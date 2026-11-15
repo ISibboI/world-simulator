@@ -73,13 +73,20 @@ pub struct ErosionResult {
 /// Performs one erosion step of `dt_years` years.
 ///
 /// `elevation` is the surface elevation, `sediment` the thickness of loose sediment,
-/// `bedrock_density` the density of the crust below it (for the isostatic response), and
-/// `precipitation` the precipitation in m/yr, all per mesh cell.
+/// `bedrock_density` the density of the crust below it (for mass), `bedrock_isostatic_density`
+/// the density that gives the isostatic response of removing crust from the top (see
+/// [`crate::tectonics::Crust::removal_isostatic_density`]), and `precipitation` the
+/// precipitation in m/yr, all per mesh cell.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "all are per-cell fields or parameters"
+)]
 pub fn erode(
     mesh: &SphereMesh,
     elevation: &[f64],
     sediment: &[f64],
     bedrock_density: &[f64],
+    bedrock_isostatic_density: &[f64],
     precipitation: &[f64],
     params: &ErosionParams,
     dt_years: f64,
@@ -143,8 +150,11 @@ pub fn erode(
         // thickness.
         let without_sediment =
             isostasy::add_layer(elevation[cell], -from_sediment, SEDIMENT_DENSITY);
-        new_elevation[cell] =
-            isostasy::add_layer(without_sediment, -from_bedrock, bedrock_density[cell]);
+        new_elevation[cell] = isostasy::add_layer(
+            without_sediment,
+            -from_bedrock,
+            bedrock_isostatic_density[cell],
+        );
     }
 
     // Route sediment downstream, filling lakes on the way.
@@ -401,6 +411,7 @@ mod tests {
             &elevation,
             &vec![0.0; mesh.len()],
             &vec![2750.0; mesh.len()],
+            &vec![2750.0; mesh.len()],
             &precipitation,
             &ErosionParams::default(),
             1e6,
@@ -427,6 +438,7 @@ mod tests {
             &mesh,
             &elevation,
             &vec![0.0; mesh.len()],
+            &vec![2750.0; mesh.len()],
             &vec![2750.0; mesh.len()],
             &precipitation,
             &ErosionParams::default(),
@@ -457,6 +469,7 @@ mod tests {
             &mesh,
             &elevation,
             &vec![0.0; mesh.len()],
+            &density,
             &density,
             &precipitation,
             &ErosionParams::default(),

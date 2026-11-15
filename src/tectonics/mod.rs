@@ -484,6 +484,13 @@ impl Simulation {
             .collect()
     }
 
+    /// Density giving the isostatic response of removing crust from the top, per world cell.
+    pub fn bedrock_isostatic_densities(&self) -> Vec<f64> {
+        (0..self.mesh.len() as u32)
+            .map(|cell| self.surface_crust(cell).removal_isostatic_density())
+            .collect()
+    }
+
     /// Sediment thickness of every world cell.
     pub fn sediment_thicknesses(&self) -> Vec<f64> {
         (0..self.mesh.len() as u32)
@@ -531,7 +538,7 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::isostasy::{ARC_DENSITY, CONTINENTAL_DENSITY};
+    use crate::isostasy::{ARC_DENSITY, CONTINENTAL_DENSITY, OCEANIC_DENSITY};
 
     fn simulation(seed: u64) -> Simulation {
         Simulation::new(SphereMesh::icosphere(4), 8, TectonicParams::default(), seed)
@@ -556,9 +563,93 @@ mod tests {
         // Normal continental crust stands a few hundred metres above sea level, doubly
         // thickened crust forms high plateaus like Tibet, thinned crust forms shelves.
         assert!((200.0..900.0).contains(&continent(35_000.0).surface_elevation()));
-        assert!((4500.0..6500.0).contains(&continent(70_000.0).surface_elevation()));
+        assert!((4500.0..5500.0).contains(&continent(70_000.0).surface_elevation()));
         assert!((-500.0..0.0).contains(&continent(30_000.0).surface_elevation()));
         assert!(continent(30_000.0).is_continental());
+    }
+
+    #[test]
+    fn elevation_rises_with_thickness_at_any_age() {
+        for age in [0.0, 1.0, 5.0, 20.0, 1000.0] {
+            for density in [OCEANIC_DENSITY, ARC_DENSITY, CONTINENTAL_DENSITY] {
+                let mut previous = f64::NEG_INFINITY;
+                let mut thickness = 5000.0;
+                while thickness <= 75_000.0 {
+                    let crust = Crust {
+                        thickness,
+                        density,
+                        age,
+                        sediment: 0.0,
+                    };
+                    let elevation = crust.dry_elevation();
+                    // At least 0.5 m per 100 m of crust (the thermal uplift fading out over the
+                    // continental transition leaves a margin of ~1 m per 100 m on young
+                    // lithosphere).
+                    assert!(
+                        elevation > previous + 0.5,
+                        "age {age}, density {density}, {thickness} m: {elevation} after {previous}"
+                    );
+                    previous = elevation;
+                    thickness += 100.0;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn young_arcs_override_young_ocean() {
+        for age in [0.0, 1.0, 5.0] {
+            for thickness in [15_000.0, 20_000.0] {
+                let arc = Crust {
+                    thickness,
+                    density: ARC_DENSITY,
+                    age,
+                    sediment: 0.0,
+                };
+                assert!(arc.buoyancy() > new_oceanic_crust().buoyancy());
+            }
+        }
+    }
+
+    #[test]
+    fn continental_crust_gets_no_oceanic_thermal_uplift() {
+        let continent = |age| Crust {
+            thickness: 40_000.0,
+            density: CONTINENTAL_DENSITY,
+            age,
+            sediment: 0.0,
+        };
+        assert!(
+            (continent(0.0).surface_elevation() - continent(1000.0).surface_elevation()).abs()
+                < 1.0
+        );
+    }
+
+    #[test]
+    fn erosion_response_matches_the_elevation_formula() {
+        for thickness in [30_000.0, 49_000.0, 60_000.0, 74_000.0] {
+            let crust = Crust {
+                thickness,
+                density: CONTINENTAL_DENSITY,
+                age: 1000.0,
+                sediment: 0.0,
+            };
+            let removed = 10.0;
+            let thinner = Crust {
+                thickness: thickness - removed,
+                ..crust
+            };
+            let expected = thinner.surface_elevation();
+            let predicted = crate::isostasy::add_layer(
+                crust.surface_elevation(),
+                -removed,
+                crust.removal_isostatic_density(),
+            );
+            assert!(
+                (predicted - expected).abs() < 0.01,
+                "{thickness}: {predicted} vs {expected}"
+            );
+        }
     }
 
     #[test]

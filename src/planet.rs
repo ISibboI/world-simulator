@@ -114,6 +114,7 @@ impl Planet {
                 &elevation,
                 &self.tectonics.sediment_thicknesses(),
                 &self.tectonics.bedrock_densities(),
+                &self.tectonics.bedrock_isostatic_densities(),
                 &self.precipitation,
                 params,
                 dt_years,

@@ -2,7 +2,8 @@
 //! from isostasy and thermal subsidence.
 
 use crate::isostasy::{
-    self, MANTLE_DENSITY, OCEANIC_DENSITY, SEDIMENT_DENSITY, SEDIMENT_ROCK_DENSITY, WATER_LOADING,
+    self, CONTINENTAL_DENSITY, MANTLE_DENSITY, OCEANIC_DENSITY, SEDIMENT_DENSITY,
+    SEDIMENT_ROCK_DENSITY, WATER_LOADING,
 };
 
 /// Oceanic crust is thinner than this (m); thicker crust is transitional or continental.
@@ -18,6 +19,19 @@ pub const OCEANIC_THICKNESS: f64 = 7000.0;
 /// compensation depth counts as continental: it is too buoyant to subduct. Normal oceanic crust
 /// reaches ~850 m, continental crust ~5800 m, and arc crust becomes continental at ~22 km.
 pub const CONTINENTAL_BUOYANCY: f64 = 3000.0;
+
+/// Crust deeper than this (m) densifies in thick orogens (granulite, partial eclogitisation).
+const DENSE_LOWER_CRUST_DEPTH: f64 = 50_000.0;
+
+/// Effective density (kg/m³) of densified lower crust, between granulite and eclogite. At the
+/// mantle density or above, thickening would lower the surface, which would need delamination
+/// dynamics; this value gives ~4.85 km for 70 km crust (Tibet ~5 km, Altiplano ~4 km).
+const DENSE_LOWER_CRUST_DENSITY: f64 = 2950.0;
+
+/// Crustal buoyancy (dry, m) of normal 35 km continental crust: the thermal uplift of the
+/// lithosphere fades out between [`CONTINENTAL_BUOYANCY`] and this value.
+const NORMAL_CONTINENTAL_BUOYANCY: f64 =
+    35_000.0 * (MANTLE_DENSITY - CONTINENTAL_DENSITY) / MANTLE_DENSITY;
 
 /// Depth of fully cooled oceanic lithosphere in metres.
 const OLD_OCEAN_DEPTH: f64 = 5651.0;
@@ -52,13 +66,40 @@ impl Crust {
     pub(super) fn dry_elevation(&self) -> f64 {
         self.crustal_buoyancy()
             + self.sediment * isostasy::dry_response(SEDIMENT_DENSITY)
-            + thermal_uplift(self.age)
+            + self.thermal_weight() * thermal_uplift(self.age)
             - COMPENSATION
     }
 
-    /// Dry elevation contributed by the crystalline crust.
+    /// Dry elevation contributed by the crystalline crust. In thick crust, the part deeper than
+    /// [`DENSE_LOWER_CRUST_DEPTH`] densifies at constant mass: its volume shrinks by `ρ / ρd`
+    /// and it is less buoyant.
     pub(super) fn crustal_buoyancy(&self) -> f64 {
-        self.thickness * isostasy::dry_response(self.density)
+        let normal = self.thickness.min(DENSE_LOWER_CRUST_DEPTH);
+        let excess = self.thickness - normal;
+        let dense_density = DENSE_LOWER_CRUST_DENSITY.max(self.density);
+        normal * isostasy::dry_response(self.density)
+            + excess * self.density / dense_density * isostasy::dry_response(dense_density)
+    }
+
+    /// How much of the oceanic thermal uplift applies: fully to oceanic and arc lithosphere
+    /// (arcs and back-arcs are hot), fading out between the continental threshold and normal
+    /// continental crust, whose lithosphere has its own, cold geotherm.
+    fn thermal_weight(&self) -> f64 {
+        ((NORMAL_CONTINENTAL_BUOYANCY - self.crustal_buoyancy())
+            / (NORMAL_CONTINENTAL_BUOYANCY - CONTINENTAL_BUOYANCY))
+            .clamp(0.0, 1.0)
+    }
+
+    /// The density with which [`isostasy::add_layer`] gives the same change of elevation as
+    /// thinning this crust from the top: at the base of thick crust, the densified layer shrinks.
+    pub fn removal_isostatic_density(&self) -> f64 {
+        if self.thickness > DENSE_LOWER_CRUST_DEPTH {
+            let dense_density = DENSE_LOWER_CRUST_DENSITY.max(self.density);
+            let slope = self.density / dense_density * isostasy::dry_response(dense_density);
+            MANTLE_DENSITY * (1.0 - slope)
+        } else {
+            self.density
+        }
     }
 
     /// Areal mass (kg/m²) of the crust: crystalline crust plus the rock mass of its sediment.
