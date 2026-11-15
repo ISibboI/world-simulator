@@ -108,6 +108,18 @@ components (climate, erosion, …) are expected to build on it.
   5. Initial continents ignore plate boundaries (5 continents → 27 per-plate pieces at t=0) and
      plate regions fragment by resampling noise (12 → 59 components). Fix: grow continents within
      plates, majority filter on ownership.
+- **Bug:** river incision uses the receiver's elevation as base level; for coastal cells that is
+  the ocean floor (e.g. −3000 m), so coasts are cut below sea level. Base level must be
+  `max(receiver, 0)` (sea level). Likely the main cause of submerged continental crust.
+- Physics review of the land-fragmentation fixes (2026-11-15): see session log. Key points:
+  model crust **thickness** (Airy isostasy → elevation) instead of elevation + binary type;
+  arcs as a band of magmatic thickening on the overriding plate, accreted as terranes; conserve
+  continental crust in collisions by thickening; deltas should build slightly *above* sea level
+  and sediment loading should cause isostatic subsidence (~0.44 of the deposit under water); the
+  "relax continents to 300 m" and "fill deltas to −10 m" suggestions are not physical.
+- Subduction model gaps: no trenches, slabs/slab pull, back-arc extension, accretionary
+  wedges, obduction, subduction initiation; polarity is per plate pair, not per boundary
+  segment; transform boundaries are not distinguished (overlap noise is treated as convergence).
 - Climate has no ocean currents, glaciers don't erode, precipitation does not fall as snow; the
   precipitation map shows slight striping from the discrete upwind neighbour.
 - Temperature is computed from the climatological seasonal cycle per Myr step (no Milankovitch
@@ -119,8 +131,9 @@ components (climate, erosion, …) are expected to build on it.
   shell (compositor sends no redraw events). The user confirmed it works normally when launched
   from their own terminal. For screenshots from the sandbox, use X11:
   `env -u WAYLAND_DISPLAY`.
-- CI not yet run with the GUI dependencies (eframe/wgpu); Linux build should not need system
-  packages since wayland-sys uses dlopen, but this is unverified.
+- CI passes on GitHub with the GUI dependencies (Linux, Windows, macOS; no extra system
+  packages needed). The repository is public, so CI status can be read via the GitHub REST API
+  without the gh CLI.
 
 ## Next steps (ideas)
 
