@@ -32,13 +32,14 @@
 
 mod boundaries;
 mod crust;
+mod dynamics;
 mod generation;
 mod statistics;
 
 pub use crust::*;
 pub use statistics::*;
 
-use boundaries::ResolvedBoundaries;
+use boundaries::{ResolvedBoundaries, pair_key};
 use generation::*;
 
 use std::collections::{HashMap, HashSet};
@@ -53,8 +54,8 @@ use crate::sphere::SphereMesh;
 /// Physical parameters of the simulation. Times are in Myr, elevations in metres.
 #[derive(Clone, Debug)]
 pub struct TectonicParams {
-    /// Range of plate angular speeds in rad/Myr. 0.01 rad/Myr is about 6.4 cm/yr on Earth.
-    pub angular_speed_range: (f64, f64),
+    /// Fraction of the initial plate boundaries that start as subduction zones.
+    pub initial_subduction_fraction: f64,
     /// The fraction of the surface initially covered by continental crust.
     pub continental_fraction: f64,
     /// The number of initial continents.
@@ -83,11 +84,29 @@ pub struct TectonicParams {
     /// Fraction of the thickness difference between neighbouring cells that flows per Myr at full
     /// strength.
     pub crustal_flow_rate: f64,
-    /// Fraction of the velocity difference of two plates that is removed per continental
-    /// collision event between them.
-    pub collision_drag: f64,
-    /// Mean time between random changes of the motion of a plate.
-    pub reorganization_interval: f64,
+    /// Planet radius in metres.
+    pub planet_radius: f64,
+    /// Effective slab pull per metre of trench at the reference slab age, in N/m. The gross
+    /// negative buoyancy of a slab is several times larger, but most of it is balanced by the
+    /// viscous resistance of the mantle to the sinking slab.
+    pub slab_pull: f64,
+    /// Slab age in Myr at which slab pull reaches [`Self::slab_pull`]; it scales with the square
+    /// root of the age, like the thickness of the lithosphere.
+    pub slab_pull_reference_age: f64,
+    /// Lithosphere stops thickening after this age in Myr.
+    pub slab_pull_max_age: f64,
+    /// Ridge push per metre of ridge in N/m.
+    pub ridge_push: f64,
+    /// Oceanic crust up to this age in Myr at a divergent boundary counts as a ridge flank.
+    pub ridge_age: f64,
+    /// Basal drag coefficient `c` in Pa·s/m: shear stress per relative velocity between plate
+    /// and mantle (asthenosphere viscosity divided by its thickness).
+    pub basal_drag: f64,
+    /// Basal drag is this many times stronger under continental crust (deep lithospheric keels).
+    pub continental_drag_factor: f64,
+    /// Resistance to converging continental crust per collision boundary cell, as a multiple of
+    /// the basal drag under one cell.
+    pub collision_resistance: f64,
     /// Subduction polarity between two plates is forgotten after they were not in contact for
     /// this long.
     pub polarity_memory: f64,
@@ -98,7 +117,7 @@ pub struct TectonicParams {
 impl Default for TectonicParams {
     fn default() -> Self {
         Self {
-            angular_speed_range: (0.004, 0.016),
+            initial_subduction_fraction: 0.5,
             continental_fraction: 0.3,
             continent_count: 7,
             continental_coast_thickness: 30_000.0,
@@ -110,8 +129,15 @@ impl Default for TectonicParams {
             crustal_flow_threshold: 40_000.0,
             crustal_flow_range: 20_000.0,
             crustal_flow_rate: 0.05,
-            collision_drag: 0.002,
-            reorganization_interval: 150.0,
+            planet_radius: 6.371e6,
+            slab_pull: 2e13,
+            slab_pull_reference_age: 100.0,
+            slab_pull_max_age: 120.0,
+            ridge_push: 3e12,
+            ridge_age: 20.0,
+            basal_drag: 3e15,
+            continental_drag_factor: 4.0,
+            collision_resistance: 50.0,
             polarity_memory: 20.0,
             max_substep_movement: 0.5,
         }
@@ -160,6 +186,10 @@ pub struct Simulation {
     owners: Vec<Ownership>,
     /// Subduction polarity of plate pairs `(a, b)` with `a < b`.
     polarities: HashMap<(u32, u32), Polarity>,
+    #[expect(
+        dead_code,
+        reason = "used by mantle plumes and plate events (next milestones)"
+    )]
     rng: ChaCha8Rng,
     /// Simulated time in Myr.
     time: f64,
@@ -205,7 +235,7 @@ impl Simulation {
         let mut plates: Vec<Plate> = (0..plate_count)
             .map(|_| Plate {
                 rotation: DQuat::IDENTITY,
-                angular_velocity: random_angular_velocity(&params, rng),
+                angular_velocity: DVec3::ZERO,
                 crust: vec![None; cell_count],
                 lookup_cache: (0..cell_count as u32).collect(),
             })
@@ -236,6 +266,40 @@ impl Simulation {
             plates[plate_of_cell[cell] as usize].crust[cell] = Some(crust);
         }
 
+        // Start some plate boundaries as subduction zones; there the denser side subducts.
+        let mut boundary_buoyancy: HashMap<(u32, u32), (f64, f64)> = HashMap::new();
+        for cell in 0..cell_count as u32 {
+            let plate = plate_of_cell[cell as usize];
+            for &neighbor in mesh.neighbors(cell) {
+                let other = plate_of_cell[neighbor as usize];
+                if other != plate {
+                    let crust = plates[plate as usize].crust[cell as usize]
+                        .expect("every cell has initial crust");
+                    let sums = boundary_buoyancy.entry(pair_key(plate, other)).or_default();
+                    if plate < other {
+                        sums.0 += crust.buoyancy();
+                    } else {
+                        sums.1 += crust.buoyancy();
+                    }
+                }
+            }
+        }
+        let mut pairs: Vec<_> = boundary_buoyancy.into_iter().collect();
+        pairs.sort_unstable_by_key(|((a, b), _)| (*a, *b));
+        let mut polarities = HashMap::new();
+        for ((a, b), (buoyancy_a, buoyancy_b)) in pairs {
+            if rng.random_bool(params.initial_subduction_fraction.clamp(0.0, 1.0)) {
+                let overriding = if buoyancy_a >= buoyancy_b { a } else { b };
+                polarities.insert(
+                    (a, b),
+                    Polarity {
+                        overriding,
+                        last_contact: 0.0,
+                    },
+                );
+            }
+        }
+
         let owners = (0..cell_count as u32)
             .map(|cell| Ownership {
                 plate: plate_of_cell[cell as usize],
@@ -248,7 +312,7 @@ impl Simulation {
             params,
             plates,
             owners,
-            polarities: HashMap::new(),
+            polarities,
             rng: owned_rng,
             time: 0.0,
         }
@@ -277,7 +341,8 @@ impl Simulation {
     /// Advances the simulation by `dt` Myr, splitting it into substeps such that no plate moves
     /// more than [`TectonicParams::max_substep_movement`] cells per substep.
     pub fn step(&mut self, dt: f64) {
-        self.reorganize_plates(dt);
+        let mantle_velocity = vec![DVec3::ZERO; self.mesh.len()];
+        self.update_plate_velocities(&mantle_velocity);
         let max_angle = self
             .plates
             .iter()
@@ -301,51 +366,13 @@ impl Simulation {
             collisions,
         } = self.resolve_ownership();
         self.apply_additions(&additions);
-        self.apply_collision_drag(&collisions);
-    }
-
-    /// Gives each plate a new random motion with probability `dt / reorganization_interval`.
-    fn reorganize_plates(&mut self, dt: f64) {
-        let probability = (dt / self.params.reorganization_interval).clamp(0.0, 1.0);
-        for plate in &mut self.plates {
-            if self.rng.random_bool(probability) {
-                plate.angular_velocity = random_angular_velocity(&self.params, &mut self.rng);
-            }
-        }
+        tracing::trace!(colliding_pairs = collisions.len(), "Substep");
     }
 
     fn move_plates(&mut self, dt: f64) {
         for plate in &mut self.plates {
             let delta = DQuat::from_scaled_axis(plate.angular_velocity * dt);
             plate.rotation = (delta * plate.rotation).normalize();
-        }
-    }
-
-    /// Continental collisions slow down the convergence of the colliding plates by moving their
-    /// angular velocities towards each other, conserving their area-weighted sum.
-    fn apply_collision_drag(&mut self, collisions: &HashMap<(u32, u32), u32>) {
-        if collisions.is_empty() {
-            return;
-        }
-        let mut areas = vec![0usize; self.plates.len()];
-        for owner in &self.owners {
-            areas[owner.plate as usize] += 1;
-        }
-        // Iterate in a fixed order for determinism.
-        let mut collisions: Vec<_> = collisions.iter().collect();
-        collisions.sort_unstable();
-        for (&(a, b), &count) in collisions {
-            let (area_a, area_b) = (areas[a as usize] as f64, areas[b as usize] as f64);
-            if area_a + area_b == 0.0 {
-                continue;
-            }
-            let strength = (self.params.collision_drag * f64::from(count)).min(1.0);
-            let difference =
-                self.plates[b as usize].angular_velocity - self.plates[a as usize].angular_velocity;
-            self.plates[a as usize].angular_velocity +=
-                difference * strength * area_b / (area_a + area_b);
-            self.plates[b as usize].angular_velocity -=
-                difference * strength * area_a / (area_a + area_b);
         }
     }
 

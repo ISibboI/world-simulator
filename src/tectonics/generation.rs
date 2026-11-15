@@ -8,13 +8,7 @@ use rand::{Rng, RngExt};
 
 use crate::sphere::SphereMesh;
 
-use super::*;
-
-pub(super) fn random_angular_velocity(params: &TectonicParams, rng: &mut impl Rng) -> DVec3 {
-    let (min, max) = params.angular_speed_range;
-    random_unit_vector(rng) * rng.random_range(min..=max)
-}
-
+#[expect(dead_code, reason = "used for mantle plumes (next milestone)")]
 pub(super) fn random_unit_vector(rng: &mut impl Rng) -> DVec3 {
     loop {
         let v = DVec3::new(
