@@ -111,6 +111,12 @@ components (climate, erosion, …) are expected to build on it.
   no plate splitting. Continents end up too high mid-run (mean land 1.1–1.4 km vs Earth 0.84).
 - Collision churn is high (≈ the whole initial continental volume passes through collisions in
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
+- **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
+  and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
+  volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal
+  uplift on young-aged continental crust inflates mountains; new crust created at convergent
+  gaps; implicit erosion ignores isostasy; shelves are 10+ km sediment piles on oceanic crust;
+  mid-latitude precipitation too low; poles too warm.
 - Subduction model gaps: no trenches, slabs/slab pull, back-arc extension, accretionary
   wedges, obduction, subduction initiation; polarity is per plate pair, not per boundary
   segment; transform boundaries are not distinguished (overlap noise is treated as convergence).
