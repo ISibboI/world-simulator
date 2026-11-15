@@ -19,6 +19,10 @@ components (climate, erosion, …) are expected to build on it.
   erosion and a seasonal temperature model (Earth-like orbit). Writes equirectangular elevation
   (with rivers), plate, precipitation and temperature (annual, January, July) maps as PNG
   snapshots. Default run (40,962 cells, 12 plates, 500 Myr) takes about 70 s.
+- **3D view** (default; `--headless` for batch runs): eframe/egui window, planet drawn with
+  wgpu via an egui paint callback, camera rotates by click-and-drag. Simulation runs on a
+  background thread and sends finished vertex buffers through a channel; window title shows the
+  simulated time. PNG snapshots are still written in both modes.
 - Temperature outcome over 500 Myr: global mean 10–13 °C, equator 23–25 °C, poles −11…−17 °C,
   permanent ice on 6–14% of the surface; continental interiors swing ~30 K over the year.
 - Calibrated outcome after 500 Myr: peaks ~7 km, mean land elevation ~750–1150 m (Earth 840),
@@ -66,7 +70,15 @@ components (climate, erosion, …) are expected to build on it.
 - Evaporation over the ocean follows sea-surface temperature (+5%/K).
 - `src/planet.rs`: couples tectonics (substeps) with temperature, precipitation and erosion per
   time step.
-- `src/render.rs`: equirectangular PNG rendering (elevation with rivers, plates, precipitation).
+- `src/render.rs`: equirectangular PNG rendering (elevation with rivers, plates, precipitation,
+  temperature) and `surface_color` (also used by the 3D view; adds permanent ice < −10 °C).
+- `src/viewer/`: 3D view. `mod.rs` (eframe app, orbit camera with yaw/pitch, vertex building
+  with `--exaggeration` 40× relief, ocean at radius 1), `renderer.rs` (wgpu pipeline, buffers in
+  egui `callback_resources`, depth buffer Depth32Float requested via `NativeOptions`, 4× MSAA),
+  `planet.wgsl` (diffuse lighting from a camera-relative light). Projection via
+  `glam::camera::rh::proj::directx` (wgpu NDC: Z in [0, 1], Y up).
+- GUI stack decision: eframe (egui) + wgpu rather than Bevy: in-view UI with egui, runs on
+  Windows/macOS/Linux(+web), far lighter than a game engine for a single-mesh viewer.
 - `src/main.rs`: clap CLI (`--seed`, `--subdivisions`, `--plates`, `--duration`, `--dt`,
   `--no-erosion`, `--river-threshold`, …).
 - Logging: `tracing` + `tracing-subscriber` (fmt, env-filter) to stderr; `RUST_LOG` controls the
@@ -103,6 +115,12 @@ components (climate, erosion, …) are expected to build on it.
 - No hillslope diffusion (sub-grid at ~120 km cells); sediment deposited on oceanic crust is lost
   at subduction.
 - Single-threaded; ownership resolution (~35 ms per substep) dominates.
+- 3D view on KDE Wayland, when launched from Claude's sandboxed shell: only the first frame is
+  drawn (compositor never sends redraw events, eframe logs "RedrawRequested is overdue: running
+  logic only"). Works under X11/XWayland (`env -u WAYLAND_DISPLAY`). Unclear whether this also
+  happens when the user launches it normally — asked the user to test.
+- CI not yet run with the GUI dependencies (eframe/wgpu); Linux build should not need system
+  packages since wayland-sys uses dlopen, but this is unverified.
 
 ## Next steps (ideas)
 

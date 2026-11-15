@@ -5,6 +5,7 @@ mod render;
 mod sphere;
 mod tectonics;
 mod temperature;
+mod viewer;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -12,7 +13,7 @@ use std::time::Instant;
 
 use anyhow::{Context, ensure};
 use clap::Parser;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::climate::ClimateParams;
@@ -30,7 +31,7 @@ const EARTH_RADIUS: f64 = 6.371e6;
 ///
 /// Log output is controlled with the `RUST_LOG` environment variable (default: `info`), e.g.
 /// `RUST_LOG=debug` shows per-step timings.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, about)]
 struct Cli {
     /// Seed for the random number generator.
@@ -76,6 +77,14 @@ struct Cli {
     /// Minimum discharge in m³/yr for a cell to be drawn as a river.
     #[arg(long, default_value_t = 1e11)]
     river_threshold: f64,
+
+    /// Run without the 3D view and only write snapshot images.
+    #[arg(long)]
+    headless: bool,
+
+    /// Vertical exaggeration of the relief in the 3D view.
+    #[arg(long, default_value_t = 40.0)]
+    exaggeration: f64,
 }
 
 /// Logs to stderr, filtered by `RUST_LOG` (default: `info`). Also captures `log` records of
@@ -116,7 +125,7 @@ fn main() -> anyhow::Result<()> {
         planet_radius: EARTH_RADIUS,
         ..ErosionParams::default()
     });
-    let mut planet = Planet::new(
+    let planet = Planet::new(
         simulation,
         ClimateParams::default(),
         TemperatureParams::default(),
@@ -124,14 +133,46 @@ fn main() -> anyhow::Result<()> {
         EARTH_RADIUS,
     );
 
+    if cli.headless {
+        return simulate(planet, &cli, |_| {});
+    }
+
+    let mesh = planet.tectonics().mesh();
+    let (vertex_count, faces) = (mesh.len(), mesh.faces().to_vec());
+    viewer::run(vertex_count, faces, move |updates, wake_up| {
+        std::thread::spawn(move || {
+            let publish = |planet: &Planet| {
+                let vertices =
+                    viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
+                let update = viewer::SurfaceUpdate {
+                    time: planet.tectonics().time(),
+                    vertices: std::sync::Arc::new(vertices),
+                };
+                // Sending fails once the window was closed; the process then exits anyway.
+                if updates.send(update).is_ok() {
+                    wake_up();
+                }
+            };
+            if let Err(error) = simulate(planet, &cli, publish) {
+                error!("Simulation failed: {error:#}");
+            }
+        });
+    })
+}
+
+/// Runs the simulation, writing snapshots and calling `on_step` with the initial state and after
+/// every step.
+fn simulate(mut planet: Planet, cli: &Cli, mut on_step: impl FnMut(&Planet)) -> anyhow::Result<()> {
     let steps = (cli.duration / cli.dt).round() as u64;
     let snapshot_every = ((cli.snapshot_interval / cli.dt).round() as u64).max(1);
     let start = Instant::now();
-    snapshot(&planet, &cli)?;
+    snapshot(&planet, cli)?;
+    on_step(&planet);
     for step in 1..=steps {
         planet.step(cli.dt);
+        on_step(&planet);
         if step % snapshot_every == 0 || step == steps {
-            snapshot(&planet, &cli)?;
+            snapshot(&planet, cli)?;
         }
     }
     info!("Finished in {:.1?}", start.elapsed());

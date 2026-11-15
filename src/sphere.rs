@@ -11,6 +11,8 @@ use glam::DVec3;
 pub struct SphereMesh {
     vertices: Vec<DVec3>,
     neighbors: Vec<Vec<u32>>,
+    /// Triangles, wound counter-clockwise when seen from outside the sphere.
+    faces: Vec<[u32; 3]>,
     mean_edge_angle: f64,
     subdivisions: u32,
 }
@@ -85,7 +87,7 @@ impl SphereMesh {
         }
 
         let mut neighbors: Vec<Vec<u32>> = vec![Vec::with_capacity(6); vertices.len()];
-        for [a, b, c] in faces {
+        for &[a, b, c] in &faces {
             for (from, to) in [(a, b), (b, c), (c, a), (b, a), (c, b), (a, c)] {
                 let list = &mut neighbors[from as usize];
                 if !list.contains(&to) {
@@ -106,9 +108,15 @@ impl SphereMesh {
         Self {
             vertices,
             neighbors,
+            faces,
             mean_edge_angle: angle_sum / edge_count as f64,
             subdivisions,
         }
+    }
+
+    /// The triangles of the mesh, wound counter-clockwise when seen from outside.
+    pub fn faces(&self) -> &[[u32; 3]] {
+        &self.faces
     }
 
     /// The number of times the icosahedron was subdivided.
@@ -192,6 +200,17 @@ mod tests {
                 };
                 assert_eq!(mesh.neighbors(index).len(), expected);
             }
+        }
+    }
+
+    #[test]
+    fn faces_are_wound_counter_clockwise_from_outside() {
+        let mesh = SphereMesh::icosphere(3);
+        assert_eq!(mesh.faces().len(), 20 * 4usize.pow(3));
+        for &[a, b, c] in mesh.faces() {
+            let (a, b, c) = (mesh.vertex(a), mesh.vertex(b), mesh.vertex(c));
+            let normal = (b - a).cross(c - a);
+            assert!(normal.dot(a + b + c) > 0.0);
         }
     }
 
