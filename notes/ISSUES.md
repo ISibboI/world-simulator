@@ -1,8 +1,14 @@
 # Known physical-accuracy issues
 
 From the independent physics review of commit fb5ffb6 (2026-11-15) and the shelf check. Earth
-reference values in brackets. Numbered as in the review; **work starts with issue 1** (user
-decision, 2026-11-15). Details and evidence: `sessions/2026-11-15.md`.
+reference values in brackets. Numbered as in the review; **work started with issue 1** (user
+decision, 2026-11-15). Details and evidence: `sessions/2026-11-15.md`. Feasibility research
+with approaches and references per issue: `research/feasibility-2026-11-15.md`.
+
+**Order of work** (user, 2026-11-15: calibrate issue 1 only as far as needed to confirm the
+implementation, then prefer issues that also help issue 1, then work through the rest
+autonomously, with an independent plan review before each issue): 1 (mechanisms) → 5 → 3 → 4 →
+issue 1 tuning (trench propagation, age-hazard initiation) → 2 → 7 + 6 → 9 → 8.
 
 ## Open
 
