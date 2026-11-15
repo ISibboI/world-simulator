@@ -1,5 +1,9 @@
 //! The planet: tectonics coupled with the water cycle and erosion.
 
+use std::time::Instant;
+
+use tracing::{debug, debug_span};
+
 use crate::climate::{Climate, ClimateParams};
 use crate::erosion::{ErosionParams, erode};
 use crate::tectonics::{Simulation, Statistics};
@@ -65,9 +69,15 @@ impl Planet {
 
     /// Advances the planet by `dt` Myr: plate motion first, then one erosion step.
     pub fn step(&mut self, dt: f64) {
+        let _span = debug_span!("step", time = self.tectonics.time() + dt).entered();
+        let start = Instant::now();
         self.tectonics.step(dt);
+        let tectonics_time = start.elapsed();
+
+        let start = Instant::now();
         let elevation = self.tectonics.surface_elevations();
         self.precipitation = self.compute_precipitation(&elevation);
+        let climate_time = start.elapsed();
 
         if let Some(params) = &self.erosion {
             let dt_years = dt * 1e6;
@@ -84,6 +94,12 @@ impl Planet {
             self.discharge = result.discharge;
             self.sediment_flux = result.sediment_to_ocean / dt_years;
         }
+        debug!(
+            ?tectonics_time,
+            ?climate_time,
+            erosion_time = ?start.elapsed() - climate_time,
+            "Step finished"
+        );
     }
 
     fn compute_precipitation(&self, elevation: &[f64]) -> Vec<f64> {

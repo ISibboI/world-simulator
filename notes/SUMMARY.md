@@ -55,6 +55,10 @@ components (climate, erosion, …) are expected to build on it.
 - `src/render.rs`: equirectangular PNG rendering (elevation with rivers, plates, precipitation).
 - `src/main.rs`: clap CLI (`--seed`, `--subdivisions`, `--plates`, `--duration`, `--dt`,
   `--no-erosion`, `--river-threshold`, …).
+- Logging: `tracing` + `tracing-subscriber` (fmt, env-filter) to stderr; `RUST_LOG` controls the
+  level (default `info`; `debug` shows per-step phase timings in a `step{time=…}` span). Chosen
+  over `log`+`simplelog`/`env_logger` for spans, structured fields and later profiling layers.
+  Use `tracing` macros, never `println!`, for console output.
 
 ## Known issues
 

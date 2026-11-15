@@ -313,6 +313,7 @@ impl Simulation {
             .fold(0.0, f64::max);
         let max_substep_angle = self.params.max_substep_movement * self.mesh.mean_edge_angle();
         let substeps = (max_angle / max_substep_angle).ceil().max(1.0) as usize;
+        tracing::trace!(substeps, "Tectonic step");
         for _ in 0..substeps {
             self.substep(dt / substeps as f64);
         }

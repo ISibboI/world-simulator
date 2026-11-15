@@ -5,11 +5,14 @@ mod render;
 mod sphere;
 mod tectonics;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, ensure};
 use clap::Parser;
+use tracing::{debug, info};
+use tracing_subscriber::EnvFilter;
 
 use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
@@ -22,6 +25,9 @@ const EARTH_RADIUS: f64 = 6.371e6;
 
 /// Simulates a planet with plate tectonics, an Earth-like water cycle and erosion, and writes
 /// map snapshots as PNG images.
+///
+/// Log output is controlled with the `RUST_LOG` environment variable (default: `info`), e.g.
+/// `RUST_LOG=debug` shows per-step timings.
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Cli {
@@ -70,10 +76,22 @@ struct Cli {
     river_threshold: f64,
 }
 
+/// Logs to stderr, filtered by `RUST_LOG` (default: `info`). Also captures `log` records of
+/// dependencies.
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
+}
+
 const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    init_logging();
     ensure!(
         cli.subdivisions <= 8,
         "at most 8 subdivisions are supported"
@@ -86,7 +104,7 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("creating output directory {}", cli.output.display()))?;
 
     let mesh = SphereMesh::icosphere(cli.subdivisions);
-    println!("Planet has {} cells", mesh.len());
+    info!(cells = mesh.len(), "Created planet mesh");
     let params = TectonicParams {
         continental_fraction: cli.continental_fraction,
         ..TectonicParams::default()
@@ -108,7 +126,7 @@ fn main() -> anyhow::Result<()> {
             snapshot(&planet, &cli)?;
         }
     }
-    println!("Finished in {:.1?}", start.elapsed());
+    info!("Finished in {:.1?}", start.elapsed());
     Ok(())
 }
 
@@ -118,7 +136,7 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
     let statistics = &planet_statistics.tectonics;
     let largest_plate = statistics.plate_areas.iter().max().copied().unwrap_or(0);
     let living_plates = statistics.plate_areas.iter().filter(|&&a| a > 0).count();
-    println!(
+    info!(
         "t = {:6.1} Myr | continental {:5.1}% | land {:5.1}% | mean ocean age {:5.1} Myr | \
          elevation {:6.0} m ..{:6.0} m, land mean {:5.0} m | mean speed {:4.1} cm/yr | \
          {} plates, largest {:4.1}%",
@@ -134,7 +152,7 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
         living_plates,
         100.0 * largest_plate as f64 / simulation.mesh().len() as f64,
     );
-    println!(
+    info!(
         "    land precipitation {:4.2} m/yr | largest river {:8.0} m³/s | \
          sediment to ocean {:5.1} km³/yr",
         planet_statistics.mean_land_precipitation,
@@ -158,6 +176,7 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
         image
             .save(&path)
             .with_context(|| format!("writing {}", path.display()))?;
+        debug!(path = %path.display(), "Wrote snapshot");
     }
     Ok(())
 }
