@@ -6,15 +6,19 @@
 //! 2. **Discharge.** Precipitation is accumulated downstream along the receivers.
 //! 3. **Incision.** Rivers cut into the land following the stream-power law
 //!    `E = K · Q^m · S`, solved implicitly (Braun & Willett, 2013), which is stable for any time
-//!    step. Loose sediment is removed before bedrock. Removing bedrock thins the crust, which then
-//!    rises isostatically, so the surface only drops by a fraction of the removed thickness.
+//!    step. Rivers cannot cut below sea level, their base level. Loose sediment is removed before
+//!    bedrock. Removing bedrock thins the crust, which then rises isostatically, so the surface
+//!    only drops by a fraction of the removed thickness.
 //! 4. **Deposition.** Sediment is carried downstream. It fills lakes, and from river mouths it
 //!    fills the ocean outwards up to [`ErosionParams::shelf_depth`], so continental shelves
-//!    prograde into the ocean.
+//!    prograde into the ocean. When the shelf within reach is full, deltas build up to
+//!    [`ErosionParams::delta_top`] slightly above sea level. Sediment loads the crust, so the sea
+//!    floor rises by only ~0.44 of the deposited thickness (see [`crate::isostasy`]).
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
+use crate::isostasy::{self, SEDIMENT_DENSITY};
 use crate::sphere::SphereMesh;
 
 /// Parameters of erosion. Lengths in metres, times in years unless noted otherwise.
@@ -26,11 +30,10 @@ pub struct ErosionParams {
     pub erodibility: f64,
     /// Discharge exponent `m` of the stream-power law.
     pub discharge_exponent: f64,
-    /// Fraction of eroded bedrock thickness by which the surface drops; the rest is compensated by
-    /// isostatic rebound. Equal to `1 - crust density / mantle density`.
-    pub isostatic_factor: f64,
     /// Sediment fills the ocean up to this elevation (negative, below sea level).
     pub shelf_depth: f64,
+    /// Elevation of delta plains above sea level, built when the shelf within reach is full.
+    pub delta_top: f64,
     /// Maximum number of ocean cells the sediment of one river mouth spreads over.
     pub max_shelf_cells: usize,
 }
@@ -41,8 +44,8 @@ impl Default for ErosionParams {
             planet_radius: 6.371e6,
             erodibility: 1.5e-7,
             discharge_exponent: 0.5,
-            isostatic_factor: 1.0 - 2700.0 / 3300.0,
             shelf_depth: -120.0,
+            delta_top: 2.0,
             max_shelf_cells: 256,
         }
     }
@@ -50,7 +53,7 @@ impl Default for ErosionParams {
 
 /// Changes caused by one erosion step, and diagnostic fields.
 pub struct ErosionResult {
-    /// Change of the bedrock surface elevation of each cell in metres.
+    /// Change of the crust (bedrock) thickness of each cell in metres.
     pub bedrock_delta: Vec<f64>,
     /// Change of the sediment thickness of each cell in metres.
     pub sediment_delta: Vec<f64>,
@@ -62,12 +65,14 @@ pub struct ErosionResult {
 
 /// Performs one erosion step of `dt_years` years.
 ///
-/// `elevation` is the surface elevation (bedrock plus sediment), `sediment` the thickness of
-/// loose sediment, and `precipitation` the precipitation in m/yr, all per mesh cell.
+/// `elevation` is the surface elevation, `sediment` the thickness of loose sediment,
+/// `bedrock_density` the density of the crust below it (for the isostatic response), and
+/// `precipitation` the precipitation in m/yr, all per mesh cell.
 pub fn erode(
     mesh: &SphereMesh,
     elevation: &[f64],
     sediment: &[f64],
+    bedrock_density: &[f64],
     precipitation: &[f64],
     params: &ErosionParams,
     dt_years: f64,
@@ -105,7 +110,8 @@ pub fn erode(
         let Some(receiver) = receiver[cell] else {
             continue;
         };
-        let receiver_elevation = new_elevation[receiver as usize];
+        // Rivers flowing into the sea cannot cut below sea level.
+        let receiver_elevation = new_elevation[receiver as usize].max(0.0);
         if elevation[cell] <= receiver_elevation {
             continue; // Lake or flat: no incision.
         }
@@ -122,10 +128,14 @@ pub fn erode(
         let from_sediment = thickness.min(sediment[cell]);
         let from_bedrock = thickness - from_sediment;
         sediment_delta[cell] -= from_sediment;
-        bedrock_delta[cell] -= from_bedrock * params.isostatic_factor;
+        bedrock_delta[cell] -= from_bedrock;
         produced[cell] = from_sediment + from_bedrock;
+        // The column rebounds isostatically, so the surface drops less than the removed
+        // thickness.
+        let without_sediment =
+            isostasy::add_layer(elevation[cell], -from_sediment, SEDIMENT_DENSITY);
         new_elevation[cell] =
-            elevation[cell] - from_sediment - from_bedrock * params.isostatic_factor;
+            isostasy::add_layer(without_sediment, -from_bedrock, bedrock_density[cell]);
     }
 
     // Route sediment downstream, filling lakes on the way.
@@ -137,13 +147,13 @@ pub fn erode(
             continue;
         }
         let lake_room = if filled[cell] > elevation[cell] {
-            (filled[cell] - new_elevation[cell]).max(0.0)
+            isostasy::layer_for_rise(new_elevation[cell], filled[cell], SEDIMENT_DENSITY).max(0.0)
         } else {
             0.0
         };
         let deposit = flux[cell].min(lake_room);
         sediment_delta[cell] += deposit;
-        new_elevation[cell] += deposit;
+        new_elevation[cell] = isostasy::add_layer(new_elevation[cell], deposit, SEDIMENT_DENSITY);
         let remaining = flux[cell] - deposit;
         match receiver[cell] {
             Some(receiver) if is_ocean(receiver as usize) => {
@@ -153,7 +163,8 @@ pub fn erode(
             None => {
                 // A land cell without receiver only exists on planets without ocean.
                 sediment_delta[cell] += remaining;
-                new_elevation[cell] += remaining;
+                new_elevation[cell] =
+                    isostasy::add_layer(new_elevation[cell], remaining, SEDIMENT_DENSITY);
             }
         }
     }
@@ -176,10 +187,15 @@ pub fn erode(
         visited_from[mouth] = mouth;
         while let Some(cell) = queue.pop_front() {
             visited.push(cell);
-            let room = (params.shelf_depth - new_elevation[cell]).max(0.0);
+            let room = if new_elevation[cell] < params.shelf_depth {
+                isostasy::layer_for_rise(new_elevation[cell], params.shelf_depth, SEDIMENT_DENSITY)
+            } else {
+                0.0
+            };
             let deposit = remaining.min(room);
             sediment_delta[cell] += deposit;
-            new_elevation[cell] += deposit;
+            new_elevation[cell] =
+                isostasy::add_layer(new_elevation[cell], deposit, SEDIMENT_DENSITY);
             remaining -= deposit;
             if remaining <= 0.0 || visited.len() >= params.max_shelf_cells {
                 break;
@@ -192,16 +208,22 @@ pub fn erode(
                 }
             }
         }
-        // When the shelf within reach is full, the delta builds up to sea level, which also
-        // fills enclosed basins below sea level. Sediment beyond that is carried into the deep
-        // ocean, beyond the reach of this model.
+        // When the shelf within reach is full, the delta builds up to a delta plain slightly
+        // above sea level, which also fills enclosed basins below sea level. Sediment beyond that
+        // is carried into the deep ocean, beyond the reach of this model.
         for &cell in &visited {
             if remaining <= 0.0 {
                 break;
             }
-            let deposit = remaining.min((-new_elevation[cell]).max(0.0));
+            let room = if new_elevation[cell] < params.delta_top {
+                isostasy::layer_for_rise(new_elevation[cell], params.delta_top, SEDIMENT_DENSITY)
+            } else {
+                0.0
+            };
+            let deposit = remaining.min(room);
             sediment_delta[cell] += deposit;
-            new_elevation[cell] += deposit;
+            new_elevation[cell] =
+                isostasy::add_layer(new_elevation[cell], deposit, SEDIMENT_DENSITY);
             remaining -= deposit;
         }
     }
@@ -324,6 +346,7 @@ mod tests {
             &mesh,
             &elevation,
             &vec![0.0; mesh.len()],
+            &vec![2750.0; mesh.len()],
             &precipitation,
             &ErosionParams::default(),
             1e6,
@@ -350,6 +373,7 @@ mod tests {
             &mesh,
             &elevation,
             &vec![0.0; mesh.len()],
+            &vec![2750.0; mesh.len()],
             &precipitation,
             &ErosionParams::default(),
             1e6,

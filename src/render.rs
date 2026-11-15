@@ -4,7 +4,7 @@ use glam::DVec3;
 use image::{Rgb, RgbImage};
 
 use crate::planet::Planet;
-use crate::tectonics::{CrustKind, Simulation};
+use crate::tectonics::Simulation;
 
 /// Renders an equirectangular map of `width × width/2` pixels, colouring each pixel by the world
 /// cell closest to it.
@@ -136,9 +136,10 @@ pub fn render_plates(simulation: &Simulation, width: u32) -> RgbImage {
             return Rgb([0, 0, 0]);
         }
         let [r, g, b] = plate_color(plate);
-        let scale = match simulation.surface_crust(cell).kind {
-            CrustKind::Continental => 1.0,
-            CrustKind::Oceanic => 0.55,
+        let scale = if simulation.surface_crust(cell).is_continental() {
+            1.0
+        } else {
+            0.55
         };
         Rgb([r, g, b].map(|c| (f64::from(c) * scale) as u8))
     })
@@ -188,8 +189,9 @@ const ELEVATION_STOPS: &[(f64, [f64; 3])] = &[
     (-7000.0, [5.0, 15.0, 60.0]),
     (-4000.0, [20.0, 50.0, 130.0]),
     (-200.0, [60.0, 130.0, 200.0]),
-    (0.0, [120.0, 180.0, 220.0]),
-    (0.1, [70.0, 140.0, 70.0]),
+    // Everything below 0 m is water, everything at or above 0 m is land, as in the simulation.
+    (-0.001, [120.0, 180.0, 220.0]),
+    (0.0, [70.0, 140.0, 70.0]),
     (1000.0, [170.0, 170.0, 90.0]),
     (2500.0, [140.0, 100.0, 60.0]),
     (4500.0, [120.0, 110.0, 105.0]),

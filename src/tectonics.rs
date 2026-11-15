@@ -9,16 +9,26 @@
 //!
 //! * If no plate covers a cell, the plates diverge there, and new oceanic crust is created on one
 //!   of the adjacent plates (sea-floor spreading).
-//! * If several plates cover a cell, they converge there. One plate overrides, the crust of the
-//!   others is destroyed (subduction) and the overriding plate is uplifted around the cell
-//!   (volcanic arcs, orogeny).
+//! * If several plates cover a cell, they converge there. One plate overrides:
+//!   - Oceanic (thin, dense) crust of the other plates subducts and is destroyed. Melting above
+//!     the slab adds new arc crust in a band behind the trench on the overriding plate (volcanic
+//!     arcs, Andean margins).
+//!   - Continental (thick, buoyant) crust cannot subduct. Where two continental crusts collide,
+//!     the crust of the lower plate is stacked onto the overriding plate around the collision
+//!     (crustal thickening, orogeny, terrane accretion), so continental crust is conserved.
+//!
+//! Every crust sample stores its thickness, density, age and sediment cover; its elevation follows
+//! from Airy isostasy plus the thermal subsidence of the lithosphere with age (see
+//! [`crate::isostasy`]). Continental crust is not a separate type: crust counts as continental
+//! when it is thick and light enough (see [`Crust::is_continental`]), so island arcs gradually
+//! become continental crust as they thicken.
 //!
 //! Which plate overrides is decided per pair of plates when they first touch, from the buoyancy of
-//! their crust (continental before oceanic, young oceanic before old oceanic), and then kept, so
-//! that every boundary has a consistent subduction polarity. It flips when continental crust
-//! arrives at the trench, since continents cannot subduct under oceanic crust. Colliding
-//! continents drag their plates towards a common motion, and plates occasionally get a new
-//! random motion (plate reorganisation), which keeps the system from settling down.
+//! their crust, and then kept, so that every boundary has a consistent subduction polarity. It
+//! flips when continental crust arrives at the trench, since continents cannot subduct under
+//! oceanic crust. Colliding continents drag their plates towards a common motion, and plates
+//! occasionally get a new random motion (plate reorganisation), which keeps the system from
+//! settling down.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
@@ -27,6 +37,10 @@ use glam::{DQuat, DVec3};
 use rand::rngs::ChaCha8Rng;
 use rand::{Rng, RngExt, SeedableRng};
 
+use crate::isostasy::{
+    self, ARC_DENSITY, CONTINENTAL_DENSITY, MANTLE_DENSITY, OCEANIC_DENSITY, SEDIMENT_DENSITY,
+    WATER_LOADING,
+};
 use crate::sphere::SphereMesh;
 
 /// Physical parameters of the simulation. Times are in Myr, elevations in metres.
@@ -38,21 +52,30 @@ pub struct TectonicParams {
     pub continental_fraction: f64,
     /// The number of initial continents.
     pub continent_count: usize,
-    /// Base elevation of the initial continents.
-    pub continental_base_elevation: f64,
-    /// Time constant of oceanic crust relaxing towards its age-dependent depth.
-    pub oceanic_relaxation_time: f64,
-    /// Uplift of the overriding plate per subducted crust sample.
-    pub subduction_uplift: f64,
-    /// Uplift of the overriding plate per consumed continental crust sample.
-    pub collision_uplift: f64,
-    /// Radius (in cells) over which uplift is distributed.
-    pub uplift_radius: u32,
-    /// Oceanic crust that is uplifted above this elevation turns into continental crust
-    /// (accretion of island arcs).
-    pub accretion_elevation: f64,
-    /// Uplift saturates when approaching this elevation.
-    pub max_elevation: f64,
+    /// Crust thickness at the coasts of the initial continents in metres.
+    pub continental_coast_thickness: f64,
+    /// Crust thickness in the interior of the initial continents in metres.
+    pub continental_interior_thickness: f64,
+    /// Volume of new arc crust per subducted crust sample, as a thickness over one cell.
+    ///
+    /// Arcs grow by roughly 30–90 km³ per km of arc and Myr on Earth; at 50 km/Myr convergence
+    /// and ~110 km cells, one subducted cell corresponds to roughly 1e13 m³ ≈ 800 m over a cell.
+    pub arc_crust_per_subduction: f64,
+    /// Relative amounts of new arc crust at distances of 0, 1, 2, … cells from the trench.
+    pub arc_profile: Vec<f64>,
+    /// Relative amounts of stacked crust at distances of 0, 1, 2, … cells from a continental
+    /// collision.
+    pub collision_profile: Vec<f64>,
+    /// Crust thicker than this is removed from below (delamination).
+    pub max_crust_thickness: f64,
+    /// Crust thicker than this flows sideways under its own weight (lower crustal flow,
+    /// orogenic collapse), spreading thickened crust over a larger area.
+    pub crustal_flow_threshold: f64,
+    /// Thickness range above the threshold over which crustal flow reaches full strength.
+    pub crustal_flow_range: f64,
+    /// Fraction of the thickness difference between neighbouring cells that flows per Myr at full
+    /// strength.
+    pub crustal_flow_rate: f64,
     /// Fraction of the velocity difference of two plates that is removed per continental
     /// collision event between them.
     pub collision_drag: f64,
@@ -71,13 +94,15 @@ impl Default for TectonicParams {
             angular_speed_range: (0.004, 0.016),
             continental_fraction: 0.3,
             continent_count: 7,
-            continental_base_elevation: 300.0,
-            oceanic_relaxation_time: 20.0,
-            subduction_uplift: 150.0,
-            collision_uplift: 300.0,
-            uplift_radius: 3,
-            accretion_elevation: -200.0,
-            max_elevation: 9000.0,
+            continental_coast_thickness: 30_000.0,
+            continental_interior_thickness: 38_000.0,
+            arc_crust_per_subduction: 800.0,
+            arc_profile: vec![0.25, 1.0, 1.0, 0.25],
+            collision_profile: vec![1.0, 0.75, 0.5, 0.25],
+            max_crust_thickness: 75_000.0,
+            crustal_flow_threshold: 40_000.0,
+            crustal_flow_range: 20_000.0,
+            crustal_flow_rate: 0.05,
             collision_drag: 0.002,
             reorganization_interval: 150.0,
             polarity_memory: 20.0,
@@ -86,37 +111,85 @@ impl Default for TectonicParams {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CrustKind {
-    Oceanic,
-    Continental,
-}
+/// Rings beyond the arc or collision profile over which crust that exceeds the maximum
+/// thickness spills.
+const SPILL_RINGS: usize = 8;
+
+/// Thickness of new oceanic crust in metres.
+pub const OCEANIC_THICKNESS: f64 = 7000.0;
+
+/// Crust whose crystalline layer alone would stand at least this high (dry, in metres) above its
+/// compensation depth counts as continental: it is too buoyant to subduct. Normal oceanic crust
+/// reaches ~850 m, continental crust ~5800 m, and arc crust becomes continental at ~22 km.
+pub const CONTINENTAL_BUOYANCY: f64 = 3000.0;
+
+/// Depth of fully cooled oceanic lithosphere in metres.
+const OLD_OCEAN_DEPTH: f64 = 6400.0;
+
+/// Dry elevation that columns are compensated against, chosen such that old oceanic crust of
+/// normal thickness lies at [`OLD_OCEAN_DEPTH`] below sea level.
+const COMPENSATION: f64 = OCEANIC_THICKNESS * (MANTLE_DENSITY - OCEANIC_DENSITY) / MANTLE_DENSITY
+    + OLD_OCEAN_DEPTH / WATER_LOADING;
 
 /// A sample of crust carried by a plate.
 #[derive(Clone, Copy, Debug)]
 pub struct Crust {
-    pub kind: CrustKind,
-    /// Age in Myr.
+    /// Thickness of the crystalline crust (bedrock) in metres.
+    pub thickness: f64,
+    /// Mean density of the crystalline crust in kg/m³.
+    pub density: f64,
+    /// Age of the lithosphere in Myr: time since it formed at a ridge. Continental lithosphere
+    /// is old and fully cooled.
     pub age: f64,
-    /// Elevation of the bedrock relative to sea level in metres.
-    pub elevation: f64,
     /// Thickness of loose sediment on top of the bedrock in metres.
     pub sediment: f64,
 }
 
 impl Crust {
-    /// Elevation of the surface (bedrock plus sediment) relative to sea level in metres.
+    /// Elevation of the surface relative to sea level in metres, from Airy isostasy of crust and
+    /// sediment plus the thermal uplift of young lithosphere.
     pub fn surface_elevation(&self) -> f64 {
-        self.elevation + self.sediment
+        isostasy::to_surface(self.dry_elevation())
     }
 
-    /// Crust with higher buoyancy overrides crust with lower buoyancy at convergent boundaries.
-    fn buoyancy(&self) -> f64 {
-        match self.kind {
-            CrustKind::Continental => 1e9 + self.elevation,
-            CrustKind::Oceanic => -self.age,
-        }
+    /// Surface elevation without the water load (see [`crate::isostasy`]).
+    fn dry_elevation(&self) -> f64 {
+        self.crustal_buoyancy()
+            + self.sediment * isostasy::dry_response(SEDIMENT_DENSITY)
+            + thermal_uplift(self.age)
+            - COMPENSATION
     }
+
+    /// Dry elevation contributed by the crystalline crust.
+    fn crustal_buoyancy(&self) -> f64 {
+        self.thickness * isostasy::dry_response(self.density)
+    }
+
+    /// Whether the crust is thick and light enough to resist subduction.
+    pub fn is_continental(&self) -> bool {
+        self.crustal_buoyancy() >= CONTINENTAL_BUOYANCY
+    }
+
+    /// Crust with higher buoyancy overrides crust with lower buoyancy at convergent boundaries:
+    /// continental before oceanic, young (hot) oceanic before old oceanic.
+    fn buoyancy(&self) -> f64 {
+        self.dry_elevation()
+    }
+
+    /// Adds crust of the given thickness and density, mixing the densities by mass. Crust beyond
+    /// `max_thickness` is removed from below.
+    fn add_crust(&mut self, thickness: f64, density: f64, max_thickness: f64) {
+        let total = self.thickness + thickness;
+        if total > 0.0 {
+            self.density = (self.density * self.thickness + density * thickness) / total;
+        }
+        self.thickness = total.min(max_thickness);
+    }
+}
+
+/// Elevation of lithosphere of the given age above fully cooled lithosphere, without water load.
+fn thermal_uplift(age: f64) -> f64 {
+    (oceanic_depth(age) + OLD_OCEAN_DEPTH) / WATER_LOADING
 }
 
 /// Depth of oceanic crust depending on its age (after Parsons & Sclater, 1977).
@@ -192,6 +265,54 @@ pub struct Statistics {
     pub mean_speed: f64,
     /// Number of cells covered by each plate.
     pub plate_areas: Vec<usize>,
+    /// Connected land masses (cells at or above sea level).
+    pub land_masses: ComponentStatistics,
+    /// Connected areas of continental crust.
+    pub continental_masses: ComponentStatistics,
+}
+
+/// Sizes of the connected components of a set of cells.
+#[derive(Clone, Debug, Default)]
+pub struct ComponentStatistics {
+    pub count: usize,
+    /// Components of at most three cells.
+    pub specks: usize,
+    /// Fraction of the cells of the set that belong to its largest component.
+    pub largest_share: f64,
+}
+
+/// Connected components of the cells for which `include` is true.
+pub fn components(mesh: &SphereMesh, include: impl Fn(u32) -> bool) -> ComponentStatistics {
+    let mut visited = vec![false; mesh.len()];
+    let mut sizes = Vec::new();
+    let mut stack = Vec::new();
+    for start in 0..mesh.len() as u32 {
+        if visited[start as usize] || !include(start) {
+            continue;
+        }
+        visited[start as usize] = true;
+        stack.push(start);
+        let mut size = 0;
+        while let Some(cell) = stack.pop() {
+            size += 1;
+            for &neighbor in mesh.neighbors(cell) {
+                if !visited[neighbor as usize] && include(neighbor) {
+                    visited[neighbor as usize] = true;
+                    stack.push(neighbor);
+                }
+            }
+        }
+        sizes.push(size);
+    }
+    let total: usize = sizes.iter().sum();
+    ComponentStatistics {
+        count: sizes.len(),
+        specks: sizes.iter().filter(|&&size| size <= 3).count(),
+        largest_share: sizes
+            .iter()
+            .max()
+            .map_or(0.0, |&max| max as f64 / total as f64),
+    }
 }
 
 impl Simulation {
@@ -242,23 +363,24 @@ impl Simulation {
 
         for cell in 0..cell_count {
             let crust = if is_continental[cell] {
-                let elevation = params.continental_base_elevation
-                    + 150.0 * f64::from(coast_distance[cell]).min(6.0)
-                    + rng.random_range(-100.0..100.0);
+                // Continents thicken from their coasts towards their interior.
+                let inland = (f64::from(coast_distance[cell]) / 5.0).min(1.0);
+                let thickness = params.continental_coast_thickness
+                    + (params.continental_interior_thickness - params.continental_coast_thickness)
+                        * inland
+                    + rng.random_range(-500.0..500.0);
                 Crust {
-                    kind: CrustKind::Continental,
+                    thickness,
+                    density: CONTINENTAL_DENSITY,
                     age: 1000.0,
-                    elevation,
                     sediment: 0.0,
                 }
             } else {
                 let age = (10.0 + 8.0 * f64::from(boundary_distance[cell])).min(180.0)
                     + rng.random_range(0.0..5.0);
                 Crust {
-                    kind: CrustKind::Oceanic,
                     age,
-                    elevation: oceanic_depth(age),
-                    sediment: 0.0,
+                    ..new_oceanic_crust()
                 }
             };
             plates[plate_of_cell[cell] as usize].crust[cell] = Some(crust);
@@ -317,6 +439,61 @@ impl Simulation {
         for _ in 0..substeps {
             self.substep(dt / substeps as f64);
         }
+        self.crustal_flow(dt);
+    }
+
+    /// Thick crust spreads under its own weight towards thinner neighbouring crust of the same
+    /// plate, conserving its volume (lower crustal flow, gravitational collapse of orogens).
+    fn crustal_flow(&mut self, dt: f64) {
+        let params = &self.params;
+        let rate = (params.crustal_flow_rate * dt).min(0.15);
+        // Per crust sample: (outgoing thickness, incoming thickness, incoming mass per area).
+        let mut delta: HashMap<Ownership, (f64, f64, f64)> = HashMap::new();
+        for cell in 0..self.mesh.len() as u32 {
+            let owner = self.owners[cell as usize];
+            let crust = self.surface_crust(cell);
+            for &neighbor in self.mesh.neighbors(cell) {
+                // Each pair once, and only within a plate.
+                let neighbor_owner = self.owners[neighbor as usize];
+                if neighbor < cell || neighbor_owner.plate != owner.plate || neighbor_owner == owner
+                {
+                    continue;
+                }
+                let other = self.surface_crust(neighbor);
+                let thickest = crust.thickness.max(other.thickness);
+                let strength = ((thickest - params.crustal_flow_threshold)
+                    / params.crustal_flow_range)
+                    .clamp(0.0, 1.0);
+                if strength <= 0.0 {
+                    continue;
+                }
+                let flow = rate * strength * (crust.thickness - other.thickness) / 2.0;
+                let (from, to, from_crust) = if flow > 0.0 {
+                    (owner, neighbor_owner, crust)
+                } else {
+                    (neighbor_owner, owner, other)
+                };
+                let amount = flow.abs();
+                delta.entry(from).or_default().0 += amount;
+                let receiver = delta.entry(to).or_default();
+                receiver.1 += amount;
+                receiver.2 += amount * from_crust.density;
+            }
+        }
+        for (owner, (outgoing, incoming, incoming_mass)) in delta {
+            let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
+                .as_mut()
+                .expect("owners always point to existing crust");
+            // Outgoing crust leaves the density unchanged; incoming crust is mixed in by mass.
+            crust.thickness = (crust.thickness - outgoing).max(0.0);
+            if incoming > 0.0 {
+                crust.add_crust(
+                    incoming,
+                    incoming_mass / incoming,
+                    params.max_crust_thickness,
+                );
+            }
+        }
     }
 
     fn substep(&mut self, dt: f64) {
@@ -324,10 +501,10 @@ impl Simulation {
         self.move_plates(dt);
         self.evolve_crust(dt);
         let ResolvedBoundaries {
-            uplift_events,
+            additions,
             collisions,
         } = self.resolve_ownership();
-        self.apply_uplift(&uplift_events);
+        self.apply_additions(&additions);
         self.apply_collision_drag(&collisions);
     }
 
@@ -376,16 +553,12 @@ impl Simulation {
         }
     }
 
-    /// Ages all crust and lets the bedrock of oceanic crust relax towards its age-dependent depth
-    /// (thermal subsidence). Erosion is handled separately, see [`crate::erosion`].
+    /// Ages all crust; its elevation follows from its age (thermal subsidence). Erosion is
+    /// handled separately, see [`crate::erosion`].
     fn evolve_crust(&mut self, dt: f64) {
-        let relaxation = 1.0 - (-dt / self.params.oceanic_relaxation_time).exp();
         for plate in &mut self.plates {
             for crust in plate.crust.iter_mut().flatten() {
                 crust.age += dt;
-                if crust.kind == CrustKind::Oceanic {
-                    crust.elevation += (oceanic_depth(crust.age) - crust.elevation) * relaxation;
-                }
             }
         }
     }
@@ -397,6 +570,13 @@ impl Simulation {
             .collect()
     }
 
+    /// Density of the crystalline crust of every world cell in kg/m³.
+    pub fn bedrock_densities(&self) -> Vec<f64> {
+        (0..self.mesh.len() as u32)
+            .map(|cell| self.surface_crust(cell).density)
+            .collect()
+    }
+
     /// Sediment thickness of every world cell.
     pub fn sediment_thicknesses(&self) -> Vec<f64> {
         (0..self.mesh.len() as u32)
@@ -404,9 +584,9 @@ impl Simulation {
             .collect()
     }
 
-    /// Applies per-cell changes of bedrock elevation and sediment thickness to the crust at the
+    /// Applies per-cell changes of crust thickness and sediment thickness to the crust at the
     /// surface. A crust sample that is visible at several cells is only changed once.
-    pub fn apply_surface_changes(&mut self, bedrock_delta: &[f64], sediment_delta: &[f64]) {
+    pub fn apply_surface_changes(&mut self, thickness_delta: &[f64], sediment_delta: &[f64]) {
         let mut changed = HashSet::new();
         for cell in 0..self.mesh.len() {
             let owner = self.owners[cell];
@@ -416,7 +596,7 @@ impl Simulation {
             let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
                 .as_mut()
                 .expect("owners always point to existing crust");
-            crust.elevation += bedrock_delta[cell];
+            crust.thickness = (crust.thickness + thickness_delta[cell]).max(0.0);
             crust.sediment = (crust.sediment + sediment_delta[cell]).max(0.0);
         }
     }
@@ -443,7 +623,7 @@ impl Simulation {
 
         let mut new_owners: Vec<Option<Ownership>> = vec![None; cell_count];
         let mut subducted = Vec::new();
-        let mut uplift_events = Vec::new();
+        let mut additions = Vec::new();
         let mut collisions: HashMap<(u32, u32), u32> = HashMap::new();
         let mut candidates: Vec<(Ownership, Crust)> = Vec::with_capacity(plates.len());
 
@@ -471,20 +651,33 @@ impl Simulation {
                     continue;
                 }
                 subducted.push(loser);
-                let amount = match (winner_crust.kind, loser_crust.kind) {
-                    (CrustKind::Continental, CrustKind::Continental) => {
-                        *collisions
-                            .entry(pair_key(winner.plate, loser.plate))
-                            .or_default() += 1;
-                        params.collision_uplift
-                    }
-                    _ => params.subduction_uplift,
-                };
-                uplift_events.push(UpliftEvent {
-                    cell,
-                    plate: winner.plate,
-                    amount,
-                });
+                if winner_crust.is_continental() && loser_crust.is_continental() {
+                    // Continental collision: the crust of the lower plate is stacked onto the
+                    // overriding plate instead of subducting.
+                    *collisions
+                        .entry(pair_key(winner.plate, loser.plate))
+                        .or_default() += 1;
+                    let sediment_mass = loser_crust.sediment * SEDIMENT_DENSITY;
+                    let thickness = loser_crust.thickness + loser_crust.sediment;
+                    additions.push(CrustAddition {
+                        cell,
+                        plate: winner.plate,
+                        thickness,
+                        density: (loser_crust.thickness * loser_crust.density + sediment_mass)
+                            / thickness.max(1e-9),
+                        collision: true,
+                    });
+                } else {
+                    // Subduction: the lower plate's crust and sediment sink into the mantle, and
+                    // melting above the slab builds an arc on the overriding plate.
+                    additions.push(CrustAddition {
+                        cell,
+                        plate: winner.plate,
+                        thickness: params.arc_crust_per_subduction,
+                        density: ARC_DENSITY,
+                        collision: false,
+                    });
+                }
             }
         }
 
@@ -562,43 +755,43 @@ impl Simulation {
             *owner = new_owner.expect("all cells are owned after gap filling");
         }
         ResolvedBoundaries {
-            uplift_events,
+            additions,
             collisions,
         }
     }
 
-    /// Distributes uplift over the cells of the overriding plate around each event, and turns
-    /// sufficiently uplifted oceanic crust into continental crust.
-    fn apply_uplift(&mut self, events: &[UpliftEvent]) {
-        let radius = self.params.uplift_radius;
+    /// Distributes new crust over the cells of the receiving plate around each addition,
+    /// following the arc or collision profile. Crust that does not fit below the maximum
+    /// thickness spills further outwards over up to [`SPILL_RINGS`] more rings, and is only
+    /// removed (delamination) when there is no room left there either.
+    fn apply_additions(&mut self, additions: &[CrustAddition]) {
         let mut visited_in_event = vec![usize::MAX; self.mesh.len()];
         let mut frontier = Vec::new();
         let mut next_frontier = Vec::new();
+        // Reached crust samples with their profile weight (0 beyond the profile).
+        let mut reached: Vec<(Ownership, f64)> = Vec::new();
+        let max_thickness = self.params.max_crust_thickness;
 
-        for (event_index, event) in events.iter().enumerate() {
+        for (event_index, addition) in additions.iter().enumerate() {
+            let profile = if addition.collision {
+                &self.params.collision_profile
+            } else {
+                &self.params.arc_profile
+            };
             frontier.clear();
-            frontier.push(event.cell);
-            visited_in_event[event.cell as usize] = event_index;
+            frontier.push(addition.cell);
+            visited_in_event[addition.cell as usize] = event_index;
+            reached.clear();
 
-            for distance in 0..=radius {
-                let falloff = 1.0 - f64::from(distance) / f64::from(radius + 1);
+            for ring in 0..profile.len() + SPILL_RINGS {
+                let weight = profile.get(ring).copied().unwrap_or(0.0);
                 next_frontier.clear();
                 for &cell in &frontier {
                     let owner = self.owners[cell as usize];
-                    if owner.plate != event.plate {
+                    if owner.plate != addition.plate {
                         continue;
                     }
-                    let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
-                        .as_mut()
-                        .expect("owners always point to existing crust");
-                    let headroom = (1.0 - crust.elevation / self.params.max_elevation).max(0.0);
-                    crust.elevation += event.amount * falloff * headroom;
-                    if crust.kind == CrustKind::Oceanic
-                        && crust.elevation > self.params.accretion_elevation
-                    {
-                        crust.kind = CrustKind::Continental;
-                    }
-
+                    reached.push((owner, weight));
                     for &neighbor in self.mesh.neighbors(cell) {
                         if visited_in_event[neighbor as usize] != event_index {
                             visited_in_event[neighbor as usize] = event_index;
@@ -607,6 +800,33 @@ impl Simulation {
                     }
                 }
                 std::mem::swap(&mut frontier, &mut next_frontier);
+            }
+
+            let total_weight: f64 = reached.iter().map(|(_, weight)| weight).sum();
+            if total_weight <= 0.0 {
+                continue;
+            }
+            // Distribute along the profile, then spill what did not fit outwards, nearest first.
+            let mut leftover = 0.0;
+            for &(owner, weight) in &reached {
+                let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
+                    .as_mut()
+                    .expect("owners always point to existing crust");
+                let share = addition.thickness * weight / total_weight;
+                let fitting = share.min((max_thickness - crust.thickness).max(0.0));
+                crust.add_crust(fitting, addition.density, max_thickness);
+                leftover += share - fitting;
+            }
+            for &(owner, _) in &reached {
+                if leftover <= 0.0 {
+                    break;
+                }
+                let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
+                    .as_mut()
+                    .expect("owners always point to existing crust");
+                let fitting = leftover.min((max_thickness - crust.thickness).max(0.0));
+                crust.add_crust(fitting, addition.density, max_thickness);
+                leftover -= fitting;
             }
         }
     }
@@ -630,9 +850,10 @@ impl Simulation {
                 .cross(self.mesh.vertex(cell))
                 .length();
             let crust = self.surface_crust(cell);
-            match crust.kind {
-                CrustKind::Continental => continental += 1,
-                CrustKind::Oceanic => oceanic_age_sum += crust.age,
+            if crust.is_continental() {
+                continental += 1;
+            } else {
+                oceanic_age_sum += crust.age;
             }
             let elevation = crust.surface_elevation();
             if elevation > 0.0 {
@@ -662,27 +883,38 @@ impl Simulation {
             min_elevation,
             mean_speed: speed_sum / cell_count as f64,
             plate_areas,
+            land_masses: components(&self.mesh, |cell| {
+                self.surface_crust(cell).surface_elevation() >= 0.0
+            }),
+            continental_masses: components(&self.mesh, |cell| {
+                self.surface_crust(cell).is_continental()
+            }),
         }
     }
 }
 
 struct ResolvedBoundaries {
-    uplift_events: Vec<UpliftEvent>,
+    additions: Vec<CrustAddition>,
     /// Number of continental collision events per plate pair.
     collisions: HashMap<(u32, u32), u32>,
 }
 
-struct UpliftEvent {
+/// New crust added to a plate around a cell.
+struct CrustAddition {
     cell: u32,
     plate: u32,
-    amount: f64,
+    /// Total volume as a thickness over one cell.
+    thickness: f64,
+    density: f64,
+    /// Whether this is crust stacked in a continental collision rather than new arc crust.
+    collision: bool,
 }
 
 fn new_oceanic_crust() -> Crust {
     Crust {
-        kind: CrustKind::Oceanic,
+        thickness: OCEANIC_THICKNESS,
+        density: OCEANIC_DENSITY,
         age: 0.0,
-        elevation: oceanic_depth(0.0),
         sediment: 0.0,
     }
 }
@@ -716,7 +948,7 @@ fn choose_overriding(
             } else {
                 (b, b_crust, a, a_crust)
             };
-            if bottom_crust.kind == CrustKind::Continental && top_crust.kind == CrustKind::Oceanic {
+            if bottom_crust.is_continental() && !top_crust.is_continental() {
                 polarity.overriding = bottom.plate;
             } else {
                 polarity.overriding = top.plate;
@@ -835,6 +1067,49 @@ mod tests {
 
     fn simulation(seed: u64) -> Simulation {
         Simulation::new(SphereMesh::icosphere(4), 8, TectonicParams::default(), seed)
+    }
+
+    #[test]
+    fn isostasy_gives_earth_like_elevations() {
+        let ocean = |age| Crust {
+            age,
+            ..new_oceanic_crust()
+        };
+        assert!((ocean(0.0).surface_elevation() + 2500.0).abs() < 1.0);
+        assert!((ocean(1000.0).surface_elevation() + 6400.0).abs() < 1.0);
+        assert!(!ocean(0.0).is_continental());
+
+        let continent = |thickness| Crust {
+            thickness,
+            density: CONTINENTAL_DENSITY,
+            age: 1000.0,
+            sediment: 0.0,
+        };
+        // Normal continental crust stands a few hundred metres above sea level, doubly
+        // thickened crust forms high plateaus like Tibet, thinned crust forms shelves.
+        assert!((200.0..900.0).contains(&continent(35_000.0).surface_elevation()));
+        assert!((4500.0..6500.0).contains(&continent(70_000.0).surface_elevation()));
+        assert!((-500.0..0.0).contains(&continent(30_000.0).surface_elevation()));
+        assert!(continent(30_000.0).is_continental());
+    }
+
+    #[test]
+    fn arcs_mature_into_continental_crust() {
+        let mut crust = Crust {
+            age: 80.0,
+            ..new_oceanic_crust()
+        };
+        let mut became_continental_at = None;
+        for _ in 0..100 {
+            crust.add_crust(500.0, ARC_DENSITY, 75_000.0);
+            if crust.is_continental() && became_continental_at.is_none() {
+                became_continental_at = Some(crust.thickness);
+            }
+        }
+        let thickness = became_continental_at.expect("arc became continental");
+        assert!((18_000.0..28_000.0).contains(&thickness), "{thickness}");
+        // A mature arc emerges above sea level.
+        assert!(crust.surface_elevation() > 0.0);
     }
 
     #[test]

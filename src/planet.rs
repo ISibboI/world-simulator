@@ -55,7 +55,7 @@ impl Planet {
     ) -> Self {
         let climate = Climate::new(tectonics.mesh(), climate);
         let mut temperature = TemperatureModel::new(tectonics.mesh(), temperature);
-        temperature.update(&tectonics.surface_elevations());
+        temperature.update(&tectonics.surface_elevations(), None);
         let cell_count = tectonics.mesh().len();
         let mut planet = Self {
             tectonics,
@@ -96,7 +96,9 @@ impl Planet {
 
         let start = Instant::now();
         let elevation = self.tectonics.surface_elevations();
-        self.temperature.update(&elevation);
+        // Ice sheets depend on last step's snowfall.
+        self.temperature
+            .update(&elevation, Some(&self.precipitation));
         self.precipitation = self.compute_precipitation(&elevation);
         let climate_time = start.elapsed();
 
@@ -106,6 +108,7 @@ impl Planet {
                 self.tectonics.mesh(),
                 &elevation,
                 &self.tectonics.sediment_thicknesses(),
+                &self.tectonics.bedrock_densities(),
                 &self.precipitation,
                 params,
                 dt_years,

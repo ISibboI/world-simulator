@@ -1,5 +1,6 @@
 mod climate;
 mod erosion;
+mod isostasy;
 mod planet;
 mod render;
 mod sphere;
@@ -200,6 +201,16 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
         statistics.mean_speed * EARTH_RADIUS * 100.0 / 1e6,
         living_plates,
         100.0 * largest_plate as f64 / simulation.mesh().len() as f64,
+    );
+    info!(
+        "    land masses {} ({} specks, largest {:.0}%) | continental crust masses {} ({} specks, \
+         largest {:.0}%)",
+        statistics.land_masses.count,
+        statistics.land_masses.specks,
+        100.0 * statistics.land_masses.largest_share,
+        statistics.continental_masses.count,
+        statistics.continental_masses.specks,
+        100.0 * statistics.continental_masses.largest_share,
     );
     info!(
         "    land precipitation {:4.2} m/yr | largest river {:8.0} m³/s | \

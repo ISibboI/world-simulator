@@ -127,6 +127,9 @@ pub struct TemperatureParams {
     /// Ice sheets form below this annual mean land surface temperature; the albedo changes
     /// linearly over ±5 K around it.
     pub land_ice_temperature: f64,
+    /// Ice sheets need snowfall: below this annual precipitation in m/yr, the ice albedo on land
+    /// is reduced proportionally, so cold deserts (like Siberia) stay free of ice sheets.
+    pub ice_sheet_precipitation: f64,
     /// Heat capacity of the ocean mixed layer in J/m²/K.
     pub ocean_heat_capacity: f64,
     /// Effective heat capacity of land in J/m²/K.
@@ -159,6 +162,7 @@ impl Default for TemperatureParams {
             ice_albedo: 0.62,
             sea_ice_temperature: -10.0,
             land_ice_temperature: -10.0,
+            ice_sheet_precipitation: 0.3,
             ocean_heat_capacity: 4.18e6 * 50.0,
             land_heat_capacity: 8e6,
             lapse_rate: 0.0065,
@@ -285,8 +289,9 @@ impl TemperatureModel {
     }
 
     /// Simulates the seasonal cycle for the given surface elevation (in metres, sea level is 0)
-    /// of the fine mesh, and updates the temperature fields.
-    pub fn update(&mut self, elevation: &[f64]) {
+    /// of the fine mesh, and updates the temperature fields. `precipitation` (m/yr) limits where
+    /// ice sheets can grow; without it, snowfall is assumed to be sufficient everywhere.
+    pub fn update(&mut self, elevation: &[f64], precipitation: Option<&[f64]>) {
         let params = &self.params;
         let coarse_count = self.coarse.len();
 
@@ -294,13 +299,23 @@ impl TemperatureModel {
         let mut cells = vec![0usize; coarse_count];
         let mut land_cells = vec![0usize; coarse_count];
         let mut land_elevation = vec![0.0; coarse_count];
+        let mut land_precipitation = vec![0.0; coarse_count];
         for (fine, &coarse) in self.fine_to_coarse.iter().enumerate() {
             cells[coarse as usize] += 1;
             if elevation[fine] >= 0.0 {
                 land_cells[coarse as usize] += 1;
                 land_elevation[coarse as usize] += elevation[fine];
+                land_precipitation[coarse as usize] +=
+                    precipitation.map_or(f64::INFINITY, |p| p[fine]);
             }
         }
+        // Fraction of the full ice albedo that the snowfall can sustain on land.
+        let snow_supply: Vec<f64> = (0..coarse_count)
+            .map(|c| {
+                let mean = land_precipitation[c] / land_cells[c].max(1) as f64;
+                (mean / params.ice_sheet_precipitation).clamp(0.0, 1.0)
+            })
+            .collect();
         let land_fraction: Vec<f64> = (0..coarse_count)
             .map(|c| land_cells[c] as f64 / cells[c].max(1) as f64)
             .collect();
@@ -361,9 +376,11 @@ impl TemperatureModel {
                     let t = self.previous_annual_mean[cell];
                     let land_t = t - params.lapse_rate * land_elevation[cell];
                     let f = land_fraction[cell];
+                    let land_ice_albedo = params.land_albedo
+                        + (params.ice_albedo - params.land_albedo) * snow_supply[cell];
                     f * blend(
                         params.land_albedo,
-                        params.ice_albedo,
+                        land_ice_albedo,
                         land_t,
                         params.land_ice_temperature,
                     ) + (1.0 - f)
@@ -603,7 +620,7 @@ mod tests {
             })
             .collect();
         let mut model = TemperatureModel::new(&mesh, TemperatureParams::default());
-        model.update(&elevation);
+        model.update(&elevation, None);
         let fields = model.fields();
 
         let mean_where = |filter: &dyn Fn(f64, f64) -> bool, field: &dyn Fn(usize) -> f64| {

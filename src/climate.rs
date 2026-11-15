@@ -7,7 +7,8 @@
 //! the moisture rains out in every cell. That fraction is high where air rises: in the
 //! intertropical convergence zone at the equator, along the polar front around 55°, and where
 //! winds are forced up mountain slopes (orographic precipitation). Downwind of mountains, the air
-//! is dry (rain shadow), and in the subsiding air around 25° there is little rain (deserts).
+//! is dry (rain shadow), and in the subsiding air around 25° there is little rain (deserts). Part
+//! of the rain over land evaporates again and continues downwind (moisture recycling).
 
 use glam::DVec3;
 
@@ -43,6 +44,12 @@ pub struct ClimateParams {
     /// Iterations of moisture transport per update; should exceed the width of the largest
     /// continent in cells.
     pub transport_iterations: usize,
+    /// Smallest rain fraction, reached where air descends steeply behind mountains.
+    pub min_rain_fraction: f64,
+    /// Fraction of the precipitation over land that evaporates again from soils and plants and
+    /// returns to the air (moisture recycling, about half on Earth). It keeps the interiors of
+    /// large continents from drying out completely.
+    pub land_recycling: f64,
 }
 
 impl Default for ClimateParams {
@@ -59,7 +66,9 @@ impl Default for ClimateParams {
             polar_front_latitude: 55.0,
             orographic_factor: 20.0,
             precipitation_scale: 25.0,
-            transport_iterations: 80,
+            transport_iterations: 150,
+            min_rain_fraction: 0.002,
+            land_recycling: 0.5,
         }
     }
 }
@@ -143,10 +152,10 @@ impl Climate {
                     + params.polar_front_rain_fraction
                         * (-((latitude - params.polar_front_latitude) / 12.0).powi(2)).exp();
                 let upwind = self.upwind[cell] as usize;
-                let lift =
-                    (elevation[cell].max(0.0) - elevation[upwind].max(0.0)).max(0.0) / cell_spacing;
-                (params.background_rain_fraction + convergence + params.orographic_factor * lift)
-                    .clamp(0.0, 0.95)
+                // Rising air cools and rains out; descending air warms and dries (foehn).
+                let slope = (elevation[cell].max(0.0) - elevation[upwind].max(0.0)) / cell_spacing;
+                (params.background_rain_fraction + convergence + params.orographic_factor * slope)
+                    .clamp(params.min_rain_fraction, 0.95)
             })
             .collect();
 
@@ -158,7 +167,8 @@ impl Climate {
                 next[cell] = if is_ocean(cell) {
                     evaporation[cell]
                 } else {
-                    moisture[self.upwind[cell] as usize] * (1.0 - rain_fraction[cell])
+                    moisture[self.upwind[cell] as usize]
+                        * (1.0 - rain_fraction[cell] * (1.0 - params.land_recycling))
                 };
             }
             std::mem::swap(&mut moisture, &mut next);
