@@ -24,6 +24,11 @@ short; move detail into the session logs.
 
 ## Development
 
+- Use `agent-scratch/` in the repository (ignored by git) for all temporary files of agents:
+  scratch copies of the source, diagnostic builds, simulation outputs, logs. Do not use `/tmp`
+  (a small RAM disk on this machine). Diagnostic builds should share one target directory,
+  e.g. `CARGO_TARGET_DIR=agent-scratch/target`.
+
 - Toolchain pinned in `rust-toolchain.toml`; CI in `.github/workflows/ci.yml` runs fmt, check
   (all and default features), clippy (pinned/stable/beta/nightly), test, doc and a
   Windows/macOS check, with warnings denied.
