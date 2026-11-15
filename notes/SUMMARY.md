@@ -25,9 +25,9 @@ components (climate, erosion, …) are expected to build on it.
   simulated time. PNG snapshots are still written in both modes.
 - Temperature outcome over 500 Myr: global mean 10–13 °C, equator 23–25 °C, poles −11…−17 °C,
   permanent ice on 6–14% of the surface; continental interiors swing ~30 K over the year.
-- Calibrated outcome after 500 Myr: peaks ~7 km, mean land elevation ~750–1150 m (Earth 840),
-  land precipitation ~0.9 m/yr, sediment to the oceans ~15 km³/yr (Earth ~8–10), largest river
-  ~50,000–80,000 m³/s.
+- Outcome over 500 Myr (thickness model, commit fb5ffb6): continental 30% → 20%, mean land
+  0.7–1.4 km, land precipitation 0.46–0.66 m/yr, sediment to ocean 3–7 km³/yr, global
+  temperature 13–16 °C, equator 22–26 °C, 3–7% permanently frozen.
 
 ## Architecture
 
@@ -47,17 +47,26 @@ components (climate, erosion, …) are expected to build on it.
     reorganisations (mean every 150 Myr per plate) keep the system moving.
   - Single-cell holes inside a plate are resampling artifacts and get a copy of neighbouring
     crust; other gaps get new oceanic crust (ridges).
-  - Uplift saturates towards 9 km; uplifted oceanic crust accretes into continental crust.
-  - Crust samples carry a separate `sediment` layer on top of the bedrock `elevation`, so that
-    oceanic thermal subsidence does not erase sediment shelves.
+  - Crust samples store **thickness, density, age and sediment**; elevation is derived from Airy
+    isostasy (`src/isostasy.rs`: mantle 3300, water 1030, sediment 2300, oceanic 2900,
+    continental 2750, arc 2800 kg/m³) plus thermal uplift of young lithosphere (age-depth curve),
+    calibrated so old ocean = −6400 m, ridges −2500 m, 35 km continent ≈ +580 m, 70 km ≈ +6 km.
+  - "Continental" is derived: crustal buoyancy ≥ 3000 m (dry) → too buoyant to subduct. Arcs
+    (≈800 m·cell of 2800 kg/m³ crust per subducted sample, in a band 0–3 cells behind the
+    trench) mature into continental crust at ~22 km.
+  - Continental collisions stack the loser's crust (+sediment) onto the winner (profile over 0–3
+    rings, spilling up to 8 more rings when above the 75 km cap); thick crust (>40 km) spreads by
+    volume-conserving lateral flow within a plate.
 - `src/climate.rs`: water cycle. Three-cell prevailing winds (trades, westerlies, polar
   easterlies) carry moisture from the ocean (evaporation ∝ warmth) over land; per-cell rain-out
-  fraction from latitude (ITCZ, polar front) and orographic lift → rain shadows, subtropical
-  deserts. Upwind neighbour per cell precomputed; moisture transport iterated to steady state.
+  fraction from latitude (ITCZ, polar front) and orographic lift, reduced in descending air
+  (foehn) → rain shadows, subtropical deserts. 50% of land precipitation is recycled
+  (evapotranspiration). Upwind neighbour per cell precomputed; 150 transport iterations.
 - `src/erosion.rs`: priority-flood drainage from the ocean (lakes spill), discharge accumulation,
-  implicit stream-power incision (Braun & Willett; `K = 1.5e-7`, `m = 0.5`), isostatic rebound
-  (surface drops only 18% of eroded bedrock), sediment fills lakes and builds shelves outward from
-  river mouths to −120 m, then deltas up to sea level; any rest is lost to the deep ocean.
+  implicit stream-power incision (Braun & Willett; `K = 1.5e-7`, `m = 0.5`) with **sea level as
+  base level**; eroding crust thins it (isostatic rebound via `isostasy`); sediment fills lakes
+  and builds shelves outward from river mouths to −120 m, then delta plains to +2 m; sediment
+  loads the crust (rises ~0.44 of its thickness under water); any rest is lost to the deep ocean.
 - `src/temperature.rs`: energy balance model `C dT/dt = Q(1−α) − (A + BT) + transport` with a
   seasonal cycle. Earth orbit (e = 0.0167, obliquity 23.44°, perihelion early January, Kepler
   solved) → daily-mean insolation per latitude and season (24 seasons/yr). Runs on a coarse
@@ -65,7 +74,8 @@ components (climate, erosion, …) are expected to build on it.
   Heat transport is mostly **zonal** (implicit 1D diffusion over 18 equal-area latitude bands,
   D = 0.45) plus weak local 2D diffusion (0.05); full 2D diffusion tied land to the ocean and
   killed continental seasonality. Ice albedo uses the **previous year's annual mean** (< −10 °C,
-  Budyko); seasonal snow albedo caused a snowball planet. 20 spin-up years, then 2 per Myr step.
+  Budyko); seasonal snow albedo caused a snowball planet. Land ice albedo is scaled by snowfall
+  (full at ≥ 0.3 m/yr of last step's precipitation), so cold deserts don't glaciate. 20 spin-up years, then 2 per Myr step.
   Month 0 = January (year starts at perihelion).
 - Evaporation over the ocean follows sea-surface temperature (+5%/K).
 - `src/planet.rs`: couples tectonics (substeps) with temperature, precipitation and erosion per
@@ -94,29 +104,13 @@ components (climate, erosion, …) are expected to build on it.
 - Continental area slowly decreases (30% → ~24% in 500 Myr) because continental collisions
   destroy the losing crust instead of thickening the winner.
 - Continental shelves are too wide (sediment spreads over up to 256 cells per river mouth).
-- **Scattered land masses** (diagnosed 2026-11-15, not yet fixed), ranked:
-  1. Island-arc accretion converts single oceanic samples above −200 m to continental crust →
-     speckled continental crust (41.6% of continental crust is accreted after 500 Myr; disabling
-     accretion: 146 → 15 continental components at 200 Myr). Fix: accrete coherent terranes only /
-     majority filter.
-  2. Delta fill raises shelves to exactly 0 m: counted as land but drawn light blue (18–20% of
-     "land"). Fix: fill to below sea level, consistent sea-level convention, fewer shelf cells.
-  3. No isostatic support of continents after erosion was added: 10–14% of continental crust
-     sinks below sea level. Fix: slow isostatic relaxation of continental bedrock.
-  4. Continental collisions delete the loser's continental crust (~42% of initial continental
-     area destroyed in 200 Myr), backfilled by speckled accretion. Fix: conserve crust.
-  5. Initial continents ignore plate boundaries (5 continents → 27 per-plate pieces at t=0) and
-     plate regions fragment by resampling noise (12 → 59 components). Fix: grow continents within
-     plates, majority filter on ownership.
-- **Bug:** river incision uses the receiver's elevation as base level; for coastal cells that is
-  the ocean floor (e.g. −3000 m), so coasts are cut below sea level. Base level must be
-  `max(receiver, 0)` (sea level). Likely the main cause of submerged continental crust.
-- Physics review of the land-fragmentation fixes (2026-11-15): see session log. Key points:
-  model crust **thickness** (Airy isostasy → elevation) instead of elevation + binary type;
-  arcs as a band of magmatic thickening on the overriding plate, accreted as terranes; conserve
-  continental crust in collisions by thickening; deltas should build slightly *above* sea level
-  and sediment loading should cause isostatic subsidence (~0.44 of the deposit under water); the
-  "relax continents to 300 m" and "fill deltas to −10 m" suggestions are not physical.
+- Land fragmentation largely fixed by the thickness model (at 200 Myr: land masses 105 → ~30,
+  continental crust masses 146 → ~17–25); still 15–20 single-cell specks.
+- **Continental area declines** 30% → ~20% in 500 Myr because collisions thicken crust (area
+  shrinks at conserved volume) and nothing thins it again: no continental rifting/extension,
+  no plate splitting. Continents end up too high mid-run (mean land 1.1–1.4 km vs Earth 0.84).
+- Collision churn is high (≈ the whole initial continental volume passes through collisions in
+  300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
 - Subduction model gaps: no trenches, slabs/slab pull, back-arc extension, accretionary
   wedges, obduction, subduction initiation; polarity is per plate pair, not per boundary
   segment; transform boundaries are not distinguished (overlap noise is treated as convergence).
