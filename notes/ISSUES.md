@@ -132,6 +132,10 @@ autonomously, with an independent plan review before each issue): 1 (mechanisms)
     coasts is simulated; currently only fluvial erosion and sediment deposition are modelled
     (`src/erosion.rs`). Not answered yet.
 
+12. **Asteroid impacts** (user, 2026-11-15): include impacts in the model at a later point
+    (craters, ejecta, and their effects on climate and life). Not a defect of the current
+    model; a future feature.
+
 Minor: statistics count land as `> 0` in one place and `>= 0` elsewhere.
 
 ## Acceptable simplifications (at ~110 km cells, 1 Myr steps)
