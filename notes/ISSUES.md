@@ -8,8 +8,9 @@ with approaches and references per issue: `research/feasibility-2026-11-15.md`.
 **Order of work** (user, 2026-11-15: calibrate issue 1 only as far as needed to confirm the
 implementation, then prefer issues that also help issue 1, then work through the rest
 autonomously, with an independent plan review before each issue): 1 (mechanisms) ✓ → 5 ✓
-(partly) → issue 1 soundness fixes ✓ → 3 ✓ (ledger; artifacts remain) → **4 (next; plan reviewed)** → issue 1 tuning
-(trench propagation, age-hazard initiation) → 2 → 7 + 6 → 9 → 8.
+(partly) → issue 1 soundness fixes ✓ → 3 ✓ (ledger; artifacts remain) → 4 ✓ (peaks still too
+high) → **runtime optimisation review (user, 2026-11-15: before issue 1 tuning; the user
+decides which optimisations to do)** → issue 1 tuning (plan reviewed) → 2 → 7 + 6 → 9 → 8.
 
 ## Open
 
@@ -107,6 +108,15 @@ autonomously, with an independent plan review before each issue): 1 (mechanisms)
    crust 1–1.5 km too high, highest cells 8.4–11.4 km [~5–6 km at 1° scale]. Track a thermal age
    that resets for continental crust; 70 km crust gives 6.3 km [Tibet ~5 km] → denser thick
    crust or a lithospheric-root term.
+   **Implemented (2026-11-15, plan + review `plans/issue-4-mountain-heights.md`):** the GDH1
+   thermal uplift fades out between the continental threshold (3000 m crustal buoyancy) and
+   normal 35 km continental crust (arcs keep it); crust deeper than 50 km densifies to
+   2950 kg/m³ at constant mass (70 km → ~4.85 km, 75 km cap → ~5.2 km); erosion gets a separate
+   per-cell isostatic density for removal from the top. Tests: monotonic elevation at all ages,
+   young arcs still override young ocean, no thermal uplift on continents, erosion response =
+   formula. Seed 0, 500 Myr: max elevation per snapshot 4.0–9.7 km (before 6.8–9.6), mean land
+   still rises to ~1.9 km. **Open:** peaks of 8–9.7 km cannot come from crust (cap → 5.2 km);
+   diagnose (sediment in high lake basins? transitional crust on young lithosphere?).
 5. **New oceanic crust created at convergent boundaries** (28–30% of crust < 3 Myr): gap filling
    ignores relative plate motion. Create ridge crust only where plates diverge.
    **Partly fixed (2026-11-15, plan `plans/issue-5-gap-filling.md`):** overridden samples are
