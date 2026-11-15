@@ -1,3 +1,6 @@
+mod climate;
+mod erosion;
+mod planet;
 mod render;
 mod sphere;
 mod tectonics;
@@ -8,13 +11,17 @@ use std::time::Instant;
 use anyhow::{Context, ensure};
 use clap::Parser;
 
+use crate::climate::ClimateParams;
+use crate::erosion::ErosionParams;
+use crate::planet::Planet;
 use crate::sphere::SphereMesh;
 use crate::tectonics::{Simulation, TectonicParams};
 
-/// Used to convert angular speeds into familiar linear speeds.
-const EARTH_RADIUS_CM: f64 = 6.371e8;
+/// The planet radius in metres; used for erosion, climate and to report linear speeds.
+const EARTH_RADIUS: f64 = 6.371e6;
 
-/// Simulates tectonic plates on a spherical planet and writes map snapshots as PNG images.
+/// Simulates a planet with plate tectonics, an Earth-like water cycle and erosion, and writes
+/// map snapshots as PNG images.
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Cli {
@@ -53,7 +60,17 @@ struct Cli {
     /// Width of the snapshot images in pixels.
     #[arg(long, default_value_t = 1024)]
     width: u32,
+
+    /// Disable erosion.
+    #[arg(long)]
+    no_erosion: bool,
+
+    /// Minimum discharge in m³/yr for a cell to be drawn as a river.
+    #[arg(long, default_value_t = 1e11)]
+    river_threshold: f64,
 }
+
+const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -74,44 +91,68 @@ fn main() -> anyhow::Result<()> {
         continental_fraction: cli.continental_fraction,
         ..TectonicParams::default()
     };
-    let mut simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
+    let simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
+    let erosion = (!cli.no_erosion).then(|| ErosionParams {
+        planet_radius: EARTH_RADIUS,
+        ..ErosionParams::default()
+    });
+    let mut planet = Planet::new(simulation, ClimateParams::default(), erosion, EARTH_RADIUS);
 
     let steps = (cli.duration / cli.dt).round() as u64;
     let snapshot_every = ((cli.snapshot_interval / cli.dt).round() as u64).max(1);
     let start = Instant::now();
-    snapshot(&simulation, &cli)?;
+    snapshot(&planet, &cli)?;
     for step in 1..=steps {
-        simulation.step(cli.dt);
+        planet.step(cli.dt);
         if step % snapshot_every == 0 || step == steps {
-            snapshot(&simulation, &cli)?;
+            snapshot(&planet, &cli)?;
         }
     }
     println!("Finished in {:.1?}", start.elapsed());
     Ok(())
 }
 
-fn snapshot(simulation: &Simulation, cli: &Cli) -> anyhow::Result<()> {
-    let statistics = simulation.statistics();
+fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
+    let simulation = planet.tectonics();
+    let planet_statistics = planet.statistics();
+    let statistics = &planet_statistics.tectonics;
     let largest_plate = statistics.plate_areas.iter().max().copied().unwrap_or(0);
     let living_plates = statistics.plate_areas.iter().filter(|&&a| a > 0).count();
     println!(
         "t = {:6.1} Myr | continental {:5.1}% | land {:5.1}% | mean ocean age {:5.1} Myr | \
-         elevation {:6.0} m ..{:6.0} m | mean speed {:4.1} cm/yr | {} plates, largest {:4.1}%",
+         elevation {:6.0} m ..{:6.0} m, land mean {:5.0} m | mean speed {:4.1} cm/yr | \
+         {} plates, largest {:4.1}%",
         statistics.time,
         100.0 * statistics.continental_fraction,
         100.0 * statistics.land_fraction,
         statistics.mean_oceanic_age,
         statistics.min_elevation,
         statistics.max_elevation,
-        statistics.mean_speed * EARTH_RADIUS_CM / 1e6,
+        statistics.mean_land_elevation,
+        // rad/Myr × m → cm/yr
+        statistics.mean_speed * EARTH_RADIUS * 100.0 / 1e6,
         living_plates,
         100.0 * largest_plate as f64 / simulation.mesh().len() as f64,
+    );
+    println!(
+        "    land precipitation {:4.2} m/yr | largest river {:8.0} m³/s | \
+         sediment to ocean {:5.1} km³/yr",
+        planet_statistics.mean_land_precipitation,
+        planet_statistics.largest_river / SECONDS_PER_YEAR,
+        planet_statistics.sediment_flux / 1e9,
     );
 
     let time = simulation.time().round() as u64;
     for (name, image) in [
-        ("elevation", render::render_elevation(simulation, cli.width)),
+        (
+            "elevation",
+            render::render_elevation(planet, cli.width, cli.river_threshold),
+        ),
         ("plates", render::render_plates(simulation, cli.width)),
+        (
+            "precipitation",
+            render::render_precipitation(planet, cli.width),
+        ),
     ] {
         let path = cli.output.join(format!("{name}_{time:05}.png"));
         image

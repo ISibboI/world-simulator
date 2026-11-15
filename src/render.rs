@@ -3,6 +3,7 @@
 use glam::DVec3;
 use image::{Rgb, RgbImage};
 
+use crate::planet::Planet;
 use crate::tectonics::{CrustKind, Simulation};
 
 /// Renders an equirectangular map of `width × width/2` pixels, colouring each pixel by the world
@@ -33,10 +34,38 @@ fn render(simulation: &Simulation, width: u32, color: impl Fn(u32) -> Rgb<u8>) -
     image
 }
 
-/// Elevation map with a hypsometric colour scheme.
-pub fn render_elevation(simulation: &Simulation, width: u32) -> RgbImage {
+/// Elevation map with a hypsometric colour scheme. Land cells whose discharge is at least
+/// `river_threshold` m³/yr are drawn as rivers.
+pub fn render_elevation(planet: &Planet, width: u32, river_threshold: f64) -> RgbImage {
+    let simulation = planet.tectonics();
     render(simulation, width, |cell| {
-        elevation_color(simulation.surface_crust(cell).elevation)
+        let elevation = simulation.surface_crust(cell).surface_elevation();
+        if elevation >= 0.0 && planet.discharge()[cell as usize] >= river_threshold {
+            Rgb([30, 80, 200])
+        } else {
+            elevation_color(elevation)
+        }
+    })
+}
+
+/// Precipitation map: land coloured from desert to rainforest, ocean in grey.
+pub fn render_precipitation(planet: &Planet, width: u32) -> RgbImage {
+    const STOPS: &[(f64, [f64; 3])] = &[
+        (0.0, [230.0, 200.0, 140.0]),
+        (0.25, [220.0, 220.0, 120.0]),
+        (0.75, [120.0, 190.0, 80.0]),
+        (1.5, [30.0, 130.0, 50.0]),
+        (3.0, [20.0, 70.0, 140.0]),
+    ];
+    let simulation = planet.tectonics();
+    render(simulation, width, |cell| {
+        if simulation.surface_crust(cell).surface_elevation() < 0.0 {
+            let shade =
+                (90.0 + 60.0 * (planet.precipitation()[cell as usize] / 3.0).min(1.0)) as u8;
+            Rgb([shade, shade, shade.saturating_add(20)])
+        } else {
+            gradient(STOPS, planet.precipitation()[cell as usize])
+        }
     })
 }
 
@@ -85,26 +114,31 @@ fn hsv_to_rgb(hue: f64, saturation: f64, value: f64) -> [u8; 3] {
 }
 
 fn elevation_color(elevation: f64) -> Rgb<u8> {
-    const STOPS: &[(f64, [f64; 3])] = &[
-        (-7000.0, [5.0, 15.0, 60.0]),
-        (-4000.0, [20.0, 50.0, 130.0]),
-        (-200.0, [60.0, 130.0, 200.0]),
-        (0.0, [120.0, 180.0, 220.0]),
-        (0.1, [70.0, 140.0, 70.0]),
-        (1000.0, [170.0, 170.0, 90.0]),
-        (2500.0, [140.0, 100.0, 60.0]),
-        (4500.0, [120.0, 110.0, 105.0]),
-        (6000.0, [250.0, 250.0, 250.0]),
-    ];
+    gradient(ELEVATION_STOPS, elevation)
+}
 
-    let elevation = elevation.clamp(STOPS[0].0, STOPS[STOPS.len() - 1].0);
-    let upper = STOPS
+/// Linear interpolation between colour stops, which must be sorted by value.
+fn gradient(stops: &[(f64, [f64; 3])], value: f64) -> Rgb<u8> {
+    let value = value.clamp(stops[0].0, stops[stops.len() - 1].0);
+    let upper = stops
         .iter()
-        .position(|&(stop, _)| stop >= elevation)
-        .unwrap_or(STOPS.len() - 1)
+        .position(|&(stop, _)| stop >= value)
+        .unwrap_or(stops.len() - 1)
         .max(1);
-    let (low, low_color) = STOPS[upper - 1];
-    let (high, high_color) = STOPS[upper];
-    let t = ((elevation - low) / (high - low)).clamp(0.0, 1.0);
+    let (low, low_color) = stops[upper - 1];
+    let (high, high_color) = stops[upper];
+    let t = ((value - low) / (high - low)).clamp(0.0, 1.0);
     Rgb([0, 1, 2].map(|i| (low_color[i] + (high_color[i] - low_color[i]) * t).round() as u8))
 }
+
+const ELEVATION_STOPS: &[(f64, [f64; 3])] = &[
+    (-7000.0, [5.0, 15.0, 60.0]),
+    (-4000.0, [20.0, 50.0, 130.0]),
+    (-200.0, [60.0, 130.0, 200.0]),
+    (0.0, [120.0, 180.0, 220.0]),
+    (0.1, [70.0, 140.0, 70.0]),
+    (1000.0, [170.0, 170.0, 90.0]),
+    (2500.0, [140.0, 100.0, 60.0]),
+    (4500.0, [120.0, 110.0, 105.0]),
+    (6000.0, [250.0, 250.0, 250.0]),
+];

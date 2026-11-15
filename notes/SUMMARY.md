@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-15_
+_Last updated: 2026-11-15 (session 1)_
 
 ## Goal
 
@@ -15,8 +15,12 @@ components (climate, erosion, …) are expected to build on it.
   `actions-rust-lang/setup-rust-toolchain@v2`, `actions-rust-lang/rustfmt@v1`), not SHAs.
   Warnings are denied via `CARGO_BUILD_WARNINGS=deny` (set by setup-rust-toolchain v2), not
   `RUSTFLAGS`.
-- Working rigid-plate tectonics simulation that writes equirectangular elevation and plate maps
-  as PNG snapshots. Default run (40,962 cells, 12 plates, 500 Myr) takes about 35 s.
+- Working rigid-plate tectonics simulation coupled with an Earth-like water cycle and fluvial
+  erosion. Writes equirectangular elevation (with rivers), plate and precipitation maps as PNG
+  snapshots. Default run (40,962 cells, 12 plates, 500 Myr) takes about 50 s.
+- Calibrated outcome after 500 Myr: peaks ~7 km, mean land elevation ~750–1150 m (Earth 840),
+  land precipitation ~0.9 m/yr, sediment to the oceans ~15 km³/yr (Earth ~8–10), largest river
+  ~50,000–80,000 m³/s.
 
 ## Architecture
 
@@ -37,8 +41,20 @@ components (climate, erosion, …) are expected to build on it.
   - Single-cell holes inside a plate are resampling artifacts and get a copy of neighbouring
     crust; other gaps get new oceanic crust (ridges).
   - Uplift saturates towards 9 km; uplifted oceanic crust accretes into continental crust.
-- `src/render.rs`: equirectangular PNG rendering (hypsometric elevation, plate map).
-- `src/main.rs`: clap CLI (`--seed`, `--subdivisions`, `--plates`, `--duration`, `--dt`, …).
+  - Crust samples carry a separate `sediment` layer on top of the bedrock `elevation`, so that
+    oceanic thermal subsidence does not erase sediment shelves.
+- `src/climate.rs`: water cycle. Three-cell prevailing winds (trades, westerlies, polar
+  easterlies) carry moisture from the ocean (evaporation ∝ warmth) over land; per-cell rain-out
+  fraction from latitude (ITCZ, polar front) and orographic lift → rain shadows, subtropical
+  deserts. Upwind neighbour per cell precomputed; moisture transport iterated to steady state.
+- `src/erosion.rs`: priority-flood drainage from the ocean (lakes spill), discharge accumulation,
+  implicit stream-power incision (Braun & Willett; `K = 1.5e-7`, `m = 0.5`), isostatic rebound
+  (surface drops only 18% of eroded bedrock), sediment fills lakes and builds shelves outward from
+  river mouths to −120 m, then deltas up to sea level; any rest is lost to the deep ocean.
+- `src/planet.rs`: couples tectonics (substeps) with one climate + erosion step per time step.
+- `src/render.rs`: equirectangular PNG rendering (elevation with rivers, plates, precipitation).
+- `src/main.rs`: clap CLI (`--seed`, `--subdivisions`, `--plates`, `--duration`, `--dt`,
+  `--no-erosion`, `--river-threshold`, …).
 
 ## Known issues
 
@@ -47,7 +63,11 @@ components (climate, erosion, …) are expected to build on it.
   through collision drag (~3 cm/yr on average).
 - Continental area slowly decreases (30% → ~24% in 500 Myr) because continental collisions
   destroy the losing crust instead of thickening the winner.
-- Continental interiors are flat (erode to 300 m); no continental shelves.
+- Continental shelves are too wide (sediment spreads over up to 256 cells per river mouth).
+- Climate ignores temperature/ice (no glaciers, no snow), seasons and ocean currents; the
+  precipitation map shows slight striping from the discrete upwind neighbour.
+- No hillslope diffusion (sub-grid at ~120 km cells); sediment deposited on oceanic crust is lost
+  at subduction.
 - Single-threaded; ownership resolution (~35 ms per substep) dominates.
 
 ## Next steps (ideas)
@@ -57,6 +77,7 @@ components (climate, erosion, …) are expected to build on it.
 - Conserve continental crust in collisions (thickening / terrane transfer to the winner).
 - Parallelise ownership resolution (rayon).
 - Better initial conditions (noise-based continents, interior relief).
+- Temperature model → glaciers, ice caps; ocean currents for coastal climate.
 
 ## User preferences
 

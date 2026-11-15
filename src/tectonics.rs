@@ -21,7 +21,7 @@
 //! random motion (plate reorganisation), which keeps the system from settling down.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use glam::{DQuat, DVec3};
 use rand::rngs::ChaCha8Rng;
@@ -38,10 +38,8 @@ pub struct TectonicParams {
     pub continental_fraction: f64,
     /// The number of initial continents.
     pub continent_count: usize,
-    /// Elevation that continents erode towards.
+    /// Base elevation of the initial continents.
     pub continental_base_elevation: f64,
-    /// Time constant of continental erosion towards [`Self::continental_base_elevation`].
-    pub erosion_time: f64,
     /// Time constant of oceanic crust relaxing towards its age-dependent depth.
     pub oceanic_relaxation_time: f64,
     /// Uplift of the overriding plate per subducted crust sample.
@@ -74,7 +72,6 @@ impl Default for TectonicParams {
             continental_fraction: 0.3,
             continent_count: 7,
             continental_base_elevation: 300.0,
-            erosion_time: 40.0,
             oceanic_relaxation_time: 20.0,
             subduction_uplift: 150.0,
             collision_uplift: 300.0,
@@ -101,11 +98,18 @@ pub struct Crust {
     pub kind: CrustKind,
     /// Age in Myr.
     pub age: f64,
-    /// Elevation relative to sea level in metres.
+    /// Elevation of the bedrock relative to sea level in metres.
     pub elevation: f64,
+    /// Thickness of loose sediment on top of the bedrock in metres.
+    pub sediment: f64,
 }
 
 impl Crust {
+    /// Elevation of the surface (bedrock plus sediment) relative to sea level in metres.
+    pub fn surface_elevation(&self) -> f64 {
+        self.elevation + self.sediment
+    }
+
     /// Crust with higher buoyancy overrides crust with lower buoyancy at convergent boundaries.
     fn buoyancy(&self) -> f64 {
         match self.kind {
@@ -148,7 +152,7 @@ impl Plate {
 }
 
 /// The plate covering a world cell, and the local vertex of the plate's crust there.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Ownership {
     pub plate: u32,
     pub local: u32,
@@ -180,6 +184,8 @@ pub struct Statistics {
     pub continental_fraction: f64,
     pub land_fraction: f64,
     pub mean_oceanic_age: f64,
+    /// Mean surface elevation of cells above sea level.
+    pub mean_land_elevation: f64,
     pub max_elevation: f64,
     pub min_elevation: f64,
     /// Mean surface speed in rad/Myr (multiply by the planet radius for a linear speed).
@@ -243,6 +249,7 @@ impl Simulation {
                     kind: CrustKind::Continental,
                     age: 1000.0,
                     elevation,
+                    sediment: 0.0,
                 }
             } else {
                 let age = (10.0 + 8.0 * f64::from(boundary_distance[cell])).min(180.0)
@@ -251,6 +258,7 @@ impl Simulation {
                     kind: CrustKind::Oceanic,
                     age,
                     elevation: oceanic_depth(age),
+                    sediment: 0.0,
                 }
             };
             plates[plate_of_cell[cell] as usize].crust[cell] = Some(crust);
@@ -367,25 +375,48 @@ impl Simulation {
         }
     }
 
-    /// Ages all crust and lets its elevation relax (erosion, thermal subsidence of ocean floor).
+    /// Ages all crust and lets the bedrock of oceanic crust relax towards its age-dependent depth
+    /// (thermal subsidence). Erosion is handled separately, see [`crate::erosion`].
     fn evolve_crust(&mut self, dt: f64) {
-        let params = &self.params;
-        let erosion = 1.0 - (-dt / params.erosion_time).exp();
-        let relaxation = 1.0 - (-dt / params.oceanic_relaxation_time).exp();
+        let relaxation = 1.0 - (-dt / self.params.oceanic_relaxation_time).exp();
         for plate in &mut self.plates {
             for crust in plate.crust.iter_mut().flatten() {
                 crust.age += dt;
-                match crust.kind {
-                    CrustKind::Continental => {
-                        crust.elevation +=
-                            (params.continental_base_elevation - crust.elevation) * erosion;
-                    }
-                    CrustKind::Oceanic => {
-                        crust.elevation +=
-                            (oceanic_depth(crust.age) - crust.elevation) * relaxation;
-                    }
+                if crust.kind == CrustKind::Oceanic {
+                    crust.elevation += (oceanic_depth(crust.age) - crust.elevation) * relaxation;
                 }
             }
+        }
+    }
+
+    /// Surface elevation (bedrock plus sediment) of every world cell.
+    pub fn surface_elevations(&self) -> Vec<f64> {
+        (0..self.mesh.len() as u32)
+            .map(|cell| self.surface_crust(cell).surface_elevation())
+            .collect()
+    }
+
+    /// Sediment thickness of every world cell.
+    pub fn sediment_thicknesses(&self) -> Vec<f64> {
+        (0..self.mesh.len() as u32)
+            .map(|cell| self.surface_crust(cell).sediment)
+            .collect()
+    }
+
+    /// Applies per-cell changes of bedrock elevation and sediment thickness to the crust at the
+    /// surface. A crust sample that is visible at several cells is only changed once.
+    pub fn apply_surface_changes(&mut self, bedrock_delta: &[f64], sediment_delta: &[f64]) {
+        let mut changed = HashSet::new();
+        for cell in 0..self.mesh.len() {
+            let owner = self.owners[cell];
+            if !changed.insert(owner) {
+                continue;
+            }
+            let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
+                .as_mut()
+                .expect("owners always point to existing crust");
+            crust.elevation += bedrock_delta[cell];
+            crust.sediment = (crust.sediment + sediment_delta[cell]).max(0.0);
         }
     }
 
@@ -588,6 +619,7 @@ impl Simulation {
         let mut max_elevation = f64::NEG_INFINITY;
         let mut min_elevation = f64::INFINITY;
         let mut speed_sum = 0.0;
+        let mut land_elevation_sum = 0.0;
 
         for cell in 0..cell_count as u32 {
             let plate = self.owner(cell).plate as usize;
@@ -601,11 +633,13 @@ impl Simulation {
                 CrustKind::Continental => continental += 1,
                 CrustKind::Oceanic => oceanic_age_sum += crust.age,
             }
-            if crust.elevation > 0.0 {
+            let elevation = crust.surface_elevation();
+            if elevation > 0.0 {
                 land += 1;
+                land_elevation_sum += elevation;
             }
-            max_elevation = max_elevation.max(crust.elevation);
-            min_elevation = min_elevation.min(crust.elevation);
+            max_elevation = max_elevation.max(elevation);
+            min_elevation = min_elevation.min(elevation);
         }
 
         let oceanic = cell_count - continental;
@@ -615,6 +649,11 @@ impl Simulation {
             land_fraction: land as f64 / cell_count as f64,
             mean_oceanic_age: if oceanic > 0 {
                 oceanic_age_sum / oceanic as f64
+            } else {
+                0.0
+            },
+            mean_land_elevation: if land > 0 {
+                land_elevation_sum / land as f64
             } else {
                 0.0
             },
@@ -643,6 +682,7 @@ fn new_oceanic_crust() -> Crust {
         kind: CrustKind::Oceanic,
         age: 0.0,
         elevation: oceanic_depth(0.0),
+        sediment: 0.0,
     }
 }
 
