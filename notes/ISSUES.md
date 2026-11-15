@@ -28,6 +28,38 @@ issue 1 tuning (trench propagation, age-hazard initiation) → 2 → 7 + 6 → 9
    5, 3, 4 (continental area still declines 30% → 20% and land rises to ~2 km; recycling vs arc
    growth is very sensitive); trench propagation and age-hazard initiation per the research;
    tiny plates reach 42 cm/yr [Earth max ~15–20], which forces many substeps (run 960 s).
+   **Independent evaluation of c449e2f (2026-11-15): does not solve issue 1 yet — overshoots.**
+   Plate count climbs to the hard cap of 30; after 200 Myr the ocean is too young (mean 33–37,
+   median 18–20 Myr [~64 / ~50–55], 33–36% younger than 10 Myr [~11%], exponential instead of
+   triangular area–age distribution); crust production 4× Earth kinematically, 6–7× actually;
+   continental area still drifts (30% → 10–19% over 900 Myr with erosion). Ranked findings
+   (outputs in `agent-scratch/issue1-review/`):
+   1a. Over-production: many small plates each move as a block → half the boundary length opens.
+       Calibrate on production/age, fewer births, merge tiny plates, transform friction.
+   1b. Numerical over-production by boundary flicker (cells alternate gap ↔ overlap; worse with
+       more substeps); new crust exceeds kinematic opening even with fixed motions.
+   1c. **Bug:** polarity per plate pair → every boundary cell of a pair with a polarity is a
+       trench (`dynamics.rs` classification, before the ridge check), even where diverging; 47–49%
+       of boundary cells are "trench", ~half of them diverging; slab age at trenches 16–20 Myr;
+       global slab pull ~2.2e21 N [0.5–1e21]; it also blocks ocean–ocean initiation. Fix:
+       per-segment subduction state, require sustained convergence, slab pull ∝ slab length.
+   1d. **Bug:** plume rifts through ≥ 160 Myr ocean become trenches in the same step
+       (`plate_events` order) — most oceanic initiations are this artifact; rifts cut random great
+       circles through whole plates.
+   1e. **Bug:** split plates inherit `collision_time` → instant sutures of new plates.
+   1f. Passive-margin initiation cuts a great circle across the whole plate; suturing counts
+       continental contact regardless of motion → some splits re-sutured after 30 Myr.
+   1g. **Bug:** thinned continental crust (below the buoyancy threshold) keeps its 1000 Myr age →
+       counts as old ocean (max age 1100–1750), dominates initiation weights.
+   1h. **Bug:** mantle kernel 1/(2π sin θ) is symmetric about 90° → every source has a phantom
+       sink at its antipode; plume and slab fluxes unbalanced. Use Q·cot(θ/2)/(4πR) (source +
+       uniform return flow).
+   1i. Tiny plates (< 0.5%) reach 20–57 cm/yr (drives substeps): merge plates < ~0.3% into the
+       neighbour with the longest shared boundary.
+   1j. Continental area drift: collisional thickening without extensional collapse.
+   Minor: active set stops after 4 iterations without convergence check; ridge push only at
+   ridge cells; useless regularisation; `mod.rs` docs still mention random reorganisation;
+   merges drop hidden samples. Determinism and index remapping verified OK.
 2. **Sea level fixed at 0 → ocean water volume not conserved** (1.75–2.35e9 km³ [1.335e9],
    drifting ~1 km sea-level equivalent). Solve sea level for constant water volume each step.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):
