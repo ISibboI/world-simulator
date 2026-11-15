@@ -36,6 +36,7 @@ mod dynamics;
 mod generation;
 mod mantle;
 mod statistics;
+mod topology;
 
 pub use crust::*;
 pub use mantle::{MantleParams, Plume};
@@ -361,6 +362,7 @@ impl Simulation {
             self.substep(dt / substeps as f64);
         }
         self.crustal_flow(dt);
+        self.remove_dead_plates();
 
         let subduction = self.subduction_rates();
         self.mantle.step(dt, &subduction, &mut self.rng);
