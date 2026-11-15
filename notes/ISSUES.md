@@ -13,6 +13,8 @@ decision, 2026-11-15). Details and evidence: `sessions/2026-11-15.md`.
    slab age, ridge push, basal drag; possibly mantle flow), subduction initiation at old (>150–200
    Myr) ocean or passive margins, rifting along old sutures or of large/supercontinent plates,
    suturing (merging) after continental collision, GDH1 depth curve (asymptote 5651 m).
+   **In progress:** plan in `plans/plate-dynamics.md` (torque balance + mantle flow, rifting,
+   subduction initiation, suturing).
 2. **Sea level fixed at 0 → ocean water volume not conserved** (1.75–2.35e9 km³ [1.335e9],
    drifting ~1 km sea-level equivalent). Solve sea level for constant water volume each step.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):
