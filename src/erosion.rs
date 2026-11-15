@@ -18,7 +18,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
-use crate::isostasy::{self, SEDIMENT_DENSITY};
+use crate::isostasy::{self, SEDIMENT_DENSITY, SEDIMENT_ROCK_DENSITY};
 use crate::sphere::SphereMesh;
 
 /// Parameters of erosion. Lengths in metres, times in years unless noted otherwise.
@@ -34,8 +34,11 @@ pub struct ErosionParams {
     pub shelf_depth: f64,
     /// Elevation of delta plains above sea level, built when the shelf within reach is full.
     pub delta_top: f64,
-    /// Maximum number of ocean cells the sediment of one river mouth spreads over.
+    /// Maximum number of ocean cells the sediment of one river mouth spreads over on the shelf.
     pub max_shelf_cells: usize,
+    /// Maximum number of ocean cells a deep-sea fan of one river mouth spreads over, for the
+    /// sediment that does not fit on the shelf.
+    pub max_fan_cells: usize,
 }
 
 impl Default for ErosionParams {
@@ -47,6 +50,7 @@ impl Default for ErosionParams {
             shelf_depth: -120.0,
             delta_top: 2.0,
             max_shelf_cells: 256,
+            max_fan_cells: 2048,
         }
     }
 }
@@ -61,6 +65,9 @@ pub struct ErosionResult {
     pub discharge: Vec<f64>,
     /// Total sediment delivered to the ocean, in m³.
     pub sediment_to_ocean: f64,
+    /// Sediment that found no place to settle (thickness over one cell, summed), lost from the
+    /// model.
+    pub sediment_lost: f64,
 }
 
 /// Performs one erosion step of `dt_years` years.
@@ -129,7 +136,9 @@ pub fn erode(
         let from_bedrock = thickness - from_sediment;
         sediment_delta[cell] -= from_sediment;
         bedrock_delta[cell] -= from_bedrock;
-        produced[cell] = from_sediment + from_bedrock;
+        // Eroded bedrock becomes sediment of the same rock mass.
+        produced[cell] =
+            from_sediment + from_bedrock * bedrock_density[cell] / SEDIMENT_ROCK_DENSITY;
         // The column rebounds isostatically, so the surface drops less than the removed
         // thickness.
         let without_sediment =
@@ -172,6 +181,7 @@ pub fn erode(
     // Build shelves at river mouths: fill the ocean outwards from the mouth up to the shelf
     // depth, so that shelves prograde into the ocean.
     let mut sediment_to_ocean = 0.0;
+    let mut sediment_lost = 0.0;
     let mut visited_from = vec![usize::MAX; cell_count];
     let mut queue = VecDeque::new();
     let mut visited = Vec::new();
@@ -208,9 +218,51 @@ pub fn erode(
                 }
             }
         }
-        // When the shelf within reach is full, the delta builds up to a delta plain slightly
-        // above sea level, which also fills enclosed basins below sea level. Sediment beyond that
-        // is carried into the deep ocean, beyond the reach of this model.
+        // Sediment that does not fit on the shelf flows down the slope into a deep-sea fan:
+        // spread thinly over the deeper ocean further out, in proportion to the room below the
+        // shelf depth.
+        if remaining > 0.0 {
+            while visited.len() < params.max_fan_cells {
+                let Some(cell) = queue.pop_front() else {
+                    break;
+                };
+                visited.push(cell);
+                for &neighbor in mesh.neighbors(cell as u32) {
+                    let neighbor = neighbor as usize;
+                    if is_ocean(neighbor) && visited_from[neighbor] != mouth {
+                        visited_from[neighbor] = mouth;
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+            let rooms: Vec<f64> = visited
+                .iter()
+                .map(|&cell| {
+                    if new_elevation[cell] < params.shelf_depth {
+                        isostasy::layer_for_rise(
+                            new_elevation[cell],
+                            params.shelf_depth,
+                            SEDIMENT_DENSITY,
+                        )
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let total_room: f64 = rooms.iter().sum();
+            if total_room > 0.0 {
+                let fraction = (remaining / total_room).min(1.0);
+                for (&cell, &room) in visited.iter().zip(&rooms) {
+                    let deposit = room * fraction;
+                    sediment_delta[cell] += deposit;
+                    new_elevation[cell] =
+                        isostasy::add_layer(new_elevation[cell], deposit, SEDIMENT_DENSITY);
+                }
+                remaining -= total_room * fraction;
+            }
+        }
+        // When even the fan is full, the delta builds up to a delta plain slightly above sea
+        // level, which also fills enclosed basins below sea level. Anything beyond that is lost.
         for &cell in &visited {
             if remaining <= 0.0 {
                 break;
@@ -226,6 +278,7 @@ pub fn erode(
                 isostasy::add_layer(new_elevation[cell], deposit, SEDIMENT_DENSITY);
             remaining -= deposit;
         }
+        sediment_lost += remaining.max(0.0);
     }
 
     ErosionResult {
@@ -233,6 +286,7 @@ pub fn erode(
         sediment_delta,
         discharge,
         sediment_to_ocean,
+        sediment_lost,
     }
 }
 
@@ -390,5 +444,36 @@ mod tests {
                 assert!(result.bedrock_delta[cell] + result.sediment_delta[cell] <= 1e-9);
             }
         }
+    }
+
+    #[test]
+    fn erosion_conserves_rock_mass() {
+        let mesh = SphereMesh::icosphere(4);
+        let elevation = island(&mesh);
+        // Heavy rain makes more sediment than the shelves can take, so fans fill too.
+        let precipitation = vec![20.0; mesh.len()];
+        let density = vec![2800.0; mesh.len()];
+        let result = erode(
+            &mesh,
+            &elevation,
+            &vec![0.0; mesh.len()],
+            &density,
+            &precipitation,
+            &ErosionParams::default(),
+            1e6,
+        );
+        let change: f64 = (0..mesh.len())
+            .map(|c| {
+                result.bedrock_delta[c] * density[c]
+                    + result.sediment_delta[c] * SEDIMENT_ROCK_DENSITY
+            })
+            .sum();
+        let eroded: f64 = result.bedrock_delta.iter().map(|d| -d * 2800.0).sum();
+        assert!(eroded > 0.0);
+        let lost = result.sediment_lost * SEDIMENT_ROCK_DENSITY;
+        assert!(
+            (change + lost).abs() < 1e-9 * eroded,
+            "change {change}, lost {lost}, eroded {eroded}"
+        );
     }
 }

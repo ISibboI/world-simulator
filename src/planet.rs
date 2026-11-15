@@ -22,6 +22,8 @@ pub struct Planet {
     discharge: Vec<f64>,
     /// Sediment delivered to the oceans in the last step, in m³/yr.
     sediment_flux: f64,
+    /// Sediment that found no place to settle so far (thickness over one cell, summed).
+    sediment_lost: f64,
 }
 
 /// Statistics of the planet, extending the tectonic statistics.
@@ -33,6 +35,8 @@ pub struct PlanetStatistics {
     pub largest_river: f64,
     /// Sediment delivered to the oceans in m³/yr.
     pub sediment_flux: f64,
+    /// Sediment lost from the model so far (thickness over one cell, summed).
+    pub sediment_lost: f64,
     /// Area-weighted global annual mean surface temperature in °C.
     pub global_temperature: f64,
     /// Annual mean surface temperature between 10°S and 10°N in °C.
@@ -66,6 +70,7 @@ impl Planet {
             precipitation: vec![0.0; cell_count],
             discharge: vec![0.0; cell_count],
             sediment_flux: 0.0,
+            sediment_lost: 0.0,
         };
         planet.precipitation = planet.compute_precipitation(&planet.tectonics.surface_elevations());
         planet
@@ -117,6 +122,7 @@ impl Planet {
                 .apply_surface_changes(&result.bedrock_delta, &result.sediment_delta);
             self.discharge = result.discharge;
             self.sediment_flux = result.sediment_to_ocean / dt_years;
+            self.sediment_lost += result.sediment_lost;
         }
         debug!(
             ?tectonics_time,
@@ -173,6 +179,7 @@ impl Planet {
             mean_land_precipitation,
             largest_river,
             sediment_flux: self.sediment_flux,
+            sediment_lost: self.sediment_lost,
         }
     }
 }

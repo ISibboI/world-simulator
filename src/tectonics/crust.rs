@@ -1,7 +1,9 @@
 //! Crust samples: thickness, density, age and sediment, and the elevation that follows
 //! from isostasy and thermal subsidence.
 
-use crate::isostasy::{self, MANTLE_DENSITY, OCEANIC_DENSITY, SEDIMENT_DENSITY, WATER_LOADING};
+use crate::isostasy::{
+    self, MANTLE_DENSITY, OCEANIC_DENSITY, SEDIMENT_DENSITY, SEDIMENT_ROCK_DENSITY, WATER_LOADING,
+};
 
 /// Oceanic crust is thinner than this (m); thicker crust is transitional or continental.
 const MAX_OCEANIC_THICKNESS: f64 = 12_000.0;
@@ -57,6 +59,11 @@ impl Crust {
     /// Dry elevation contributed by the crystalline crust.
     pub(super) fn crustal_buoyancy(&self) -> f64 {
         self.thickness * isostasy::dry_response(self.density)
+    }
+
+    /// Areal mass (kg/m²) of the crust: crystalline crust plus the rock mass of its sediment.
+    pub fn mass(&self) -> f64 {
+        self.thickness * self.density + self.sediment * SEDIMENT_ROCK_DENSITY
     }
 
     /// Whether the crust is thick and light enough to resist subduction.

@@ -36,6 +36,16 @@ pub struct Statistics {
     pub gaps: GapStatistics,
     /// Plate births and deaths so far, by mechanism.
     pub events: EventCounts,
+    /// Where crust mass came from and went to so far.
+    pub ledger: MassLedger,
+    /// Crust mass in Gt: crystalline crust that is continental, transitional and oceanic,
+    /// sediment, felsic crust (density < 2850 kg/m³), and crust hidden below other plates.
+    pub continental_mass: f64,
+    pub transitional_mass: f64,
+    pub oceanic_mass: f64,
+    pub sediment_mass: f64,
+    pub felsic_mass: f64,
+    pub hidden_mass: f64,
     /// Length of trenches and ridges in km.
     pub trench_length: f64,
     pub ridge_length: f64,
@@ -139,6 +149,34 @@ impl Simulation {
         }
 
         let oceanic = oceanic_ages.len();
+        // Masses by class over the visible crust samples (each counted once).
+        let cell_area =
+            4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / cell_count as f64;
+        let to_gigatonnes = cell_area / 1e12;
+        let mut masses = [0.0; 5];
+        let mut visible_mass = 0.0;
+        let mut seen = std::collections::HashSet::new();
+        for owner in &self.owners {
+            if !seen.insert(*owner) {
+                continue;
+            }
+            let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
+                .expect("owners always point to existing crust");
+            let crust_mass = crust.thickness * crust.density;
+            let class = if crust.is_continental() {
+                0
+            } else if crust.is_oceanic() {
+                2
+            } else {
+                1
+            };
+            masses[class] += crust_mass;
+            masses[3] += crust.mass() - crust_mass;
+            if crust.density < 2850.0 {
+                masses[4] += crust_mass;
+            }
+            visible_mass += crust.mass();
+        }
         let boundary_length = self.params.planet_radius * self.mesh.mean_edge_angle() / 1000.0;
         let (mut trench_length, mut ridge_length, mut slab_pull, mut ridge_push) =
             (0.0, 0.0, 0.0, 0.0);
@@ -192,6 +230,13 @@ impl Simulation {
             plumes: self.plumes().len(),
             gaps: self.gap_statistics.clone(),
             events: self.event_counts.clone(),
+            ledger: self.ledger.clone(),
+            continental_mass: masses[0] * to_gigatonnes,
+            transitional_mass: masses[1] * to_gigatonnes,
+            oceanic_mass: masses[2] * to_gigatonnes,
+            sediment_mass: masses[3] * to_gigatonnes,
+            felsic_mass: masses[4] * to_gigatonnes,
+            hidden_mass: (self.total_mass() - visible_mass) * to_gigatonnes,
             trench_length,
             ridge_length,
             slab_pull,

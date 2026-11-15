@@ -12,8 +12,11 @@
 pub const MANTLE_DENSITY: f64 = 3300.0;
 /// Density of sea water in kg/m³.
 pub const WATER_DENSITY: f64 = 1030.0;
-/// Density of (compacted) sediment in kg/m³.
+/// Bulk density of (compacted, water-saturated) sediment in kg/m³, used for isostasy.
 pub const SEDIMENT_DENSITY: f64 = 2300.0;
+/// Rock (grain) mass per volume of sediment in kg/m³: 25% pores in 2700 kg/m³ grains. With
+/// water in the pores this gives the bulk density above. Mass conservation uses this density.
+pub const SEDIMENT_ROCK_DENSITY: f64 = 2050.0;
 /// Density of oceanic crust (basalt, gabbro) in kg/m³.
 pub const OCEANIC_DENSITY: f64 = 2900.0;
 /// Mean density of continental crust in kg/m³ (~2830 after Christensen & Mooney, 1995).

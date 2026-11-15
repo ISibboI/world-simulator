@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use glam::DVec3;
 
+use super::ledger::{self, Term};
 use super::*;
 
 impl Simulation {
@@ -12,6 +13,14 @@ impl Simulation {
     /// the normal points to moves to a new plate with the same rotation and motion. Returns the
     /// new plate, or `None` if one side would be empty.
     pub(super) fn split_plate(&mut self, plate: u32, normal: DVec3) -> Option<u32> {
+        let before = ledger::plates_mass(&self.plates);
+        let result = self.split_plate_inner(plate, normal);
+        let after = ledger::plates_mass(&self.plates);
+        self.ledger.record(Term::Splits, after - before);
+        result
+    }
+
+    fn split_plate_inner(&mut self, plate: u32, normal: DVec3) -> Option<u32> {
         let rotation = self.plates[plate as usize].rotation;
         let new_side: Vec<bool> = (0..self.mesh.len() as u32)
             .map(|local| (rotation * self.mesh.vertex(local)).dot(normal) > 0.0)
@@ -88,6 +97,14 @@ impl Simulation {
     /// crust is stacked; otherwise the visible crust replaces the hidden one. Returns the volume
     /// (thickness × cells, m) of continental crust of `absorbed` that was hidden and is lost.
     pub(super) fn merge_plates(&mut self, into: u32, absorbed: u32) -> f64 {
+        let before = ledger::plates_mass(&self.plates);
+        let result = self.merge_plates_inner(into, absorbed);
+        let after = ledger::plates_mass(&self.plates);
+        self.ledger.record(Term::Merges, after - before);
+        result
+    }
+
+    fn merge_plates_inner(&mut self, into: u32, absorbed: u32) -> f64 {
         assert_ne!(into, absorbed, "a plate cannot be merged into itself");
         let inverse_rotation = self.plates[into as usize].rotation.inverse();
         let max_thickness = self.params.max_crust_thickness;
@@ -171,6 +188,13 @@ impl Simulation {
 
     /// Removes all plates that no longer own any cell.
     pub(super) fn remove_dead_plates(&mut self) {
+        let before = ledger::plates_mass(&self.plates);
+        self.remove_dead_plates_inner();
+        let after = ledger::plates_mass(&self.plates);
+        self.ledger.record(Term::RemovedPlates, after - before);
+    }
+
+    fn remove_dead_plates_inner(&mut self) {
         let mut area = vec![0usize; self.plates.len()];
         for owner in &self.owners {
             area[owner.plate as usize] += 1;

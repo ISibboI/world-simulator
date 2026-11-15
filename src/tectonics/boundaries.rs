@@ -5,8 +5,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use glam::{DQuat, DVec3};
 
-use crate::isostasy::{ARC_DENSITY, SEDIMENT_DENSITY};
+use crate::isostasy::{ARC_DENSITY, SEDIMENT_ROCK_DENSITY};
 
+use super::ledger::{self, Term};
 use super::*;
 
 /// Rings beyond the arc or collision profile over which crust that exceeds the maximum
@@ -17,6 +18,13 @@ impl Simulation {
     /// Thick crust spreads under its own weight towards thinner neighbouring crust of the same
     /// plate, conserving its volume (lower crustal flow, gravitational collapse of orogens).
     pub(super) fn crustal_flow(&mut self, dt: f64) {
+        let before = ledger::plates_mass(&self.plates);
+        self.crustal_flow_inner(dt);
+        let after = ledger::plates_mass(&self.plates);
+        self.ledger.record(Term::CrustalFlow, after - before);
+    }
+
+    fn crustal_flow_inner(&mut self, dt: f64) {
         let params = &self.params;
         let rate = (params.crustal_flow_rate * dt).min(0.15);
         // Per crust sample: (outgoing thickness, incoming thickness, incoming mass per area).
@@ -79,6 +87,7 @@ impl Simulation {
             polarities,
             time,
             gap_statistics,
+            ledger,
             ..
         } = self;
         polarities.retain(|_, polarity| *time - polarity.last_contact <= params.polarity_memory);
@@ -143,32 +152,56 @@ impl Simulation {
             loser_plate.crust[contact.loser.local as usize] = None;
             loser_plate.consumed[contact.loser.local as usize] = true;
             let (winner, loser_crust) = (contact.winner, contact.loser_crust);
+            let sediment_mass = loser_crust.sediment * SEDIMENT_ROCK_DENSITY;
             if contact.winner_crust.is_continental() && loser_crust.is_continental() {
                 // Continental collision: the crust of the lower plate is stacked onto the
-                // overriding plate instead of subducting.
+                // overriding plate instead of subducting; its sediment becomes metasediment at
+                // the same mass.
                 *collisions
                     .entry(pair_key(winner.plate, contact.loser.plate))
                     .or_default() += 1;
-                let sediment_mass = loser_crust.sediment * SEDIMENT_DENSITY;
-                let thickness = loser_crust.thickness + loser_crust.sediment;
+                ledger.record(Term::CollisionConsumed, -loser_crust.mass());
+                let thickness = loser_crust.thickness + sediment_mass / METASEDIMENT_DENSITY;
                 additions.push(CrustAddition {
                     cell: contact.cell,
                     plate: winner.plate,
                     thickness,
-                    density: (loser_crust.thickness * loser_crust.density + sediment_mass)
-                        / thickness.max(1e-9),
-                    collision: true,
+                    density: loser_crust.mass() / thickness.max(1e-9),
+                    kind: AdditionKind::Collision,
                 });
             } else {
-                // Subduction: the lower plate's crust and sediment sink into the mantle, and
-                // melting above the slab builds an arc on the overriding plate.
+                // Subduction: the lower plate's crust and most of its sediment sink into the
+                // mantle; melting above the slab builds an arc on the overriding plate.
+                let crust_mass = loser_crust.thickness * loser_crust.density;
+                let term = if loser_crust.is_oceanic() {
+                    Term::SubductedOceanic
+                } else if loser_crust.is_continental() {
+                    Term::SubductedContinental
+                } else {
+                    Term::SubductedTransitional
+                };
+                ledger.record(term, -crust_mass);
+                ledger.record(Term::SubductedSediment, -sediment_mass);
                 additions.push(CrustAddition {
                     cell: contact.cell,
                     plate: winner.plate,
                     thickness: params.arc_crust_per_subduction,
                     density: ARC_DENSITY,
-                    collision: false,
+                    kind: AdditionKind::Arc,
                 });
+                // Part of the sediment is scraped off at the trench into an accretionary wedge
+                // on the overriding plate, which becomes crust (metasediment) at the same mass.
+                let accreted_mass = sediment_mass * params.frontal_accretion;
+                if accreted_mass > 0.0 {
+                    // Booked as accretion when added; all sediment left with the slab above.
+                    additions.push(CrustAddition {
+                        cell: contact.cell,
+                        plate: winner.plate,
+                        thickness: accreted_mass / METASEDIMENT_DENSITY,
+                        density: METASEDIMENT_DENSITY,
+                        kind: AdditionKind::Accretion,
+                    });
+                }
                 eroded.push(winner);
             }
         }
@@ -180,12 +213,14 @@ impl Simulation {
             if let Some(crust) =
                 &mut plates[ownership.plate as usize].crust[ownership.local as usize]
             {
+                let before = crust.mass();
                 let mut amount = params.subduction_erosion;
                 let from_sediment = amount.min(crust.sediment);
                 crust.sediment -= from_sediment;
                 amount -= from_sediment;
                 crust.thickness =
                     (crust.thickness - amount).max(crust.thickness.min(OCEANIC_THICKNESS));
+                ledger.record(Term::SubductionErosion, crust.mass() - before);
             }
         }
 
@@ -225,6 +260,9 @@ impl Simulation {
             } else {
                 let crust =
                     plate.crust[template.local as usize].expect("owners point to existing crust");
+                if plate.crust[local as usize].is_none() {
+                    ledger.record(Term::GapFilling, crust.mass());
+                }
                 plate.crust[local as usize].get_or_insert(crust);
                 gap_statistics.copied_cells += 1;
                 gap_statistics.copied_volume += crust.thickness;
@@ -248,6 +286,7 @@ impl Simulation {
             // All crust was destroyed, which can only happen in degenerate configurations.
             // Restart with the first plate covering the first cell.
             plates[0].crust[0] = Some(new_oceanic_crust());
+            ledger.record(Term::NewSeaFloor, new_oceanic_crust().mass());
             new_owners[0] = Some(Ownership { plate: 0, local: 0 });
             queue.push_back(0);
         }
@@ -271,6 +310,9 @@ impl Simulation {
                     plate.local_vertex(mesh, inverse_rotations[plate_index as usize], neighbor);
                 if spreading {
                     gap_statistics.new_crust_cells += 1;
+                    if plate.crust[local as usize].is_none() {
+                        ledger.record(Term::NewSeaFloor, new_oceanic_crust().mass());
+                    }
                     plate.crust[local as usize].get_or_insert_with(new_oceanic_crust);
                     plate.consumed[local as usize] = false;
                     new_owners[neighbor as usize] = Some(Ownership {
@@ -290,6 +332,8 @@ impl Simulation {
                     } else {
                         // Away from other plates, the uncovered area is open sea floor.
                         gap_statistics.new_crust_cells += 1;
+                        let replaced = plate.crust[local as usize].map_or(0.0, |c| c.mass());
+                        ledger.record(Term::NewSeaFloor, new_oceanic_crust().mass() - replaced);
                         plate.crust[local as usize] = Some(new_oceanic_crust());
                         plate.consumed[local as usize] = false;
                         new_owners[neighbor as usize] = Some(Ownership {
@@ -301,6 +345,9 @@ impl Simulation {
                     // A resampling gap: heal it with a copy of the adjacent crust.
                     let crust =
                         plate.crust[parent.local as usize].expect("owners point to existing crust");
+                    if plate.crust[local as usize].is_none() {
+                        ledger.record(Term::GapFilling, crust.mass());
+                    }
                     plate.crust[local as usize].get_or_insert(crust);
                     gap_statistics.copied_cells += 1;
                     gap_statistics.copied_volume += crust.thickness;
@@ -327,6 +374,24 @@ impl Simulation {
     /// thickness spills further outwards over up to [`SPILL_RINGS`] more rings, and is only
     /// removed (delamination) when there is no room left there either.
     pub(super) fn apply_additions(&mut self, additions: &[CrustAddition]) {
+        let before = ledger::plates_mass(&self.plates);
+        let mut nominal = 0.0;
+        for addition in additions {
+            let mass = addition.thickness * addition.density;
+            nominal += mass;
+            let term = match addition.kind {
+                AdditionKind::Arc => Term::Arcs,
+                AdditionKind::Accretion => Term::Accretion,
+                AdditionKind::Collision => Term::CollisionStacked,
+            };
+            self.ledger.record(term, mass);
+        }
+        self.apply_additions_inner(additions);
+        let actual = ledger::plates_mass(&self.plates) - before;
+        self.ledger.record(Term::AdditionsLost, actual - nominal);
+    }
+
+    fn apply_additions_inner(&mut self, additions: &[CrustAddition]) {
         let mut visited_in_event = vec![usize::MAX; self.mesh.len()];
         let mut frontier = Vec::new();
         let mut next_frontier = Vec::new();
@@ -335,10 +400,9 @@ impl Simulation {
         let max_thickness = self.params.max_crust_thickness;
 
         for (event_index, addition) in additions.iter().enumerate() {
-            let profile = if addition.collision {
-                &self.params.collision_profile
-            } else {
-                &self.params.arc_profile
+            let profile = match addition.kind {
+                AdditionKind::Collision => &self.params.collision_profile,
+                AdditionKind::Arc | AdditionKind::Accretion => &self.params.arc_profile,
             };
             frontier.clear();
             frontier.push(addition.cell);
@@ -490,9 +554,22 @@ pub(super) struct CrustAddition {
     /// Total volume as a thickness over one cell.
     thickness: f64,
     density: f64,
-    /// Whether this is crust stacked in a continental collision rather than new arc crust.
-    collision: bool,
+    kind: AdditionKind,
 }
+
+/// Where added crust comes from; decides its distribution and its ledger term.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AdditionKind {
+    /// New arc crust from melting above a slab.
+    Arc,
+    /// Sediment scraped off at a trench.
+    Accretion,
+    /// Crust of the lower plate stacked in a continental collision.
+    Collision,
+}
+
+/// Density of crust formed from sediment (metasediment) in kg/m³.
+const METASEDIMENT_DENSITY: f64 = 2650.0;
 
 pub(super) fn pair_key(a: u32, b: u32) -> (u32, u32) {
     (a.min(b), a.max(b))

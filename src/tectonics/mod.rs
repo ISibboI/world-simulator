@@ -39,6 +39,7 @@ mod crust;
 mod dynamics;
 mod events;
 mod generation;
+mod ledger;
 mod mantle;
 mod statistics;
 mod topology;
@@ -46,19 +47,20 @@ mod topology;
 pub use boundaries::GapStatistics;
 pub use crust::*;
 pub use events::{EventCounts, PlateEventParams};
+pub use ledger::MassLedger;
 pub use mantle::{MantleParams, Plume};
 pub use statistics::*;
 
 use boundaries::{ResolvedBoundaries, pair_key};
 use generation::*;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use glam::{DQuat, DVec3};
 use rand::rngs::ChaCha8Rng;
 use rand::{RngExt, SeedableRng};
 
-use crate::isostasy::CONTINENTAL_DENSITY;
+use crate::isostasy::{CONTINENTAL_DENSITY, SEDIMENT_ROCK_DENSITY};
 use crate::sphere::SphereMesh;
 
 /// Physical parameters of the simulation. Times are in Myr, elevations in metres.
@@ -74,6 +76,11 @@ pub struct TectonicParams {
     pub continental_coast_thickness: f64,
     /// Crust thickness in the interior of the initial continents in metres.
     pub continental_interior_thickness: f64,
+    /// Fraction of the sediment on a subducting plate that is scraped off at the trench into an
+    /// accretionary wedge of the overriding plate (frontal accretion). Sediment recycled
+    /// through arc magmas is part of the arc crust. Erosive margins accrete almost nothing, so
+    /// the global fraction is low.
+    pub frontal_accretion: f64,
     /// Volume of new arc crust per subducted crust sample, as a thickness over one cell.
     ///
     /// Arcs grow by roughly 30–90 km³ per km of arc and Myr on Earth; at 50 km/Myr convergence
@@ -150,6 +157,7 @@ impl Default for TectonicParams {
             continent_count: 7,
             continental_coast_thickness: 30_000.0,
             continental_interior_thickness: 38_000.0,
+            frontal_accretion: 0.2,
             arc_crust_per_subduction: 500.0,
             subduction_erosion: 300.0,
             arc_profile: vec![0.25, 1.0, 1.0, 0.25],
@@ -234,6 +242,8 @@ pub struct Simulation {
     gap_statistics: GapStatistics,
     /// Plate births and deaths so far.
     event_counts: EventCounts,
+    /// Where crust mass came from and went to.
+    ledger: MassLedger,
     /// Simulated time in Myr.
     time: f64,
 }
@@ -355,7 +365,7 @@ impl Simulation {
             .collect();
 
         let mantle = mantle::MantleFlow::new(params.mantle.clone());
-        Self {
+        let mut simulation = Self {
             mesh,
             params,
             plates,
@@ -364,9 +374,12 @@ impl Simulation {
             mantle,
             gap_statistics: GapStatistics::default(),
             event_counts: EventCounts::default(),
+            ledger: MassLedger::default(),
             rng: owned_rng,
             time: 0.0,
-        }
+        };
+        simulation.ledger = MassLedger::new(simulation.total_mass());
+        simulation
     }
 
     pub fn mesh(&self) -> &SphereMesh {
@@ -414,6 +427,13 @@ impl Simulation {
 
         let subduction = self.subduction_rates();
         self.mantle.step(dt, &subduction, &mut self.rng);
+        let total = self.total_mass();
+        self.ledger.check(total);
+    }
+
+    /// Areal mass (kg/m², summed over cells) of all crust, including hidden samples.
+    pub fn total_mass(&self) -> f64 {
+        ledger::plates_mass(&self.plates)
     }
 
     /// The active mantle plumes.
@@ -472,20 +492,39 @@ impl Simulation {
     }
 
     /// Applies per-cell changes of crust thickness and sediment thickness to the crust at the
-    /// surface. A crust sample that is visible at several cells is only changed once.
+    /// surface. A crust sample visible at several cells gets the sum of their changes: erosion
+    /// works per cell, and about as many samples are hidden by resampling as are shown twice.
+    /// Sediment removal beyond the available sediment comes from the bedrock at the same mass.
     pub fn apply_surface_changes(&mut self, thickness_delta: &[f64], sediment_delta: &[f64]) {
-        let mut changed = HashSet::new();
+        let mut changes: Vec<(Ownership, f64, f64)> = Vec::new();
+        let mut index: HashMap<Ownership, usize> = HashMap::new();
         for cell in 0..self.mesh.len() {
             let owner = self.owners[cell];
-            if !changed.insert(owner) {
-                continue;
-            }
+            let slot = *index.entry(owner).or_insert_with(|| {
+                changes.push((owner, 0.0, 0.0));
+                changes.len() - 1
+            });
+            changes[slot].1 += thickness_delta[cell];
+            changes[slot].2 += sediment_delta[cell];
+        }
+        let mut change = 0.0;
+        for (owner, thickness, sediment) in changes {
             let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
                 .as_mut()
                 .expect("owners always point to existing crust");
-            crust.thickness = (crust.thickness + thickness_delta[cell]).max(0.0);
-            crust.sediment = (crust.sediment + sediment_delta[cell]).max(0.0);
+            let before = crust.mass();
+            let new_sediment = crust.sediment + sediment;
+            let mut new_thickness = crust.thickness + thickness;
+            if new_sediment < 0.0 {
+                new_thickness += new_sediment * SEDIMENT_ROCK_DENSITY / crust.density;
+            }
+            crust.sediment = new_sediment.max(0.0);
+            crust.thickness = new_thickness.max(0.0);
+            change += crust.mass() - before;
         }
+        self.ledger.record(ledger::Term::SurfaceProcesses, change);
+        let total = self.total_mass();
+        self.ledger.check(total);
     }
 }
 
@@ -609,5 +648,41 @@ mod tests {
             b.step(1.0);
         }
         assert_eq!(a.owners, b.owners);
+    }
+
+    #[test]
+    fn crust_mass_ledger_closes() {
+        let mut simulation = simulation(3);
+        let total = simulation.total_mass();
+        for _ in 0..40 {
+            simulation.step(1.0);
+            // Erosion-like changes, including a sample shown at several cells.
+            let cells = simulation.mesh.len();
+            let thickness: Vec<f64> = (0..cells).map(|c| -((c % 7) as f64)).collect();
+            let sediment: Vec<f64> = (0..cells).map(|c| (c % 5) as f64 - 2.0).collect();
+            simulation.apply_surface_changes(&thickness, &sediment);
+        }
+        let residual = simulation.ledger.residual;
+        assert!(
+            residual.abs() < 1e-9 * total,
+            "residual {residual} of total {total}"
+        );
+        // Plates moved and things happened.
+        assert!(simulation.ledger.new_sea_floor > 0.0);
+        assert!(simulation.ledger.subducted_oceanic < 0.0);
+    }
+
+    #[test]
+    fn shared_samples_get_the_sum_of_their_changes() {
+        let mut simulation = simulation(4);
+        // Show the sample of cell 0 also at its first neighbour.
+        let neighbor = simulation.mesh.neighbors(0)[0];
+        simulation.owners[neighbor as usize] = simulation.owners[0];
+        let before = simulation.surface_crust(0);
+        let mut thickness = vec![0.0; simulation.mesh.len()];
+        thickness[0] = -10.0;
+        thickness[neighbor as usize] = -20.0;
+        simulation.apply_surface_changes(&thickness, &vec![0.0; simulation.mesh.len()]);
+        assert!((simulation.surface_crust(0).thickness - (before.thickness - 30.0)).abs() < 1e-9);
     }
 }

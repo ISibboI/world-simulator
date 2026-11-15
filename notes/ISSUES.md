@@ -8,7 +8,7 @@ with approaches and references per issue: `research/feasibility-2026-11-15.md`.
 **Order of work** (user, 2026-11-15: calibrate issue 1 only as far as needed to confirm the
 implementation, then prefer issues that also help issue 1, then work through the rest
 autonomously, with an independent plan review before each issue): 1 (mechanisms) ✓ → 5 ✓
-(partly) → issue 1 soundness fixes ✓ → **3 (next; plan reviewed)** → 4 → issue 1 tuning
+(partly) → issue 1 soundness fixes ✓ → 3 ✓ (ledger; artifacts remain) → **4 (next; plan reviewed)** → issue 1 tuning
 (trench propagation, age-hazard initiation) → 2 → 7 + 6 → 9 → 8.
 
 ## Open
@@ -89,6 +89,20 @@ autonomously, with an independent plan review before each issue): 1 (mechanisms)
    - `apply_surface_changes` drops erosion changes of cells sharing a crust sample (~3000
      cells);
    - single-cell hole filling copies crust (creates volume, small).
+   **Implemented (2026-11-15, plan + review `plans/issue-3-mass-conservation.md`):** crust mass
+   ledger (`src/tectonics/ledger.rs`; every operation books its actual change; residual from the
+   total of all samples incl. hidden ones; closes to round-off, test `crust_mass_ledger_closes`);
+   sediment counted as rock mass (2050 kg/m³; bulk 2300 for isostasy); erosion converts bedrock to
+   sediment at equal mass; deep-sea fans (up to 2048 cells) before deltas, the rest booked as
+   lost; shared samples get the summed erosion change (excess sediment removal from bedrock by
+   mass); 20% frontal accretion of subducting sediment as metasediment crust; collision stacking
+   converts sediment at constant mass; per-snapshot budget in Gt/yr and masses by class.
+   Seed 0, 500 Myr: continental crust mass −15% with erosion (was −36%), +40% without.
+   Budget (Gt/yr; Earth): new sea floor 280–340 (~70, issue 1), arcs 20–25 (~7–8), subduction
+   erosion 7–9 (~4), subducted sediment 10–16 (~3), **gap filling +27…+51 (artificial,
+   resampling)**, **merges −2…−18 (hidden crust lost)**, sediment lost 0.4–4.3. Remaining leaks
+   are resampling artifacts (gap copies, merges) and rate calibration (issue 1); hidden mass
+   ~1.5–2.3e9 Gt (phantom crust on subducting plates).
 4. **Thermal uplift on continental/arc crust with inherited young oceanic age** → thick young
    crust 1–1.5 km too high, highest cells 8.4–11.4 km [~5–6 km at 1° scale]. Track a thermal age
    that resets for continental crust; 70 km crust gives 6.3 km [Tibet ~5 km] → denser thick

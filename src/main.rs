@@ -21,7 +21,7 @@ use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
 use crate::planet::Planet;
 use crate::sphere::SphereMesh;
-use crate::tectonics::{Simulation, TectonicParams};
+use crate::tectonics::{MassLedger, Simulation, TectonicParams};
 use crate::temperature::TemperatureParams;
 
 /// The planet radius in metres; used for erosion, climate and to report linear speeds.
@@ -167,20 +167,25 @@ fn simulate(mut planet: Planet, cli: &Cli, mut on_step: impl FnMut(&Planet)) -> 
     let steps = (cli.duration / cli.dt).round() as u64;
     let snapshot_every = ((cli.snapshot_interval / cli.dt).round() as u64).max(1);
     let start = Instant::now();
-    snapshot(&planet, cli)?;
+    let mut previous_ledger: Option<(f64, MassLedger)> = None;
+    snapshot(&planet, cli, &mut previous_ledger)?;
     on_step(&planet);
     for step in 1..=steps {
         planet.step(cli.dt);
         on_step(&planet);
         if step % snapshot_every == 0 || step == steps {
-            snapshot(&planet, cli)?;
+            snapshot(&planet, cli, &mut previous_ledger)?;
         }
     }
     info!("Finished in {:.1?}", start.elapsed());
     Ok(())
 }
 
-fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
+fn snapshot(
+    planet: &Planet,
+    cli: &Cli,
+    previous_ledger: &mut Option<(f64, MassLedger)>,
+) -> anyhow::Result<()> {
     let simulation = planet.tectonics();
     let planet_statistics = planet.statistics();
     let statistics = &planet_statistics.tectonics;
@@ -233,6 +238,35 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
         statistics.events.captures,
         statistics.events.consumed,
         statistics.events.merge_lost_continental_volume / 1000.0,
+    );
+    // Crust mass budget since the last snapshot, in Gt/yr.
+    let cell_area =
+        4.0 * std::f64::consts::PI * EARTH_RADIUS * EARTH_RADIUS / simulation.mesh().len() as f64;
+    if let Some((previous_time, previous)) = previous_ledger.as_ref() {
+        let years = (statistics.time - previous_time) * 1e6;
+        let rates: Vec<String> = statistics
+            .ledger
+            .terms()
+            .iter()
+            .zip(previous.terms())
+            .filter(|((name, _), _)| *name != "total")
+            .map(|((name, now), (_, before))| (name, (now - before) * cell_area / 1e12 / years))
+            .filter(|(_, rate)| rate.abs() >= 0.005)
+            .map(|(name, rate)| format!("{name} {rate:+.2}"))
+            .collect();
+        info!("    crust mass budget (Gt/yr): {}", rates.join(", "));
+    }
+    *previous_ledger = Some((statistics.time, statistics.ledger.clone()));
+    info!(
+        "    crust mass (Gt): continental {:.3e}, transitional {:.3e}, oceanic {:.3e}, \
+         sediment {:.3e}, felsic {:.3e}, hidden {:.3e} | sediment lost {:.0} km·cells",
+        statistics.continental_mass,
+        statistics.transitional_mass,
+        statistics.oceanic_mass,
+        statistics.sediment_mass,
+        statistics.felsic_mass,
+        statistics.hidden_mass,
+        planet_statistics.sediment_lost / 1000.0,
     );
     info!(
         "    gaps filled: {} new sea floor, {} copies ({:.0} km·cells), {} shared, {} holes, \
