@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-15 (session 1, plate dynamics)_
+_Last updated: 2026-11-15 (incremental plate matching)_
 
 ## Goal
 
@@ -18,7 +18,8 @@ components (climate, erosion, …) are expected to build on it.
 - Working rigid-plate tectonics simulation coupled with an Earth-like water cycle, fluvial
   erosion and a seasonal temperature model (Earth-like orbit). Writes equirectangular elevation
   (with rivers), plate, precipitation and temperature (annual, January, July) maps as PNG
-  snapshots. Default run (40,962 cells, 12 plates, 500 Myr) takes about 70 s.
+  snapshots. Default run (40,962 cells, 500 Myr, seed 0) takes about 170 s (was 414 s before
+  incremental plate matching).
 - **3D view** (default; `--headless` for batch runs): eframe/egui window, planet drawn with
   wgpu via an egui paint callback, camera rotates by click-and-drag. Simulation runs on a
   background thread and sends finished vertex buffers through a channel; window title shows the
@@ -106,8 +107,10 @@ components (climate, erosion, …) are expected to build on it.
 - Collision churn is high (≈ the whole initial continental volume passes through collisions in
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
 - **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
-  plans in `notes/plans/`, research in `notes/research/`. Current: issue 5 (gap filling), then
-  the issue 1 soundness fixes (`plans/issue-1-soundness.md`).**
+  plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms), 5, 3, 4 done and
+  the runtime optimisation (incremental matching). **Next: issue 1 tuning per
+  `plans/issue-1-tuning.md` incl. its review items R1–R8; ask the user first whether to do
+  further optimisations from `research/profiling-2026-11-15.md`.**
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal
@@ -123,7 +126,9 @@ components (climate, erosion, …) are expected to build on it.
   cycles, constant solar luminosity).
 - No hillslope diffusion (sub-grid at ~120 km cells); sediment deposited on oceanic crust is lost
   at subduction.
-- Single-threaded; ownership resolution (~35 ms per substep) dominates.
+- Single-threaded by user choice (efficiency before parallelism). Plate–cell matching is
+  incremental (`src/tectonics/matching.rs`: crust cells + 3 rings, full-scan fallback,
+  `--verify-matching`); remaining optimisation options in `research/profiling-2026-11-15.md`.
 - 3D view under KDE Wayland only draws its first frame when launched from Claude's sandboxed
   shell (compositor sends no redraw events). The user confirmed it works normally when launched
   from their own terminal. For screenshots from the sandbox, use X11:

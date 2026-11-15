@@ -38,6 +38,8 @@ pub struct Statistics {
     pub events: EventCounts,
     /// Where crust mass came from and went to so far.
     pub ledger: MassLedger,
+    /// How plates were matched to cells so far.
+    pub matching: MatchingStatistics,
     /// Crust mass in Gt: crystalline crust that is continental, transitional and oceanic,
     /// sediment, felsic crust (density < 2850 kg/m³), and crust hidden below other plates.
     pub continental_mass: f64,
@@ -231,6 +233,7 @@ impl Simulation {
             gaps: self.gap_statistics.clone(),
             events: self.event_counts.clone(),
             ledger: self.ledger.clone(),
+            matching: self.matching_statistics.clone(),
             continental_mass: masses[0] * to_gigatonnes,
             transitional_mass: masses[1] * to_gigatonnes,
             oceanic_mass: masses[2] * to_gigatonnes,

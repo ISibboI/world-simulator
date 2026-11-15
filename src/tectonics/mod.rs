@@ -41,6 +41,7 @@ mod events;
 mod generation;
 mod ledger;
 mod mantle;
+mod matching;
 mod statistics;
 mod topology;
 
@@ -49,6 +50,7 @@ pub use crust::*;
 pub use events::{EventCounts, PlateEventParams};
 pub use ledger::MassLedger;
 pub use mantle::{MantleParams, Plume};
+pub use matching::{MatchingParams, MatchingStatistics};
 pub use statistics::*;
 
 use boundaries::{ResolvedBoundaries, pair_key};
@@ -140,6 +142,8 @@ pub struct TectonicParams {
     pub collision_resistance: f64,
     /// Mantle flow below the plates.
     pub mantle: MantleParams,
+    /// How plates are matched to cells.
+    pub matching: MatchingParams,
     /// Rifting, subduction initiation and suturing.
     pub events: PlateEventParams,
     /// Subduction polarity between two plates is forgotten after they were not in contact for
@@ -180,6 +184,7 @@ impl Default for TectonicParams {
             continental_drag_factor: 4.0,
             collision_resistance: 50.0,
             mantle: MantleParams::default(),
+            matching: MatchingParams::default(),
             events: PlateEventParams::default(),
             polarity_memory: 20.0,
             max_substep_movement: 0.5,
@@ -199,6 +204,11 @@ pub struct Plate {
     /// Local vertices whose crust was consumed (subducted or stacked onto another plate). Gaps
     /// there are never refilled with copies, which would recreate consumed crust.
     consumed: Vec<bool>,
+    /// World cells where the plate had crust after the last matching, or `None` if unknown (new,
+    /// split or merged plates). See [`matching`].
+    crust_cells: Option<Vec<u32>>,
+    /// The rotation at the last matching.
+    matched_rotation: DQuat,
 }
 
 impl Plate {
@@ -244,6 +254,9 @@ pub struct Simulation {
     event_counts: EventCounts,
     /// Where crust mass came from and went to.
     ledger: MassLedger,
+    /// How plates were matched to cells.
+    matching_statistics: MatchingStatistics,
+    matching_scratch: matching::MatchingScratch,
     /// Simulated time in Myr.
     time: f64,
 }
@@ -292,6 +305,8 @@ impl Simulation {
                 crust: vec![None; cell_count],
                 lookup_cache: (0..cell_count as u32).collect(),
                 consumed: vec![false; cell_count],
+                crust_cells: None,
+                matched_rotation: DQuat::IDENTITY,
             })
             .collect();
 
@@ -375,6 +390,8 @@ impl Simulation {
             gap_statistics: GapStatistics::default(),
             event_counts: EventCounts::default(),
             ledger: MassLedger::default(),
+            matching_statistics: MatchingStatistics::default(),
+            matching_scratch: matching::MatchingScratch::default(),
             rng: owned_rng,
             time: 0.0,
         };

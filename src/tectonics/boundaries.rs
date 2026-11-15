@@ -8,6 +8,7 @@ use glam::{DQuat, DVec3};
 use crate::isostasy::{ARC_DENSITY, SEDIMENT_ROCK_DENSITY};
 
 use super::ledger::{self, Term};
+use super::matching;
 use super::*;
 
 /// Rings beyond the arc or collision profile over which crust that exceeds the maximum
@@ -88,6 +89,8 @@ impl Simulation {
             time,
             gap_statistics,
             ledger,
+            matching_scratch,
+            matching_statistics,
             ..
         } = self;
         polarities.retain(|_, polarity| *time - polarity.last_contact <= params.polarity_memory);
@@ -107,17 +110,24 @@ impl Simulation {
         let mut collisions: HashMap<(u32, u32), u32> = HashMap::new();
         let mut candidates: Vec<(Ownership, Crust)> = Vec::with_capacity(plates.len());
 
+        let (matches, searched) = matching::match_plates(
+            mesh,
+            plates,
+            &inverse_rotations,
+            &alive,
+            &params.matching,
+            matching_scratch,
+            matching_statistics,
+        );
+        // Cells filled in gaps, per plate, for updating the plates' crust cells.
+        let mut filled: Vec<(u32, u32)> = Vec::new();
+
         for cell in 0..cell_count as u32 {
             candidates.clear();
-            for (index, plate) in plates.iter_mut().enumerate() {
-                if !alive[index] {
-                    continue;
-                }
-                let local = plate.local_vertex(mesh, inverse_rotations[index], cell);
-                if let Some(crust) = plate.crust[local as usize] {
-                    let plate = index as u32;
-                    candidates.push((Ownership { plate, local }, crust));
-                }
+            for &(plate, local) in matches.at(cell) {
+                let crust = plates[plate as usize].crust[local as usize]
+                    .expect("matched samples have crust");
+                candidates.push((Ownership { plate, local }, crust));
             }
 
             let Some((winner, winner_crust)) = choose_overriding(&candidates, polarities, *time)
@@ -251,6 +261,7 @@ impl Simulation {
         // Holes are healed with a copy of the neighbouring crust, unless the crust there was
         // consumed; then the hole shows the neighbouring sample.
         for (cell, template) in holes {
+            filled.push((template.plate, cell));
             let plate_index = template.plate as usize;
             let plate = &mut plates[plate_index];
             let local = plate.local_vertex(mesh, inverse_rotations[plate_index], cell);
@@ -297,6 +308,7 @@ impl Simulation {
                 if new_owners[neighbor as usize].is_some() {
                     continue;
                 }
+                filled.push((plate_index, neighbor));
                 let spreading = opens_away(
                     mesh,
                     &new_owners,
@@ -363,6 +375,7 @@ impl Simulation {
         for (owner, new_owner) in owners.iter_mut().zip(new_owners) {
             *owner = new_owner.expect("all cells are owned after gap filling");
         }
+        matching::update_crust_cells(mesh, plates, searched, &filled, matching_scratch);
         ResolvedBoundaries {
             additions,
             collisions,

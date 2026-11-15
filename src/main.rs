@@ -79,6 +79,10 @@ struct Cli {
     #[arg(long, default_value_t = 1e11)]
     river_threshold: f64,
 
+    /// Check the incremental plate matching against a full scan (slow; counts mismatches).
+    #[arg(long)]
+    verify_matching: bool,
+
     /// Run without the 3D view and only write snapshot images.
     #[arg(long)]
     headless: bool,
@@ -117,10 +121,11 @@ fn main() -> anyhow::Result<()> {
 
     let mesh = SphereMesh::icosphere(cli.subdivisions);
     info!(cells = mesh.len(), "Created planet mesh");
-    let params = TectonicParams {
+    let mut params = TectonicParams {
         continental_fraction: cli.continental_fraction,
         ..TectonicParams::default()
     };
+    params.matching.verify = cli.verify_matching;
     let simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
     let erosion = (!cli.no_erosion).then(|| ErosionParams {
         planet_radius: EARTH_RADIUS,
@@ -267,6 +272,16 @@ fn snapshot(
         statistics.felsic_mass,
         statistics.hidden_mass,
         planet_statistics.sediment_lost / 1000.0,
+    );
+    info!(
+        "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
+         cell, {} mismatches",
+        statistics.matching.incremental,
+        statistics.matching.full_scans,
+        statistics.matching.searched_cells as f64
+            / ((statistics.matching.incremental + statistics.matching.full_scans).max(1) as f64
+                * simulation.mesh().len() as f64),
+        statistics.matching.mismatches,
     );
     info!(
         "    gaps filled: {} new sea floor, {} copies ({:.0} km·cells), {} shared, {} holes, \

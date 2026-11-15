@@ -53,7 +53,11 @@ impl Simulation {
             crust,
             lookup_cache: self.plates[plate as usize].lookup_cache.clone(),
             consumed: self.plates[plate as usize].consumed.clone(),
+            crust_cells: None,
+            matched_rotation: self.plates[plate as usize].matched_rotation,
         };
+        // The crust cells of the remaining part are no longer accurate.
+        self.plates[plate as usize].crust_cells = None;
         let new_index = self.plates.len() as u32;
         self.plates.push(new_plate);
 
@@ -106,6 +110,8 @@ impl Simulation {
 
     fn merge_plates_inner(&mut self, into: u32, absorbed: u32) -> f64 {
         assert_ne!(into, absorbed, "a plate cannot be merged into itself");
+        // The receiving plate gains crust at new cells.
+        self.plates[into as usize].crust_cells = None;
         let inverse_rotation = self.plates[into as usize].rotation.inverse();
         let max_thickness = self.params.max_crust_thickness;
         // Where each sample of `absorbed` went, for cells sharing a sample.

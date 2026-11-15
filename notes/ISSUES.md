@@ -9,8 +9,8 @@ with approaches and references per issue: `research/feasibility-2026-11-15.md`.
 implementation, then prefer issues that also help issue 1, then work through the rest
 autonomously, with an independent plan review before each issue): 1 (mechanisms) ✓ → 5 ✓
 (partly) → issue 1 soundness fixes ✓ → 3 ✓ (ledger; artifacts remain) → 4 ✓ (peaks still too
-high) → **runtime optimisation review (user, 2026-11-15: before issue 1 tuning; the user
-decides which optimisations to do)** → issue 1 tuning (plan reviewed) → 2 → 7 + 6 → 9 → 8.
+high) → runtime optimisation review ✓ (incremental plate matching, 2.5×; the user decides on
+further options in `research/profiling-2026-11-15.md`) → **issue 1 tuning** (plan reviewed) → 2 → 7 + 6 → 9 → 8.
 
 ## Open
 
