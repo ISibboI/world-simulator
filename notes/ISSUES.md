@@ -122,6 +122,16 @@ autonomously, with an independent plan review before each issue): 1 (mechanisms)
    8e6 J/m²/K below the atmospheric column alone [use 2–3e7]; subtropical land seasonality too
    large.
 
+10. **Plates break apart along straight lines** (user, 2026-11-15): rifting above plumes and
+    subduction initiation at passive margins split plates along a full great circle, which looks
+    odd. Look for a physics-based way to choose the break (e.g. along zones of weakness such as
+    old sutures or thinned/young lithosphere, following the stress field, or growing a rift from
+    the plume towards existing boundaries). Related: issue 1 findings 1d/1f and the deferred
+    recommendation S1 in `plans/issue-1-soundness.md`.
+11. **Ocean wave (coastal) erosion** (user question, 2026-11-15): check whether wave erosion of
+    coasts is simulated; currently only fluvial erosion and sediment deposition are modelled
+    (`src/erosion.rs`). Not answered yet.
+
 Minor: statistics count land as `> 0` in one place and `>= 0` elsewhere.
 
 ## Acceptable simplifications (at ~110 km cells, 1 Myr steps)
