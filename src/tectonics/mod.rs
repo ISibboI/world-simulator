@@ -34,9 +34,11 @@ mod boundaries;
 mod crust;
 mod dynamics;
 mod generation;
+mod mantle;
 mod statistics;
 
 pub use crust::*;
+pub use mantle::{MantleParams, Plume};
 pub use statistics::*;
 
 use boundaries::{ResolvedBoundaries, pair_key};
@@ -107,6 +109,8 @@ pub struct TectonicParams {
     /// Resistance to converging continental crust per collision boundary cell, as a multiple of
     /// the basal drag under one cell.
     pub collision_resistance: f64,
+    /// Mantle flow below the plates.
+    pub mantle: MantleParams,
     /// Subduction polarity between two plates is forgotten after they were not in contact for
     /// this long.
     pub polarity_memory: f64,
@@ -138,6 +142,7 @@ impl Default for TectonicParams {
             basal_drag: 3e15,
             continental_drag_factor: 4.0,
             collision_resistance: 50.0,
+            mantle: MantleParams::default(),
             polarity_memory: 20.0,
             max_substep_movement: 0.5,
         }
@@ -186,11 +191,8 @@ pub struct Simulation {
     owners: Vec<Ownership>,
     /// Subduction polarity of plate pairs `(a, b)` with `a < b`.
     polarities: HashMap<(u32, u32), Polarity>,
-    #[expect(
-        dead_code,
-        reason = "used by mantle plumes and plate events (next milestones)"
-    )]
     rng: ChaCha8Rng,
+    mantle: mantle::MantleFlow,
     /// Simulated time in Myr.
     time: f64,
 }
@@ -307,12 +309,14 @@ impl Simulation {
             })
             .collect();
 
+        let mantle = mantle::MantleFlow::new(params.mantle.clone());
         Self {
             mesh,
             params,
             plates,
             owners,
             polarities,
+            mantle,
             rng: owned_rng,
             time: 0.0,
         }
@@ -341,7 +345,9 @@ impl Simulation {
     /// Advances the simulation by `dt` Myr, splitting it into substeps such that no plate moves
     /// more than [`TectonicParams::max_substep_movement`] cells per substep.
     pub fn step(&mut self, dt: f64) {
-        let mantle_velocity = vec![DVec3::ZERO; self.mesh.len()];
+        let mantle_velocity = self
+            .mantle
+            .velocities(&self.mesh, self.params.planet_radius);
         self.update_plate_velocities(&mantle_velocity);
         let max_angle = self
             .plates
@@ -355,6 +361,14 @@ impl Simulation {
             self.substep(dt / substeps as f64);
         }
         self.crustal_flow(dt);
+
+        let subduction = self.subduction_rates();
+        self.mantle.step(dt, &subduction, &mut self.rng);
+    }
+
+    /// The active mantle plumes.
+    pub fn plumes(&self) -> &[Plume] {
+        self.mantle.plumes()
     }
 
     fn substep(&mut self, dt: f64) {

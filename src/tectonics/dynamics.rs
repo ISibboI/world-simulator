@@ -241,6 +241,28 @@ impl Simulation {
     }
 }
 
+impl Simulation {
+    /// Positions of trench cells with their subduction rate (convergence speed times boundary
+    /// length, in m²/s), which feed the mantle downwellings.
+    pub(super) fn subduction_rates(&self) -> Vec<(DVec3, f64)> {
+        let boundary_length = self.params.planet_radius * self.mesh.mean_edge_angle();
+        self.boundary_cells()
+            .into_iter()
+            .filter(|boundary| matches!(boundary.kind, BoundaryKind::Trench { .. }))
+            .filter_map(|boundary| {
+                let r = self.mesh.vertex(boundary.cell);
+                let relative = (self.plates[boundary.plate as usize].angular_velocity
+                    - self.plates[boundary.other as usize].angular_velocity)
+                    .cross(r)
+                    .dot(boundary.normal)
+                    * self.params.planet_radius
+                    / SECONDS_PER_MYR;
+                (relative > 0.0).then_some((r, relative * boundary_length))
+            })
+            .collect()
+    }
+}
+
 fn outer(a: DVec3, b: DVec3) -> DMat3 {
     DMat3::from_cols(a * b.x, a * b.y, a * b.z)
 }

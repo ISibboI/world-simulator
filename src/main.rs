@@ -189,7 +189,7 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
     info!(
         "t = {:6.1} Myr | continental {:5.1}% | land {:5.1}% | mean ocean age {:5.1} Myr | \
          elevation {:6.0} m ..{:6.0} m, land mean {:5.0} m | mean speed {:4.1} cm/yr | \
-         {} plates, largest {:4.1}%",
+         {} plates, largest {:4.1}%, {} plumes",
         statistics.time,
         100.0 * statistics.continental_fraction,
         100.0 * statistics.land_fraction,
@@ -201,6 +201,7 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
         statistics.mean_speed * EARTH_RADIUS * 100.0 / 1e6,
         living_plates,
         100.0 * largest_plate as f64 / simulation.mesh().len() as f64,
+        statistics.plumes,
     );
     info!(
         "    land masses {} ({} specks, largest {:.0}%) | continental crust masses {} ({} specks, \

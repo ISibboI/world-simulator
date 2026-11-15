@@ -8,7 +8,6 @@ use rand::{Rng, RngExt};
 
 use crate::sphere::SphereMesh;
 
-#[expect(dead_code, reason = "used for mantle plumes (next milestone)")]
 pub(super) fn random_unit_vector(rng: &mut impl Rng) -> DVec3 {
     loop {
         let v = DVec3::new(

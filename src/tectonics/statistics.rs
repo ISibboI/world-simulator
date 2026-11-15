@@ -19,6 +19,8 @@ pub struct Statistics {
     pub mean_speed: f64,
     /// Number of cells covered by each plate.
     pub plate_areas: Vec<usize>,
+    /// Number of active mantle plumes.
+    pub plumes: usize,
     /// Connected land masses (cells at or above sea level).
     pub land_masses: ComponentStatistics,
     /// Connected areas of continental crust.
@@ -122,6 +124,7 @@ impl Simulation {
             min_elevation,
             mean_speed: speed_sum / cell_count as f64,
             plate_areas,
+            plumes: self.plumes().len(),
             land_masses: components(&self.mesh, |cell| {
                 self.surface_crust(cell).surface_elevation() >= 0.0
             }),
