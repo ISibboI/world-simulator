@@ -13,6 +13,9 @@ Notes on every chat session live in [notes/](notes/) and are checked into git.
   user asked for, what was done, decisions and their reasons, and open questions. If several
   sessions happen on one day, append a new `## Session N` section.
 
+- `notes/ISSUES.md` is the numbered list of known physical-accuracy issues and their order of
+  work. Keep it up to date when issues are fixed or found.
+
 Before ending a session (or after any significant piece of work), update the session log and
 `notes/SUMMARY.md`, and commit the notes together with the work they describe. Keep the summary
 short; move detail into the session logs.

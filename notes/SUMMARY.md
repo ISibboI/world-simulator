@@ -111,6 +111,8 @@ components (climate, erosion, …) are expected to build on it.
   no plate splitting. Continents end up too high mid-run (mean land 1.1–1.4 km vs Earth 0.84).
 - Collision churn is high (≈ the whole initial continental volume passes through collisions in
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
+- **Open physical-accuracy issues are tracked in `notes/ISSUES.md`; next up is issue 1 (ocean
+  floor too old, plates only die).**
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal
