@@ -90,6 +90,8 @@ impl Simulation {
 
         let mut new_owners: Vec<Option<Ownership>> = vec![None; cell_count];
         let mut subducted = Vec::new();
+        // Overriding crust at trenches, eroded from below by the subducting slab.
+        let mut eroded = Vec::new();
         let mut additions = Vec::new();
         let mut collisions: HashMap<(u32, u32), u32> = HashMap::new();
         let mut candidates: Vec<(Ownership, Crust)> = Vec::with_capacity(plates.len());
@@ -144,12 +146,29 @@ impl Simulation {
                         density: ARC_DENSITY,
                         collision: false,
                     });
+                    eroded.push(winner);
                 }
             }
         }
 
         for ownership in subducted {
             plates[ownership.plate as usize].crust[ownership.local as usize] = None;
+        }
+
+        // Subduction erosion: the slab scrapes material off the underside and front of the
+        // overriding plate and carries it into the mantle, sediment first. On Earth this and
+        // sediment subduction recycle about as much crust as arcs produce.
+        for ownership in eroded {
+            if let Some(crust) =
+                &mut plates[ownership.plate as usize].crust[ownership.local as usize]
+            {
+                let mut amount = params.subduction_erosion;
+                let from_sediment = amount.min(crust.sediment);
+                crust.sediment -= from_sediment;
+                amount -= from_sediment;
+                crust.thickness =
+                    (crust.thickness - amount).max(crust.thickness.min(OCEANIC_THICKNESS));
+            }
         }
 
         // A sample may have been subducted at one cell while owning another; that cell is now free.

@@ -205,6 +205,21 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
         100.0 * largest_plate as f64 / simulation.mesh().len() as f64,
         statistics.plumes,
     );
+    // rad/Myr × m → cm/yr
+    let cm_per_year = EARTH_RADIUS * 100.0 / 1e6;
+    info!(
+        "    ocean age median {:4.0}, 90% {:4.0}, max {:4.0} Myr | deeper than 6 km {:4.1}%, \
+         ocean older than 150 Myr {:4.1}% | \
+         speed oceanic {:4.1}, continental {:4.1}, max {:5.1} cm/yr",
+        statistics.oceanic_age_percentiles[0],
+        statistics.oceanic_age_percentiles[1],
+        statistics.oceanic_age_percentiles[2],
+        100.0 * statistics.deep_fraction,
+        100.0 * statistics.old_ocean_fraction,
+        statistics.mean_oceanic_speed * cm_per_year,
+        statistics.mean_continental_speed * cm_per_year,
+        statistics.max_speed * cm_per_year,
+    );
     info!(
         "    land masses {} ({} specks, largest {:.0}%) | continental crust masses {} ({} specks, \
          largest {:.0}%)",

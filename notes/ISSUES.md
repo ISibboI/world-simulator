@@ -19,8 +19,15 @@ issue 1 tuning (trench propagation, age-hazard initiation) → 2 → 7 + 6 → 9
    slab age, ridge push, basal drag; possibly mantle flow), subduction initiation at old (>150–200
    Myr) ocean or passive margins, rifting along old sutures or of large/supercontinent plates,
    suturing (merging) after continental collision, GDH1 depth curve (asymptote 5651 m).
-   **In progress:** plan in `plans/plate-dynamics.md` (torque balance + mantle flow, rifting,
-   subduction initiation, suturing).
+   **Mechanisms implemented** (plan `plans/plate-dynamics.md`): torque balance (slab pull,
+   ridge push, basal drag, collision resistance), mantle flow (slab downwellings + plumes),
+   rifting above plumes, subduction initiation at old passive margins and old ocean–ocean
+   boundaries, suturing, GDH1, crust recycling by subduction erosion. Calibrated only as far as
+   needed to show they work (seed 0, 500 Myr: mean ocean age 44 Myr, median 25, 6% > 150 Myr,
+   22 plates with 81 births / 71 deaths, 7.3 cm/yr). **Open:** final calibration after issues
+   5, 3, 4 (continental area still declines 30% → 20% and land rises to ~2 km; recycling vs arc
+   growth is very sensitive); trench propagation and age-hazard initiation per the research;
+   tiny plates reach 42 cm/yr [Earth max ~15–20], which forces many substeps (run 960 s).
 2. **Sea level fixed at 0 → ocean water volume not conserved** (1.75–2.35e9 km³ [1.335e9],
    drifting ~1 km sea-level equivalent). Solve sea level for constant water volume each step.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):

@@ -16,8 +16,8 @@ pub const WATER_DENSITY: f64 = 1030.0;
 pub const SEDIMENT_DENSITY: f64 = 2300.0;
 /// Density of oceanic crust (basalt, gabbro) in kg/m³.
 pub const OCEANIC_DENSITY: f64 = 2900.0;
-/// Density of continental crust in kg/m³.
-pub const CONTINENTAL_DENSITY: f64 = 2750.0;
+/// Mean density of continental crust in kg/m³ (~2830 after Christensen & Mooney, 1995).
+pub const CONTINENTAL_DENSITY: f64 = 2800.0;
 /// Density of new arc crust (andesitic) in kg/m³.
 pub const ARC_DENSITY: f64 = 2800.0;
 

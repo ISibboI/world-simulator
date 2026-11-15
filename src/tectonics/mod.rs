@@ -74,6 +74,9 @@ pub struct TectonicParams {
     /// Arcs grow by roughly 30–90 km³ per km of arc and Myr on Earth; at 50 km/Myr convergence
     /// and ~110 km cells, one subducted cell corresponds to roughly 1e13 m³ ≈ 800 m over a cell.
     pub arc_crust_per_subduction: f64,
+    /// Thickness of crust (and sediment) removed from the overriding plate at the trench per
+    /// subducted crust sample (subduction erosion), as a thickness over one cell.
+    pub subduction_erosion: f64,
     /// Relative amounts of new arc crust at distances of 0, 1, 2, … cells from the trench.
     pub arc_profile: Vec<f64>,
     /// Relative amounts of stacked crust at distances of 0, 1, 2, … cells from a continental
@@ -131,7 +134,8 @@ impl Default for TectonicParams {
             continent_count: 7,
             continental_coast_thickness: 30_000.0,
             continental_interior_thickness: 38_000.0,
-            arc_crust_per_subduction: 800.0,
+            arc_crust_per_subduction: 500.0,
+            subduction_erosion: 300.0,
             arc_profile: vec![0.25, 1.0, 1.0, 0.25],
             collision_profile: vec![1.0, 0.75, 0.5, 0.25],
             max_crust_thickness: 75_000.0,
@@ -144,7 +148,7 @@ impl Default for TectonicParams {
             slab_pull_max_age: 120.0,
             ridge_push: 3e12,
             ridge_age: 20.0,
-            basal_drag: 3e15,
+            basal_drag: 1e15,
             continental_drag_factor: 4.0,
             collision_resistance: 50.0,
             mantle: MantleParams::default(),
@@ -471,8 +475,8 @@ mod tests {
             age,
             ..new_oceanic_crust()
         };
-        assert!((ocean(0.0).surface_elevation() + 2500.0).abs() < 1.0);
-        assert!((ocean(1000.0).surface_elevation() + 6400.0).abs() < 1.0);
+        assert!((ocean(0.0).surface_elevation() + 2600.0).abs() < 1.0);
+        assert!((ocean(1000.0).surface_elevation() + 5651.0).abs() < 1.0);
         assert!(!ocean(0.0).is_continental());
 
         let continent = |thickness| Crust {

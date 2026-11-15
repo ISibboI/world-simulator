@@ -37,10 +37,10 @@ impl Default for PlateEventParams {
             min_rift_area: 0.05,
             min_plate_area: 0.01,
             max_plates: 30,
-            initiation_age: 180.0,
-            initiation_interval: 25.0,
-            suture_time: 20.0,
-            suture_min_cells: 3,
+            initiation_age: 160.0,
+            initiation_interval: 8.0,
+            suture_time: 30.0,
+            suture_min_cells: 10,
         }
     }
 }
@@ -51,6 +51,7 @@ impl Simulation {
         self.suture_colliding_plates(dt);
         self.rift_above_plumes();
         self.initiate_subduction(dt);
+        self.initiate_oceanic_subduction();
         self.remove_dead_plates();
     }
 
@@ -119,6 +120,61 @@ impl Simulation {
             }
             // Each plume rifts at most once, also if the split was not possible.
             self.mantle.mark_rifted(index);
+        }
+    }
+
+    /// Old oceanic lithosphere at a boundary between two oceanic plates without a subduction
+    /// zone (such as a transform fault) starts to sink below the younger plate: the boundary
+    /// becomes a subduction zone. This is how many intra-oceanic subduction zones began (e.g.
+    /// Izu-Bonin-Mariana).
+    fn initiate_oceanic_subduction(&mut self) {
+        let initiation_age = self.params.events.initiation_age;
+        let mut new_zones: HashMap<(u32, u32), (u32, f64)> = HashMap::new();
+        for boundary in self.boundary_cells() {
+            let pair = pair_key(boundary.plate, boundary.other);
+            if self.polarities.contains_key(&pair) {
+                continue;
+            }
+            let crust = self.surface_crust(boundary.cell);
+            if crust.is_continental() || crust.age < initiation_age {
+                continue;
+            }
+            // The other side of the boundary: the oldest crust sinks.
+            let other_crust = self
+                .mesh
+                .neighbors(boundary.cell)
+                .iter()
+                .filter(|&&n| self.owners[n as usize].plate == boundary.other)
+                .map(|&n| self.surface_crust(n))
+                .next();
+            let Some(other_crust) = other_crust else {
+                continue;
+            };
+            if other_crust.age >= crust.age {
+                continue;
+            }
+            let entry = new_zones.entry(pair).or_insert((boundary.other, 0.0));
+            if crust.age > entry.1 {
+                *entry = (boundary.other, crust.age);
+            }
+        }
+        let mut zones: Vec<_> = new_zones.into_iter().collect();
+        zones.sort_unstable_by_key(|(pair, _)| *pair);
+        for (pair, (overriding, _)) in zones {
+            debug!(
+                ?pair,
+                overriding,
+                time = self.time,
+                "Subduction started at an oceanic boundary"
+            );
+            self.polarities.insert(
+                pair,
+                Polarity {
+                    overriding,
+                    last_contact: self.time,
+                    collision_time: 0.0,
+                },
+            );
         }
     }
 

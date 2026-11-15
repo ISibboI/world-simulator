@@ -11,6 +11,17 @@ pub struct Statistics {
     pub continental_fraction: f64,
     pub land_fraction: f64,
     pub mean_oceanic_age: f64,
+    /// Median, 90th percentile and maximum age of oceanic crust in Myr.
+    pub oceanic_age_percentiles: [f64; 3],
+    /// Fraction of the surface deeper than 6000 m.
+    pub deep_fraction: f64,
+    /// Fraction of the oceanic crust older than 150 Myr.
+    pub old_ocean_fraction: f64,
+    /// Mean surface speed over oceanic and over continental crust in rad/Myr.
+    pub mean_oceanic_speed: f64,
+    pub mean_continental_speed: f64,
+    /// Fastest plate surface speed in rad/Myr.
+    pub max_speed: f64,
     /// Mean surface elevation of cells above sea level.
     pub mean_land_elevation: f64,
     pub max_elevation: f64,
@@ -86,21 +97,33 @@ impl Simulation {
         let mut min_elevation = f64::INFINITY;
         let mut speed_sum = 0.0;
         let mut land_elevation_sum = 0.0;
+        let mut oceanic_ages = Vec::new();
+        let mut deep = 0;
+        let (mut oceanic_speed, mut continental_speed) = (0.0, 0.0);
+        let mut max_speed: f64 = 0.0;
 
         for cell in 0..cell_count as u32 {
             let plate = self.owner(cell).plate as usize;
             plate_areas[plate] += 1;
-            speed_sum += self.plates[plate]
+            let speed = self.plates[plate]
                 .angular_velocity
                 .cross(self.mesh.vertex(cell))
                 .length();
+            speed_sum += speed;
+            max_speed = max_speed.max(speed);
             let crust = self.surface_crust(cell);
             if crust.is_continental() {
                 continental += 1;
+                continental_speed += speed;
             } else {
                 oceanic_age_sum += crust.age;
+                oceanic_ages.push(crust.age);
+                oceanic_speed += speed;
             }
             let elevation = crust.surface_elevation();
+            if elevation < -6000.0 {
+                deep += 1;
+            }
             if elevation > 0.0 {
                 land += 1;
                 land_elevation_sum += elevation;
@@ -110,7 +133,22 @@ impl Simulation {
         }
 
         let oceanic = cell_count - continental;
+        oceanic_ages.sort_by(f64::total_cmp);
+        let percentile = |p: f64| {
+            if oceanic_ages.is_empty() {
+                0.0
+            } else {
+                oceanic_ages[((oceanic_ages.len() - 1) as f64 * p).round() as usize]
+            }
+        };
         Statistics {
+            oceanic_age_percentiles: [percentile(0.5), percentile(0.9), percentile(1.0)],
+            deep_fraction: deep as f64 / cell_count as f64,
+            old_ocean_fraction: oceanic_ages.iter().filter(|&&age| age > 150.0).count() as f64
+                / oceanic_ages.len().max(1) as f64,
+            mean_oceanic_speed: oceanic_speed / oceanic.max(1) as f64,
+            mean_continental_speed: continental_speed / continental.max(1) as f64,
+            max_speed,
             time: self.time,
             continental_fraction: continental as f64 / cell_count as f64,
             land_fraction: land as f64 / cell_count as f64,

@@ -12,7 +12,7 @@ pub const OCEANIC_THICKNESS: f64 = 7000.0;
 pub const CONTINENTAL_BUOYANCY: f64 = 3000.0;
 
 /// Depth of fully cooled oceanic lithosphere in metres.
-const OLD_OCEAN_DEPTH: f64 = 6400.0;
+const OLD_OCEAN_DEPTH: f64 = 5651.0;
 
 /// Dry elevation that columns are compensated against, chosen such that old oceanic crust of
 /// normal thickness lies at [`OLD_OCEAN_DEPTH`] below sea level.
@@ -80,15 +80,16 @@ pub(super) fn thermal_uplift(age: f64) -> f64 {
     (oceanic_depth(age) + OLD_OCEAN_DEPTH) / WATER_LOADING
 }
 
-/// Depth of oceanic crust depending on its age (after Parsons & Sclater, 1977).
-///
-/// Young crust follows the half-space cooling model, old crust flattens out. Taking the
-/// shallower of both curves keeps the depth continuous and monotonic.
+/// Depth of oceanic crust depending on its age, after the GDH1 model (Stein & Stein, 1992):
+/// half-space cooling for young crust, flattening towards the depth of a cooled plate. Both
+/// branches meet at 20 Myr.
 pub fn oceanic_depth(age: f64) -> f64 {
     let age = age.max(0.0);
-    let half_space_cooling = 2500.0 + 350.0 * age.sqrt();
-    let plate_model = 6400.0 - 3200.0 * (-age / 62.8).exp();
-    -half_space_cooling.min(plate_model)
+    if age < 20.0 {
+        -(2600.0 + 365.0 * age.sqrt())
+    } else {
+        -(OLD_OCEAN_DEPTH - 2473.0 * (-0.0278 * age).exp())
+    }
 }
 
 pub(super) fn new_oceanic_crust() -> Crust {
