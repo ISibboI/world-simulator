@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-15 (session 1)_
+_Last updated: 2026-11-15 (session 1, plate dynamics)_
 
 ## Goal
 
@@ -33,30 +33,29 @@ components (climate, erosion, …) are expected to build on it.
 
 - `src/sphere.rs`: icosphere mesh (`10·4^n+2` vertices, 5–6 neighbours each), greedy
   nearest-vertex walk with warm start.
-- `src/tectonics.rs`: the simulation.
-  - Each plate is a rigid rotation (quaternion + angular velocity vector) and stores its crust
-    (kind, age, elevation) in its **own local frame**, indexed by mesh vertex. No resampling
-    error accumulates because plates are rigid.
-  - Each substep: rotate plates → age/erode crust → for every world cell, find which plates have
-    crust there → resolve overlaps (subduction) and gaps (new oceanic crust) → apply uplift →
-    collision drag.
-  - Subduction polarity is decided **per plate pair** at first contact (buoyancy: continental >
-    young oceanic > old oceanic) and remembered; it flips when continental crust reaches the
-    trench. Per-cell decisions made plates fragment.
-  - Continental collisions pull the angular velocities of both plates together. Random plate
-    reorganisations (mean every 150 Myr per plate) keep the system moving.
-  - Single-cell holes inside a plate are resampling artifacts and get a copy of neighbouring
-    crust; other gaps get new oceanic crust (ridges).
-  - Crust samples store **thickness, density, age and sediment**; elevation is derived from Airy
-    isostasy (`src/isostasy.rs`: mantle 3300, water 1030, sediment 2300, oceanic 2900,
-    continental 2750, arc 2800 kg/m³) plus thermal uplift of young lithosphere (age-depth curve),
-    calibrated so old ocean = −6400 m, ridges −2500 m, 35 km continent ≈ +580 m, 70 km ≈ +6 km.
-  - "Continental" is derived: crustal buoyancy ≥ 3000 m (dry) → too buoyant to subduct. Arcs
-    (≈800 m·cell of 2800 kg/m³ crust per subducted sample, in a band 0–3 cells behind the
-    trench) mature into continental crust at ~22 km.
-  - Continental collisions stack the loser's crust (+sediment) onto the winner (profile over 0–3
-    rings, spilling up to 8 more rings when above the 75 km cap); thick crust (>40 km) spreads by
-    volume-conserving lateral flow within a plate.
+- `src/tectonics/`: the plate simulation.
+  - `mod.rs`: parameters, `Plate` (rigid rotation + angular velocity; crust samples in its own
+    local frame, indexed by mesh vertex; lookup cache; `consumed` flags), `Simulation`, step loop
+    (velocities → substeps → crustal flow → dead plates → events → mantle).
+  - `crust.rs`: crust samples (thickness, density, age, sediment); elevation from Airy isostasy
+    (`src/isostasy.rs`: mantle 3300, water 1030, sediment 2300, oceanic 2900, continental 2800,
+    arc 2800 kg/m³) plus thermal uplift from the GDH1 depth–age curve (ridge −2600 m, old ocean
+    −5651 m; 35 km continent ≈ +570 m). "Continental" = crustal buoyancy ≥ 3000 m.
+  - `boundaries.rs`: ownership resolution per substep (most buoyant crust wins; subduction
+    polarity per plate pair), deferred consumption of overridden samples (only once invisible),
+    arcs (500 m·cell per subducted sample in a band behind the trench), subduction erosion
+    (300 m·cell at the trench), continental collisions stack the loser's crust onto the winner
+    (spilling outward above 75 km), crustal flow of crust > 40 km, gap filling (new sea floor
+    only where plates diverge, healed copies for resampling gaps, shared samples at boundary
+    slivers where crust was consumed).
+  - `dynamics.rs`: boundary classification (trench, ridge, collision) and a quasi-static
+    torque balance per plate (slab pull ∝ √age, ridge push, basal drag against the mantle flow,
+    ×4 under continents, collision resistance with an active set), one dense linear system.
+  - `mantle.rs`: mantle flow from slab downwellings (decaying memory) and plumes.
+  - `topology.rs` / `events.rs`: split, merge, remove plates; rifting above plumes, subduction
+    initiation at old passive margins and old ocean–ocean boundaries, suturing.
+  - `generation.rs` (initial conditions), `statistics.rs` (diagnostics incl. ocean-age
+    percentiles, plate births/deaths, gap statistics, connected land masses).
 - `src/climate.rs`: water cycle. Three-cell prevailing winds (trades, westerlies, polar
   easterlies) carry moisture from the ocean (evaporation ∝ warmth) over land; per-cell rain-out
   fraction from latitude (ITCZ, polar front) and orographic lift, reduced in descending air
@@ -98,11 +97,6 @@ components (climate, erosion, …) are expected to build on it.
 
 ## Known issues
 
-- No plate rifting/splitting: the plate count only decreases over time (12 → ~9 in 500 Myr).
-- Mean ocean floor age drifts upwards (~145 Myr after 500 Myr; Earth ≈ 60 Myr). Plates slow down
-  through collision drag (~3 cm/yr on average).
-- Continental area slowly decreases (30% → ~24% in 500 Myr) because continental collisions
-  destroy the losing crust instead of thickening the winner.
 - Continental shelves are too wide (sediment spreads over up to 256 cells per river mouth).
 - Land fragmentation largely fixed by the thickness model (at 200 Myr: land masses 105 → ~30,
   continental crust masses 146 → ~17–25); still 15–20 single-cell specks.
@@ -111,8 +105,9 @@ components (climate, erosion, …) are expected to build on it.
   no plate splitting. Continents end up too high mid-run (mean land 1.1–1.4 km vs Earth 0.84).
 - Collision churn is high (≈ the whole initial continental volume passes through collisions in
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
-- **Open physical-accuracy issues are tracked in `notes/ISSUES.md`; next up is issue 1 (ocean
-  floor too old, plates only die).**
+- **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
+  plans in `notes/plans/`, research in `notes/research/`. Current: issue 5 (gap filling), then
+  the issue 1 soundness fixes (`plans/issue-1-soundness.md`).**
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal
@@ -139,9 +134,6 @@ components (climate, erosion, …) are expected to build on it.
 
 ## Next steps (ideas)
 
-- Plate rifting, e.g. splitting large or continental-heavy plates along a random great circle.
-- Slab pull as the driving force instead of random reorganisations.
-- Conserve continental crust in collisions (thickening / terrane transfer to the winner).
 - Parallelise ownership resolution (rayon).
 - Better initial conditions (noise-based continents, interior relief).
 - Glacial erosion and snow; ocean currents for coastal climate.
@@ -151,3 +143,6 @@ components (climate, erosion, …) are expected to build on it.
 - Keep session notes in `notes/`, checked into git (see `CLAUDE.md`).
 - CI: follow the user's existing "Tests and Lints" workflow template; pin actions to the latest
   major version tag.
+- Before each issue, have an independent agent review the plan; get independent evaluations
+  of results; agents' temporary files go to `agent-scratch/` (never `/tmp`).
+- Calibrate only as far as needed to confirm soundness; prefer fixing physics over tuning.

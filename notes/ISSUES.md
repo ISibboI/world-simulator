@@ -76,6 +76,16 @@ issue 1 tuning (trench propagation, age-hazard initiation) → 2 → 7 + 6 → 9
    crust or a lithospheric-root term.
 5. **New oceanic crust created at convergent boundaries** (28–30% of crust < 3 Myr): gap filling
    ignores relative plate motion. Create ridge crust only where plates diverge.
+   **Partly fixed (2026-11-15, plan `plans/issue-5-gap-filling.md`):** overridden samples are
+   consumed only once invisible (no freed cells; arcs/erosion/collision counted once per
+   sample); new sea floor only where the receiving plate opens away from a nearby plate (smoothed
+   normals, ≥ 0.5 cm/yr, obliquity limit); other gaps healed with copies unless the slot's crust
+   was consumed (then boundary slivers share the adjacent sample, interior areas become sea
+   floor). Seed 0, 200 Myr: young crust at convergent boundaries 21–26% → 8–10% (target < 5%;
+   rest likely issue 1c), continental area 24.6% → 27.7%. Copies still create ~330,000 km·cells
+   per 200 Myr (→ issue 3 ledger). Variants tried: plain copies inflated continents (30 → 35%,
+   copies of consumed collision crust were stacked again — a mass pump); pure sharing left 12% of
+   the surface as persistent shared cells.
 6. **Erosion inconsistencies:**
    - implicit stream-power solve ignores isostatic response → big rivers erode up to ~6× too
      little; use `e = F(z − z_r) / (1 + F·f)`;

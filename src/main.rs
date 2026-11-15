@@ -221,6 +221,16 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
         statistics.max_speed * cm_per_year,
     );
     info!(
+        "    gaps filled: {} new sea floor, {} copies ({:.0} km·cells), {} shared, {} holes, \
+         {} freed",
+        statistics.gaps.new_crust_cells,
+        statistics.gaps.copied_cells,
+        statistics.gaps.copied_volume / 1000.0,
+        statistics.gaps.shared_cells,
+        statistics.gaps.hole_cells,
+        statistics.gaps.freed_cells,
+    );
+    info!(
         "    land masses {} ({} specks, largest {:.0}%) | continental crust masses {} ({} specks, \
          largest {:.0}%)",
         statistics.land_masses.count,

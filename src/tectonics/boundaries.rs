@@ -1,9 +1,9 @@
 //! Plate boundaries: assigning cells to plates, subduction, arc growth, continental
 //! collision and crustal flow.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use glam::DQuat;
+use glam::{DQuat, DVec3};
 
 use crate::isostasy::{ARC_DENSITY, SEDIMENT_DENSITY};
 
@@ -78,6 +78,7 @@ impl Simulation {
             owners,
             polarities,
             time,
+            gap_statistics,
             ..
         } = self;
         polarities.retain(|_, polarity| *time - polarity.last_contact <= params.polarity_memory);
@@ -89,7 +90,8 @@ impl Simulation {
             .collect();
 
         let mut new_owners: Vec<Option<Ownership>> = vec![None; cell_count];
-        let mut subducted = Vec::new();
+        // Contacts where a sample of one plate is overridden by another plate.
+        let mut lost_contacts: Vec<LostContact> = Vec::new();
         // Overriding crust at trenches, eroded from below by the subducting slab.
         let mut eroded = Vec::new();
         let mut additions = Vec::new();
@@ -116,43 +118,59 @@ impl Simulation {
             new_owners[cell as usize] = Some(winner);
 
             for &(loser, loser_crust) in &candidates {
-                if loser == winner {
-                    continue;
-                }
-                subducted.push(loser);
-                if winner_crust.is_continental() && loser_crust.is_continental() {
-                    // Continental collision: the crust of the lower plate is stacked onto the
-                    // overriding plate instead of subducting.
-                    *collisions
-                        .entry(pair_key(winner.plate, loser.plate))
-                        .or_default() += 1;
-                    let sediment_mass = loser_crust.sediment * SEDIMENT_DENSITY;
-                    let thickness = loser_crust.thickness + loser_crust.sediment;
-                    additions.push(CrustAddition {
+                if loser != winner {
+                    lost_contacts.push(LostContact {
                         cell,
-                        plate: winner.plate,
-                        thickness,
-                        density: (loser_crust.thickness * loser_crust.density + sediment_mass)
-                            / thickness.max(1e-9),
-                        collision: true,
+                        winner,
+                        winner_crust,
+                        loser,
+                        loser_crust,
                     });
-                } else {
-                    // Subduction: the lower plate's crust and sediment sink into the mantle, and
-                    // melting above the slab builds an arc on the overriding plate.
-                    additions.push(CrustAddition {
-                        cell,
-                        plate: winner.plate,
-                        thickness: params.arc_crust_per_subduction,
-                        density: ARC_DENSITY,
-                        collision: false,
-                    });
-                    eroded.push(winner);
                 }
             }
         }
 
-        for ownership in subducted {
-            plates[ownership.plate as usize].crust[ownership.local as usize] = None;
+        // A sample that is overridden at one cell but still forms the surface of another cell is
+        // kept until it is covered everywhere: deleting it now would leave a hole behind the
+        // trench. Each consumed sample is accounted for exactly once.
+        let visible: HashSet<Ownership> = new_owners.iter().flatten().copied().collect();
+        let mut consumed: HashSet<Ownership> = HashSet::new();
+        for contact in &lost_contacts {
+            if visible.contains(&contact.loser) || !consumed.insert(contact.loser) {
+                continue;
+            }
+            let loser_plate = &mut plates[contact.loser.plate as usize];
+            loser_plate.crust[contact.loser.local as usize] = None;
+            loser_plate.consumed[contact.loser.local as usize] = true;
+            let (winner, loser_crust) = (contact.winner, contact.loser_crust);
+            if contact.winner_crust.is_continental() && loser_crust.is_continental() {
+                // Continental collision: the crust of the lower plate is stacked onto the
+                // overriding plate instead of subducting.
+                *collisions
+                    .entry(pair_key(winner.plate, contact.loser.plate))
+                    .or_default() += 1;
+                let sediment_mass = loser_crust.sediment * SEDIMENT_DENSITY;
+                let thickness = loser_crust.thickness + loser_crust.sediment;
+                additions.push(CrustAddition {
+                    cell: contact.cell,
+                    plate: winner.plate,
+                    thickness,
+                    density: (loser_crust.thickness * loser_crust.density + sediment_mass)
+                        / thickness.max(1e-9),
+                    collision: true,
+                });
+            } else {
+                // Subduction: the lower plate's crust and sediment sink into the mantle, and
+                // melting above the slab builds an arc on the overriding plate.
+                additions.push(CrustAddition {
+                    cell: contact.cell,
+                    plate: winner.plate,
+                    thickness: params.arc_crust_per_subduction,
+                    density: ARC_DENSITY,
+                    collision: false,
+                });
+                eroded.push(winner);
+            }
         }
 
         // Subduction erosion: the slab scrapes material off the underside and front of the
@@ -171,12 +189,14 @@ impl Simulation {
             }
         }
 
-        // A sample may have been subducted at one cell while owning another; that cell is now free.
+        // Visible samples are never consumed above, so no cell should lose its crust here; count
+        // it if it happens anyway.
         for owner in &mut new_owners {
             if let Some(ownership) = owner
                 && plates[ownership.plate as usize].crust[ownership.local as usize].is_none()
             {
                 *owner = None;
+                gap_statistics.freed_cells += 1;
             }
         }
 
@@ -192,21 +212,35 @@ impl Simulation {
                     .then_some((cell, first))
             })
             .collect();
+        gap_statistics.hole_cells += holes.len();
+        // Holes are healed with a copy of the neighbouring crust, unless the crust there was
+        // consumed; then the hole shows the neighbouring sample.
         for (cell, template) in holes {
             let plate_index = template.plate as usize;
             let plate = &mut plates[plate_index];
-            let template_crust =
-                plate.crust[template.local as usize].expect("owners point to existing crust");
             let local = plate.local_vertex(mesh, inverse_rotations[plate_index], cell);
-            plate.crust[local as usize].get_or_insert(template_crust);
-            new_owners[cell as usize] = Some(Ownership {
-                plate: template.plate,
-                local,
-            });
+            if plate.consumed[local as usize] {
+                gap_statistics.shared_cells += 1;
+                new_owners[cell as usize] = Some(template);
+            } else {
+                let crust =
+                    plate.crust[template.local as usize].expect("owners point to existing crust");
+                plate.crust[local as usize].get_or_insert(crust);
+                gap_statistics.copied_cells += 1;
+                gap_statistics.copied_volume += crust.thickness;
+                new_owners[cell as usize] = Some(Ownership {
+                    plate: template.plate,
+                    local,
+                });
+            }
         }
 
-        // Fill the remaining gaps with new oceanic crust, growing the adjacent plates layer by
-        // layer.
+        // Fill the remaining gaps, growing the adjacent plates layer by layer. Where the plate
+        // moves away from a neighbouring plate, the gap is new sea floor (spreading ridge);
+        // otherwise it is an artifact of resampling the rigid plates onto the cells (at trenches
+        // and transform faults), and the gap gets a copy of the adjacent crust.
+        let angular_velocities: Vec<DVec3> = plates.iter().map(|p| p.angular_velocity).collect();
+        let min_opening = params.min_spreading_rate / (params.planet_radius * 100.0 / 1e6);
         let mut queue: VecDeque<u32> = (0..cell_count as u32)
             .filter(|&cell| new_owners[cell as usize].is_some())
             .collect();
@@ -218,21 +252,63 @@ impl Simulation {
             queue.push_back(0);
         }
         while let Some(cell) = queue.pop_front() {
-            let plate_index = new_owners[cell as usize]
-                .expect("queued cells are owned")
-                .plate;
+            let parent = new_owners[cell as usize].expect("queued cells are owned");
+            let plate_index = parent.plate;
             for &neighbor in mesh.neighbors(cell) {
                 if new_owners[neighbor as usize].is_some() {
                     continue;
                 }
+                let spreading = opens_away(
+                    mesh,
+                    &new_owners,
+                    &angular_velocities,
+                    neighbor,
+                    plate_index,
+                    min_opening,
+                );
                 let plate = &mut plates[plate_index as usize];
                 let local =
                     plate.local_vertex(mesh, inverse_rotations[plate_index as usize], neighbor);
-                plate.crust[local as usize].get_or_insert_with(new_oceanic_crust);
-                new_owners[neighbor as usize] = Some(Ownership {
-                    plate: plate_index,
-                    local,
-                });
+                if spreading {
+                    gap_statistics.new_crust_cells += 1;
+                    plate.crust[local as usize].get_or_insert_with(new_oceanic_crust);
+                    plate.consumed[local as usize] = false;
+                    new_owners[neighbor as usize] = Some(Ownership {
+                        plate: plate_index,
+                        local,
+                    });
+                } else if plate.consumed[local as usize] {
+                    let at_boundary = mesh.neighbors(neighbor).iter().any(|&n| {
+                        new_owners[n as usize].is_some_and(|owner| owner.plate != plate_index)
+                    });
+                    if at_boundary {
+                        // A sliver at a boundary where the plate's crust was consumed: refilling
+                        // it would recreate consumed crust (and, at collisions, stack it again).
+                        // Show the adjacent sample.
+                        gap_statistics.shared_cells += 1;
+                        new_owners[neighbor as usize] = Some(parent);
+                    } else {
+                        // Away from other plates, the uncovered area is open sea floor.
+                        gap_statistics.new_crust_cells += 1;
+                        plate.crust[local as usize] = Some(new_oceanic_crust());
+                        plate.consumed[local as usize] = false;
+                        new_owners[neighbor as usize] = Some(Ownership {
+                            plate: plate_index,
+                            local,
+                        });
+                    }
+                } else {
+                    // A resampling gap: heal it with a copy of the adjacent crust.
+                    let crust =
+                        plate.crust[parent.local as usize].expect("owners point to existing crust");
+                    plate.crust[local as usize].get_or_insert(crust);
+                    gap_statistics.copied_cells += 1;
+                    gap_statistics.copied_volume += crust.thickness;
+                    new_owners[neighbor as usize] = Some(Ownership {
+                        plate: plate_index,
+                        local,
+                    });
+                }
                 queue.push_back(neighbor);
             }
         }
@@ -324,6 +400,89 @@ pub(super) struct ResolvedBoundaries {
     pub(super) collisions: HashMap<(u32, u32), u32>,
 }
 
+/// A crust sample overridden by another plate at a cell.
+struct LostContact {
+    cell: u32,
+    winner: Ownership,
+    winner_crust: Crust,
+    loser: Ownership,
+    loser_crust: Crust,
+}
+
+/// Counts of how uncovered cells were filled, accumulated over the simulation.
+#[derive(Clone, Debug, Default)]
+pub struct GapStatistics {
+    /// Cells filled with new oceanic crust where plates spread apart.
+    pub new_crust_cells: usize,
+    /// Resampling gaps healed with a copy of the adjacent crust.
+    pub copied_cells: usize,
+    /// Crust thickness (m · cells) created by copies.
+    pub copied_volume: f64,
+    /// Gaps where the plate's crust was consumed, showing the adjacent sample instead.
+    pub shared_cells: usize,
+    /// Single-cell holes inside a plate (healed or shared, also counted there).
+    pub hole_cells: usize,
+    /// Cells whose surface crust was consumed while visible (should stay zero).
+    pub freed_cells: usize,
+}
+
+/// Whether `plate` moves away from any other plate near `cell` faster than `min_opening`
+/// (rad/Myr), so that new sea floor forms at `cell`. The direction between two plates is taken
+/// from the centroids of their cells within a few rings around `cell`, which is smoother than
+/// single mesh edges, and the motion must not be too oblique (transform faults do not spread).
+fn opens_away(
+    mesh: &SphereMesh,
+    owners: &[Option<Ownership>],
+    angular_velocities: &[DVec3],
+    cell: u32,
+    plate: u32,
+    min_opening: f64,
+) -> bool {
+    const RINGS: usize = 3;
+    /// Opening must be at least this fraction of the relative speed.
+    const MIN_OBLIQUITY: f64 = 0.25;
+
+    let mut centroids: Vec<(u32, DVec3)> = Vec::new();
+    let mut visited = vec![cell];
+    let mut frontier = vec![cell];
+    for _ in 0..RINGS {
+        let mut next = Vec::new();
+        for &current in &frontier {
+            for &neighbor in mesh.neighbors(current) {
+                if visited.contains(&neighbor) {
+                    continue;
+                }
+                visited.push(neighbor);
+                next.push(neighbor);
+                if let Some(owner) = owners[neighbor as usize] {
+                    let position = mesh.vertex(neighbor);
+                    match centroids.iter_mut().find(|(p, _)| *p == owner.plate) {
+                        Some((_, sum)) => *sum += position,
+                        None => centroids.push((owner.plate, position)),
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    let r = mesh.vertex(cell);
+    let tangent = |v: DVec3| (v - r * r.dot(v)).normalize_or_zero();
+    let Some(&(_, own)) = centroids.iter().find(|(p, _)| *p == plate) else {
+        return false;
+    };
+    centroids.iter().any(|&(other, centroid)| {
+        if other == plate {
+            return false;
+        }
+        let normal = tangent(centroid.normalize() - own.normalize());
+        let relative =
+            (angular_velocities[other as usize] - angular_velocities[plate as usize]).cross(r);
+        let opening = relative.dot(normal);
+        opening > min_opening && opening > MIN_OBLIQUITY * relative.length()
+    })
+}
+
 /// New crust added to a plate around a cell.
 pub(super) struct CrustAddition {
     cell: u32,
@@ -388,4 +547,56 @@ pub(super) fn choose_overriding(
                 .max_by(|a, b| a.1.buoyancy().total_cmp(&b.1.buoyancy()))
         })
         .copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Plate 0 covers x < -0.02, plate 1 covers x > 0.02, the band between is uncovered. Returns
+    /// whether plate 1 opens away from plate 0 at the uncovered cell nearest to +z.
+    fn spreading(omega_0: DVec3, omega_1: DVec3) -> bool {
+        let mesh = SphereMesh::icosphere(4);
+        let owners: Vec<Option<Ownership>> = (0..mesh.len() as u32)
+            .map(|cell| {
+                let x = mesh.vertex(cell).x;
+                if x < -0.02 {
+                    Some(Ownership {
+                        plate: 0,
+                        local: cell,
+                    })
+                } else if x > 0.02 {
+                    Some(Ownership {
+                        plate: 1,
+                        local: cell,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let gap = (0..mesh.len() as u32)
+            .filter(|&cell| owners[cell as usize].is_none())
+            .max_by(|&a, &b| mesh.vertex(a).z.total_cmp(&mesh.vertex(b).z))
+            .unwrap();
+        // 0.5 cm/yr in rad/Myr.
+        let min_opening = 0.5 / 637.1;
+        opens_away(&mesh, &owners, &[omega_0, omega_1], gap, 1, min_opening)
+    }
+
+    #[test]
+    fn diverging_plates_make_new_sea_floor() {
+        // At +z, ω = ±y gives velocities along ±x: the plates move apart at ~6 cm/yr each.
+        assert!(spreading(-DVec3::Y * 0.01, DVec3::Y * 0.01));
+    }
+
+    #[test]
+    fn transform_faults_and_trenches_do_not() {
+        // ω = ±x gives velocities along ∓y at +z: fast sliding along the boundary.
+        assert!(!spreading(-DVec3::X * 0.01, DVec3::X * 0.01));
+        // Converging plates.
+        assert!(!spreading(DVec3::Y * 0.01, -DVec3::Y * 0.01));
+        // Spreading slower than the threshold.
+        assert!(!spreading(DVec3::ZERO, DVec3::Y * 0.0003));
+    }
 }

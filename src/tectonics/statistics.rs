@@ -32,6 +32,8 @@ pub struct Statistics {
     pub plate_areas: Vec<usize>,
     /// Number of active mantle plumes.
     pub plumes: usize,
+    /// How uncovered cells were filled so far.
+    pub gaps: GapStatistics,
     /// Plates created so far (rifting, subduction initiation).
     pub plate_births: usize,
     /// Plates that disappeared so far (sutured or consumed).
@@ -167,6 +169,7 @@ impl Simulation {
             mean_speed: speed_sum / cell_count as f64,
             plate_areas,
             plumes: self.plumes().len(),
+            gaps: self.gap_statistics.clone(),
             plate_births: self.plate_births,
             plate_deaths: self.plate_deaths,
             land_masses: components(&self.mesh, |cell| {

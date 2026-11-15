@@ -43,6 +43,7 @@ impl Simulation {
             angular_velocity: self.plates[plate as usize].angular_velocity,
             crust,
             lookup_cache: self.plates[plate as usize].lookup_cache.clone(),
+            consumed: self.plates[plate as usize].consumed.clone(),
         };
         let new_index = self.plates.len() as u32;
         self.plates.push(new_plate);
@@ -110,6 +111,7 @@ impl Simulation {
                         }
                         slot => *slot = Some(crust),
                     }
+                    target.consumed[local as usize] = false;
                     destination.insert(owner.local, local);
                     local
                 }

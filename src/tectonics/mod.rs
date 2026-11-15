@@ -39,6 +39,7 @@ mod mantle;
 mod statistics;
 mod topology;
 
+pub use boundaries::GapStatistics;
 pub use crust::*;
 pub use events::PlateEventParams;
 pub use mantle::{MantleParams, Plume};
@@ -103,6 +104,9 @@ pub struct TectonicParams {
     pub slab_pull_reference_age: f64,
     /// Lithosphere stops thickening after this age in Myr.
     pub slab_pull_max_age: f64,
+    /// Plates must separate at least this fast (cm/yr) for a gap between them to become new sea
+    /// floor; slower gaps are resampling artifacts. The slowest ridges spread at ~0.6–1.5 cm/yr.
+    pub min_spreading_rate: f64,
     /// Ridge push per metre of ridge in N/m.
     pub ridge_push: f64,
     /// Oceanic crust up to this age in Myr at a divergent boundary counts as a ridge flank.
@@ -146,6 +150,7 @@ impl Default for TectonicParams {
             slab_pull: 2e13,
             slab_pull_reference_age: 100.0,
             slab_pull_max_age: 120.0,
+            min_spreading_rate: 0.5,
             ridge_push: 3e12,
             ridge_age: 20.0,
             basal_drag: 1e15,
@@ -168,6 +173,9 @@ pub struct Plate {
     pub crust: Vec<Option<Crust>>,
     /// For each world cell, the local vertex that was closest to it in the previous substep.
     lookup_cache: Vec<u32>,
+    /// Local vertices whose crust was consumed (subducted or stacked onto another plate). Gaps
+    /// there are never refilled with copies, which would recreate consumed crust.
+    consumed: Vec<bool>,
 }
 
 impl Plate {
@@ -205,6 +213,8 @@ pub struct Simulation {
     polarities: HashMap<(u32, u32), Polarity>,
     rng: ChaCha8Rng,
     mantle: mantle::MantleFlow,
+    /// How uncovered cells were filled so far.
+    gap_statistics: GapStatistics,
     /// Number of plates created by rifting and subduction initiation so far.
     plate_births: usize,
     /// Number of plates that disappeared (merged or consumed) so far.
@@ -256,6 +266,7 @@ impl Simulation {
                 angular_velocity: DVec3::ZERO,
                 crust: vec![None; cell_count],
                 lookup_cache: (0..cell_count as u32).collect(),
+                consumed: vec![false; cell_count],
             })
             .collect();
 
@@ -334,6 +345,7 @@ impl Simulation {
             owners,
             polarities,
             mantle,
+            gap_statistics: GapStatistics::default(),
             plate_births: 0,
             plate_deaths: 0,
             rng: owned_rng,
