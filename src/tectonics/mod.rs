@@ -23,12 +23,16 @@
 //! when it is thick and light enough (see [`Crust::is_continental`]), so island arcs gradually
 //! become continental crust as they thicken.
 //!
-//! Which plate overrides is decided per pair of plates when they first touch, from the buoyancy of
-//! their crust, and then kept, so that every boundary has a consistent subduction polarity. It
-//! flips when continental crust arrives at the trench, since continents cannot subduct under
-//! oceanic crust. Colliding continents drag their plates towards a common motion, and plates
-//! occasionally get a new random motion (plate reorganisation), which keeps the system from
-//! settling down.
+//! Which plate would subduct is decided per pair of plates when they first touch, from the
+//! buoyancy of their crust, and then kept (subduction polarity). It flips when continental crust
+//! arrives at the trench, since continents cannot subduct under oceanic crust. Where the plates
+//! of a pair converge, their boundary is a trench, with a slab that grows as it subducts.
+//!
+//! Plate velocities follow from a balance of forces on each plate (slab pull, ridge push, drag
+//! against the mantle flow, collision resistance; see [`dynamics`]), with mantle flow from sinking
+//! slabs and plumes ([`mantle`]). Plates are born by rifting above plumes and by subduction
+//! initiation at old passive margins, and disappear by subduction, suturing after continental
+//! collisions, or capture of tiny plates by a neighbour ([`events`]).
 
 mod boundaries;
 mod crust;
@@ -41,7 +45,7 @@ mod topology;
 
 pub use boundaries::GapStatistics;
 pub use crust::*;
-pub use events::PlateEventParams;
+pub use events::{EventCounts, PlateEventParams};
 pub use mantle::{MantleParams, Plume};
 pub use statistics::*;
 
@@ -107,6 +111,14 @@ pub struct TectonicParams {
     /// Plates must separate at least this fast (cm/yr) for a gap between them to become new sea
     /// floor; slower gaps are resampling artifacts. The slowest ridges spread at ~0.6–1.5 cm/yr.
     pub min_spreading_rate: f64,
+    /// Plates must converge at least this fast (cm/yr) for a new trench to act (an existing slab
+    /// keeps acting until the plates diverge faster than this).
+    pub min_trench_convergence: f64,
+    /// Slab pull reaches full strength once this much slab (m) has subducted (about the depth
+    /// of the upper mantle; Conrad & Lithgow-Bertelloni 2002).
+    pub max_slab_length: f64,
+    /// Time constant (Myr) for a slab to sink away or break off once subduction stops.
+    pub slab_decay_time: f64,
     /// Ridge push per metre of ridge in N/m.
     pub ridge_push: f64,
     /// Oceanic crust up to this age in Myr at a divergent boundary counts as a ridge flank.
@@ -151,6 +163,9 @@ impl Default for TectonicParams {
             slab_pull_reference_age: 100.0,
             slab_pull_max_age: 120.0,
             min_spreading_rate: 0.5,
+            min_trench_convergence: 0.1,
+            max_slab_length: 600e3,
+            slab_decay_time: 10.0,
             ridge_push: 3e12,
             ridge_age: 20.0,
             basal_drag: 1e15,
@@ -202,6 +217,8 @@ struct Polarity {
     last_contact: f64,
     /// How long, in Myr, the continents of the two plates have been colliding without pause.
     collision_time: f64,
+    /// Length of slab (m) that has subducted below the overriding plate.
+    slab_length: f64,
 }
 
 pub struct Simulation {
@@ -215,10 +232,8 @@ pub struct Simulation {
     mantle: mantle::MantleFlow,
     /// How uncovered cells were filled so far.
     gap_statistics: GapStatistics,
-    /// Number of plates created by rifting and subduction initiation so far.
-    plate_births: usize,
-    /// Number of plates that disappeared (merged or consumed) so far.
-    plate_deaths: usize,
+    /// Plate births and deaths so far.
+    event_counts: EventCounts,
     /// Simulated time in Myr.
     time: f64,
 }
@@ -325,6 +340,8 @@ impl Simulation {
                         overriding,
                         last_contact: 0.0,
                         collision_time: 0.0,
+                        // Initial subduction zones have fully developed slabs.
+                        slab_length: params.max_slab_length,
                     },
                 );
             }
@@ -346,8 +363,7 @@ impl Simulation {
             polarities,
             mantle,
             gap_statistics: GapStatistics::default(),
-            plate_births: 0,
-            plate_deaths: 0,
+            event_counts: EventCounts::default(),
             rng: owned_rng,
             time: 0.0,
         }
@@ -393,6 +409,7 @@ impl Simulation {
         }
         self.crustal_flow(dt);
         self.remove_dead_plates();
+        self.update_slab_lengths(dt);
         self.plate_events(dt);
 
         let subduction = self.subduction_rates();
@@ -503,6 +520,19 @@ mod tests {
         assert!((4500.0..6500.0).contains(&continent(70_000.0).surface_elevation()));
         assert!((-500.0..0.0).contains(&continent(30_000.0).surface_elevation()));
         assert!(continent(30_000.0).is_continental());
+    }
+
+    #[test]
+    fn thinned_continental_crust_is_not_ocean() {
+        let eroded = Crust {
+            thickness: OCEANIC_THICKNESS,
+            density: CONTINENTAL_DENSITY,
+            age: 1000.0,
+            sediment: 0.0,
+        };
+        assert!(!eroded.is_oceanic());
+        assert!(!eroded.is_continental());
+        assert!(new_oceanic_crust().is_oceanic());
     }
 
     #[test]

@@ -517,6 +517,7 @@ pub(super) fn choose_overriding(
                     },
                     last_contact: time,
                     collision_time: 0.0,
+                    slab_length: 0.0,
                 });
             polarity.last_contact = time;
             let (top, top_crust, bottom, bottom_crust) = if polarity.overriding == a.plate {
@@ -525,7 +526,10 @@ pub(super) fn choose_overriding(
                 (b, b_crust, a, a_crust)
             };
             if bottom_crust.is_continental() && !top_crust.is_continental() {
+                // Continental crust arrived at the trench: the polarity flips, and the old slab
+                // belonged to the other plate.
                 polarity.overriding = bottom.plate;
+                polarity.slab_length = 0.0;
             } else {
                 polarity.overriding = top.plate;
             }

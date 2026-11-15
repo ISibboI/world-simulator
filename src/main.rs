@@ -200,8 +200,8 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
         // rad/Myr × m → cm/yr
         statistics.mean_speed * EARTH_RADIUS * 100.0 / 1e6,
         living_plates,
-        statistics.plate_births,
-        statistics.plate_deaths,
+        statistics.events.births(),
+        statistics.events.deaths(),
         100.0 * largest_plate as f64 / simulation.mesh().len() as f64,
         statistics.plumes,
     );
@@ -219,6 +219,20 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
         statistics.mean_oceanic_speed * cm_per_year,
         statistics.mean_continental_speed * cm_per_year,
         statistics.max_speed * cm_per_year,
+    );
+    info!(
+        "    trenches {:.0} km, ridges {:.0} km | slab pull {:.2e} N, ridge push {:.2e} N | \
+         rifts {}, initiations {}, sutures {}, captures {}, consumed {}, merge loss {:.0} km·cells",
+        statistics.trench_length,
+        statistics.ridge_length,
+        statistics.slab_pull,
+        statistics.ridge_push,
+        statistics.events.rifts,
+        statistics.events.initiations,
+        statistics.events.sutures,
+        statistics.events.captures,
+        statistics.events.consumed,
+        statistics.events.merge_lost_continental_volume / 1000.0,
     );
     info!(
         "    gaps filled: {} new sea floor, {} copies ({:.0} km·cells), {} shared, {} holes, \

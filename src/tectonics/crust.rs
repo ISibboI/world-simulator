@@ -3,6 +3,12 @@
 
 use crate::isostasy::{self, MANTLE_DENSITY, OCEANIC_DENSITY, SEDIMENT_DENSITY, WATER_LOADING};
 
+/// Oceanic crust is thinner than this (m); thicker crust is transitional or continental.
+const MAX_OCEANIC_THICKNESS: f64 = 12_000.0;
+
+/// Oceanic crust is denser than this (kg/m³), between continental and oceanic density.
+const MIN_OCEANIC_DENSITY: f64 = 2850.0;
+
 /// Thickness of new oceanic crust in metres.
 pub const OCEANIC_THICKNESS: f64 = 7000.0;
 
@@ -56,6 +62,13 @@ impl Crust {
     /// Whether the crust is thick and light enough to resist subduction.
     pub fn is_continental(&self) -> bool {
         self.crustal_buoyancy() >= CONTINENTAL_BUOYANCY
+    }
+
+    /// Whether this is normal oceanic crust: thin and dense. Crust that is neither oceanic nor
+    /// continental is transitional (thickened arc crust, or thinned continental crust, whose age
+    /// is not the age of a sea floor).
+    pub fn is_oceanic(&self) -> bool {
+        self.thickness < MAX_OCEANIC_THICKNESS && self.density > MIN_OCEANIC_DENSITY
     }
 
     /// Crust with higher buoyancy overrides crust with lower buoyancy at convergent boundaries:

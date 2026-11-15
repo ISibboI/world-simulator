@@ -34,10 +34,14 @@ pub struct Statistics {
     pub plumes: usize,
     /// How uncovered cells were filled so far.
     pub gaps: GapStatistics,
-    /// Plates created so far (rifting, subduction initiation).
-    pub plate_births: usize,
-    /// Plates that disappeared so far (sutured or consumed).
-    pub plate_deaths: usize,
+    /// Plate births and deaths so far, by mechanism.
+    pub events: EventCounts,
+    /// Length of trenches and ridges in km.
+    pub trench_length: f64,
+    pub ridge_length: f64,
+    /// Total magnitude of slab pull and ridge push in N.
+    pub slab_pull: f64,
+    pub ridge_push: f64,
     /// Connected land masses (cells at or above sea level).
     pub land_masses: ComponentStatistics,
     /// Connected areas of continental crust.
@@ -117,7 +121,7 @@ impl Simulation {
             if crust.is_continental() {
                 continental += 1;
                 continental_speed += speed;
-            } else {
+            } else if crust.is_oceanic() {
                 oceanic_age_sum += crust.age;
                 oceanic_ages.push(crust.age);
                 oceanic_speed += speed;
@@ -134,7 +138,24 @@ impl Simulation {
             min_elevation = min_elevation.min(elevation);
         }
 
-        let oceanic = cell_count - continental;
+        let oceanic = oceanic_ages.len();
+        let boundary_length = self.params.planet_radius * self.mesh.mean_edge_angle() / 1000.0;
+        let (mut trench_length, mut ridge_length, mut slab_pull, mut ridge_push) =
+            (0.0, 0.0, 0.0, 0.0);
+        for boundary in self.boundary_cells() {
+            let force = self.boundary_force(&boundary).length();
+            match boundary.kind {
+                super::dynamics::BoundaryKind::Trench { .. } => {
+                    trench_length += boundary_length;
+                    slab_pull += force;
+                }
+                super::dynamics::BoundaryKind::Ridge => {
+                    ridge_length += boundary_length;
+                    ridge_push += force;
+                }
+                _ => {}
+            }
+        }
         oceanic_ages.sort_by(f64::total_cmp);
         let percentile = |p: f64| {
             if oceanic_ages.is_empty() {
@@ -170,8 +191,11 @@ impl Simulation {
             plate_areas,
             plumes: self.plumes().len(),
             gaps: self.gap_statistics.clone(),
-            plate_births: self.plate_births,
-            plate_deaths: self.plate_deaths,
+            events: self.event_counts.clone(),
+            trench_length,
+            ridge_length,
+            slab_pull,
+            ridge_push,
             land_masses: components(&self.mesh, |cell| {
                 self.surface_crust(cell).surface_elevation() >= 0.0
             }),

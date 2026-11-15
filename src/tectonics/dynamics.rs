@@ -23,6 +23,9 @@ use super::*;
 /// Seconds per million years.
 const SECONDS_PER_MYR: f64 = 1e6 * 365.25 * 24.0 * 3600.0;
 
+/// Maximum number of solves for the set of converging collision contacts.
+const MAX_ACTIVE_SET_ITERATIONS: usize = 20;
+
 /// What happens at a boundary cell, seen from the plate the cell belongs to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum BoundaryKind {
@@ -45,6 +48,9 @@ pub(super) struct BoundaryCell {
     pub(super) other: u32,
     /// Unit vector tangent to the sphere, pointing from the plate towards the other plate.
     pub(super) normal: DVec3,
+    /// Relative velocity of the plate towards the other plate along `normal` in rad/Myr
+    /// (positive where they converge).
+    pub(super) convergence: f64,
     pub(super) kind: BoundaryKind,
 }
 
@@ -52,6 +58,7 @@ impl Simulation {
     /// Finds all boundary cells and classifies them with the current plate velocities.
     pub(super) fn boundary_cells(&self) -> Vec<BoundaryCell> {
         let params = &self.params;
+        let min_convergence = params.min_trench_convergence / (params.planet_radius * 100.0 / 1e6);
         let mut result = Vec::new();
         // Per other plate: summed direction towards it and one representative neighbour.
         let mut towards: Vec<(u32, DVec3, u32)> = Vec::new();
@@ -87,19 +94,27 @@ impl Simulation {
                 }
                 let other_crust = self.surface_crust(neighbor);
                 let other_velocity = self.plates[other as usize].angular_velocity.cross(position);
-                let converging = (velocity - other_velocity).dot(normal) > 0.0;
-                let overriding = self
-                    .polarities
-                    .get(&pair_key(owner.plate, other))
-                    .map(|polarity| polarity.overriding);
+                let convergence = (velocity - other_velocity).dot(normal);
+                let polarity = self.polarities.get(&pair_key(owner.plate, other));
+                // A polarity only says which plate would subduct if the plates converge. A trench
+                // needs convergence, or an existing slab where the plates do not clearly diverge
+                // (hysteresis: a slab keeps pulling while the plates are nearly at rest).
+                let subducts_here = polarity.is_some_and(|polarity| {
+                    polarity.overriding == other
+                        && (convergence > min_convergence
+                            || (polarity.slab_length > 0.0 && convergence > -min_convergence))
+                });
 
                 let kind = if crust.is_continental() && other_crust.is_continental() {
                     BoundaryKind::Collision
-                } else if overriding == Some(other) && !crust.is_continental() {
+                } else if subducts_here && !crust.is_continental() {
                     BoundaryKind::Trench {
                         slab_age: crust.age,
                     }
-                } else if !converging && !crust.is_continental() && crust.age <= params.ridge_age {
+                } else if convergence < 0.0
+                    && !crust.is_continental()
+                    && crust.age <= params.ridge_age
+                {
                     BoundaryKind::Ridge
                 } else {
                     BoundaryKind::Other
@@ -109,6 +124,7 @@ impl Simulation {
                     plate: owner.plate,
                     other,
                     normal,
+                    convergence,
                     kind,
                 });
             }
@@ -123,7 +139,6 @@ impl Simulation {
         let plate_count = self.plates.len();
         let radius = params.planet_radius;
         let cell_area = 4.0 * std::f64::consts::PI * radius * radius / self.mesh.len() as f64;
-        let boundary_length = radius * self.mesh.mean_edge_angle();
 
         // Torque balance per plate: drag matrix and driving torques.
         let mut drag = vec![DMat3::ZERO; plate_count];
@@ -147,17 +162,7 @@ impl Simulation {
         let boundaries = self.boundary_cells();
         for boundary in &boundaries {
             let r = self.mesh.vertex(boundary.cell);
-            let force = match boundary.kind {
-                BoundaryKind::Trench { slab_age } => {
-                    let thickness_factor = (slab_age.min(params.slab_pull_max_age)
-                        / params.slab_pull_reference_age)
-                        .max(0.0)
-                        .sqrt();
-                    boundary.normal * (params.slab_pull * thickness_factor * boundary_length)
-                }
-                BoundaryKind::Ridge => -boundary.normal * (params.ridge_push * boundary_length),
-                BoundaryKind::Collision | BoundaryKind::Other => DVec3::ZERO,
-            };
+            let force = self.boundary_force(boundary);
             driving[boundary.plate as usize] += r.cross(force) * radius;
         }
 
@@ -172,13 +177,17 @@ impl Simulation {
         let mut active = vec![true; collisions.len()];
 
         let mut omega = vec![DVec3::ZERO; plate_count];
-        for _ in 0..4 {
+        let mut converged = false;
+        for _ in 0..MAX_ACTIVE_SET_ITERATIONS {
             let size = 3 * plate_count;
             let mut matrix = vec![0.0; size * size];
             let mut rhs = vec![0.0; size];
             for plate in 0..plate_count {
-                // A tiny regularisation keeps plates without (or with very few) cells solvable.
-                let block = drag[plate] + DMat3::IDENTITY * (1e-9 * cell_area * radius * radius);
+                // A small regularisation (like the drag under a millionth of a cell) keeps plates
+                // without cells, or with a single cell (free to spin about its own axis),
+                // solvable.
+                let block = drag[plate]
+                    + DMat3::IDENTITY * (1e-6 * params.basal_drag * cell_area * radius * radius);
                 add_block(&mut matrix, size, plate, plate, block);
                 for i in 0..3 {
                     rhs[3 * plate + i] = driving[plate][i];
@@ -231,8 +240,12 @@ impl Simulation {
                 }
             }
             if !changed {
+                converged = true;
                 break;
             }
+        }
+        if !converged {
+            tracing::debug!(time = self.time, "Collision active set did not converge");
         }
 
         for (plate, omega) in self.plates.iter_mut().zip(omega) {
@@ -242,6 +255,59 @@ impl Simulation {
 }
 
 impl Simulation {
+    /// The force (N, tangent to the sphere) acting on the plate at a boundary cell: slab pull at
+    /// trenches, growing with the age of the slab (lithosphere thickness ∝ √age) and with the
+    /// length of slab that has already sunk; ridge push at ridges.
+    pub(super) fn boundary_force(&self, boundary: &BoundaryCell) -> DVec3 {
+        let params = &self.params;
+        let boundary_length = params.planet_radius * self.mesh.mean_edge_angle();
+        match boundary.kind {
+            BoundaryKind::Trench { slab_age } => {
+                let thickness_factor = (slab_age.min(params.slab_pull_max_age)
+                    / params.slab_pull_reference_age)
+                    .max(0.0)
+                    .sqrt();
+                let slab_length = self
+                    .polarities
+                    .get(&pair_key(boundary.plate, boundary.other))
+                    .map_or(0.0, |polarity| polarity.slab_length);
+                let length_factor = (slab_length / params.max_slab_length).clamp(0.0, 1.0);
+                boundary.normal
+                    * (params.slab_pull * thickness_factor * length_factor * boundary_length)
+            }
+            BoundaryKind::Ridge => -boundary.normal * (params.ridge_push * boundary_length),
+            BoundaryKind::Collision | BoundaryKind::Other => DVec3::ZERO,
+        }
+    }
+
+    /// Updates the length of slab below each subduction zone: it grows with the convergence at
+    /// the trench (up to the length of an upper-mantle slab) and decays when subduction stops
+    /// (the slab sinks or breaks off).
+    pub(super) fn update_slab_lengths(&mut self, dt: f64) {
+        let params = &self.params;
+        // Mean convergence at the trench cells of each pair, in m/Myr.
+        let mut convergence: HashMap<(u32, u32), (f64, usize)> = HashMap::new();
+        for boundary in self.boundary_cells() {
+            if matches!(boundary.kind, BoundaryKind::Trench { .. }) && boundary.convergence > 0.0 {
+                let entry = convergence
+                    .entry(pair_key(boundary.plate, boundary.other))
+                    .or_default();
+                entry.0 += boundary.convergence * params.planet_radius;
+                entry.1 += 1;
+            }
+        }
+        let decay = (-dt / params.slab_decay_time).exp();
+        for (pair, polarity) in &mut self.polarities {
+            match convergence.get(pair) {
+                Some(&(sum, count)) if count > 0 => {
+                    polarity.slab_length = (polarity.slab_length + sum / count as f64 * dt)
+                        .min(params.max_slab_length);
+                }
+                _ => polarity.slab_length *= decay,
+            }
+        }
+    }
+
     /// Positions of trench cells with their subduction rate (convergence speed times boundary
     /// length, in m²/s), which feed the mantle downwellings.
     pub(super) fn subduction_rates(&self) -> Vec<(DVec3, f64)> {
@@ -385,6 +451,7 @@ mod tests {
                 overriding: 1,
                 last_contact: 0.0,
                 collision_time: 0.0,
+                slab_length: 600e3,
             },
         );
         // Old oceanic crust everywhere, except that plate 0 is continental on the -x side, so
@@ -486,5 +553,90 @@ mod tests {
         // Without resistance, the plates would converge at roughly the mantle speed
         // (3e-9 m/s ≈ 0.015 rad/Myr). Collision resistance reduces this to a small fraction.
         assert!(mean < 0.002, "{mean}");
+    }
+
+    /// Two plates, all oceanic crust, plate 0 would subduct under plate 1.
+    fn two_oceanic_plates(slab_length: f64) -> Simulation {
+        let mut simulation =
+            Simulation::new(SphereMesh::icosphere(4), 2, TectonicParams::default(), 5);
+        simulation.polarities.clear();
+        simulation.polarities.insert(
+            pair_key(0, 1),
+            Polarity {
+                overriding: 1,
+                last_contact: 0.0,
+                collision_time: 0.0,
+                slab_length,
+            },
+        );
+        for plate in &mut simulation.plates {
+            for crust in plate.crust.iter_mut().flatten() {
+                *crust = Crust {
+                    age: 100.0,
+                    ..new_oceanic_crust()
+                };
+            }
+        }
+        simulation
+    }
+
+    /// Makes the plates move apart (`direction` = 1) or together (`direction` = -1) by rotating
+    /// them in opposite senses about an axis through the boundary.
+    fn set_relative_motion(simulation: &mut Simulation, direction: f64) {
+        let boundary: Vec<BoundaryCell> = simulation.boundary_cells();
+        let b = boundary.iter().find(|b| b.plate == 0).unwrap();
+        let r = simulation.mesh.vertex(b.cell);
+        // ω = r × n moves points at r along n.
+        let axis = r.cross(b.normal).normalize();
+        simulation.plates[0].angular_velocity = -axis * 0.01 * direction;
+        simulation.plates[1].angular_velocity = axis * 0.01 * direction;
+    }
+
+    #[test]
+    fn diverging_boundaries_are_not_trenches_despite_a_polarity() {
+        let mut simulation = two_oceanic_plates(600e3);
+        set_relative_motion(&mut simulation, 1.0);
+        let boundaries = simulation.boundary_cells();
+        // Where the plates diverge there must be no trench.
+        assert!(
+            boundaries
+                .iter()
+                .filter(|b| b.convergence < -0.001)
+                .all(|b| !matches!(b.kind, BoundaryKind::Trench { .. }))
+        );
+        set_relative_motion(&mut simulation, -1.0);
+        assert!(
+            simulation
+                .boundary_cells()
+                .iter()
+                .any(|b| matches!(b.kind, BoundaryKind::Trench { .. }))
+        );
+    }
+
+    #[test]
+    fn slabs_grow_with_convergence_and_decay_without() {
+        let mut simulation = two_oceanic_plates(0.0);
+        set_relative_motion(&mut simulation, -1.0);
+        let mut previous = 0.0;
+        for _ in 0..5 {
+            simulation.update_slab_lengths(1.0);
+            let length = simulation.polarities[&(0, 1)].slab_length;
+            assert!(length > previous);
+            previous = length;
+        }
+        for _ in 0..200 {
+            simulation.update_slab_lengths(1.0);
+        }
+        assert_eq!(
+            simulation.polarities[&(0, 1)].slab_length,
+            simulation.params.max_slab_length
+        );
+        // Subduction stops: the plates come to rest.
+        for plate in &mut simulation.plates {
+            plate.angular_velocity = DVec3::ZERO;
+        }
+        simulation.update_slab_lengths(10.0);
+        let decayed = simulation.polarities[&(0, 1)].slab_length;
+        assert!(decayed < 0.5 * simulation.params.max_slab_length);
     }
 }

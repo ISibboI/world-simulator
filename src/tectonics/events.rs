@@ -1,5 +1,10 @@
 //! Events that change the plate configuration: rifting above mantle plumes, initiation of
-//! subduction at old passive margins, and suturing of plates after a continental collision.
+//! subduction at old passive margins, suturing of plates after a continental collision, and
+//! capture of tiny plates by a neighbour.
+//!
+//! Subduction between two plates that already share a boundary needs no event: a polarity
+//! (which plate would subduct, by buoyancy) exists from their first contact, and the boundary
+//! becomes a trench as soon as they converge (see [`super::dynamics`]).
 
 use glam::DVec3;
 use rand::RngExt;
@@ -14,8 +19,12 @@ use super::*;
 pub struct PlateEventParams {
     /// A plume rifts the plate above it after this many Myr.
     pub rift_delay: f64,
-    /// Only plates covering at least this fraction of the surface are rifted by plumes.
-    pub min_rift_area: f64,
+    /// Plumes rift plates with continental crust within this angular distance (radians), the
+    /// usual setting of plume-related break-up.
+    pub rift_continent_radius: f64,
+    /// Plumes also rift plates without nearby continental crust that cover at least this
+    /// fraction of the surface.
+    pub min_oceanic_rift_area: f64,
     /// Neither part of a split plate may cover less than this fraction of the surface.
     pub min_plate_area: f64,
     /// No plates are split while there are this many plates.
@@ -24,24 +33,60 @@ pub struct PlateEventParams {
     pub initiation_age: f64,
     /// Mean time in Myr between subduction initiations while old passive margins exist.
     pub initiation_interval: f64,
+    /// Length of slab (m) that a new subduction zone at a passive margin starts with: the
+    /// foundering lithosphere that triggers it.
+    pub initiation_slab_length: f64,
     /// Plates whose continents have been colliding for this many Myr merge.
     pub suture_time: f64,
     /// Minimum number of colliding boundary cells for a pair of plates to count as colliding.
     pub suture_min_cells: usize,
+    /// Plates smaller than this fraction of the surface are captured by a neighbour.
+    pub min_plate_area_before_capture: f64,
 }
 
 impl Default for PlateEventParams {
     fn default() -> Self {
         Self {
             rift_delay: 20.0,
-            min_rift_area: 0.05,
+            rift_continent_radius: 0.17,
+            min_oceanic_rift_area: 0.15,
             min_plate_area: 0.01,
             max_plates: 30,
             initiation_age: 160.0,
             initiation_interval: 8.0,
+            initiation_slab_length: 150e3,
             suture_time: 30.0,
             suture_min_cells: 10,
+            min_plate_area_before_capture: 0.003,
         }
+    }
+}
+
+/// How many plate events of each kind happened so far.
+#[derive(Clone, Debug, Default)]
+pub struct EventCounts {
+    /// Plates split by plumes.
+    pub rifts: usize,
+    /// Plates split at passive margins by subduction initiation.
+    pub initiations: usize,
+    /// Plates merged after continental collisions.
+    pub sutures: usize,
+    /// Tiny plates captured by a neighbour.
+    pub captures: usize,
+    /// Plates that disappeared by subduction.
+    pub consumed: usize,
+    /// Continental crust volume (thickness × cells, m) lost in merges: hidden samples of the
+    /// absorbed plate.
+    pub merge_lost_continental_volume: f64,
+}
+
+impl EventCounts {
+    pub fn births(&self) -> usize {
+        self.rifts + self.initiations
+    }
+
+    pub fn deaths(&self) -> usize {
+        self.sutures + self.captures + self.consumed
     }
 }
 
@@ -49,9 +94,9 @@ impl Simulation {
     /// Runs the plate events for a time step of `dt` Myr.
     pub(super) fn plate_events(&mut self, dt: f64) {
         self.suture_colliding_plates(dt);
+        self.capture_tiny_plates();
         self.rift_above_plumes();
         self.initiate_subduction(dt);
-        self.initiate_oceanic_subduction();
         self.remove_dead_plates();
     }
 
@@ -85,13 +130,18 @@ impl Simulation {
         if (positive as f64) < min_cells || (negative as f64) < min_cells {
             return None;
         }
-        let new_plate = self.split_plate(plate, normal)?;
-        self.plate_births += 1;
-        Some(new_plate)
+        self.split_plate(plate, normal)
     }
 
-    /// A plume that has been rising below a large plate for long enough splits it along a great
-    /// circle through the plume. The plume's outflow then drives the two parts apart.
+    /// Merges `absorbed` into `into` and records the continental crust lost.
+    fn merge_and_record(&mut self, into: u32, absorbed: u32) {
+        let lost = self.merge_plates(into, absorbed);
+        self.event_counts.merge_lost_continental_volume += lost;
+    }
+
+    /// A plume that has been rising below a plate with continental crust nearby (or below a
+    /// very large plate) for long enough splits it along a great circle through the plume. The
+    /// plume's outflow then drives the two parts apart.
     fn rift_above_plumes(&mut self) {
         let params = self.params.events.clone();
         let candidates: Vec<(usize, DVec3)> = self
@@ -106,7 +156,14 @@ impl Simulation {
         for (index, position) in candidates {
             let cell = self.mesh.nearest(position);
             let plate = self.owners[cell as usize].plate;
-            if self.plate_area_fractions()[plate as usize] < params.min_rift_area {
+            let continent_nearby = (0..self.mesh.len() as u32).any(|other| {
+                self.owners[other as usize].plate == plate
+                    && self.mesh.vertex(other).angle_between(position)
+                        < params.rift_continent_radius
+                    && self.surface_crust(other).is_continental()
+            });
+            let large = self.plate_area_fractions()[plate as usize] >= params.min_oceanic_rift_area;
+            if !continent_nearby && !large {
                 continue;
             }
             // A random great circle through the plume.
@@ -116,6 +173,7 @@ impl Simulation {
                 continue;
             }
             if let Some(new_plate) = self.split_if_large_enough(plate, normal) {
+                self.event_counts.rifts += 1;
                 debug!(plate, new_plate, time = self.time, "Plume rifted a plate");
             }
             // Each plume rifts at most once, also if the split was not possible.
@@ -123,64 +181,9 @@ impl Simulation {
         }
     }
 
-    /// Old oceanic lithosphere at a boundary between two oceanic plates without a subduction
-    /// zone (such as a transform fault) starts to sink below the younger plate: the boundary
-    /// becomes a subduction zone. This is how many intra-oceanic subduction zones began (e.g.
-    /// Izu-Bonin-Mariana).
-    fn initiate_oceanic_subduction(&mut self) {
-        let initiation_age = self.params.events.initiation_age;
-        let mut new_zones: HashMap<(u32, u32), (u32, f64)> = HashMap::new();
-        for boundary in self.boundary_cells() {
-            let pair = pair_key(boundary.plate, boundary.other);
-            if self.polarities.contains_key(&pair) {
-                continue;
-            }
-            let crust = self.surface_crust(boundary.cell);
-            if crust.is_continental() || crust.age < initiation_age {
-                continue;
-            }
-            // The other side of the boundary: the oldest crust sinks.
-            let other_crust = self
-                .mesh
-                .neighbors(boundary.cell)
-                .iter()
-                .filter(|&&n| self.owners[n as usize].plate == boundary.other)
-                .map(|&n| self.surface_crust(n))
-                .next();
-            let Some(other_crust) = other_crust else {
-                continue;
-            };
-            if other_crust.age >= crust.age {
-                continue;
-            }
-            let entry = new_zones.entry(pair).or_insert((boundary.other, 0.0));
-            if crust.age > entry.1 {
-                *entry = (boundary.other, crust.age);
-            }
-        }
-        let mut zones: Vec<_> = new_zones.into_iter().collect();
-        zones.sort_unstable_by_key(|(pair, _)| *pair);
-        for (pair, (overriding, _)) in zones {
-            debug!(
-                ?pair,
-                overriding,
-                time = self.time,
-                "Subduction started at an oceanic boundary"
-            );
-            self.polarities.insert(
-                pair,
-                Polarity {
-                    overriding,
-                    last_contact: self.time,
-                    collision_time: 0.0,
-                },
-            );
-        }
-    }
-
     /// Old oceanic lithosphere at a passive margin (ocean and continent on the same plate) may
     /// start to sink: the plate splits along the margin and the oceanic part subducts below the
-    /// continental part.
+    /// continental part, starting with a short slab.
     fn initiate_subduction(&mut self, dt: f64) {
         let params = self.params.events.clone();
         // Old oceanic cells next to continental crust of the same plate, weighted by age.
@@ -188,7 +191,7 @@ impl Simulation {
         for cell in 0..self.mesh.len() as u32 {
             let owner = self.owners[cell as usize];
             let crust = self.surface_crust(cell);
-            if crust.is_continental() || crust.age < params.initiation_age {
+            if !crust.is_oceanic() || crust.age < params.initiation_age {
                 continue;
             }
             let at_margin = self.mesh.neighbors(cell).iter().any(|&neighbor| {
@@ -237,12 +240,14 @@ impl Simulation {
         }
         // The new plate is the continental side; the oceanic side subducts below it.
         if let Some(continental_plate) = self.split_if_large_enough(plate, normal) {
+            self.event_counts.initiations += 1;
             self.polarities.insert(
                 pair_key(plate, continental_plate),
                 Polarity {
                     overriding: continental_plate,
                     last_contact: self.time,
                     collision_time: 0.0,
+                    slab_length: params.initiation_slab_length,
                 },
             );
             debug!(
@@ -255,11 +260,14 @@ impl Simulation {
     }
 
     /// Tracks how long pairs of plates have been in continental collision, and merges them once
-    /// the collision has lasted long enough.
+    /// the collision has lasted long enough. Contacts count unless the plates clearly move
+    /// apart (collision resistance drives locked collisions to near-zero convergence).
     fn suture_colliding_plates(&mut self, dt: f64) {
+        let min_convergence =
+            self.params.min_trench_convergence / (self.params.planet_radius * 100.0 / 1e6);
         let mut colliding: HashMap<(u32, u32), usize> = HashMap::new();
         for boundary in self.boundary_cells() {
-            if boundary.kind == BoundaryKind::Collision {
+            if boundary.kind == BoundaryKind::Collision && boundary.convergence > -min_convergence {
                 *colliding
                     .entry(pair_key(boundary.plate, boundary.other))
                     .or_default() += 1;
@@ -270,7 +278,7 @@ impl Simulation {
             if colliding.get(pair).copied().unwrap_or(0) >= min_cells {
                 polarity.collision_time += dt;
             } else {
-                polarity.collision_time = 0.0;
+                polarity.collision_time = (polarity.collision_time - dt).max(0.0);
             }
         }
 
@@ -290,8 +298,58 @@ impl Simulation {
                 (b, a)
             };
             debug!(into, absorbed, time = self.time, "Plates sutured");
-            self.merge_plates(into, absorbed);
-            self.plate_deaths += 1;
+            self.merge_and_record(into, absorbed);
+            self.event_counts.sutures += 1;
+        }
+    }
+
+    /// Tiny plates are captured by the neighbour they move most similarly to (like fragments of
+    /// the Farallon plate joining the Pacific plate), the smallest first.
+    fn capture_tiny_plates(&mut self) {
+        let min_area = self.params.events.min_plate_area_before_capture;
+        loop {
+            let area = self.plate_area_fractions();
+            let Some(tiny) = (0..self.plates.len())
+                .filter(|&plate| area[plate] > 0.0 && area[plate] < min_area)
+                .min_by(|&a, &b| area[a].total_cmp(&area[b]).then(a.cmp(&b)))
+            else {
+                return;
+            };
+            let tiny = tiny as u32;
+            // Shared boundary length and summed relative speed per neighbour.
+            let mut neighbours: HashMap<u32, (usize, f64)> = HashMap::new();
+            for cell in 0..self.mesh.len() as u32 {
+                if self.owners[cell as usize].plate != tiny {
+                    continue;
+                }
+                let r = self.mesh.vertex(cell);
+                for &neighbor in self.mesh.neighbors(cell) {
+                    let other = self.owners[neighbor as usize].plate;
+                    if other != tiny {
+                        let relative = (self.plates[tiny as usize].angular_velocity
+                            - self.plates[other as usize].angular_velocity)
+                            .cross(r)
+                            .length();
+                        let entry = neighbours.entry(other).or_default();
+                        entry.0 += 1;
+                        entry.1 += relative;
+                    }
+                }
+            }
+            let Some((&into, _)) = neighbours.iter().min_by(|a, b| {
+                let mean_a = a.1.1 / a.1.0 as f64;
+                let mean_b = b.1.1 / b.1.0 as f64;
+                mean_a
+                    .total_cmp(&mean_b)
+                    .then(b.1.0.cmp(&a.1.0))
+                    .then(a.0.cmp(b.0))
+            }) else {
+                // A plate without neighbours covers the whole planet.
+                return;
+            };
+            debug!(into, tiny, time = self.time, "Tiny plate captured");
+            self.merge_and_record(into, tiny);
+            self.event_counts.captures += 1;
         }
     }
 }
@@ -356,13 +414,14 @@ mod tests {
                 overriding: 0,
                 last_contact: 0.0,
                 collision_time: 0.0,
+                slab_length: 0.0,
             },
         );
         for _ in 0..5 {
             simulation.suture_colliding_plates(1.0);
         }
         assert_eq!(simulation.plates.len(), 1);
-        assert_eq!(simulation.plate_deaths, 1);
+        assert_eq!(simulation.event_counts.sutures, 1);
     }
 
     #[test]
@@ -378,7 +437,57 @@ mod tests {
         });
         simulation.rift_above_plumes();
         assert_eq!(simulation.plates.len(), 2);
-        assert_eq!(simulation.plate_births, 1);
+        assert_eq!(simulation.event_counts.rifts, 1);
         assert!(simulation.mantle.plumes()[0].has_rifted);
+    }
+
+    #[test]
+    fn tiny_plates_are_captured() {
+        let mut params = TectonicParams::default();
+        params.events.min_plate_area_before_capture = 0.05;
+        let mut simulation = Simulation::new(SphereMesh::icosphere(4), 30, params, 8);
+        let before = simulation.plates.len();
+        simulation.capture_tiny_plates();
+        assert!(simulation.plates.len() < before);
+        assert_eq!(
+            before - simulation.plates.len(),
+            simulation.event_counts.captures
+        );
+        let area = simulation.plate_area_fractions();
+        assert!(area.iter().all(|&a| a >= 0.05));
+        for cell in 0..simulation.mesh.len() as u32 {
+            simulation.surface_crust(cell);
+        }
+    }
+
+    #[test]
+    fn plume_rifts_through_old_ocean_do_not_become_trenches() {
+        let mut simulation =
+            Simulation::new(SphereMesh::icosphere(4), 1, TectonicParams::default(), 6);
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            *crust = Crust {
+                age: 200.0,
+                ..new_oceanic_crust()
+            };
+        }
+        simulation.mantle.insert_plume(Plume {
+            position: DVec3::Z,
+            age: 50.0,
+            lifetime: 200.0,
+            peak_flux: 5e-3,
+            has_rifted: false,
+        });
+        simulation.rift_above_plumes();
+        assert_eq!(simulation.plates.len(), 2);
+        for _ in 0..2 {
+            simulation.step(1.0);
+            assert!(
+                simulation
+                    .boundary_cells()
+                    .iter()
+                    .filter(|b| b.convergence < 0.0)
+                    .all(|b| !matches!(b.kind, BoundaryKind::Trench { .. }))
+            );
+        }
     }
 }

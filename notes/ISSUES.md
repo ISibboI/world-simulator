@@ -7,8 +7,9 @@ with approaches and references per issue: `research/feasibility-2026-11-15.md`.
 
 **Order of work** (user, 2026-11-15: calibrate issue 1 only as far as needed to confirm the
 implementation, then prefer issues that also help issue 1, then work through the rest
-autonomously, with an independent plan review before each issue): 1 (mechanisms) → 5 → 3 → 4 →
-issue 1 tuning (trench propagation, age-hazard initiation) → 2 → 7 + 6 → 9 → 8.
+autonomously, with an independent plan review before each issue): 1 (mechanisms) ✓ → 5 ✓
+(partly) → issue 1 soundness fixes ✓ → **3 (next; plan reviewed)** → 4 → issue 1 tuning
+(trench propagation, age-hazard initiation) → 2 → 7 + 6 → 9 → 8.
 
 ## Open
 
@@ -60,6 +61,24 @@ issue 1 tuning (trench propagation, age-hazard initiation) → 2 → 7 + 6 → 9
    Minor: active set stops after 4 iterations without convergence check; ridge push only at
    ridge cells; useless regularisation; `mod.rs` docs still mention random reorganisation;
    merges drop hidden samples. Determinism and index remapping verified OK.
+   **Soundness fixes done (2026-11-15, plan + review `plans/issue-1-soundness.md`):** trenches
+   only where converging or with an existing slab (hysteresis); slab pull ∝ slab length (grows
+   with convergence to 600 km, decays τ = 10 Myr, reset on polarity flip, 150 km on initiation,
+   600 km for initial zones); ocean–ocean initiation removed (converging pairs become trenches
+   by polarity); plume rifting needs continental crust within 0.17 rad or a plate > 15%; split
+   resets collision time; suturing counts non-diverging contact, timer decays; `is_oceanic`
+   (< 12 km and > 2850 kg/m³) for ocean statistics and initiation; mantle kernel cot(θ/2)/(4π);
+   tiny plates (< 0.3%) captured by the most similarly moving neighbour; active set ≤ 20
+   iterations; regularisation scaled by drag; births/deaths by mechanism, trench/ridge length,
+   slab pull and ridge push logged. 38 tests.
+   Verification (500 Myr, seed 0 at s6, seeds 1–2 at s5): slab pull 0.55–1.05e21 N ✓ (was
+   2.2e21); trench 150–190k km vs ridge 250–360k km (ratio plausible, absolute ~3× Earth:
+   too many plates); plates 25/30/25 (seed 1 at the cap; births 52–76 vs deaths 34–63, mostly
+   passive-margin initiations every ~10 Myr); max speed 28–54 cm/yr ✗; mean ocean age 31–37 Myr
+   ✗ (too young); continental area 30 → 25–26%; merge loss up to 67,000 km·cells (seed 0).
+   **Remaining = calibration, deferred to the issue 1 tuning step after issues 3 and 4:** birth
+   rate (initiation interval), small-plate speeds, ocean production, trench propagation and
+   age-hazard initiation per the research.
 2. **Sea level fixed at 0 → ocean water volume not conserved** (1.75–2.35e9 km³ [1.335e9],
    drifting ~1 km sea-level equivalent). Solve sea level for constant water volume each step.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):

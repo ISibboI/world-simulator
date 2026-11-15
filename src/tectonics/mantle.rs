@@ -9,8 +9,12 @@
 //! * **Plumes**: hot upwellings that rise preferentially far from the slab graveyards, grow,
 //!   last for of the order of 100 Myr, and fade. Mantle flows radially away from them.
 //!
-//! A source or sink with area flux `Q` drives a radial flow of speed `Q / (2π R sin θ)` at angular
-//! distance `θ`, softened within [`MantleParams::core_radius`] to stay finite. The plates feel
+//! A source with area flux `Q` drives a radial flow of speed `Q cot(θ/2) / (4π R)` at angular
+//! distance `θ`: the flow of a point source on a sphere whose flux returns uniformly over the
+//! whole sphere (the Green's function of the surface divergence), softened within
+//! [`MantleParams::core_radius`] to stay finite. Unlike `Q / (2π R sin θ)`, it decays to zero at
+//! the antipode instead of converging there into a phantom sink. Sinks work the same way with
+//! negative flux. The plates feel
 //! this flow through basal drag (see [`super::dynamics`]).
 
 use glam::DVec3;
@@ -244,10 +248,10 @@ impl MantleFlow {
 }
 
 /// Radial speed (times the planet radius, per unit flux) of the flow from a point source at
-/// angular distance `angle`: `1 / (2π sin θ)`, softened within `core_radius`.
+/// angular distance `angle`: `cot(θ/2) / (4π) = sin θ / (4π (1 − cos θ))`, softened within
+/// `core_radius` (the near field becomes `θ / (2π (θ² + c²))`).
 fn radial_speed_factor(angle: f64, core_radius: f64) -> f64 {
-    let s = angle.sin();
-    s / (2.0 * std::f64::consts::PI * (s * s + core_radius.sin().powi(2)))
+    angle.sin() / (4.0 * std::f64::consts::PI * (1.0 - angle.cos() + (1.0 - core_radius.cos())))
 }
 
 #[cfg(test)]
@@ -294,6 +298,36 @@ mod tests {
         // Speeds of the order of cm/yr (1 cm/yr ≈ 3.2e-10 m/s).
         let max = velocities.iter().map(|v| v.length()).fold(0.0, f64::max);
         assert!((1e-10..1e-8).contains(&max), "{max}");
+    }
+
+    #[test]
+    fn source_flow_returns_uniformly_without_antipodal_sink() {
+        let core = 0.1;
+        // Flux through the circle at θ (per unit source flux): 2π sin θ · v(θ). With uniform
+        // return flow it must be (1 + cos θ) / 2 away from the core.
+        for degrees in [30.0, 60.0, 90.0, 120.0, 150.0] {
+            let angle: f64 = f64::to_radians(degrees);
+            // A negligible core radius, so that the softening does not matter here.
+            let flux = 2.0 * std::f64::consts::PI * angle.sin() * radial_speed_factor(angle, 1e-4);
+            let expected = (1.0 + angle.cos()) / 2.0;
+            assert!(
+                (flux - expected).abs() < 0.01,
+                "{degrees}: {flux} vs {expected}"
+            );
+        }
+        // Speed falls monotonically beyond the core, to zero at the antipode.
+        let mut previous = radial_speed_factor(0.3, core);
+        for step in 1..=100 {
+            let angle = 0.3 + (std::f64::consts::PI - 0.3) * f64::from(step) / 100.0;
+            let speed = radial_speed_factor(angle, core);
+            assert!(speed < previous + 1e-15);
+            previous = speed;
+        }
+        assert!(radial_speed_factor(std::f64::consts::PI, core).abs() < 1e-12);
+        // The near field matches a point source in the plane: 1 / (2π θ).
+        let angle: f64 = 0.5;
+        let planar = angle / (2.0 * std::f64::consts::PI * (angle * angle + core * core));
+        assert!((radial_speed_factor(angle, core) - planar).abs() / planar < 0.05);
     }
 
     #[test]

@@ -72,6 +72,8 @@ impl Simulation {
                     pair_key(new_index, other),
                     Polarity {
                         overriding,
+                        // A new plate has no history of collision with its neighbours.
+                        collision_time: 0.0,
                         ..polarity
                     },
                 )
@@ -83,8 +85,9 @@ impl Simulation {
 
     /// Merges plate `absorbed` into plate `into`. The crust of `absorbed` that is visible at the
     /// surface moves into the frame of `into`. Where `into` already has crust below it, continental
-    /// crust is stacked; otherwise the visible crust replaces the hidden one.
-    pub(super) fn merge_plates(&mut self, into: u32, absorbed: u32) {
+    /// crust is stacked; otherwise the visible crust replaces the hidden one. Returns the volume
+    /// (thickness × cells, m) of continental crust of `absorbed` that was hidden and is lost.
+    pub(super) fn merge_plates(&mut self, into: u32, absorbed: u32) -> f64 {
         assert_ne!(into, absorbed, "a plate cannot be merged into itself");
         let inverse_rotation = self.plates[into as usize].rotation.inverse();
         let max_thickness = self.params.max_crust_thickness;
@@ -121,7 +124,15 @@ impl Simulation {
             };
             self.owners[cell as usize] = Ownership { plate: into, local };
         }
+        let lost = self.plates[absorbed as usize]
+            .crust
+            .iter()
+            .flatten()
+            .filter(|crust| crust.is_continental())
+            .map(|crust| crust.thickness)
+            .sum();
         self.remove_plate(absorbed);
+        lost
     }
 
     /// Removes a plate that owns no cells. The last plate takes its index.
@@ -168,7 +179,7 @@ impl Simulation {
         for plate in (0..self.plates.len()).rev() {
             if area[plate] == 0 {
                 self.remove_plate(plate as u32);
-                self.plate_deaths += 1;
+                self.event_counts.consumed += 1;
             }
         }
     }
@@ -266,5 +277,21 @@ mod tests {
             simulation.step(1.0);
         }
         assert_consistent(&simulation);
+    }
+
+    #[test]
+    fn split_plates_start_without_collision_history() {
+        let mut simulation = simulation();
+        let plate = simulation.owners[0].plate;
+        for polarity in simulation.polarities.values_mut() {
+            polarity.collision_time = 25.0;
+        }
+        let normal = simulation.mesh.vertex(0).any_orthonormal_vector();
+        let new_plate = simulation.split_plate(plate, normal).unwrap();
+        for (&(a, b), polarity) in &simulation.polarities {
+            if a == new_plate || b == new_plate {
+                assert_eq!(polarity.collision_time, 0.0);
+            }
+        }
     }
 }
