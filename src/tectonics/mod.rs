@@ -33,12 +33,14 @@
 mod boundaries;
 mod crust;
 mod dynamics;
+mod events;
 mod generation;
 mod mantle;
 mod statistics;
 mod topology;
 
 pub use crust::*;
+pub use events::PlateEventParams;
 pub use mantle::{MantleParams, Plume};
 pub use statistics::*;
 
@@ -112,6 +114,8 @@ pub struct TectonicParams {
     pub collision_resistance: f64,
     /// Mantle flow below the plates.
     pub mantle: MantleParams,
+    /// Rifting, subduction initiation and suturing.
+    pub events: PlateEventParams,
     /// Subduction polarity between two plates is forgotten after they were not in contact for
     /// this long.
     pub polarity_memory: f64,
@@ -144,6 +148,7 @@ impl Default for TectonicParams {
             continental_drag_factor: 4.0,
             collision_resistance: 50.0,
             mantle: MantleParams::default(),
+            events: PlateEventParams::default(),
             polarity_memory: 20.0,
             max_substep_movement: 0.5,
         }
@@ -183,6 +188,8 @@ pub struct Ownership {
 struct Polarity {
     overriding: u32,
     last_contact: f64,
+    /// How long, in Myr, the continents of the two plates have been colliding without pause.
+    collision_time: f64,
 }
 
 pub struct Simulation {
@@ -194,6 +201,10 @@ pub struct Simulation {
     polarities: HashMap<(u32, u32), Polarity>,
     rng: ChaCha8Rng,
     mantle: mantle::MantleFlow,
+    /// Number of plates created by rifting and subduction initiation so far.
+    plate_births: usize,
+    /// Number of plates that disappeared (merged or consumed) so far.
+    plate_deaths: usize,
     /// Simulated time in Myr.
     time: f64,
 }
@@ -298,6 +309,7 @@ impl Simulation {
                     Polarity {
                         overriding,
                         last_contact: 0.0,
+                        collision_time: 0.0,
                     },
                 );
             }
@@ -318,6 +330,8 @@ impl Simulation {
             owners,
             polarities,
             mantle,
+            plate_births: 0,
+            plate_deaths: 0,
             rng: owned_rng,
             time: 0.0,
         }
@@ -363,6 +377,7 @@ impl Simulation {
         }
         self.crustal_flow(dt);
         self.remove_dead_plates();
+        self.plate_events(dt);
 
         let subduction = self.subduction_rates();
         self.mantle.step(dt, &subduction, &mut self.rng);

@@ -384,6 +384,7 @@ mod tests {
             Polarity {
                 overriding: 1,
                 last_contact: 0.0,
+                collision_time: 0.0,
             },
         );
         // Old oceanic crust everywhere, except that plate 0 is continental on the -x side, so

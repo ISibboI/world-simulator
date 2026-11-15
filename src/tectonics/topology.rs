@@ -11,10 +11,6 @@ impl Simulation {
     /// Splits `plate` along the great circle with the given unit `normal`: the crust on the side
     /// the normal points to moves to a new plate with the same rotation and motion. Returns the
     /// new plate, or `None` if one side would be empty.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by plate events (next milestone)")
-    )]
     pub(super) fn split_plate(&mut self, plate: u32, normal: DVec3) -> Option<u32> {
         let rotation = self.plates[plate as usize].rotation;
         let new_side: Vec<bool> = (0..self.mesh.len() as u32)
@@ -87,10 +83,6 @@ impl Simulation {
     /// Merges plate `absorbed` into plate `into`. The crust of `absorbed` that is visible at the
     /// surface moves into the frame of `into`. Where `into` already has crust below it, continental
     /// crust is stacked; otherwise the visible crust replaces the hidden one.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by plate events (next milestone)")
-    )]
     pub(super) fn merge_plates(&mut self, into: u32, absorbed: u32) {
         assert_ne!(into, absorbed, "a plate cannot be merged into itself");
         let inverse_rotation = self.plates[into as usize].rotation.inverse();
@@ -174,6 +166,7 @@ impl Simulation {
         for plate in (0..self.plates.len()).rev() {
             if area[plate] == 0 {
                 self.remove_plate(plate as u32);
+                self.plate_deaths += 1;
             }
         }
     }

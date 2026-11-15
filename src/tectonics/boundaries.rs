@@ -338,6 +338,7 @@ pub(super) fn choose_overriding(
                         b.plate
                     },
                     last_contact: time,
+                    collision_time: 0.0,
                 });
             polarity.last_contact = time;
             let (top, top_crust, bottom, bottom_crust) = if polarity.overriding == a.plate {

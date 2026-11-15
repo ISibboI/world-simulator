@@ -71,6 +71,8 @@ pub struct Plume {
     pub lifetime: f64,
     /// Peak area flux in m²/s.
     pub peak_flux: f64,
+    /// Whether the plume has already rifted the plate above it.
+    pub has_rifted: bool,
 }
 
 impl Plume {
@@ -110,6 +112,16 @@ impl MantleFlow {
         &self.plumes
     }
 
+    /// Records that the plume with the given index has rifted the plate above it.
+    pub fn mark_rifted(&mut self, plume: usize) {
+        self.plumes[plume].has_rifted = true;
+    }
+
+    #[cfg(test)]
+    pub fn insert_plume(&mut self, plume: Plume) {
+        self.plumes.push(plume);
+    }
+
     /// Advances the mantle by `dt` Myr. `subduction` lists the positions of trench segments with
     /// their subduction rate in m²/s.
     pub fn step(&mut self, dt: f64, subduction: &[(DVec3, f64)], rng: &mut impl Rng) {
@@ -146,6 +158,7 @@ impl MantleFlow {
                 age: 0.0,
                 lifetime: rng.random_range(params.plume_lifetime.0..=params.plume_lifetime.1),
                 peak_flux: rng.random_range(params.plume_flux.0..=params.plume_flux.1),
+                has_rifted: false,
             });
         }
     }
@@ -259,6 +272,7 @@ mod tests {
             age: 50.0,
             lifetime: 200.0,
             peak_flux: 5e-3,
+            has_rifted: false,
         });
         let velocities = mantle.velocities(&mesh, 6.371e6);
         let near = |target: DVec3| {

@@ -21,6 +21,10 @@ pub struct Statistics {
     pub plate_areas: Vec<usize>,
     /// Number of active mantle plumes.
     pub plumes: usize,
+    /// Plates created so far (rifting, subduction initiation).
+    pub plate_births: usize,
+    /// Plates that disappeared so far (sutured or consumed).
+    pub plate_deaths: usize,
     /// Connected land masses (cells at or above sea level).
     pub land_masses: ComponentStatistics,
     /// Connected areas of continental crust.
@@ -125,6 +129,8 @@ impl Simulation {
             mean_speed: speed_sum / cell_count as f64,
             plate_areas,
             plumes: self.plumes().len(),
+            plate_births: self.plate_births,
+            plate_deaths: self.plate_deaths,
             land_masses: components(&self.mesh, |cell| {
                 self.surface_crust(cell).surface_elevation() >= 0.0
             }),
