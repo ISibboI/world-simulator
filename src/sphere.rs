@@ -12,6 +12,7 @@ pub struct SphereMesh {
     vertices: Vec<DVec3>,
     neighbors: Vec<Vec<u32>>,
     mean_edge_angle: f64,
+    subdivisions: u32,
 }
 
 /// The number of original icosahedron vertices, which are stored first in every mesh.
@@ -106,7 +107,13 @@ impl SphereMesh {
             vertices,
             neighbors,
             mean_edge_angle: angle_sum / edge_count as f64,
+            subdivisions,
         }
+    }
+
+    /// The number of times the icosahedron was subdivided.
+    pub fn subdivisions(&self) -> u32 {
+        self.subdivisions
     }
 
     /// The number of vertices (cells) of the mesh.

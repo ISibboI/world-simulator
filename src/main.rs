@@ -4,6 +4,7 @@ mod planet;
 mod render;
 mod sphere;
 mod tectonics;
+mod temperature;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ use crate::erosion::ErosionParams;
 use crate::planet::Planet;
 use crate::sphere::SphereMesh;
 use crate::tectonics::{Simulation, TectonicParams};
+use crate::temperature::TemperatureParams;
 
 /// The planet radius in metres; used for erosion, climate and to report linear speeds.
 const EARTH_RADIUS: f64 = 6.371e6;
@@ -114,7 +116,13 @@ fn main() -> anyhow::Result<()> {
         planet_radius: EARTH_RADIUS,
         ..ErosionParams::default()
     });
-    let mut planet = Planet::new(simulation, ClimateParams::default(), erosion, EARTH_RADIUS);
+    let mut planet = Planet::new(
+        simulation,
+        ClimateParams::default(),
+        TemperatureParams::default(),
+        erosion,
+        EARTH_RADIUS,
+    );
 
     let steps = (cli.duration / cli.dt).round() as u64;
     let snapshot_every = ((cli.snapshot_interval / cli.dt).round() as u64).max(1);
@@ -159,6 +167,15 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
         planet_statistics.largest_river / SECONDS_PER_YEAR,
         planet_statistics.sediment_flux / 1e9,
     );
+    info!(
+        "    temperature global {:5.1} °C, equator {:5.1} °C, poles {:6.1} °C | \
+         land seasonal range {:4.1} K | permanently frozen {:4.1}%",
+        planet_statistics.global_temperature,
+        planet_statistics.equatorial_temperature,
+        planet_statistics.polar_temperature,
+        planet_statistics.land_seasonal_range,
+        100.0 * planet_statistics.frozen_fraction,
+    );
 
     let time = simulation.time().round() as u64;
     for (name, image) in [
@@ -170,6 +187,18 @@ fn snapshot(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
         (
             "precipitation",
             render::render_precipitation(planet, cli.width),
+        ),
+        (
+            "temperature",
+            render::render_temperature(planet, cli.width, &planet.temperature().annual_mean),
+        ),
+        (
+            "temperature_january",
+            render::render_temperature(planet, cli.width, &planet.temperature().monthly[0]),
+        ),
+        (
+            "temperature_july",
+            render::render_temperature(planet, cli.width, &planet.temperature().monthly[6]),
         ),
     ] {
         let path = cli.output.join(format!("{name}_{time:05}.png"));

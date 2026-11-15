@@ -15,9 +15,12 @@ components (climate, erosion, …) are expected to build on it.
   `actions-rust-lang/setup-rust-toolchain@v2`, `actions-rust-lang/rustfmt@v1`), not SHAs.
   Warnings are denied via `CARGO_BUILD_WARNINGS=deny` (set by setup-rust-toolchain v2), not
   `RUSTFLAGS`.
-- Working rigid-plate tectonics simulation coupled with an Earth-like water cycle and fluvial
-  erosion. Writes equirectangular elevation (with rivers), plate and precipitation maps as PNG
-  snapshots. Default run (40,962 cells, 12 plates, 500 Myr) takes about 50 s.
+- Working rigid-plate tectonics simulation coupled with an Earth-like water cycle, fluvial
+  erosion and a seasonal temperature model (Earth-like orbit). Writes equirectangular elevation
+  (with rivers), plate, precipitation and temperature (annual, January, July) maps as PNG
+  snapshots. Default run (40,962 cells, 12 plates, 500 Myr) takes about 70 s.
+- Temperature outcome over 500 Myr: global mean 10–13 °C, equator 23–25 °C, poles −11…−17 °C,
+  permanent ice on 6–14% of the surface; continental interiors swing ~30 K over the year.
 - Calibrated outcome after 500 Myr: peaks ~7 km, mean land elevation ~750–1150 m (Earth 840),
   land precipitation ~0.9 m/yr, sediment to the oceans ~15 km³/yr (Earth ~8–10), largest river
   ~50,000–80,000 m³/s.
@@ -51,7 +54,18 @@ components (climate, erosion, …) are expected to build on it.
   implicit stream-power incision (Braun & Willett; `K = 1.5e-7`, `m = 0.5`), isostatic rebound
   (surface drops only 18% of eroded bedrock), sediment fills lakes and builds shelves outward from
   river mouths to −120 m, then deltas up to sea level; any rest is lost to the deep ocean.
-- `src/planet.rs`: couples tectonics (substeps) with one climate + erosion step per time step.
+- `src/temperature.rs`: energy balance model `C dT/dt = Q(1−α) − (A + BT) + transport` with a
+  seasonal cycle. Earth orbit (e = 0.0167, obliquity 23.44°, perihelion early January, Kepler
+  solved) → daily-mean insolation per latitude and season (24 seasons/yr). Runs on a coarse
+  icosphere (subdivision 4, 2562 cells), interpolated to the fine mesh, lapse rate 6.5 K/km.
+  Heat transport is mostly **zonal** (implicit 1D diffusion over 18 equal-area latitude bands,
+  D = 0.45) plus weak local 2D diffusion (0.05); full 2D diffusion tied land to the ocean and
+  killed continental seasonality. Ice albedo uses the **previous year's annual mean** (< −10 °C,
+  Budyko); seasonal snow albedo caused a snowball planet. 20 spin-up years, then 2 per Myr step.
+  Month 0 = January (year starts at perihelion).
+- Evaporation over the ocean follows sea-surface temperature (+5%/K).
+- `src/planet.rs`: couples tectonics (substeps) with temperature, precipitation and erosion per
+  time step.
 - `src/render.rs`: equirectangular PNG rendering (elevation with rivers, plates, precipitation).
 - `src/main.rs`: clap CLI (`--seed`, `--subdivisions`, `--plates`, `--duration`, `--dt`,
   `--no-erosion`, `--river-threshold`, …).
@@ -68,8 +82,24 @@ components (climate, erosion, …) are expected to build on it.
 - Continental area slowly decreases (30% → ~24% in 500 Myr) because continental collisions
   destroy the losing crust instead of thickening the winner.
 - Continental shelves are too wide (sediment spreads over up to 256 cells per river mouth).
-- Climate ignores temperature/ice (no glaciers, no snow), seasons and ocean currents; the
+- **Scattered land masses** (diagnosed 2026-11-15, not yet fixed), ranked:
+  1. Island-arc accretion converts single oceanic samples above −200 m to continental crust →
+     speckled continental crust (41.6% of continental crust is accreted after 500 Myr; disabling
+     accretion: 146 → 15 continental components at 200 Myr). Fix: accrete coherent terranes only /
+     majority filter.
+  2. Delta fill raises shelves to exactly 0 m: counted as land but drawn light blue (18–20% of
+     "land"). Fix: fill to below sea level, consistent sea-level convention, fewer shelf cells.
+  3. No isostatic support of continents after erosion was added: 10–14% of continental crust
+     sinks below sea level. Fix: slow isostatic relaxation of continental bedrock.
+  4. Continental collisions delete the loser's continental crust (~42% of initial continental
+     area destroyed in 200 Myr), backfilled by speckled accretion. Fix: conserve crust.
+  5. Initial continents ignore plate boundaries (5 continents → 27 per-plate pieces at t=0) and
+     plate regions fragment by resampling noise (12 → 59 components). Fix: grow continents within
+     plates, majority filter on ownership.
+- Climate has no ocean currents, glaciers don't erode, precipitation does not fall as snow; the
   precipitation map shows slight striping from the discrete upwind neighbour.
+- Temperature is computed from the climatological seasonal cycle per Myr step (no Milankovitch
+  cycles, constant solar luminosity).
 - No hillslope diffusion (sub-grid at ~120 km cells); sediment deposited on oceanic crust is lost
   at subduction.
 - Single-threaded; ownership resolution (~35 ms per substep) dominates.
@@ -81,7 +111,7 @@ components (climate, erosion, …) are expected to build on it.
 - Conserve continental crust in collisions (thickening / terrane transfer to the winner).
 - Parallelise ownership resolution (rayon).
 - Better initial conditions (noise-based continents, interior relief).
-- Temperature model → glaciers, ice caps; ocean currents for coastal climate.
+- Glacial erosion and snow; ocean currents for coastal climate.
 
 ## User preferences
 

@@ -18,8 +18,16 @@ use crate::sphere::SphereMesh;
 pub struct ClimateParams {
     /// Moisture evaporated over the ocean at the equator (relative units).
     pub equatorial_evaporation: f64,
-    /// Moisture evaporated over the ocean at the poles (relative units).
+    /// Moisture evaporated over the ocean at the poles (relative units). Only used when no
+    /// sea-surface temperature is given.
     pub polar_evaporation: f64,
+    /// Sea-surface temperature in °C at which [`Self::equatorial_evaporation`] is reached.
+    pub reference_temperature: f64,
+    /// Relative increase of evaporation per kelvin of sea-surface temperature
+    /// (Clausius-Clapeyron scaling of saturation vapour pressure, damped).
+    pub evaporation_per_kelvin: f64,
+    /// Minimum evaporation (relative units), e.g. over sea ice.
+    pub min_evaporation: f64,
     /// Fraction of moisture raining out per cell where air neither rises nor sinks.
     pub background_rain_fraction: f64,
     /// Additional rain fraction in the intertropical convergence zone.
@@ -42,6 +50,9 @@ impl Default for ClimateParams {
         Self {
             equatorial_evaporation: 1.0,
             polar_evaporation: 0.2,
+            reference_temperature: 27.0,
+            evaporation_per_kelvin: 0.05,
+            min_evaporation: 0.05,
             background_rain_fraction: 0.02,
             equatorial_rain_fraction: 0.06,
             polar_front_rain_fraction: 0.04,
@@ -91,20 +102,38 @@ impl Climate {
 
     /// Computes the precipitation in m/yr for every cell, given the surface elevation in metres
     /// (sea level is 0) and the distance between neighbouring cells in metres.
-    pub fn precipitation(&self, elevation: &[f64], cell_spacing: f64) -> Vec<f64> {
+    ///
+    /// Evaporation over the ocean depends on the annual mean sea-surface temperature in °C, if
+    /// given; otherwise on latitude.
+    pub fn precipitation(
+        &self,
+        elevation: &[f64],
+        cell_spacing: f64,
+        sea_surface_temperature: Option<&[f64]>,
+    ) -> Vec<f64> {
         let params = &self.params;
         let cell_count = elevation.len();
         let is_ocean = |cell: usize| elevation[cell] < 0.0;
 
-        let evaporation: Vec<f64> = self
-            .latitude
-            .iter()
-            .map(|&latitude| {
-                let warmth = latitude.cos().powi(2);
-                params.polar_evaporation
-                    + (params.equatorial_evaporation - params.polar_evaporation) * warmth
-            })
-            .collect();
+        let evaporation: Vec<f64> = match sea_surface_temperature {
+            Some(temperature) => temperature
+                .iter()
+                .map(|&t| {
+                    let scaling =
+                        (params.evaporation_per_kelvin * (t - params.reference_temperature)).exp();
+                    (params.equatorial_evaporation * scaling).max(params.min_evaporation)
+                })
+                .collect(),
+            None => self
+                .latitude
+                .iter()
+                .map(|&latitude| {
+                    let warmth = latitude.cos().powi(2);
+                    params.polar_evaporation
+                        + (params.equatorial_evaporation - params.polar_evaporation) * warmth
+                })
+                .collect(),
+        };
 
         let rain_fraction: Vec<f64> = (0..cell_count)
             .map(|cell| {
@@ -198,7 +227,7 @@ mod tests {
 
         // An all-ocean planet: wet equator, dry subtropics.
         let ocean = vec![-4000.0; mesh.len()];
-        let precipitation = climate.precipitation(&ocean, spacing);
+        let precipitation = climate.precipitation(&ocean, spacing, None);
         let mean_at = |from: f64, to: f64| {
             let cells: Vec<f64> = (0..mesh.len())
                 .filter(|&c| (from..to).contains(&climate.latitude[c].to_degrees().abs()))
@@ -222,7 +251,7 @@ mod tests {
                 };
             }
         }
-        let precipitation = climate.precipitation(&elevation, spacing);
+        let precipitation = climate.precipitation(&elevation, spacing, None);
         let mean_land = |from: f64, to: f64| {
             let cells: Vec<f64> = (0..mesh.len() as u32)
                 .filter(|&c| elevation[c as usize] > 0.0 && (from..to).contains(&longitude(c)))

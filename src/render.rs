@@ -48,6 +48,36 @@ pub fn render_elevation(planet: &Planet, width: u32, river_threshold: f64) -> Rg
     })
 }
 
+/// Temperature map of a per-cell field in °C, with coastlines drawn dark.
+pub fn render_temperature(planet: &Planet, width: u32, temperature: &[f64]) -> RgbImage {
+    const STOPS: &[(f64, [f64; 3])] = &[
+        (-50.0, [60.0, 0.0, 90.0]),
+        (-30.0, [40.0, 60.0, 190.0]),
+        (-10.0, [120.0, 180.0, 240.0]),
+        (0.0, [235.0, 245.0, 250.0]),
+        (10.0, [250.0, 230.0, 120.0]),
+        (20.0, [245.0, 150.0, 50.0]),
+        (30.0, [210.0, 40.0, 30.0]),
+        (40.0, [110.0, 0.0, 20.0]),
+    ];
+    let simulation = planet.tectonics();
+    let mesh = simulation.mesh();
+    let is_land = |cell: u32| simulation.surface_crust(cell).surface_elevation() >= 0.0;
+    render(simulation, width, |cell| {
+        let coast = is_land(cell)
+            && mesh
+                .neighbors(cell)
+                .iter()
+                .any(|&neighbor| !is_land(neighbor));
+        let Rgb(color) = gradient(STOPS, temperature[cell as usize]);
+        if coast {
+            Rgb(color.map(|c| c / 2))
+        } else {
+            Rgb(color)
+        }
+    })
+}
+
 /// Precipitation map: land coloured from desert to rainforest, ocean in grey.
 pub fn render_precipitation(planet: &Planet, width: u32) -> RgbImage {
     const STOPS: &[(f64, [f64; 3])] = &[
