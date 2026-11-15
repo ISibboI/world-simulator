@@ -115,10 +115,10 @@ components (climate, erosion, …) are expected to build on it.
 - No hillslope diffusion (sub-grid at ~120 km cells); sediment deposited on oceanic crust is lost
   at subduction.
 - Single-threaded; ownership resolution (~35 ms per substep) dominates.
-- 3D view on KDE Wayland, when launched from Claude's sandboxed shell: only the first frame is
-  drawn (compositor never sends redraw events, eframe logs "RedrawRequested is overdue: running
-  logic only"). Works under X11/XWayland (`env -u WAYLAND_DISPLAY`). Unclear whether this also
-  happens when the user launches it normally — asked the user to test.
+- 3D view under KDE Wayland only draws its first frame when launched from Claude's sandboxed
+  shell (compositor sends no redraw events). The user confirmed it works normally when launched
+  from their own terminal. For screenshots from the sandbox, use X11:
+  `env -u WAYLAND_DISPLAY`.
 - CI not yet run with the GUI dependencies (eframe/wgpu); Linux build should not need system
   packages since wayland-sys uses dlopen, but this is unverified.
 
