@@ -90,6 +90,11 @@ struct Cli {
     /// Vertical exaggeration of the relief in the 3D view.
     #[arg(long, default_value_t = 40.0)]
     exaggeration: f64,
+
+    /// Overrides a tectonic parameter for calibration, e.g. `--set basal_drag=8e14`; can be
+    /// repeated. See `TectonicParams::set` for the names.
+    #[arg(long = "set", value_name = "NAME=VALUE")]
+    overrides: Vec<String>,
 }
 
 /// Logs to stderr, filtered by `RUST_LOG` (default: `info`). Also captures `log` records of
@@ -126,6 +131,16 @@ fn main() -> anyhow::Result<()> {
         ..TectonicParams::default()
     };
     params.matching.verify = cli.verify_matching;
+    for assignment in &cli.overrides {
+        let (name, value) = assignment
+            .split_once('=')
+            .with_context(|| format!("expected NAME=VALUE, got {assignment}"))?;
+        let value: f64 = value
+            .parse()
+            .with_context(|| format!("parsing the value of {name}"))?;
+        params.set(name, value)?;
+        info!(name, value, "Overrode tectonic parameter");
+    }
     let simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
     let erosion = (!cli.no_erosion).then(|| ErosionParams {
         planet_radius: EARTH_RADIUS,
@@ -172,7 +187,7 @@ fn simulate(mut planet: Planet, cli: &Cli, mut on_step: impl FnMut(&Planet)) -> 
     let steps = (cli.duration / cli.dt).round() as u64;
     let snapshot_every = ((cli.snapshot_interval / cli.dt).round() as u64).max(1);
     let start = Instant::now();
-    let mut previous_ledger: Option<(f64, MassLedger)> = None;
+    let mut previous_ledger: Option<(f64, MassLedger, usize)> = None;
     snapshot(&planet, cli, &mut previous_ledger)?;
     on_step(&planet);
     for step in 1..=steps {
@@ -189,7 +204,7 @@ fn simulate(mut planet: Planet, cli: &Cli, mut on_step: impl FnMut(&Planet)) -> 
 fn snapshot(
     planet: &Planet,
     cli: &Cli,
-    previous_ledger: &mut Option<(f64, MassLedger)>,
+    previous_ledger: &mut Option<(f64, MassLedger, usize)>,
 ) -> anyhow::Result<()> {
     let simulation = planet.tectonics();
     let planet_statistics = planet.statistics();
@@ -220,7 +235,8 @@ fn snapshot(
     info!(
         "    ocean age median {:4.0}, 90% {:4.0}, max {:4.0} Myr | deeper than 6 km {:4.1}%, \
          ocean older than 150 Myr {:4.1}% | \
-         speed oceanic {:4.1}, continental {:4.1}, max {:5.1} cm/yr",
+         speed oceanic {:4.1}, continental {:4.1}, max {:5.1}, 99% {:4.1}, \
+         RMS of plates > 1% {:4.1} cm/yr",
         statistics.oceanic_age_percentiles[0],
         statistics.oceanic_age_percentiles[1],
         statistics.oceanic_age_percentiles[2],
@@ -229,26 +245,55 @@ fn snapshot(
         statistics.mean_oceanic_speed * cm_per_year,
         statistics.mean_continental_speed * cm_per_year,
         statistics.max_speed * cm_per_year,
+        statistics.speed_p99 * cm_per_year,
+        statistics.rms_plate_speed * cm_per_year,
+    );
+    let histogram: Vec<String> = statistics
+        .age_histogram
+        .iter()
+        .map(|fraction| format!("{:.0}", 100.0 * fraction))
+        .collect();
+    info!(
+        "    ocean area by age (% per 20 Myr): {} | ≥ 200 Myr {:.1}% ({:.0}% at continents) | \
+         plates > 1%: {} | old passive margins {:.0} km, {:.3} initiations/Myr, \
+         induced {:.3}/Myr",
+        histogram.join(" "),
+        100.0 * statistics.ancient_ocean_fraction,
+        100.0 * statistics.ancient_ocean_at_continents,
+        statistics.plates_above_one_percent,
+        statistics.old_margin_length,
+        statistics.initiation_rate,
+        statistics.induced_rate,
     );
     info!(
         "    trenches {:.0} km, ridges {:.0} km | slab pull {:.2e} N, ridge push {:.2e} N | \
-         rifts {}, initiations {}, sutures {}, captures {}, consumed {}, merge loss {:.0} km·cells",
+         rifts {}, initiations {}, induced {}, reversals {}, sutures {}, captures {}, consumed {}, merge loss {:.0} km·cells, \
+         blocked splits {}",
         statistics.trench_length,
         statistics.ridge_length,
         statistics.slab_pull,
         statistics.ridge_push,
         statistics.events.rifts,
         statistics.events.initiations,
+        statistics.events.induced_subductions,
+        statistics.events.polarity_reversals,
         statistics.events.sutures,
         statistics.events.captures,
         statistics.events.consumed,
         statistics.events.merge_lost_continental_volume / 1000.0,
+        statistics.events.blocked_splits,
     );
     // Crust mass budget since the last snapshot, in Gt/yr.
     let cell_area =
         4.0 * std::f64::consts::PI * EARTH_RADIUS * EARTH_RADIUS / simulation.mesh().len() as f64;
-    if let Some((previous_time, previous)) = previous_ledger.as_ref() {
+    let new_crust_cells = statistics.gaps.new_crust_cells;
+    if let Some((previous_time, previous, previous_cells)) = previous_ledger.as_ref() {
         let years = (statistics.time - previous_time) * 1e6;
+        info!(
+            "    sea floor production (km²/yr): kinematic {:.2}, created {:.2}",
+            statistics.kinematic_production,
+            (new_crust_cells - previous_cells) as f64 * cell_area / 1e6 / years,
+        );
         let rates: Vec<String> = statistics
             .ledger
             .terms()
@@ -261,7 +306,7 @@ fn snapshot(
             .collect();
         info!("    crust mass budget (Gt/yr): {}", rates.join(", "));
     }
-    *previous_ledger = Some((statistics.time, statistics.ledger.clone()));
+    *previous_ledger = Some((statistics.time, statistics.ledger.clone(), new_crust_cells));
     info!(
         "    crust mass (Gt): continental {:.3e}, transitional {:.3e}, oceanic {:.3e}, \
          sediment {:.3e}, felsic {:.3e}, hidden {:.3e} | sediment lost {:.0} km·cells",

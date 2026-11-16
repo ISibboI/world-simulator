@@ -6,12 +6,16 @@
 //! * **slab pull** along trenches, where the subducting slab pulls its plate towards the trench.
 //!   It grows with the thickness of the slab, i.e. with the square root of its age;
 //! * **ridge push** on the young flanks of spreading ridges, away from the ridge;
+//! * **slab resistance** at trenches: the mantle resists the sinking of the slab and the bending
+//!   of the plate into the trench, which opposes the motion of the subducting plate towards the
+//!   trench relative to the mantle (Forsyth & Uyeda 1975, Conrad & Hager 1999). It limits the
+//!   speed that slab pull alone can give a plate, also a small one;
 //! * **basal drag** between each plate and the mantle below it, `τ = c (v_mantle − v_plate)`,
 //!   stronger under thick continental keels;
 //! * **collision resistance** where continental crust of two plates converges, which opposes the
 //!   relative motion of the plates across the boundary.
 //!
-//! Drag and collision resistance are linear in the plate velocities, so the torque balance of all
+//! Drag and the resistances are linear in the plate velocities, so the torque balance of all
 //! plates is one linear system for their angular velocities, solved directly. Collision
 //! resistance only acts where the plates actually converge, which is resolved by re-solving with
 //! the converging contacts only (active set).
@@ -164,6 +168,17 @@ impl Simulation {
             let r = self.mesh.vertex(boundary.cell);
             let force = self.boundary_force(boundary);
             driving[boundary.plate as usize] += r.cross(force) * radius;
+            // Slab resistance −k ((v_p − v_mantle) · n) n at R r gives the torque
+            // −k R² m mᵀ ω + k R (v_mantle · n) m with m = r × n.
+            let resistance = self.slab_resistance(boundary);
+            if resistance > 0.0 {
+                let m = r.cross(boundary.normal);
+                drag[boundary.plate as usize] += outer(m, m) * (resistance * radius * radius);
+                driving[boundary.plate as usize] += m
+                    * (resistance
+                        * radius
+                        * mantle_velocity[boundary.cell as usize].dot(boundary.normal));
+            }
         }
 
         // Collision resistance: the force on the plate −k ((v_p − v_q) · n) n at R r gives the
@@ -267,11 +282,7 @@ impl Simulation {
                     / params.slab_pull_reference_age)
                     .max(0.0)
                     .sqrt();
-                let slab_length = self
-                    .polarities
-                    .get(&pair_key(boundary.plate, boundary.other))
-                    .map_or(0.0, |polarity| polarity.slab_length);
-                let length_factor = (slab_length / params.max_slab_length).clamp(0.0, 1.0);
+                let length_factor = self.slab_length_factor(boundary);
                 boundary.normal
                     * (params.slab_pull * thickness_factor * length_factor * boundary_length)
             }
@@ -280,9 +291,35 @@ impl Simulation {
         }
     }
 
+    /// Slab resistance coefficient (N·s/m) at a boundary cell: at trenches, the force opposing
+    /// the motion of the plate towards the trench relative to the mantle per unit of that speed.
+    /// It grows with the length of the sunken slab like slab pull, so that full slab pull of
+    /// reference-age lithosphere alone moves a plate at [`TectonicParams::slab_sinking_speed`].
+    pub(super) fn slab_resistance(&self, boundary: &BoundaryCell) -> f64 {
+        let params = &self.params;
+        if !matches!(boundary.kind, BoundaryKind::Trench { .. }) {
+            return 0.0;
+        }
+        let boundary_length = params.planet_radius * self.mesh.mean_edge_angle();
+        let length_factor = self.slab_length_factor(boundary);
+        // cm/yr → m/s.
+        let speed = params.slab_sinking_speed / 100.0 / (SECONDS_PER_MYR / 1e6);
+        params.slab_pull * length_factor * boundary_length / speed
+    }
+
+    /// Fraction of the full slab length that has sunk below the trench at a boundary cell.
+    fn slab_length_factor(&self, boundary: &BoundaryCell) -> f64 {
+        let slab_length = self
+            .polarities
+            .get(&pair_key(boundary.plate, boundary.other))
+            .map_or(0.0, |polarity| polarity.slab_length);
+        (slab_length / self.params.max_slab_length).clamp(0.0, 1.0)
+    }
+
     /// Updates the length of slab below each subduction zone: it grows with the convergence at
     /// the trench (up to the length of an upper-mantle slab) and decays when subduction stops
-    /// (the slab sinks or breaks off). `boundaries` are the current [`Self::boundary_cells`].
+    /// (the slab sinks or breaks off; below [`TectonicParams::min_slab_length`] it is gone).
+    /// `boundaries` are the current [`Self::boundary_cells`].
     ///
     /// Returns whether a slab appeared or disappeared, which changes the classification of
     /// boundary cells (see [`Self::boundary_cells`]).
@@ -308,7 +345,13 @@ impl Simulation {
                     polarity.slab_length = (polarity.slab_length + sum / count as f64 * dt)
                         .min(params.max_slab_length);
                 }
-                _ => polarity.slab_length *= decay,
+                _ => {
+                    polarity.slab_length *= decay;
+                    // A slab remnant this short has broken off: the trench is gone.
+                    if polarity.slab_length < params.min_slab_length {
+                        polarity.slab_length = 0.0;
+                    }
+                }
             }
             slabs_changed |= had_slab != (polarity.slab_length > 0.0);
         }
@@ -445,10 +488,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn slab_pull_moves_a_plate_towards_its_trench() {
-        let mut simulation =
-            Simulation::new(SphereMesh::icosphere(4), 2, TectonicParams::default(), 5);
+    /// Two plates; plate 0 subducts under plate 1 along the +x part of its boundary.
+    fn one_sided_trench(params: TectonicParams) -> Simulation {
+        let mut simulation = Simulation::new(SphereMesh::icosphere(4), 2, params, 5);
         for plate in &mut simulation.plates {
             plate.angular_velocity = DVec3::ZERO;
         }
@@ -482,6 +524,54 @@ mod tests {
                 }
             }
         }
+        simulation
+    }
+
+    /// Mean speed (rad/Myr) of plate 0 towards plate 1 at the trench cells.
+    fn mean_trench_convergence(simulation: &Simulation) -> f64 {
+        let boundaries = simulation.boundary_cells();
+        let trenches: Vec<_> = boundaries
+            .iter()
+            .filter(|b| matches!(b.kind, BoundaryKind::Trench { .. }))
+            .collect();
+        assert!(!trenches.is_empty());
+        trenches
+            .iter()
+            .map(|b| {
+                let r = simulation.mesh.vertex(b.cell);
+                (simulation.plates[0].angular_velocity - simulation.plates[1].angular_velocity)
+                    .cross(r)
+                    .dot(b.normal)
+            })
+            .sum::<f64>()
+            / trenches.len() as f64
+    }
+
+    #[test]
+    fn slab_resistance_limits_the_speed_towards_the_trench() {
+        let mut params = TectonicParams::default();
+        // Hardly any basal drag: only slab resistance limits the motion.
+        params.basal_drag *= 1e-4;
+        let sinking_speed = params.slab_sinking_speed;
+        let mut simulation = one_sided_trench(params.clone());
+        let mantle = vec![DVec3::ZERO; simulation.mesh.len()];
+        simulation.update_plate_velocities(&mantle);
+        // rad/Myr → cm/yr
+        let speed = mean_trench_convergence(&simulation) * 637.1;
+        assert!(
+            (0.3 * sinking_speed..1.2 * sinking_speed).contains(&speed),
+            "{speed}"
+        );
+
+        params.slab_sinking_speed = 1e6;
+        let mut free = one_sided_trench(params);
+        free.update_plate_velocities(&mantle);
+        assert!(mean_trench_convergence(&free) * 637.1 > 10.0 * speed);
+    }
+
+    #[test]
+    fn slab_pull_moves_a_plate_towards_its_trench() {
+        let mut simulation = one_sided_trench(TectonicParams::default());
         let mantle = vec![DVec3::ZERO; simulation.mesh.len()];
         simulation.update_plate_velocities(&mantle);
 
@@ -644,5 +734,9 @@ mod tests {
         update(&mut simulation, 10.0);
         let decayed = simulation.polarities[&(0, 1)].slab_length;
         assert!(decayed < 0.5 * simulation.params.max_slab_length);
+        assert!(decayed > 0.0);
+        // Eventually the slab breaks off completely.
+        update(&mut simulation, 100.0);
+        assert_eq!(simulation.polarities[&(0, 1)].slab_length, 0.0);
     }
 }

@@ -10,7 +10,7 @@ implementation, then prefer issues that also help issue 1, then work through the
 autonomously, with an independent plan review before each issue): 1 (mechanisms) ✓ → 5 ✓
 (partly) → issue 1 soundness fixes ✓ → 3 ✓ (ledger; artifacts remain) → 4 ✓ (peaks still too
 high) → runtime optimisation review ✓ (incremental plate matching, 2.5×; the user decides on
-further options in `research/profiling-2026-11-15.md`) → **issue 1 tuning** (plan reviewed) → 2 → 7 + 6 → 9 → 8.
+further options in `research/profiling-2026-11-15.md`) → issue 1 tuning ✓ (ancient ocean remains, see issue 10) → **2** → 7 + 6 → 9 → 8.
 
 ## Open
 
@@ -80,6 +80,23 @@ further options in `research/profiling-2026-11-15.md`) → **issue 1 tuning** (p
    **Remaining = calibration, deferred to the issue 1 tuning step after issues 3 and 4:** birth
    rate (initiation interval), small-plate speeds, ocean production, trench propagation and
    age-hazard initiation per the research.
+   **Tuning done (2026-11-16, plan `plans/issue-1-tuning.md` with review R1–R8; details in
+   `sessions/2026-11-16.md`):** diagnostics (kinematic vs created production, one-flank ridge
+   length with zig-zag factor 1.1, area–age histogram, 99th percentile and plate RMS speed, old
+   passive margin length and hazards, ancient ocean); trench-local slab resistance (terminal
+   speed 10 cm/yr); subduction initiation as an age hazard per margin length (passive margins
+   1000 Myr per 1000 km, existing boundaries 150 Myr incl. polarity reversals where old ocean
+   overrides ≥ 20 Myr younger ocean; one Poisson draw per step, not on newborn plates); slabs
+   break off below 20 km (they never reached zero before, so trenches persisted forever);
+   `max_plates` 40 with blocked-split counter; `--set` parameter overrides. Trench propagation
+   (R3) and transform friction dropped. Result (seeds 0–4, means over 200–500 Myr; 1 Gyr seed 0
+   without trends): mean ocean age 66–86 Myr, median 38–52, 14–20 plates with births ≈ deaths,
+   99% speed 8.5–9.4 cm/yr (was 20–31), production 5.1–6.7 km²/yr kinematic / 120–147 Gt/yr
+   (~2× Earth, was 4×), continental mass −5% per 500 Myr, default run 103 s → 58 s.
+   **Still open:** 7–12% of the ocean is ≥ 200 Myr old (Earth ~0), in the interiors of large,
+   slow, continent-bearing plates far from their trenches — needs splitting along the
+   continent–ocean margin instead of a great circle (issue 10) or intraplate initiation; ridge
+   and trench lengths ~2× Earth; mean speed 3.4–3.8 cm/yr slightly low.
 2. **Sea level fixed at 0 → ocean water volume not conserved** (1.75–2.35e9 km³ [1.335e9],
    drifting ~1 km sea-level equivalent). Solve sea level for constant water volume each step.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):

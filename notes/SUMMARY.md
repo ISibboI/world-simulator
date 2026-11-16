@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-16 (ledger, birth time, boundary reuse, mantle optimisations)_
+_Last updated: 2026-11-16 (issue 1 tuning: slab resistance, initiation hazards)_
 
 ## Goal
 
@@ -18,8 +18,8 @@ components (climate, erosion, …) are expected to build on it.
 - Working rigid-plate tectonics simulation coupled with an Earth-like water cycle, fluvial
   erosion and a seasonal temperature model (Earth-like orbit). Writes equirectangular elevation
   (with rivers), plate, precipitation and temperature (annual, January, July) maps as PNG
-  snapshots. Default run (40,962 cells, 500 Myr, seed 0) takes about 170 s (was 414 s before
-  incremental plate matching).
+  snapshots. Default run (40,962 cells, 500 Myr, seed 0) takes about 58 s (was 414 s before
+  incremental plate matching and the issue 1 tuning).
 - **3D view** (default; `--headless` for batch runs): eframe/egui window, planet drawn with
   wgpu via an egui paint callback, camera rotates by click-and-drag. Simulation runs on a
   background thread and sends finished vertex buffers through a channel; window title shows the
@@ -51,10 +51,14 @@ components (climate, erosion, …) are expected to build on it.
     slivers where crust was consumed).
   - `dynamics.rs`: boundary classification (trench, ridge, collision) and a quasi-static
     torque balance per plate (slab pull ∝ √age, ridge push, basal drag against the mantle flow,
-    ×4 under continents, collision resistance with an active set), one dense linear system.
+    ×4 under continents, slab resistance at trenches capping slab-driven speed at 10 cm/yr,
+    collision resistance with an active set), one dense linear system. Slabs grow with
+    convergence, decay when it stops and break off below 20 km.
   - `mantle.rs`: mantle flow from slab downwellings (decaying memory) and plumes.
   - `topology.rs` / `events.rs`: split, merge, remove plates; rifting above plumes, subduction
-    initiation at old passive margins and old ocean–ocean boundaries, suturing.
+    initiation as an age hazard per margin length (passive margins split the plate; existing
+    boundaries, mostly polarity reversals where old ocean overrides younger ocean), suturing,
+    capture of tiny plates. `--set NAME=VALUE` overrides tunable parameters.
   - `generation.rs` (initial conditions), `statistics.rs` (diagnostics incl. ocean-age
     percentiles, plate births/deaths, gap statistics, connected land masses).
 - `src/climate.rs`: water cycle. Three-cell prevailing winds (trades, westerlies, polar
@@ -107,12 +111,9 @@ components (climate, erosion, …) are expected to build on it.
 - Collision churn is high (≈ the whole initial continental volume passes through collisions in
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
 - **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
-  plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms), 5, 3, 4 done and
-  the runtime optimisation (incremental matching). **Next: issue 1 tuning per
-  `plans/issue-1-tuning.md` incl. its review items R1–R8; ask the user first whether to do
-  further optimisations from `research/profiling-2026-11-15.md` (done so far: incremental
-  matching, sample tracking, arrays + Fx, cheap ledger, birth time, boundary reuse, trig-free
-  mantle; see `sessions/2026-11-16.md`).**
+  plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms + tuning), 5, 3,
+  4 done and the runtime optimisations. **Next: issue 2 (sea level).** Issue 1 leaves 7–12%
+  ancient (≥ 200 Myr) ocean in slow continent-bearing plates (needs issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal

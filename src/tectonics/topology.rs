@@ -16,7 +16,7 @@ impl Simulation {
         let after = ledger::plates_mass(&self.plates);
         self.ledger.record(Term::Splits, after - before);
         if result.is_some() {
-            self.topology_changes += 1;
+            self.configuration_changes += 1;
         }
         result
     }
@@ -165,7 +165,7 @@ impl Simulation {
             self.owners.iter().all(|owner| owner.plate != plate),
             "removed plates must not own cells"
         );
-        self.topology_changes += 1;
+        self.configuration_changes += 1;
         let last = self.plates.len() as u32 - 1;
         self.plates.swap_remove(plate as usize);
         self.polarities

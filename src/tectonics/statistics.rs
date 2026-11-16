@@ -48,9 +48,31 @@ pub struct Statistics {
     pub sediment_mass: f64,
     pub felsic_mass: f64,
     pub hidden_mass: f64,
-    /// Length of trenches and ridges in km.
+    /// Length of trenches and of ridge axes in km (corrected for the zig-zag of boundaries on
+    /// the mesh; a ridge has two flanks, a trench one subducting side).
     pub trench_length: f64,
     pub ridge_length: f64,
+    /// Rate at which diverging plates open new sea floor (one flank), from the plate motions,
+    /// in km²/yr. Earth: ~3.4 km²/yr.
+    pub kinematic_production: f64,
+    /// Area fraction of the oceanic crust per 20 Myr age bin (the last bin is ≥ 200 Myr).
+    pub age_histogram: [f64; 11],
+    /// 99th percentile of the surface speed over all cells in rad/Myr.
+    pub speed_p99: f64,
+    /// Root mean square speed of plates covering more than 1% of the surface, in rad/Myr.
+    pub rms_plate_speed: f64,
+    /// Number of plates covering more than 1% of the surface.
+    pub plates_above_one_percent: usize,
+    /// Length (km) of passive margins (oceanic next to continental crust of the same plate)
+    /// old enough for subduction initiation, and the expected number of initiations per Myr.
+    pub old_margin_length: f64,
+    pub initiation_rate: f64,
+    /// Expected number of subduction initiations per Myr at existing plate boundaries.
+    pub induced_rate: f64,
+    /// Fraction of the oceanic crust that is at least 200 Myr old, and the fraction of that
+    /// next to continental crust of any plate.
+    pub ancient_ocean_fraction: f64,
+    pub ancient_ocean_at_continents: f64,
     /// Total magnitude of slab pull and ridge push in N.
     pub slab_pull: f64,
     pub ridge_push: f64,
@@ -59,6 +81,10 @@ pub struct Statistics {
     /// Connected areas of continental crust.
     pub continental_masses: ComponentStatistics,
 }
+
+/// Ratio of the length of a straight boundary measured as boundary cells × mean edge length to
+/// its true length: boundaries on the mesh zig-zag (see the test below).
+const BOUNDARY_ZIGZAG: f64 = 1.1;
 
 /// Sizes of the connected components of a set of cells.
 #[derive(Clone, Debug, Default)]
@@ -119,6 +145,8 @@ impl Simulation {
         let mut deep = 0;
         let (mut oceanic_speed, mut continental_speed) = (0.0, 0.0);
         let mut max_speed: f64 = 0.0;
+        let mut speeds = Vec::with_capacity(cell_count);
+        let mut plate_speed_sums = vec![0.0; self.plates.len()];
 
         for cell in 0..cell_count as u32 {
             let plate = self.owner(cell).plate as usize;
@@ -128,6 +156,8 @@ impl Simulation {
                 .cross(self.mesh.vertex(cell))
                 .length();
             speed_sum += speed;
+            speeds.push(speed);
+            plate_speed_sums[plate] += speed;
             max_speed = max_speed.max(speed);
             let crust = self.surface_crust(cell);
             if crust.is_continental() {
@@ -181,23 +211,90 @@ impl Simulation {
             visible_mass += crust.mass();
         }
         let total_mass = self.total_mass();
-        let boundary_length = self.params.planet_radius * self.mesh.mean_edge_angle() / 1000.0;
-        let (mut trench_length, mut ridge_length, mut slab_pull, mut ridge_push) =
+        let boundary_length =
+            self.params.planet_radius * self.mesh.mean_edge_angle() / 1000.0 / BOUNDARY_ZIGZAG;
+        let (mut trench_length, mut ridge_flank_length, mut slab_pull, mut ridge_push) =
             (0.0, 0.0, 0.0, 0.0);
-        for boundary in self.boundary_cells() {
-            let force = self.boundary_force(&boundary).length();
+        // Opening rate × boundary length over the diverging boundary cells of both sides, in
+        // rad/Myr × km.
+        let mut opening = 0.0;
+        let boundaries = self.boundary_cells();
+        for boundary in &boundaries {
+            let force = self.boundary_force(boundary).length();
             match boundary.kind {
                 super::dynamics::BoundaryKind::Trench { .. } => {
                     trench_length += boundary_length;
                     slab_pull += force;
                 }
                 super::dynamics::BoundaryKind::Ridge => {
-                    ridge_length += boundary_length;
+                    ridge_flank_length += boundary_length;
                     ridge_push += force;
                 }
                 _ => {}
             }
+            if boundary.convergence < 0.0 {
+                opening -= boundary.convergence * boundary_length;
+            }
         }
+        // rad/Myr × km → km²/yr, halved for the two sides of each boundary.
+        let kinematic_production = 0.5 * opening * self.params.planet_radius / 1000.0 / 1e6;
+        let (mut old_margin_length, mut initiation_rate) = (0.0, 0.0);
+        let (mut ancient, mut ancient_at_continents) = (0usize, 0usize);
+        let margin_length = self.params.planet_radius * self.mesh.mean_edge_angle();
+        for cell in 0..cell_count as u32 {
+            let crust = self.surface_crust(cell);
+            if !crust.is_oceanic() {
+                continue;
+            }
+            let age = crust.age(self.time);
+            let plate = self.owner(cell).plate;
+            let mut same_plate_continent = false;
+            let mut any_continent = false;
+            for &neighbor in self.mesh.neighbors(cell) {
+                if self.surface_crust(neighbor).is_continental() {
+                    any_continent = true;
+                    same_plate_continent |= self.owner(neighbor).plate == plate;
+                }
+            }
+            if same_plate_continent && age >= self.params.events.initiation_age {
+                old_margin_length += margin_length / BOUNDARY_ZIGZAG / 1000.0;
+                initiation_rate += self.params.events.initiation_hazard(age) * margin_length;
+            }
+            if age >= 200.0 {
+                ancient += 1;
+                if any_continent {
+                    ancient_at_continents += 1;
+                }
+            }
+        }
+        let induced_rate = self
+            .initiation_candidates(u32::MAX, &boundaries)
+            .iter()
+            .filter(|(initiation, _)| {
+                matches!(initiation, super::events::Initiation::Boundary { .. })
+            })
+            .map(|(_, hazard)| hazard)
+            .sum();
+        let mut age_histogram = [0.0; 11];
+        for &age in &oceanic_ages {
+            age_histogram[((age / 20.0).max(0.0) as usize).min(10)] += 1.0;
+        }
+        for bin in &mut age_histogram {
+            *bin /= oceanic.max(1) as f64;
+        }
+        speeds.sort_by(f64::total_cmp);
+        let speed_p99 = speeds[((speeds.len() - 1) as f64 * 0.99).round() as usize];
+        let (mut square_sum, mut weight) = (0.0, 0.0);
+        let mut plates_above_one_percent = 0;
+        for (&area, &speed_sum) in plate_areas.iter().zip(&plate_speed_sums) {
+            if area as f64 > 0.01 * cell_count as f64 {
+                plates_above_one_percent += 1;
+                let mean = speed_sum / area as f64;
+                square_sum += mean * mean;
+                weight += 1.0;
+            }
+        }
+        let rms_plate_speed = (square_sum / f64::max(weight, 1.0)).sqrt();
         oceanic_ages.sort_by(f64::total_cmp);
         let percentile = |p: f64| {
             if oceanic_ages.is_empty() {
@@ -243,13 +340,60 @@ impl Simulation {
             felsic_mass: masses[4] * to_gigatonnes,
             hidden_mass: (total_mass - visible_mass) * to_gigatonnes,
             trench_length,
-            ridge_length,
+            ridge_length: ridge_flank_length / 2.0,
+            kinematic_production,
+            age_histogram,
+            speed_p99,
+            rms_plate_speed,
+            plates_above_one_percent,
+            old_margin_length,
+            initiation_rate,
+            induced_rate,
+            ancient_ocean_fraction: ancient as f64 / oceanic.max(1) as f64,
+            ancient_ocean_at_continents: ancient_at_continents as f64 / ancient.max(1) as f64,
             slab_pull,
             ridge_push,
             land_masses: components(&self.mesh, |cell| self.surface_elevation(cell) >= 0.0),
             continental_masses: components(&self.mesh, |cell| {
                 self.surface_crust(cell).is_continental()
             }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::DVec3;
+
+    use super::*;
+
+    #[test]
+    fn boundary_zigzag_factor_matches_the_mesh() {
+        for subdivisions in [4, 5] {
+            for normal in [
+                DVec3::new(0.3, 0.5, 0.8).normalize(),
+                DVec3::new(-0.7, 0.1, 0.2).normalize(),
+                DVec3::Z,
+            ] {
+                let mut simulation = Simulation::new(
+                    SphereMesh::icosphere(subdivisions),
+                    1,
+                    TectonicParams::default(),
+                    1,
+                );
+                simulation.split_plate(0, normal).unwrap();
+                let cells = simulation
+                    .boundary_cells()
+                    .iter()
+                    .filter(|b| b.plate == 0)
+                    .count();
+                let factor =
+                    cells as f64 * simulation.mesh.mean_edge_angle() / (2.0 * std::f64::consts::PI);
+                assert!(
+                    (factor / BOUNDARY_ZIGZAG - 1.0).abs() < 0.06,
+                    "{subdivisions}: {factor}"
+                );
+            }
         }
     }
 }

@@ -1,5 +1,7 @@
 # Plan: issue 1 tuning — plate birth/death balance and ocean production
 
+_Status (2026-11-16): done, with deviations — see `../sessions/2026-11-16.md` (session 3)._
+
 _2026-11-15. After the issue 1 mechanisms, their soundness fixes, and issues 5, 3, 4 (clean
 bookkeeping, mass ledger, elevations), issue 1 still misses its targets (500 Myr, 3 seeds,
 commit 5395931/293a882): mean ocean age 31–37 Myr [Earth ~64], plates 25–30 (cap 30 hit),

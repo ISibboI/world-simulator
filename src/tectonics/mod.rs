@@ -130,6 +130,12 @@ pub struct TectonicParams {
     /// Slab pull reaches full strength once this much slab (m) has subducted (about the depth
     /// of the upper mantle; Conrad & Lithgow-Bertelloni 2002).
     pub max_slab_length: f64,
+    /// Speed (cm/yr) at which slab resistance balances full slab pull of reference-age
+    /// lithosphere: the fastest that slab pull alone can move a plate towards its trench
+    /// relative to the mantle. Earth's fastest subducting plates move at ~8–10 cm/yr.
+    pub slab_sinking_speed: f64,
+    /// A decaying slab shorter than this (m) has broken off: the trench stops acting.
+    pub min_slab_length: f64,
     /// Time constant (Myr) for a slab to sink away or break off once subduction stops.
     pub slab_decay_time: f64,
     /// Ridge push per metre of ridge in N/m.
@@ -182,6 +188,8 @@ impl Default for TectonicParams {
             min_trench_convergence: 0.1,
             max_slab_length: 600e3,
             slab_decay_time: 10.0,
+            min_slab_length: 20e3,
+            slab_sinking_speed: 10.0,
             ridge_push: 3e12,
             ridge_age: 20.0,
             basal_drag: 1e15,
@@ -193,6 +201,37 @@ impl Default for TectonicParams {
             polarity_memory: 20.0,
             max_substep_movement: 0.5,
         }
+    }
+}
+
+impl TectonicParams {
+    /// Sets the tunable parameter `name` (the field name, with `events.` for
+    /// [`PlateEventParams`] fields) to `value`.
+    pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
+        let field = match name {
+            "basal_drag" => &mut self.basal_drag,
+            "continental_drag_factor" => &mut self.continental_drag_factor,
+            "collision_resistance" => &mut self.collision_resistance,
+            "slab_pull" => &mut self.slab_pull,
+            "slab_sinking_speed" => &mut self.slab_sinking_speed,
+            "ridge_push" => &mut self.ridge_push,
+            "arc_crust_per_subduction" => &mut self.arc_crust_per_subduction,
+            "subduction_erosion" => &mut self.subduction_erosion,
+            "events.initiation_age" => &mut self.events.initiation_age,
+            "events.initiation_full_age" => &mut self.events.initiation_full_age,
+            "events.initiation_waiting_time" => &mut self.events.initiation_waiting_time,
+            "events.boundary_initiation_waiting_time" => {
+                &mut self.events.boundary_initiation_waiting_time
+            }
+            "events.initiation_age_contrast" => &mut self.events.initiation_age_contrast,
+            "events.min_oceanic_rift_area" => &mut self.events.min_oceanic_rift_area,
+            "events.rift_continent_radius" => &mut self.events.rift_continent_radius,
+            "events.suture_time" => &mut self.events.suture_time,
+            "mantle.plume_interval" => &mut self.mantle.plume_interval,
+            _ => anyhow::bail!("unknown or untunable tectonic parameter {name}"),
+        };
+        *field = value;
+        Ok(())
     }
 }
 
@@ -266,8 +305,9 @@ pub struct Simulation {
     /// How plates were matched to cells.
     matching_statistics: MatchingStatistics,
     matching_scratch: matching::MatchingScratch,
-    /// Number of changes of the plate configuration (splits, merges, removals) so far.
-    topology_changes: u64,
+    /// Number of changes of the plate configuration (splits, merges, removals, induced
+    /// subduction) so far; boundaries must be reclassified after each.
+    configuration_changes: u64,
     /// Simulated time in Myr.
     time: f64,
 }
@@ -401,7 +441,7 @@ impl Simulation {
             matching_statistics: MatchingStatistics::default(),
             matching_scratch: matching::MatchingScratch::default(),
             rng: owned_rng,
-            topology_changes: 0,
+            configuration_changes: 0,
             time: 0.0,
         };
         simulation.ledger = MassLedger::new(simulation.total_mass());
@@ -450,11 +490,12 @@ impl Simulation {
         self.remove_dead_plates();
         let boundaries = self.boundary_cells();
         let slabs_changed = self.update_slab_lengths(dt, &boundaries);
-        let topology = self.topology_changes;
+        let topology = self.configuration_changes;
         self.plate_events(dt, &boundaries);
-        // The boundaries only change if plates were split, merged or removed, or if a slab
-        // appeared or disappeared (trenches with slabs persist at slight divergence).
-        let boundaries = if self.topology_changes == topology && !slabs_changed {
+        // The boundaries only change if plates were split, merged or removed, subduction was
+        // induced, or a slab appeared or disappeared (trenches with slabs persist at slight
+        // divergence).
+        let boundaries = if self.configuration_changes == topology && !slabs_changed {
             boundaries
         } else {
             self.boundary_cells()

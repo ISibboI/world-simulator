@@ -394,6 +394,7 @@ mod tests {
         let params = TectonicParams {
             max_substep_movement: 3.0,
             basal_drag: defaults.basal_drag / 4.0,
+            slab_sinking_speed: 1000.0,
             ..defaults
         };
         for seed in 0..3 {
@@ -407,8 +408,10 @@ mod tests {
     #[test]
     fn splits_and_merges_keep_both_modes_identical() {
         let mut params = TectonicParams::default();
-        params.events.initiation_interval = 1.0;
+        params.events.initiation_waiting_time = 1.0;
+        params.events.boundary_initiation_waiting_time = 1.0;
         params.events.initiation_age = 30.0;
+        params.events.initiation_full_age = 40.0;
         params.events.rift_delay = 1.0;
         params.events.suture_time = 5.0;
         params.events.min_plate_area_before_capture = 0.02;

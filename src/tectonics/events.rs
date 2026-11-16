@@ -31,8 +31,20 @@ pub struct PlateEventParams {
     pub max_plates: usize,
     /// Oceanic lithosphere at a passive margin may start to subduct from this age in Myr.
     pub initiation_age: f64,
-    /// Mean time in Myr between subduction initiations while old passive margins exist.
-    pub initiation_interval: f64,
+    /// From this age (Myr) on, the hazard of subduction initiation at a passive margin has its
+    /// full value; between [`Self::initiation_age`] and this age it rises quadratically.
+    pub initiation_full_age: f64,
+    /// Mean waiting time (Myr) until 1000 km of passive margin with lithosphere of at least
+    /// [`Self::initiation_full_age`] starts to subduct. The 180 Myr old margins of the
+    /// Atlantic have not subducted yet, so it is long.
+    pub initiation_waiting_time: f64,
+    /// Mean waiting time (Myr) until 1000 km of an existing plate boundary with old oceanic
+    /// lithosphere on one side starts to subduct. Plate boundaries are weak zones, so
+    /// subduction starts there much more easily than at a passive margin (Stern & Gerya 2018).
+    pub boundary_initiation_waiting_time: f64,
+    /// At an existing plate boundary, oceanic lithosphere only starts to subduct below oceanic
+    /// lithosphere that is at least this much (Myr) younger.
+    pub initiation_age_contrast: f64,
     /// Length of slab (m) that a new subduction zone at a passive margin starts with: the
     /// foundering lithosphere that triggers it.
     pub initiation_slab_length: f64,
@@ -51,14 +63,50 @@ impl Default for PlateEventParams {
             rift_continent_radius: 0.17,
             min_oceanic_rift_area: 0.15,
             min_plate_area: 0.01,
-            max_plates: 30,
-            initiation_age: 160.0,
-            initiation_interval: 8.0,
+            max_plates: 40,
+            initiation_age: 80.0,
+            initiation_full_age: 180.0,
+            initiation_waiting_time: 1000.0,
+            boundary_initiation_waiting_time: 150.0,
+            initiation_age_contrast: 20.0,
             initiation_slab_length: 150e3,
             suture_time: 30.0,
             suture_min_cells: 10,
             min_plate_area_before_capture: 0.003,
         }
+    }
+}
+
+/// A place where subduction may start.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Initiation {
+    /// An oceanic cell at a passive margin.
+    PassiveMargin(u32),
+    /// The boundary between two plates.
+    Boundary { subducting: u32, overriding: u32 },
+}
+
+impl PlateEventParams {
+    /// Hazard of subduction initiation (per Myr and metre of passive margin) for oceanic
+    /// lithosphere of the given age in Myr: zero when young, rising quadratically from
+    /// [`Self::initiation_age`] to [`Self::initiation_full_age`].
+    pub fn initiation_hazard(&self, age: f64) -> f64 {
+        self.hazard(age, self.initiation_waiting_time)
+    }
+
+    /// Like [`Self::initiation_hazard`], at an existing plate boundary.
+    pub fn boundary_initiation_hazard(&self, age: f64) -> f64 {
+        self.hazard(age, self.boundary_initiation_waiting_time)
+    }
+
+    fn hazard(&self, age: f64, waiting_time: f64) -> f64 {
+        if age < self.initiation_age {
+            return 0.0;
+        }
+        let maturity = ((age - self.initiation_age)
+            / (self.initiation_full_age - self.initiation_age).max(1e-9))
+        .min(1.0);
+        maturity * maturity / (waiting_time * 1e6)
     }
 }
 
@@ -69,12 +117,19 @@ pub struct EventCounts {
     pub rifts: usize,
     /// Plates split at passive margins by subduction initiation.
     pub initiations: usize,
+    /// Subduction induced at existing plate boundaries without subduction (no new plate).
+    pub induced_subductions: usize,
+    /// Subduction induced at the overriding side of a trench, which reverses the polarity.
+    pub polarity_reversals: usize,
     /// Plates merged after continental collisions.
     pub sutures: usize,
     /// Tiny plates captured by a neighbour.
     pub captures: usize,
     /// Plates that disappeared by subduction.
     pub consumed: usize,
+    /// Splits that did not happen because there were already
+    /// [`PlateEventParams::max_plates`] plates.
+    pub blocked_splits: usize,
     /// Continental crust volume (thickness × cells, m) lost in merges: hidden samples of the
     /// absorbed plate.
     pub merge_lost_continental_volume: f64,
@@ -95,10 +150,18 @@ impl Simulation {
     /// [`Self::boundary_cells`] (only their collisions and convergence are used, which do not
     /// depend on the slab lengths).
     pub(super) fn plate_events(&mut self, dt: f64, boundaries: &[BoundaryCell]) {
+        let configuration = self.configuration_changes;
         self.suture_colliding_plates(dt, boundaries);
         self.capture_tiny_plates();
+        // Splits append plates, so plates from here on are born in this step.
+        let first_new_plate = self.plates.len() as u32;
         self.rift_above_plumes();
-        self.initiate_subduction(dt);
+        if self.configuration_changes == configuration {
+            self.initiate_subduction(dt, first_new_plate, boundaries);
+        } else {
+            let boundaries = self.boundary_cells();
+            self.initiate_subduction(dt, first_new_plate, &boundaries);
+        }
         self.remove_dead_plates();
     }
 
@@ -116,6 +179,12 @@ impl Simulation {
     /// enough. Returns the new plate on the side the normal points to.
     fn split_if_large_enough(&mut self, plate: u32, normal: DVec3) -> Option<u32> {
         if self.plates.len() >= self.params.events.max_plates {
+            self.event_counts.blocked_splits += 1;
+            debug!(
+                plate,
+                time = self.time,
+                "Split blocked by the maximum number of plates"
+            );
             return None;
         }
         let (mut positive, mut negative) = (0usize, 0usize);
@@ -183,45 +252,61 @@ impl Simulation {
         }
     }
 
-    /// Old oceanic lithosphere at a passive margin (ocean and continent on the same plate) may
-    /// start to sink: the plate splits along the margin and the oceanic part subducts below the
-    /// continental part, starting with a short slab.
-    fn initiate_subduction(&mut self, dt: f64) {
-        let params = self.params.events.clone();
-        // Old oceanic cells next to continental crust of the same plate, weighted by age.
-        let mut candidates: Vec<(u32, f64)> = Vec::new();
-        for cell in 0..self.mesh.len() as u32 {
-            let owner = self.owners[cell as usize];
-            let crust = self.surface_crust(cell);
-            let age = crust.age(self.time);
-            if !crust.is_oceanic() || age < params.initiation_age {
-                continue;
-            }
-            let at_margin = self.mesh.neighbors(cell).iter().any(|&neighbor| {
-                self.owners[neighbor as usize].plate == owner.plate
-                    && self.surface_crust(neighbor).is_continental()
-            });
-            if at_margin {
-                candidates.push((cell, age - params.initiation_age + 1.0));
-            }
+    /// Old oceanic lithosphere may start to sink, at two kinds of places:
+    ///
+    /// * at a passive margin (ocean and continent on the same plate): the plate splits along
+    ///   the margin and the oceanic part subducts below the continental part;
+    /// * at an existing plate boundary that is not diverging and where it does not subduct yet
+    ///   (transform faults, fracture zones, locked margins, the overriding side of a trench),
+    ///   where it meets younger oceanic or continental crust of the other plate: the old side
+    ///   starts to subduct below the other plate (induced nucleation, like Izu–Bonin–Mariana at
+    ///   a transform fault; at a trench, a polarity reversal: old, dense lithosphere does not
+    ///   stay above much younger, buoyant lithosphere).
+    ///
+    /// Both start with a short slab. Initiation is a random process with a hazard per unit
+    /// length that rises with the age of the lithosphere (see
+    /// [`PlateEventParams::initiation_waiting_time`]); at most one initiation happens per step,
+    /// and not on plates from `first_new_plate` on, which were born in this step. `boundaries`
+    /// are the current [`Self::boundary_cells`].
+    pub(super) fn initiate_subduction(
+        &mut self,
+        dt: f64,
+        first_new_plate: u32,
+        boundaries: &[BoundaryCell],
+    ) {
+        let candidates = self.initiation_candidates(first_new_plate, boundaries);
+        let total: f64 = candidates.iter().map(|(_, hazard)| hazard).sum();
+        if total * dt > 0.5 {
+            debug!(
+                expected = total * dt,
+                time = self.time,
+                "Subduction initiation saturated: at most one per step"
+            );
         }
-        if candidates.is_empty()
-            || !self
-                .rng
-                .random_bool((dt / params.initiation_interval).clamp(0.0, 1.0))
-        {
+        if candidates.is_empty() || !self.rng.random_bool(1.0 - (-total * dt).exp()) {
             return;
         }
 
-        let total: f64 = candidates.iter().map(|(_, weight)| weight).sum();
         let mut pick = self.rng.random_range(0.0..total);
-        let cell = candidates
+        let initiation = candidates
             .iter()
-            .find(|(_, weight)| {
-                pick -= weight;
+            .find(|(_, hazard)| {
+                pick -= hazard;
                 pick <= 0.0
             })
-            .map_or(candidates[candidates.len() - 1].0, |(cell, _)| *cell);
+            .map_or(candidates[candidates.len() - 1].0, |(initiation, _)| {
+                *initiation
+            });
+        let cell = match initiation {
+            Initiation::PassiveMargin(cell) => cell,
+            Initiation::Boundary {
+                subducting,
+                overriding,
+            } => {
+                self.induce_subduction(subducting, overriding);
+                return;
+            }
+        };
 
         // The margin runs perpendicular to the direction from the ocean towards the continent.
         let position = self.mesh.vertex(cell);
@@ -250,7 +335,7 @@ impl Simulation {
                     overriding: continental_plate,
                     last_contact: self.time,
                     collision_time: 0.0,
-                    slab_length: params.initiation_slab_length,
+                    slab_length: self.params.events.initiation_slab_length,
                 },
             );
             debug!(
@@ -260,6 +345,122 @@ impl Simulation {
                 "Subduction started at a passive margin"
             );
         }
+    }
+
+    /// Places where subduction may start (see [`Self::initiate_subduction`]) with their hazard
+    /// per Myr.
+    pub(super) fn initiation_candidates(
+        &self,
+        first_new_plate: u32,
+        boundaries: &[BoundaryCell],
+    ) -> Vec<(Initiation, f64)> {
+        let params = &self.params.events;
+        let margin_length = self.params.planet_radius * self.mesh.mean_edge_angle();
+        let min_convergence =
+            self.params.min_trench_convergence / (self.params.planet_radius * 100.0 / 1e6);
+        // Candidate places with their hazard (per Myr).
+        let mut candidates: Vec<(Initiation, f64)> = Vec::new();
+        // Old oceanic cells next to continental crust of the same plate.
+        for cell in 0..self.mesh.len() as u32 {
+            let owner = self.owners[cell as usize];
+            if owner.plate >= first_new_plate {
+                continue;
+            }
+            let crust = self.surface_crust(cell);
+            let age = crust.age(self.time);
+            if !crust.is_oceanic() || age < params.initiation_age {
+                continue;
+            }
+            let at_margin = self.mesh.neighbors(cell).iter().any(|&neighbor| {
+                self.owners[neighbor as usize].plate == owner.plate
+                    && self.surface_crust(neighbor).is_continental()
+            });
+            if at_margin {
+                candidates.push((
+                    Initiation::PassiveMargin(cell),
+                    params.initiation_hazard(age) * margin_length,
+                ));
+            }
+        }
+        // Old oceanic boundary cells facing younger or continental crust without subduction.
+        for boundary in boundaries {
+            if boundary.kind != BoundaryKind::Other
+                || boundary.convergence <= -min_convergence
+                || boundary.plate >= first_new_plate
+                || boundary.other >= first_new_plate
+                || self
+                    .polarities
+                    .get(&pair_key(boundary.plate, boundary.other))
+                    .is_some_and(|polarity| {
+                        polarity.slab_length > 0.0 && polarity.overriding == boundary.other
+                    })
+            {
+                // Not a candidate, or the plate already subducts below the other one.
+                continue;
+            }
+            let crust = self.surface_crust(boundary.cell);
+            let age = crust.age(self.time);
+            if !crust.is_oceanic() || age < params.initiation_age {
+                continue;
+            }
+            let Some(&neighbor) = self
+                .mesh
+                .neighbors(boundary.cell)
+                .iter()
+                .find(|&&neighbor| self.owners[neighbor as usize].plate == boundary.other)
+            else {
+                continue;
+            };
+            let other_crust = self.surface_crust(neighbor);
+            if other_crust.is_continental()
+                || (other_crust.is_oceanic()
+                    && other_crust.age(self.time) + params.initiation_age_contrast <= age)
+            {
+                candidates.push((
+                    Initiation::Boundary {
+                        subducting: boundary.plate,
+                        overriding: boundary.other,
+                    },
+                    params.boundary_initiation_hazard(age) * margin_length,
+                ));
+            }
+        }
+        candidates
+    }
+
+    /// Starts subduction of `subducting` below `overriding` at their common boundary with a
+    /// short slab. If `overriding` subducted below `subducting` so far, the polarity reverses.
+    fn induce_subduction(&mut self, subducting: u32, overriding: u32) {
+        let slab_length = self.params.events.initiation_slab_length;
+        let time = self.time;
+        let reversal = self
+            .polarities
+            .get(&pair_key(subducting, overriding))
+            .is_some_and(|polarity| {
+                polarity.slab_length > 0.0 && polarity.overriding == subducting
+            });
+        let polarity = self
+            .polarities
+            .entry(pair_key(subducting, overriding))
+            .or_insert(Polarity {
+                overriding,
+                last_contact: time,
+                collision_time: 0.0,
+                slab_length: 0.0,
+            });
+        polarity.overriding = overriding;
+        polarity.last_contact = time;
+        polarity.slab_length = slab_length;
+        self.configuration_changes += 1;
+        if reversal {
+            self.event_counts.polarity_reversals += 1;
+        } else {
+            self.event_counts.induced_subductions += 1;
+        }
+        debug!(
+            subducting,
+            overriding, time, reversal, "Subduction induced at a plate boundary"
+        );
     }
 
     /// Tracks how long pairs of plates have been in continental collision, and merges them once
@@ -362,12 +563,9 @@ mod tests {
     use super::*;
     use crate::isostasy::CONTINENTAL_DENSITY;
 
-    #[test]
-    fn old_passive_margins_start_subducting() {
-        let mut params = TectonicParams::default();
-        params.events.initiation_interval = 1.0;
+    /// One plate: continental where x > 0.3, ocean of the given age elsewhere.
+    fn passive_margin(params: TectonicParams, ocean_age: f64) -> Simulation {
         let mut simulation = Simulation::new(SphereMesh::icosphere(4), 1, params, 2);
-        // One plate: continental where x > 0.3, very old ocean elsewhere.
         for (local, crust) in simulation.plates[0].crust.iter_mut().enumerate() {
             let x = simulation.mesh.vertex(local as u32).x;
             *crust = Some(if x > 0.3 {
@@ -378,10 +576,124 @@ mod tests {
                     sediment: 0.0,
                 }
             } else {
-                new_oceanic_crust(-250.0)
+                new_oceanic_crust(-ocean_age)
             });
         }
-        simulation.initiate_subduction(1.0);
+        simulation
+    }
+
+    #[test]
+    fn initiation_hazard_rises_with_age() {
+        let params = PlateEventParams::default();
+        assert_eq!(params.initiation_hazard(params.initiation_age - 1.0), 0.0);
+        let mut previous = 0.0;
+        for age in [90.0, 120.0, 150.0, 179.0] {
+            let hazard = params.initiation_hazard(age);
+            assert!(hazard > previous, "{age}");
+            previous = hazard;
+        }
+        assert_eq!(
+            params.initiation_hazard(180.0),
+            params.initiation_hazard(400.0)
+        );
+        // 1000 km of old margin waits on average the waiting time.
+        let waiting = 1.0 / (params.initiation_hazard(400.0) * 1e6);
+        assert!((waiting - params.initiation_waiting_time).abs() < 1e-9);
+    }
+
+    #[test]
+    fn young_passive_margins_do_not_subduct() {
+        let mut params = TectonicParams::default();
+        params.events.initiation_waiting_time = 1e-6;
+        let mut simulation = passive_margin(params, 70.0);
+        for _ in 0..10 {
+            simulation.initiate_subduction(1.0, u32::MAX, &[]);
+        }
+        assert_eq!(simulation.plates.len(), 1);
+    }
+
+    #[test]
+    fn plates_born_in_the_same_step_do_not_subduct() {
+        let mut params = TectonicParams::default();
+        params.events.initiation_waiting_time = 1e-6;
+        let mut simulation = passive_margin(params, 250.0);
+        simulation.initiate_subduction(1.0, 0, &[]);
+        assert_eq!(simulation.plates.len(), 1);
+    }
+
+    /// Two resting oceanic plates of the given ages without subduction polarity.
+    fn resting_oceanic_plates(ages: [f64; 2]) -> Simulation {
+        let mut params = TectonicParams::default();
+        params.events.boundary_initiation_waiting_time = 1e-6;
+        let mut simulation = Simulation::new(SphereMesh::icosphere(4), 2, params, 3);
+        simulation.polarities.clear();
+        for (plate, age) in simulation.plates.iter_mut().zip(ages) {
+            plate.angular_velocity = DVec3::ZERO;
+            for crust in plate.crust.iter_mut().flatten() {
+                *crust = new_oceanic_crust(-age);
+            }
+        }
+        simulation
+    }
+
+    #[test]
+    fn old_ocean_starts_subducting_below_younger_ocean_at_a_boundary() {
+        let mut simulation = resting_oceanic_plates([200.0, 30.0]);
+        let boundaries = simulation.boundary_cells();
+        assert!(boundaries.iter().all(|b| b.kind == BoundaryKind::Other));
+        simulation.initiate_subduction(1.0, u32::MAX, &boundaries);
+        assert_eq!(simulation.plates.len(), 2);
+        assert_eq!(simulation.event_counts.induced_subductions, 1);
+        assert_eq!(simulation.polarities[&(0, 1)].overriding, 1);
+        // The old plate's side of the boundary is now a trench.
+        let boundaries = simulation.boundary_cells();
+        assert!(
+            boundaries
+                .iter()
+                .filter(|b| b.plate == 0)
+                .all(|b| matches!(b.kind, BoundaryKind::Trench { .. }))
+        );
+    }
+
+    #[test]
+    fn old_overriding_ocean_reverses_the_subduction_polarity() {
+        let mut simulation = resting_oceanic_plates([200.0, 30.0]);
+        // The young plate subducts below the old one.
+        simulation.polarities.insert(
+            (0, 1),
+            Polarity {
+                overriding: 0,
+                last_contact: 0.0,
+                collision_time: 0.0,
+                slab_length: 600e3,
+            },
+        );
+        let boundaries = simulation.boundary_cells();
+        simulation.initiate_subduction(1.0, u32::MAX, &boundaries);
+        assert_eq!(simulation.event_counts.polarity_reversals, 1);
+        let polarity = simulation.polarities[&(0, 1)];
+        assert_eq!(polarity.overriding, 1);
+        assert_eq!(
+            polarity.slab_length,
+            simulation.params.events.initiation_slab_length
+        );
+    }
+
+    #[test]
+    fn ocean_of_similar_age_does_not_start_subducting_at_a_boundary() {
+        let mut simulation = resting_oceanic_plates([200.0, 190.0]);
+        let boundaries = simulation.boundary_cells();
+        simulation.initiate_subduction(1.0, u32::MAX, &boundaries);
+        assert_eq!(simulation.event_counts.induced_subductions, 0);
+        assert!(simulation.polarities.is_empty());
+    }
+
+    #[test]
+    fn old_passive_margins_start_subducting() {
+        let mut params = TectonicParams::default();
+        params.events.initiation_waiting_time = 1e-6;
+        let mut simulation = passive_margin(params, 250.0);
+        simulation.initiate_subduction(1.0, u32::MAX, &[]);
         assert_eq!(simulation.plates.len(), 2);
         // The oceanic plate subducts below the continental one.
         let polarity = simulation.polarities[&(0, 1)];
