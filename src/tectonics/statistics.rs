@@ -52,9 +52,16 @@ pub struct Statistics {
     /// the mesh; a ridge has two flanks, a trench one subducting side).
     pub trench_length: f64,
     pub ridge_length: f64,
-    /// Rate at which diverging plates open new sea floor (one flank), from the plate motions,
-    /// in km²/yr. Earth: ~3.4 km²/yr.
-    pub kinematic_production: f64,
+    /// Area of sea floor opened by diverging plates so far (one flank), from the plate motions,
+    /// in km². Earth: ~3.4 km²/yr.
+    pub opened_area: f64,
+    /// Boundary segments with their own polarity, those with a slab, and the mean slab length
+    /// (km) of those.
+    pub segments: usize,
+    pub slab_segments: usize,
+    pub mean_slab_length: f64,
+    /// Segment events so far.
+    pub segment_events: super::polarity::SegmentStatistics,
     /// Area fraction of the oceanic crust per 20 Myr age bin (the last bin is ≥ 200 Myr).
     pub age_histogram: [f64; 11],
     /// 99th percentile of the surface speed over all cells in rad/Myr.
@@ -81,10 +88,6 @@ pub struct Statistics {
     /// Connected areas of continental crust.
     pub continental_masses: ComponentStatistics,
 }
-
-/// Ratio of the length of a straight boundary measured as boundary cells × mean edge length to
-/// its true length: boundaries on the mesh zig-zag (see the test below).
-const BOUNDARY_ZIGZAG: f64 = 1.1;
 
 /// Sizes of the connected components of a set of cells.
 #[derive(Clone, Debug, Default)]
@@ -215,9 +218,6 @@ impl Simulation {
             self.params.planet_radius * self.mesh.mean_edge_angle() / 1000.0 / BOUNDARY_ZIGZAG;
         let (mut trench_length, mut ridge_flank_length, mut slab_pull, mut ridge_push) =
             (0.0, 0.0, 0.0, 0.0);
-        // Opening rate × boundary length over the diverging boundary cells of both sides, in
-        // rad/Myr × km.
-        let mut opening = 0.0;
         let boundaries = self.boundary_cells();
         for boundary in &boundaries {
             let force = self.boundary_force(boundary).length();
@@ -232,15 +232,16 @@ impl Simulation {
                 }
                 _ => {}
             }
-            if boundary.convergence < 0.0 {
-                opening -= boundary.convergence * boundary_length;
-            }
         }
-        // rad/Myr × km → km²/yr, halved for the two sides of each boundary.
-        let kinematic_production = 0.5 * opening * self.params.planet_radius / 1000.0 / 1e6;
+        let slabs: Vec<f64> = self
+            .polarities
+            .segments()
+            .map(|segment| segment.slab_length)
+            .filter(|&length| length > 0.0)
+            .collect();
         let (mut old_margin_length, mut initiation_rate) = (0.0, 0.0);
         let (mut ancient, mut ancient_at_continents) = (0usize, 0usize);
-        let margin_length = self.params.planet_radius * self.mesh.mean_edge_angle();
+        let margin_length = self.boundary_length_per_cell();
         for cell in 0..cell_count as u32 {
             let crust = self.surface_crust(cell);
             if !crust.is_oceanic() {
@@ -257,7 +258,7 @@ impl Simulation {
                 }
             }
             if same_plate_continent && age >= self.params.events.initiation_age {
-                old_margin_length += margin_length / BOUNDARY_ZIGZAG / 1000.0;
+                old_margin_length += margin_length / 1000.0;
                 initiation_rate += self.params.events.initiation_hazard(age) * margin_length;
             }
             if age >= 200.0 {
@@ -341,7 +342,11 @@ impl Simulation {
             hidden_mass: (total_mass - visible_mass) * to_gigatonnes,
             trench_length,
             ridge_length: ridge_flank_length / 2.0,
-            kinematic_production,
+            opened_area: self.opened_area,
+            segments: self.polarities.segments().count(),
+            slab_segments: slabs.len(),
+            mean_slab_length: slabs.iter().sum::<f64>() / slabs.len().max(1) as f64 / 1000.0,
+            segment_events: self.polarities.statistics.clone(),
             age_histogram,
             speed_p99,
             rms_plate_speed,

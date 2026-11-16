@@ -187,7 +187,7 @@ fn simulate(mut planet: Planet, cli: &Cli, mut on_step: impl FnMut(&Planet)) -> 
     let steps = (cli.duration / cli.dt).round() as u64;
     let snapshot_every = ((cli.snapshot_interval / cli.dt).round() as u64).max(1);
     let start = Instant::now();
-    let mut previous_ledger: Option<(f64, MassLedger, usize)> = None;
+    let mut previous_ledger: Option<(f64, MassLedger, usize, f64)> = None;
     snapshot(&planet, cli, &mut previous_ledger)?;
     on_step(&planet);
     for step in 1..=steps {
@@ -204,7 +204,7 @@ fn simulate(mut planet: Planet, cli: &Cli, mut on_step: impl FnMut(&Planet)) -> 
 fn snapshot(
     planet: &Planet,
     cli: &Cli,
-    previous_ledger: &mut Option<(f64, MassLedger, usize)>,
+    previous_ledger: &mut Option<(f64, MassLedger, usize, f64)>,
 ) -> anyhow::Result<()> {
     let simulation = planet.tectonics();
     let planet_statistics = planet.statistics();
@@ -287,11 +287,13 @@ fn snapshot(
     let cell_area =
         4.0 * std::f64::consts::PI * EARTH_RADIUS * EARTH_RADIUS / simulation.mesh().len() as f64;
     let new_crust_cells = statistics.gaps.new_crust_cells;
-    if let Some((previous_time, previous, previous_cells)) = previous_ledger.as_ref() {
+    if let Some((previous_time, previous, previous_cells, previous_opened)) =
+        previous_ledger.as_ref()
+    {
         let years = (statistics.time - previous_time) * 1e6;
         info!(
             "    sea floor production (km²/yr): kinematic {:.2}, created {:.2}",
-            statistics.kinematic_production,
+            (statistics.opened_area - previous_opened) / years,
             (new_crust_cells - previous_cells) as f64 * cell_area / 1e6 / years,
         );
         let rates: Vec<String> = statistics
@@ -306,7 +308,29 @@ fn snapshot(
             .collect();
         info!("    crust mass budget (Gt/yr): {}", rates.join(", "));
     }
-    *previous_ledger = Some((statistics.time, statistics.ledger.clone(), new_crust_cells));
+    *previous_ledger = Some((
+        statistics.time,
+        statistics.ledger.clone(),
+        new_crust_cells,
+        statistics.opened_area,
+    ));
+    let segments = &statistics.segment_events;
+    info!(
+        "    segments {} ({} with slab, mean {:.0} km) | created {}, merged {}, expired {}, \
+         flips {}, continental overrides {}, initiation segments {} ({} grew to 300 km), \
+         failed initiations {}",
+        statistics.segments,
+        statistics.slab_segments,
+        statistics.mean_slab_length,
+        segments.created,
+        segments.merged,
+        segments.expired,
+        segments.flips,
+        segments.continental_overrides,
+        segments.initiation_segments,
+        segments.successful_initiation_segments,
+        statistics.events.failed_initiations,
+    );
     info!(
         "    crust mass (Gt): continental {:.3e}, transitional {:.3e}, oceanic {:.3e}, \
          sediment {:.3e}, felsic {:.3e}, hidden {:.3e} | sediment lost {:.0} km·cells",

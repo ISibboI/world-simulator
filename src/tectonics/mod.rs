@@ -23,10 +23,11 @@
 //! when it is thick and light enough (see [`Crust::is_continental`]), so island arcs gradually
 //! become continental crust as they thicken.
 //!
-//! Which plate would subduct is decided per pair of plates when they first touch, from the
-//! buoyancy of their crust, and then kept (subduction polarity). It flips when continental crust
-//! arrives at the trench, since continents cannot subduct under oceanic crust. Where the plates
-//! of a pair converge, their boundary is a trench, with a slab that grows as it subducts.
+//! Which plate would subduct is decided per segment of the boundary between two plates when they
+//! first touch there, from the buoyancy of their crust or a neighbouring segment, and then kept
+//! (subduction polarity, see [`polarity`]). Continental crust arriving at a trench stays on top,
+//! and the segment flips once it keeps arriving. Where the plates converge, a segment's boundary
+//! is a trench, with a slab that grows as it subducts.
 //!
 //! Plate velocities follow from a balance of forces on each plate (slab pull, ridge push, drag
 //! against the mantle flow, collision resistance; see [`dynamics`]), with mantle flow from sinking
@@ -42,6 +43,7 @@ mod generation;
 mod ledger;
 mod mantle;
 mod matching;
+mod polarity;
 mod statistics;
 mod topology;
 
@@ -156,6 +158,12 @@ pub struct TectonicParams {
     pub matching: MatchingParams,
     /// Rifting, subduction initiation and suturing.
     pub events: PlateEventParams,
+    /// Boundary segments with their own subduction polarity cover this distance (m) around their
+    /// position (at least three cell spacings).
+    pub segment_radius: f64,
+    /// A boundary segment flips its polarity once continental crust has been arriving along
+    /// most of it for this long (Myr).
+    pub polarity_flip_time: f64,
     /// Subduction polarity between two plates is forgotten after they were not in contact for
     /// this long.
     pub polarity_memory: f64,
@@ -199,6 +207,8 @@ impl Default for TectonicParams {
             matching: MatchingParams::default(),
             events: PlateEventParams::default(),
             polarity_memory: 20.0,
+            segment_radius: 500e3,
+            polarity_flip_time: 3.0,
             max_substep_movement: 0.5,
         }
     }
@@ -254,6 +264,10 @@ pub struct Plate {
     matched_rotation: DQuat,
 }
 
+/// Ratio of the length of a straight boundary measured as boundary cells × mean edge length to
+/// its true length: boundaries on the mesh zig-zag (see the test in [`statistics`]).
+const BOUNDARY_ZIGZAG: f64 = 1.1;
+
 /// Position of crust sample `owner` in a dense per-sample array over all plates.
 fn sample_index(owner: Ownership, cell_count: usize) -> usize {
     owner.plate as usize * cell_count + owner.local as usize
@@ -276,24 +290,13 @@ pub struct Ownership {
     pub local: u32,
 }
 
-/// Which plate of a pair overrides the other at their common boundary.
-#[derive(Clone, Copy, Debug)]
-struct Polarity {
-    overriding: u32,
-    last_contact: f64,
-    /// How long, in Myr, the continents of the two plates have been colliding without pause.
-    collision_time: f64,
-    /// Length of slab (m) that has subducted below the overriding plate.
-    slab_length: f64,
-}
-
 pub struct Simulation {
     mesh: SphereMesh,
     params: TectonicParams,
     plates: Vec<Plate>,
     owners: Vec<Ownership>,
-    /// Subduction polarity of plate pairs `(a, b)` with `a < b`.
-    polarities: HashMap<(u32, u32), Polarity>,
+    /// Subduction polarity of the boundary segments of plate pairs.
+    polarities: polarity::Polarities,
     rng: ChaCha8Rng,
     mantle: mantle::MantleFlow,
     /// How uncovered cells were filled so far.
@@ -308,6 +311,8 @@ pub struct Simulation {
     /// Number of changes of the plate configuration (splits, merges, removals, induced
     /// subduction) so far; boundaries must be reclassified after each.
     configuration_changes: u64,
+    /// Area of sea floor opened by diverging plates so far (one flank), in km².
+    opened_area: f64,
     /// Simulated time in Myr.
     time: f64,
 }
@@ -403,22 +408,16 @@ impl Simulation {
         }
         let mut pairs: Vec<_> = boundary_buoyancy.into_iter().collect();
         pairs.sort_unstable_by_key(|((a, b), _)| (*a, *b));
-        let mut polarities = HashMap::default();
+        let mut initial_subduction = Vec::new();
         for ((a, b), (buoyancy_a, buoyancy_b)) in pairs {
             if rng.random_bool(params.initial_subduction_fraction.clamp(0.0, 1.0)) {
                 let overriding = if buoyancy_a >= buoyancy_b { a } else { b };
-                polarities.insert(
-                    (a, b),
-                    Polarity {
-                        overriding,
-                        last_contact: 0.0,
-                        collision_time: 0.0,
-                        // Initial subduction zones have fully developed slabs.
-                        slab_length: params.max_slab_length,
-                    },
-                );
+                initial_subduction.push(((a, b), overriding));
             }
         }
+        let segment_radius =
+            (params.segment_radius / params.planet_radius).max(3.0 * mesh.mean_edge_angle());
+        let polarities = polarity::Polarities::new(segment_radius);
 
         let owners = (0..cell_count as u32)
             .map(|cell| Ownership {
@@ -442,10 +441,51 @@ impl Simulation {
             matching_scratch: matching::MatchingScratch::default(),
             rng: owned_rng,
             configuration_changes: 0,
+            opened_area: 0.0,
             time: 0.0,
         };
         simulation.ledger = MassLedger::new(simulation.total_mass());
+        // Initial subduction zones have fully developed slabs.
+        let max_slab_length = simulation.params.max_slab_length;
+        for (pair, overriding) in initial_subduction {
+            simulation.seed_subduction(pair, overriding, max_slab_length);
+        }
         simulation
+    }
+
+    /// True length (m) of a boundary per boundary cell: the mean edge length, corrected for the
+    /// zig-zag of boundaries on the mesh.
+    pub(super) fn boundary_length_per_cell(&self) -> f64 {
+        self.params.planet_radius * self.mesh.mean_edge_angle() / BOUNDARY_ZIGZAG
+    }
+
+    /// Current rotations of all plates.
+    fn rotations(&self) -> Vec<DQuat> {
+        self.plates.iter().map(|plate| plate.rotation).collect()
+    }
+
+    /// Makes `overriding` override the other plate of `pair` with a slab of `slab_length` along
+    /// their whole common boundary, in segments that do not exist yet.
+    pub(super) fn seed_subduction(&mut self, pair: (u32, u32), overriding: u32, slab_length: f64) {
+        let rotations = self.rotations();
+        for cell in 0..self.mesh.len() as u32 {
+            let plate = self.owners[cell as usize].plate;
+            if plate != pair.0 && plate != pair.1 {
+                continue;
+            }
+            let other = if plate == pair.0 { pair.1 } else { pair.0 };
+            if self
+                .mesh
+                .neighbors(cell)
+                .iter()
+                .any(|&neighbor| self.owners[neighbor as usize].plate == other)
+            {
+                let r = self.mesh.vertex(cell);
+                self.polarities
+                    .seed(pair, overriding, r, slab_length, self.time, &rotations);
+            }
+        }
+        self.configuration_changes += 1;
     }
 
     pub fn mesh(&self) -> &SphereMesh {
@@ -486,20 +526,39 @@ impl Simulation {
         for _ in 0..substeps {
             self.substep(dt / substeps as f64);
         }
+        let rotations = self.rotations();
+        self.polarities
+            .end_step(self.time, self.params.polarity_memory, &rotations);
         self.crustal_flow(dt);
         self.remove_dead_plates();
         let boundaries = self.boundary_cells();
         let slabs_changed = self.update_slab_lengths(dt, &boundaries);
+        // Trenches whose slab broke off are no trenches any more.
+        let boundaries = if slabs_changed {
+            self.boundary_cells()
+        } else {
+            boundaries
+        };
         let topology = self.configuration_changes;
         self.plate_events(dt, &boundaries);
-        // The boundaries only change if plates were split, merged or removed, subduction was
-        // induced, or a slab appeared or disappeared (trenches with slabs persist at slight
-        // divergence).
-        let boundaries = if self.configuration_changes == topology && !slabs_changed {
+        // The boundaries only change if plates were split, merged or removed, or subduction was
+        // induced.
+        let boundaries = if self.configuration_changes == topology {
             boundaries
         } else {
             self.boundary_cells()
         };
+
+        // Opening rate × boundary length over the diverging cells of both sides, halved.
+        let opening: f64 = boundaries
+            .iter()
+            .filter(|boundary| boundary.convergence < 0.0)
+            .map(|boundary| -boundary.convergence)
+            .sum();
+        self.opened_area += 0.5 * opening * self.boundary_length_per_cell() / 1000.0
+            * self.params.planet_radius
+            / 1000.0
+            * dt;
 
         let subduction = self.subduction_rates(&boundaries);
         self.mantle.step(dt, &subduction, &mut self.rng);
@@ -522,6 +581,9 @@ impl Simulation {
             additions,
             collisions,
         } = self.resolve_ownership();
+        let rotations = self.rotations();
+        self.polarities
+            .end_pass(dt, self.params.polarity_flip_time, &rotations);
         self.apply_additions(&additions);
         tracing::trace!(colliding_pairs = collisions.len(), "Substep");
     }

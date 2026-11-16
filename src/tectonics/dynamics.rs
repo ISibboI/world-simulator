@@ -56,6 +56,9 @@ pub(super) struct BoundaryCell {
     /// (positive where they converge).
     pub(super) convergence: f64,
     pub(super) kind: BoundaryKind,
+    /// Id of the boundary segment of the pair covering the cell, if any (see
+    /// [`super::polarity`]).
+    pub(super) segment: Option<u32>,
 }
 
 impl Simulation {
@@ -64,6 +67,7 @@ impl Simulation {
         let params = &self.params;
         let min_convergence = params.min_trench_convergence / (params.planet_radius * 100.0 / 1e6);
         let mut result = Vec::new();
+        let rotations = self.rotations();
         // Per other plate: summed direction towards it and one representative neighbour.
         let mut towards: Vec<(u32, DVec3, u32)> = Vec::new();
 
@@ -99,14 +103,16 @@ impl Simulation {
                 let other_crust = self.surface_crust(neighbor);
                 let other_velocity = self.plates[other as usize].angular_velocity.cross(position);
                 let convergence = (velocity - other_velocity).dot(normal);
-                let polarity = self.polarities.get(&pair_key(owner.plate, other));
+                let segment = self
+                    .polarities
+                    .segment_at(owner.plate, other, position, &rotations);
                 // A polarity only says which plate would subduct if the plates converge. A trench
                 // needs convergence, or an existing slab where the plates do not clearly diverge
                 // (hysteresis: a slab keeps pulling while the plates are nearly at rest).
-                let subducts_here = polarity.is_some_and(|polarity| {
-                    polarity.overriding == other
+                let subducts_here = segment.is_some_and(|segment| {
+                    segment.overriding == other
                         && (convergence > min_convergence
-                            || (polarity.slab_length > 0.0 && convergence > -min_convergence))
+                            || (segment.slab_length > 0.0 && convergence > -min_convergence))
                 });
 
                 let kind = if crust.is_continental() && other_crust.is_continental() {
@@ -130,6 +136,7 @@ impl Simulation {
                     normal,
                     convergence,
                     kind,
+                    segment: segment.map(|segment| segment.id),
                 });
             }
         }
@@ -309,10 +316,10 @@ impl Simulation {
 
     /// Fraction of the full slab length that has sunk below the trench at a boundary cell.
     fn slab_length_factor(&self, boundary: &BoundaryCell) -> f64 {
-        let slab_length = self
-            .polarities
-            .get(&pair_key(boundary.plate, boundary.other))
-            .map_or(0.0, |polarity| polarity.slab_length);
+        let slab_length = boundary
+            .segment
+            .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id))
+            .map_or(0.0, |segment| segment.slab_length);
         (slab_length / self.params.max_slab_length).clamp(0.0, 1.0)
     }
 
@@ -325,35 +332,41 @@ impl Simulation {
     /// boundary cells (see [`Self::boundary_cells`]).
     pub(super) fn update_slab_lengths(&mut self, dt: f64, boundaries: &[BoundaryCell]) -> bool {
         let params = &self.params;
-        // Mean convergence at the trench cells of each pair, in m/Myr.
-        let mut convergence: HashMap<(u32, u32), (f64, usize)> = HashMap::default();
+        // Mean convergence at the trench cells of each segment, in m/Myr.
+        let mut convergence: HashMap<u32, (f64, usize)> = HashMap::default();
         for boundary in boundaries {
-            if matches!(boundary.kind, BoundaryKind::Trench { .. }) && boundary.convergence > 0.0 {
-                let entry = convergence
-                    .entry(pair_key(boundary.plate, boundary.other))
-                    .or_default();
+            if let (BoundaryKind::Trench { .. }, Some(id)) = (boundary.kind, boundary.segment)
+                && boundary.convergence > 0.0
+            {
+                let entry = convergence.entry(id).or_default();
                 entry.0 += boundary.convergence * params.planet_radius;
                 entry.1 += 1;
             }
         }
         let decay = (-dt / params.slab_decay_time).exp();
         let mut slabs_changed = false;
-        for (pair, polarity) in &mut self.polarities {
-            let had_slab = polarity.slab_length > 0.0;
-            match convergence.get(pair) {
-                Some(&(sum, count)) if count > 0 => {
-                    polarity.slab_length = (polarity.slab_length + sum / count as f64 * dt)
-                        .min(params.max_slab_length);
-                }
-                _ => {
-                    polarity.slab_length *= decay;
-                    // A slab remnant this short has broken off: the trench is gone.
-                    if polarity.slab_length < params.min_slab_length {
-                        polarity.slab_length = 0.0;
+        let polarity::Polarities {
+            pairs, statistics, ..
+        } = &mut self.polarities;
+        for pair in pairs.values_mut() {
+            for segment in &mut pair.segments {
+                let had_slab = segment.slab_length > 0.0;
+                match convergence.get(&segment.id) {
+                    Some(&(sum, count)) if count > 0 => {
+                        segment.slab_length = (segment.slab_length + sum / count as f64 * dt)
+                            .min(params.max_slab_length);
+                        polarity::Polarities::note_slab_growth(statistics, segment);
+                    }
+                    _ => {
+                        segment.slab_length *= decay;
+                        // A slab remnant this short has broken off: the trench is gone.
+                        if segment.slab_length < params.min_slab_length {
+                            segment.slab_length = 0.0;
+                        }
                     }
                 }
+                slabs_changed |= had_slab != (segment.slab_length > 0.0);
             }
-            slabs_changed |= had_slab != (polarity.slab_length > 0.0);
         }
         slabs_changed
     }
@@ -495,15 +508,8 @@ mod tests {
             plate.angular_velocity = DVec3::ZERO;
         }
         // Plate 0 subducts under plate 1.
-        simulation.polarities.insert(
-            pair_key(0, 1),
-            Polarity {
-                overriding: 1,
-                last_contact: 0.0,
-                collision_time: 0.0,
-                slab_length: 600e3,
-            },
-        );
+        simulation.polarities.clear();
+        simulation.seed_subduction((0, 1), 1, 600e3);
         // Old oceanic crust everywhere, except that plate 0 is continental on the -x side, so
         // that it only subducts along the +x part of its boundary. Pulls from all sides of a
         // plate would cancel out.
@@ -655,15 +661,7 @@ mod tests {
         let mut simulation =
             Simulation::new(SphereMesh::icosphere(4), 2, TectonicParams::default(), 5);
         simulation.polarities.clear();
-        simulation.polarities.insert(
-            pair_key(0, 1),
-            Polarity {
-                overriding: 1,
-                last_contact: 0.0,
-                collision_time: 0.0,
-                slab_length,
-            },
-        );
+        simulation.seed_subduction((0, 1), 1, slab_length);
         for plate in &mut simulation.plates {
             for crust in plate.crust.iter_mut().flatten() {
                 *crust = new_oceanic_crust(-100.0);
@@ -716,7 +714,7 @@ mod tests {
         };
         for _ in 0..5 {
             update(&mut simulation, 1.0);
-            let length = simulation.polarities[&(0, 1)].slab_length;
+            let length = simulation.polarities.max_slab(0, 1);
             assert!(length > previous);
             previous = length;
         }
@@ -724,7 +722,7 @@ mod tests {
             update(&mut simulation, 1.0);
         }
         assert_eq!(
-            simulation.polarities[&(0, 1)].slab_length,
+            simulation.polarities.max_slab(0, 1),
             simulation.params.max_slab_length
         );
         // Subduction stops: the plates come to rest.
@@ -732,11 +730,11 @@ mod tests {
             plate.angular_velocity = DVec3::ZERO;
         }
         update(&mut simulation, 10.0);
-        let decayed = simulation.polarities[&(0, 1)].slab_length;
+        let decayed = simulation.polarities.max_slab(0, 1);
         assert!(decayed < 0.5 * simulation.params.max_slab_length);
         assert!(decayed > 0.0);
         // Eventually the slab breaks off completely.
         update(&mut simulation, 100.0);
-        assert_eq!(simulation.polarities[&(0, 1)].slab_length, 0.0);
+        assert_eq!(simulation.polarities.max_slab(0, 1), 0.0);
     }
 }

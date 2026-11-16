@@ -110,9 +110,9 @@ impl Simulation {
             ..
         } = self;
         let time = *time;
-        polarities.retain(|_, polarity| time - polarity.last_contact <= params.polarity_memory);
         let cell_count = mesh.len();
-        let inverse_rotations: Vec<DQuat> = plates.iter().map(|p| p.rotation.inverse()).collect();
+        let rotations: Vec<DQuat> = plates.iter().map(|p| p.rotation).collect();
+        let inverse_rotations: Vec<DQuat> = rotations.iter().map(|r| r.inverse()).collect();
         let alive: Vec<bool> = plates
             .iter()
             .map(|p| p.crust.iter().any(Option::is_some))
@@ -147,7 +147,8 @@ impl Simulation {
                 candidates.push((Ownership { plate, local }, crust));
             }
 
-            let Some((winner, winner_crust)) = choose_overriding(&candidates, polarities, time)
+            let Some((winner, winner_crust)) =
+                choose_overriding(&candidates, polarities, mesh.vertex(cell), &rotations, time)
             else {
                 continue;
             };
@@ -657,52 +658,38 @@ pub(super) fn pair_key(a: u32, b: u32) -> (u32, u32) {
     (a.min(b), a.max(b))
 }
 
-/// Chooses the overriding plate among the plates covering a cell, recording and updating the
-/// subduction polarity of each pair of plates in contact.
+/// Chooses the plate whose crust stays at the surface among the plates covering a cell at the
+/// world position `r`, recording the contact of each pair in their boundary segment there (see
+/// [`polarity::Polarities::contact`]).
 pub(super) fn choose_overriding(
     candidates: &[(Ownership, Crust)],
-    polarities: &mut HashMap<(u32, u32), Polarity>,
+    polarities: &mut polarity::Polarities,
+    r: DVec3,
+    rotations: &[DQuat],
     time: f64,
 ) -> Option<(Ownership, Crust)> {
+    if candidates.len() <= 1 {
+        return candidates.first().copied();
+    }
+    // The plate on top for each pair of candidates at this cell.
+    let mut on_top: Vec<((u32, u32), u32)> = Vec::new();
     for (i, &(a, a_crust)) in candidates.iter().enumerate() {
         for &(b, b_crust) in &candidates[i + 1..] {
-            let polarity = polarities
-                .entry(pair_key(a.plate, b.plate))
-                .or_insert_with(|| Polarity {
-                    overriding: if a_crust.buoyancy(time) >= b_crust.buoyancy(time) {
-                        a.plate
-                    } else {
-                        b.plate
-                    },
-                    last_contact: time,
-                    collision_time: 0.0,
-                    slab_length: 0.0,
-                });
-            polarity.last_contact = time;
-            let (top, top_crust, bottom, bottom_crust) = if polarity.overriding == a.plate {
-                (a, a_crust, b, b_crust)
-            } else {
-                (b, b_crust, a, a_crust)
-            };
-            if bottom_crust.is_continental() && !top_crust.is_continental() {
-                // Continental crust arrived at the trench: the polarity flips, and the old slab
-                // belonged to the other plate.
-                polarity.overriding = bottom.plate;
-                polarity.slab_length = 0.0;
-            } else {
-                polarity.overriding = top.plate;
-            }
+            let top =
+                polarities.contact((a.plate, a_crust), (b.plate, b_crust), r, time, rotations);
+            on_top.push((pair_key(a.plate, b.plate), top));
         }
     }
 
-    // Prefer the plate that overrides all others; with three or more plates the relation may be
-    // cyclic, in which case buoyancy decides.
+    // Prefer the plate that is on top of all others; with three or more plates the relation may
+    // be cyclic, in which case buoyancy decides.
     candidates
         .iter()
         .find(|(a, _)| {
-            candidates.iter().all(|(b, _)| {
-                a.plate == b.plate || polarities[&pair_key(a.plate, b.plate)].overriding == a.plate
-            })
+            on_top
+                .iter()
+                .filter(|((p, q), _)| *p == a.plate || *q == a.plate)
+                .all(|(_, top)| *top == a.plate)
         })
         .or_else(|| {
             candidates

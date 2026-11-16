@@ -327,23 +327,7 @@ mod tests {
                 );
             }
         }
-        let polarities = |s: &Simulation| {
-            let mut v: Vec<_> = s
-                .polarities
-                .iter()
-                .map(|(&key, p)| {
-                    (
-                        key,
-                        p.overriding,
-                        p.last_contact.to_bits(),
-                        p.collision_time.to_bits(),
-                        p.slab_length.to_bits(),
-                    )
-                })
-                .collect();
-            v.sort_unstable();
-            v
-        };
+        let polarities = |s: &Simulation| s.polarities.snapshot();
         assert_eq!(polarities(a), polarities(b), "{context}: polarities");
         assert_eq!(
             a.total_mass().to_bits(),

@@ -70,30 +70,9 @@ impl Simulation {
             }
         }
 
-        // Both halves inherit the subduction polarities of the original plate.
-        let inherited: Vec<((u32, u32), Polarity)> = self
-            .polarities
-            .iter()
-            .filter(|((a, b), _)| *a == plate || *b == plate)
-            .map(|(&(a, b), &polarity)| {
-                let other = if a == plate { b } else { a };
-                let overriding = if polarity.overriding == plate {
-                    new_index
-                } else {
-                    polarity.overriding
-                };
-                (
-                    pair_key(new_index, other),
-                    Polarity {
-                        overriding,
-                        // A new plate has no history of collision with its neighbours.
-                        collision_time: 0.0,
-                        ..polarity
-                    },
-                )
-            })
-            .collect();
-        self.polarities.extend(inherited);
+        // Segments of the original plate's boundaries go to the half they lie on.
+        let rotations = self.rotations();
+        self.polarities.split(plate, new_index, normal, &rotations);
         Some(new_index)
     }
 
@@ -111,6 +90,8 @@ impl Simulation {
 
     fn merge_plates_inner(&mut self, into: u32, absorbed: u32) -> f64 {
         assert_ne!(into, absorbed, "a plate cannot be merged into itself");
+        let rotations = self.rotations();
+        self.polarities.merge(into, absorbed, &rotations);
         // The receiving plate gains crust at new cells.
         self.plates[into as usize].tracked = None;
         let inverse_rotation = self.plates[into as usize].rotation.inverse();
@@ -168,8 +149,7 @@ impl Simulation {
         self.configuration_changes += 1;
         let last = self.plates.len() as u32 - 1;
         self.plates.swap_remove(plate as usize);
-        self.polarities
-            .retain(|&(a, b), _| a != plate && b != plate);
+        self.polarities.remove_plate(plate, last);
         if plate == last {
             return;
         }
@@ -178,20 +158,6 @@ impl Simulation {
                 owner.plate = plate;
             }
         }
-        let renumber = |index: u32| if index == last { plate } else { index };
-        self.polarities = self
-            .polarities
-            .drain()
-            .map(|((a, b), polarity)| {
-                (
-                    pair_key(renumber(a), renumber(b)),
-                    Polarity {
-                        overriding: renumber(polarity.overriding),
-                        ..polarity
-                    },
-                )
-            })
-            .collect();
     }
 
     /// Removes all plates that no longer own any cell; their hidden crust is lost.
@@ -234,9 +200,11 @@ mod tests {
             // Panics if an owner points to a missing plate or missing crust.
             simulation.surface_crust(cell);
         }
-        for (&(a, b), polarity) in &simulation.polarities {
+        for (&(a, b), pair) in &simulation.polarities.pairs {
             assert!(a < b && (b as usize) < simulation.plates.len());
-            assert!(polarity.overriding == a || polarity.overriding == b);
+            for segment in &pair.segments {
+                assert!(segment.overriding == a || segment.overriding == b);
+            }
         }
     }
 
@@ -310,14 +278,14 @@ mod tests {
     fn split_plates_start_without_collision_history() {
         let mut simulation = simulation();
         let plate = simulation.owners[0].plate;
-        for polarity in simulation.polarities.values_mut() {
-            polarity.collision_time = 25.0;
+        for pair in simulation.polarities.pairs.values_mut() {
+            pair.collision_time = 25.0;
         }
         let normal = simulation.mesh.vertex(0).any_orthonormal_vector();
         let new_plate = simulation.split_plate(plate, normal).unwrap();
-        for (&(a, b), polarity) in &simulation.polarities {
+        for (&(a, b), pair) in &simulation.polarities.pairs {
             if a == new_plate || b == new_plate {
-                assert_eq!(polarity.collision_time, 0.0);
+                assert_eq!(pair.collision_time, 0.0);
             }
         }
     }

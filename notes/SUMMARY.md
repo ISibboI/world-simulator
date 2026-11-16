@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-16 (issue 1 tuning: slab resistance, initiation hazards)_
+_Last updated: 2026-11-16 (per-segment subduction polarity)_
 
 ## Goal
 
@@ -55,6 +55,9 @@ components (climate, erosion, …) are expected to build on it.
     collision resistance with an active set), one dense linear system. Slabs grow with
     convergence, decay when it stops and break off below 20 km.
   - `mantle.rs`: mantle flow from slab downwellings (decaying memory) and plumes.
+  - `polarity.rs`: subduction polarity and slab length per boundary segment (≤ ~1000 km,
+    anchored to the overriding plate, inherited along strike; continental crust arriving at a
+    trench stays on top, the segment flips after 3 Myr of sustained arrival).
   - `topology.rs` / `events.rs`: split, merge, remove plates; rifting above plumes, subduction
     initiation as an age hazard per margin length (passive margins split the plate; existing
     boundaries, mostly polarity reversals where old ocean overrides younger ocean), suturing,
@@ -112,9 +115,9 @@ components (climate, erosion, …) are expected to build on it.
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
 - **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
   plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms + tuning), 5, 3,
-  4 done and the runtime optimisations. **Next: issue 2 (sea level).** Issue 1 leaves 7–12%
-  ancient (≥ 200 Myr) ocean in slow continent-bearing plates (needs issue 10) and a polarity
-  flip-flop bug (issue 1k).
+  4 done and the runtime optimisations. **Next: issue 2 (sea level).** Issue 1 leaves 3–6%
+  ancient (≥ 200 Myr) ocean in slow continent-bearing plates (needs issue 10); continental mass
+  loss through collisions (75 km cap, merges) grew after the polarity fix.
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal

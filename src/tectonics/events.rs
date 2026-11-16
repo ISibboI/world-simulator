@@ -82,8 +82,12 @@ impl Default for PlateEventParams {
 pub(super) enum Initiation {
     /// An oceanic cell at a passive margin.
     PassiveMargin(u32),
-    /// The boundary between two plates.
-    Boundary { subducting: u32, overriding: u32 },
+    /// The boundary between two plates at a cell.
+    Boundary {
+        subducting: u32,
+        overriding: u32,
+        cell: u32,
+    },
 }
 
 impl PlateEventParams {
@@ -127,6 +131,8 @@ pub struct EventCounts {
     pub captures: usize,
     /// Plates that disappeared by subduction.
     pub consumed: usize,
+    /// Passive-margin initiations whose split did not happen (a part would be too small).
+    pub failed_initiations: usize,
     /// Splits that did not happen because there were already
     /// [`PlateEventParams::max_plates`] plates.
     pub blocked_splits: usize,
@@ -302,8 +308,9 @@ impl Simulation {
             Initiation::Boundary {
                 subducting,
                 overriding,
+                cell,
             } => {
-                self.induce_subduction(subducting, overriding);
+                self.induce_subduction(subducting, overriding, cell);
                 return;
             }
         };
@@ -329,22 +336,58 @@ impl Simulation {
         // The new plate is the continental side; the oceanic side subducts below it.
         if let Some(continental_plate) = self.split_if_large_enough(plate, normal) {
             self.event_counts.initiations += 1;
-            self.polarities.insert(
-                pair_key(plate, continental_plate),
-                Polarity {
-                    overriding: continental_plate,
-                    last_contact: self.time,
-                    collision_time: 0.0,
-                    slab_length: self.params.events.initiation_slab_length,
-                },
-            );
+            self.seed_margin_subduction(plate, continental_plate, cell);
             debug!(
                 oceanic_plate = plate,
                 continental_plate,
                 time = self.time,
                 "Subduction started at a passive margin"
             );
+        } else {
+            self.event_counts.failed_initiations += 1;
         }
+    }
+
+    /// Starts subduction of `oceanic_plate` below `continental_plate` along their new common
+    /// boundary where old oceanic crust faces continental crust, and at `cell`.
+    fn seed_margin_subduction(&mut self, oceanic_plate: u32, continental_plate: u32, cell: u32) {
+        let params = &self.params.events;
+        let (slab_length, min_age) = (params.initiation_slab_length, params.initiation_age);
+        let rotations = self.rotations();
+        let pair = (oceanic_plate, continental_plate);
+        let mut seeds = vec![cell];
+        for candidate in 0..self.mesh.len() as u32 {
+            if self.owners[candidate as usize].plate != oceanic_plate {
+                continue;
+            }
+            let crust = self.surface_crust(candidate);
+            if !crust.is_oceanic() || crust.age(self.time) < min_age {
+                continue;
+            }
+            if self.mesh.neighbors(candidate).iter().any(|&neighbor| {
+                self.owners[neighbor as usize].plate == continental_plate
+                    && self.surface_crust(neighbor).is_continental()
+            }) {
+                seeds.push(candidate);
+            }
+        }
+        for seed in seeds {
+            let r = self.mesh.vertex(seed);
+            if self
+                .polarities
+                .segment_at(pair.0, pair.1, r, &rotations)
+                .is_none()
+            {
+                let subduction = polarity::Subduction {
+                    overriding: continental_plate,
+                    slab_length,
+                    initiation: true,
+                };
+                self.polarities
+                    .set(pair, subduction, r, self.time, &rotations);
+            }
+        }
+        self.configuration_changes += 1;
     }
 
     /// Places where subduction may start (see [`Self::initiate_subduction`]) with their hazard
@@ -355,7 +398,7 @@ impl Simulation {
         boundaries: &[BoundaryCell],
     ) -> Vec<(Initiation, f64)> {
         let params = &self.params.events;
-        let margin_length = self.params.planet_radius * self.mesh.mean_edge_angle();
+        let margin_length = self.boundary_length_per_cell();
         let min_convergence =
             self.params.min_trench_convergence / (self.params.planet_radius * 100.0 / 1e6);
         // Candidate places with their hazard (per Myr).
@@ -388,11 +431,11 @@ impl Simulation {
                 || boundary.convergence <= -min_convergence
                 || boundary.plate >= first_new_plate
                 || boundary.other >= first_new_plate
-                || self
-                    .polarities
-                    .get(&pair_key(boundary.plate, boundary.other))
-                    .is_some_and(|polarity| {
-                        polarity.slab_length > 0.0 && polarity.overriding == boundary.other
+                || boundary
+                    .segment
+                    .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id))
+                    .is_some_and(|segment| {
+                        segment.slab_length > 0.0 && segment.overriding == boundary.other
                     })
             {
                 // Not a candidate, or the plate already subducts below the other one.
@@ -420,6 +463,7 @@ impl Simulation {
                     Initiation::Boundary {
                         subducting: boundary.plate,
                         overriding: boundary.other,
+                        cell: boundary.cell,
                     },
                     params.boundary_initiation_hazard(age) * margin_length,
                 ));
@@ -428,29 +472,25 @@ impl Simulation {
         candidates
     }
 
-    /// Starts subduction of `subducting` below `overriding` at their common boundary with a
-    /// short slab. If `overriding` subducted below `subducting` so far, the polarity reverses.
-    fn induce_subduction(&mut self, subducting: u32, overriding: u32) {
+    /// Starts subduction of `subducting` below `overriding` in the boundary segment at `cell`
+    /// with a short slab. If `overriding` subducted below `subducting` there so far, the
+    /// polarity reverses.
+    fn induce_subduction(&mut self, subducting: u32, overriding: u32, cell: u32) {
         let slab_length = self.params.events.initiation_slab_length;
         let time = self.time;
-        let reversal = self
-            .polarities
-            .get(&pair_key(subducting, overriding))
-            .is_some_and(|polarity| {
-                polarity.slab_length > 0.0 && polarity.overriding == subducting
-            });
-        let polarity = self
-            .polarities
-            .entry(pair_key(subducting, overriding))
-            .or_insert(Polarity {
-                overriding,
-                last_contact: time,
-                collision_time: 0.0,
-                slab_length: 0.0,
-            });
-        polarity.overriding = overriding;
-        polarity.last_contact = time;
-        polarity.slab_length = slab_length;
+        let rotations = self.rotations();
+        let subduction = polarity::Subduction {
+            overriding,
+            slab_length,
+            initiation: true,
+        };
+        let reversal = self.polarities.set(
+            (subducting, overriding),
+            subduction,
+            self.mesh.vertex(cell),
+            time,
+            &rotations,
+        );
         self.configuration_changes += 1;
         if reversal {
             self.event_counts.polarity_reversals += 1;
@@ -478,11 +518,11 @@ impl Simulation {
             }
         }
         let min_cells = self.params.events.suture_min_cells;
-        for (pair, polarity) in &mut self.polarities {
+        for (pair, state) in &mut self.polarities.pairs {
             if colliding.get(pair).copied().unwrap_or(0) >= min_cells {
-                polarity.collision_time += dt;
+                state.collision_time += dt;
             } else {
-                polarity.collision_time = (polarity.collision_time - dt).max(0.0);
+                state.collision_time = (state.collision_time - dt).max(0.0);
             }
         }
 
@@ -490,8 +530,9 @@ impl Simulation {
         // Merge one pair at a time, since merging renumbers plates.
         while let Some(&(a, b)) = self
             .polarities
+            .pairs
             .iter()
-            .filter(|(_, polarity)| polarity.collision_time >= suture_time)
+            .filter(|(_, state)| state.collision_time >= suture_time)
             .map(|(pair, _)| pair)
             .min()
         {
@@ -644,14 +685,26 @@ mod tests {
         simulation.initiate_subduction(1.0, u32::MAX, &boundaries);
         assert_eq!(simulation.plates.len(), 2);
         assert_eq!(simulation.event_counts.induced_subductions, 1);
-        assert_eq!(simulation.polarities[&(0, 1)].overriding, 1);
-        // The old plate's side of the boundary is now a trench.
+        // One segment: the old plate subducts there.
+        let segments = simulation.polarities.pair_segments(0, 1);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].overriding, 1);
+        // The old plate's side of the boundary is a trench there, and only there.
         let boundaries = simulation.boundary_cells();
+        let trenches = boundaries
+            .iter()
+            .filter(|b| matches!(b.kind, BoundaryKind::Trench { .. }))
+            .count();
+        let old_side = boundaries.iter().filter(|b| b.plate == 0).count();
+        assert!(
+            trenches > 0 && trenches < old_side,
+            "{trenches} of {old_side}"
+        );
         assert!(
             boundaries
                 .iter()
-                .filter(|b| b.plate == 0)
-                .all(|b| matches!(b.kind, BoundaryKind::Trench { .. }))
+                .filter(|b| matches!(b.kind, BoundaryKind::Trench { .. }))
+                .all(|b| b.plate == 0)
         );
     }
 
@@ -659,23 +712,25 @@ mod tests {
     fn old_overriding_ocean_reverses_the_subduction_polarity() {
         let mut simulation = resting_oceanic_plates([200.0, 30.0]);
         // The young plate subducts below the old one.
-        simulation.polarities.insert(
-            (0, 1),
-            Polarity {
-                overriding: 0,
-                last_contact: 0.0,
-                collision_time: 0.0,
-                slab_length: 600e3,
-            },
-        );
+        simulation.seed_subduction((0, 1), 0, 600e3);
+        let segments = simulation.polarities.pair_segments(0, 1).len();
+        assert!(segments > 1);
         let boundaries = simulation.boundary_cells();
         simulation.initiate_subduction(1.0, u32::MAX, &boundaries);
         assert_eq!(simulation.event_counts.polarity_reversals, 1);
-        let polarity = simulation.polarities[&(0, 1)];
-        assert_eq!(polarity.overriding, 1);
+        // Exactly one segment reversed, with a new short slab; the others are unchanged.
+        let segments = simulation.polarities.pair_segments(0, 1);
+        let reversed: Vec<_> = segments.iter().filter(|s| s.overriding == 1).collect();
+        assert_eq!(reversed.len(), 1);
         assert_eq!(
-            polarity.slab_length,
+            reversed[0].slab_length,
             simulation.params.events.initiation_slab_length
+        );
+        assert!(
+            segments
+                .iter()
+                .filter(|s| s.overriding == 0)
+                .all(|s| s.slab_length == 600e3)
         );
     }
 
@@ -695,9 +750,14 @@ mod tests {
         let mut simulation = passive_margin(params, 250.0);
         simulation.initiate_subduction(1.0, u32::MAX, &[]);
         assert_eq!(simulation.plates.len(), 2);
-        // The oceanic plate subducts below the continental one.
-        let polarity = simulation.polarities[&(0, 1)];
-        assert_eq!(polarity.overriding, 1);
+        // The oceanic plate subducts below the continental one along the margin.
+        let segments = simulation.polarities.pair_segments(0, 1);
+        assert!(segments.len() > 1, "{}", segments.len());
+        assert!(
+            segments
+                .iter()
+                .all(|s| s.overriding == 1 && s.slab_length > 0.0)
+        );
         let continental_cells = (0..simulation.mesh.len() as u32)
             .filter(|&cell| simulation.owners[cell as usize].plate == 1)
             .filter(|&cell| simulation.surface_crust(cell).is_continental())
@@ -720,15 +780,7 @@ mod tests {
                 };
             }
         }
-        simulation.polarities.insert(
-            (0, 1),
-            Polarity {
-                overriding: 0,
-                last_contact: 0.0,
-                collision_time: 0.0,
-                slab_length: 0.0,
-            },
-        );
+        simulation.seed_subduction((0, 1), 0, 0.0);
         for _ in 0..5 {
             let boundaries = simulation.boundary_cells();
             simulation.suture_colliding_plates(1.0, &boundaries);

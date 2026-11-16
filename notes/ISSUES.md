@@ -117,6 +117,19 @@ further options in `research/profiling-2026-11-15.md`) → issue 1 tuning ✓ (a
        mean age without the ≥ 200 Myr tail only 50–57 Myr. The 1 Gyr run drifts in its second
        half (plates > 1% 22 → 11–16, > 150 Myr 13 → 19–21%).
    Outputs: `agent-scratch/eval-issue1-tuning/`.
+   **1k, 1l and the small items of 1m fixed (2026-11-16, plan + review
+   `plans/per-segment-polarity.md`):** subduction polarity and slabs per boundary segment
+   (`src/tectonics/polarity.rs`; segments ≤ ~1000 km anchored to the overriding plate,
+   inherited along strike, flip only after 3 Myr of majority continental arrival with
+   hysteresis; continental crust arriving at a trench stays on top per cell). Seeds 0–2,
+   500 Myr (means 200–500 Myr; before → after): flips 7,300–9,300 → 239–302; ≥ 200 Myr ocean
+   7–12% → 2.7–6.3%; > 150 Myr 12–18% → 6–10%; mean age 66–86 → 52–65 Myr (median 34–39, below
+   the 45–55 target); mean speed 3.4–3.8 → 3.7–4.1 cm/yr; plates 14–20 → 8–11 (births = deaths;
+   more sutures); production 130–147 → 152–172 Gt/yr (kinematic 6.7–7.4 km²/yr, ~2× Earth);
+   60–70% of initiation segments grow a 300 km slab. **Continental mass −16%, 0%, −13% per
+   500 Myr (was −5%)**: more sutures → more stacking above the 75 km cap ("additions lost"
+   −4.7 Gt/yr) and more hidden crust lost in merges (−15 Gt/yr) — fix with issue 3's artifacts
+   and the thickness cap, not by tuning.
 2. **Sea level fixed at 0 → ocean water volume not conserved** (1.75–2.35e9 km³ [1.335e9],
    drifting ~1 km sea-level equivalent). Solve sea level for constant water volume each step.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):
