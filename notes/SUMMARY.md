@@ -113,7 +113,8 @@ components (climate, erosion, …) are expected to build on it.
 - **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
   plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms + tuning), 5, 3,
   4 done and the runtime optimisations. **Next: issue 2 (sea level).** Issue 1 leaves 7–12%
-  ancient (≥ 200 Myr) ocean in slow continent-bearing plates (needs issue 10).
+  ancient (≥ 200 Myr) ocean in slow continent-bearing plates (needs issue 10) and a polarity
+  flip-flop bug (issue 1k).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal

@@ -97,6 +97,26 @@ further options in `research/profiling-2026-11-15.md`) → issue 1 tuning ✓ (a
    slow, continent-bearing plates far from their trenches — needs splitting along the
    continent–ocean margin instead of a great circle (issue 10) or intraplate initiation; ridge
    and trench lengths ~2× Earth; mean speed 3.4–3.8 cm/yr slightly low.
+   **Independent evaluation of af49af9 (2026-11-16):** move on, but keep open:
+   1k. **Bug (older):** `choose_overriding` (`boundaries.rs`) re-decides the pair polarity at
+       every overlap cell and resets the slab whenever the lower plate shows continental crust,
+       so pairs with continental crust on both sides flip back and forth within one pass (7,300–
+       9,300 flips per 500 Myr, ~2,700 destroying a live slab, 43–53% of flipping pair-substeps
+       flip ≥ 2×). Slabs rarely reach full length → weak slab pull, likely the low mean speed.
+       Fix: per-segment polarity, or one majority decision per pass with sustained contact that
+       keeps the slab.
+   1l. Polarity reversals (17–37 per run) are almost all undone within ~1 Myr by 1k; induced
+       subduction at transform-type boundaries never fires (non-diverging pairs always have a
+       polarity already). Turning boundary initiation off barely changes results.
+   1m. Small: initiation candidates use boundaries classified before slab break-off (stale doc
+       comment in `plate_events`); failed passive-margin splits (< 1% side) are not counted; the
+       hazards omit the 1.1 zig-zag factor (waiting times ~10% shorter than stated); kinematic
+       production is a snapshot vs created over 50 Myr (time-averaged, created is 10–20% higher:
+       some numerical over-production remains).
+   1n. Age distribution: young part exponential, not triangular (0–20 Myr bin 27–32% [~21%]);
+       mean age without the ≥ 200 Myr tail only 50–57 Myr. The 1 Gyr run drifts in its second
+       half (plates > 1% 22 → 11–16, > 150 Myr 13 → 19–21%).
+   Outputs: `agent-scratch/eval-issue1-tuning/`.
 2. **Sea level fixed at 0 → ocean water volume not conserved** (1.75–2.35e9 km³ [1.335e9],
    drifting ~1 km sea-level equivalent). Solve sea level for constant water volume each step.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):
