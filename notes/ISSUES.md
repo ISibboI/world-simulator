@@ -12,8 +12,9 @@ autonomously, with an independent plan review before each issue): 1 (mechanisms)
 high) → runtime optimisation review ✓ (incremental plate matching, 2.5×; the user decides on
 further options in `research/profiling-2026-11-15.md`) → issue 1 tuning ✓ (ancient ocean remains, see issue 10) → per-segment polarity ✓ →
 **boundary length and collision thickening (1o a/b, user 2026-11-16; a: plate connectivity
-done)** → 2 ✓ → **open: 1q relative-speed tuning (later, user), 1r thickening** → 7 + 6
-→ 9 → 8.
+done)** → 2 ✓ → **1r: mass-conserving gap healing (next) → issue 3 continental mass
+balance → collapse/stretching if needed** → 1q relative-speed tuning (later, user) → 7 + 6 → 9
+→ 8.
 
 ## Open
 
@@ -181,6 +182,18 @@ done)** → 2 ✓ → **open: 1q relative-speed tuning (later, user), 1r thicken
        only > 40 km); no rift stretching (issue 7). Fix: collapse onto the foreland across
        plate boundaries (10⁴–10⁵ km²/Myr), rift stretching (β 2–4), shear coupling (1q) also
        slows collisions.
+       **Update (2026-11-16, budget of continental crust, seeds 0–1):** the main source of the
+       thickening is numerical — healing resampling gaps copies the adjacent sample and creates
+       continental crust (+35–44 Gt/yr, mostly at boundaries with other plates where
+       collisions then stack it), more than collision stacking onto continents (+16–18),
+       arcs/accretion (+3) or erosion (−19…−21). Experiment showing the adjacent sample instead
+       (mass-conserving): mean continental thickness 45.6 → 34–35 km, > 50 km 31–33% → 6–8%,
+       mean land ~0.7–0.8 km — but continental area falls 40% → 27–30% in 500 Myr: the copies
+       hid the real continental mass loss (erosion −12…−16 Gt/yr; sediment mostly subducted,
+       4–6× Earth). Plans: `plans/mass-conserving-gaps.md` (reviewed, changes pending:
+       fill enclosed holes mass-conservingly, share elsewhere) → issue 3 mass balance →
+       collapse/stretching (`plans/issue-1r-thickening.md`, reviewed, needs rework per its
+       review) only if still needed.
    **1q: boundary shear coupling done (2026-11-16, plan + review `plans/boundary-friction.md`):**
    strike-slip along plate boundaries resisted in the torque balance (smoothed 3-ring normals,
    per boundary cell, symmetric); oceanic/mixed boundaries `boundary_coupling_width` 200 km
