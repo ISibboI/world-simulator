@@ -52,6 +52,9 @@ pub struct PlateEventParams {
     pub suture_time: f64,
     /// Minimum number of colliding boundary cells for a pair of plates to count as colliding.
     pub suture_min_cells: usize,
+    /// A colliding pair only sutures while its colliding cells are at least this fraction of
+    /// its trench cells: plates still subducting along long trenches keep moving independently.
+    pub suture_trench_ratio: f64,
     /// Plates smaller than this fraction of the surface are captured by a neighbour.
     pub min_plate_area_before_capture: f64,
 }
@@ -72,6 +75,7 @@ impl Default for PlateEventParams {
             initiation_slab_length: 150e3,
             suture_time: 30.0,
             suture_min_cells: 10,
+            suture_trench_ratio: 1.0,
             min_plate_area_before_capture: 0.003,
         }
     }
@@ -153,8 +157,7 @@ impl EventCounts {
 
 impl Simulation {
     /// Runs the plate events for a time step of `dt` Myr. `boundaries` are the current
-    /// [`Self::boundary_cells`] (only their collisions and convergence are used, which do not
-    /// depend on the slab lengths).
+    /// [`Self::boundary_cells`], classified with the slab lengths after this step's update.
     pub(super) fn plate_events(&mut self, dt: f64, boundaries: &[BoundaryCell]) {
         let configuration = self.configuration_changes;
         self.suture_colliding_plates(dt, boundaries);
@@ -503,23 +506,31 @@ impl Simulation {
         );
     }
 
-    /// Tracks how long pairs of plates have been in continental collision, and merges them once
-    /// the collision has lasted long enough. Contacts count unless the plates clearly move
+    /// Tracks how long pairs of plates have been in continental collision (dominating their
+    /// convergent boundary over trenches), and merges them once the collision has lasted long
+    /// enough. Contacts count unless the plates clearly move
     /// apart (collision resistance drives locked collisions to near-zero convergence).
     fn suture_colliding_plates(&mut self, dt: f64, boundaries: &[BoundaryCell]) {
         let min_convergence =
             self.params.min_trench_convergence / (self.params.planet_radius * 100.0 / 1e6);
-        let mut colliding: HashMap<(u32, u32), usize> = HashMap::default();
+        // Per pair: colliding cells and trench cells.
+        let mut contacts: HashMap<(u32, u32), (usize, usize)> = HashMap::default();
         for boundary in boundaries {
+            let pair = pair_key(boundary.plate, boundary.other);
             if boundary.kind == BoundaryKind::Collision && boundary.convergence > -min_convergence {
-                *colliding
-                    .entry(pair_key(boundary.plate, boundary.other))
-                    .or_default() += 1;
+                contacts.entry(pair).or_default().0 += 1;
+            } else if matches!(boundary.kind, BoundaryKind::Trench { .. }) {
+                contacts.entry(pair).or_default().1 += 1;
             }
         }
         let min_cells = self.params.events.suture_min_cells;
         for (pair, state) in &mut self.polarities.pairs {
-            if colliding.get(pair).copied().unwrap_or(0) >= min_cells {
+            // The continents collide, and collision dominates the convergent boundary: plates
+            // that still subduct along long trenches keep moving independently.
+            let (colliding, trenches) = contacts.get(pair).copied().unwrap_or_default();
+            if colliding >= min_cells
+                && colliding as f64 >= self.params.events.suture_trench_ratio * trenches as f64
+            {
                 state.collision_time += dt;
             } else {
                 state.collision_time = (state.collision_time - dt).max(0.0);

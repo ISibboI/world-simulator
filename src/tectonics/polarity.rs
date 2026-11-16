@@ -289,8 +289,8 @@ impl Polarities {
     }
 
     /// Ends a step at `time`: re-centres segments on their contacts, merges segments of a pair
-    /// that came close, and forgets segments without slab and contact for `memory` Myr and pairs
-    /// without segments and contact.
+    /// that came close, and forgets segments without contact or trench for `memory` Myr and
+    /// pairs without segments and contact.
     pub(super) fn end_step(&mut self, time: f64, memory: f64, rotations: &[DQuat]) {
         let merge_dot = (0.5 * self.radius).cos();
         let statistics = &mut self.statistics;
@@ -305,21 +305,18 @@ impl Polarities {
                     segment.contact_sum = DVec3::ZERO;
                 }
             }
-            // Merge close segments of the same polarity (or where one has no slab).
+            // Merge close segments of the same polarity.
             let mut i = 0;
             while i < pair.segments.len() {
                 let mut j = i + 1;
                 while j < pair.segments.len() {
                     let (first, second) = (&pair.segments[i], &pair.segments[j]);
                     let close = world(first, rotations).dot(world(second, rotations)) > merge_dot;
-                    let compatible = first.overriding == second.overriding
-                        || first.slab_length == 0.0
-                        || second.slab_length == 0.0;
-                    if close && compatible {
+                    // Segments of opposite polarity stay apart (a fresh flip must survive).
+                    if close && first.overriding == second.overriding {
                         let removed = pair.segments.remove(j);
                         let kept = &mut pair.segments[i];
                         if removed.slab_length > kept.slab_length {
-                            kept.overriding = removed.overriding;
                             kept.anchor = removed.anchor;
                             kept.slab_length = removed.slab_length;
                         }
@@ -337,9 +334,10 @@ impl Polarities {
                 i += 1;
             }
             let before = pair.segments.len();
-            pair.segments.retain(|segment| {
-                segment.slab_length > 0.0 || time - segment.last_contact <= memory
-            });
+            // Segments with a trench count as in contact (see `update_slab_lengths`), so this
+            // only drops segments left away from the boundary.
+            pair.segments
+                .retain(|segment| time - segment.last_contact <= memory);
             statistics.expired += before - pair.segments.len();
         }
         self.pairs
@@ -452,6 +450,10 @@ impl Polarities {
                 let side = world(&segment, rotations).dot(normal);
                 if side.abs() < near || side > 0.0 {
                     let mut copy = segment.clone();
+                    if side.abs() < near {
+                        // Counted once, on the staying side.
+                        copy.initiation = None;
+                    }
                     if copy.overriding == plate {
                         // Same rotation, so the anchor stays valid.
                         copy.overriding = new_plate;
@@ -757,15 +759,33 @@ mod tests {
     }
 
     #[test]
-    fn segments_with_slabs_outlive_the_contact_memory() {
+    fn segments_away_from_the_boundary_expire() {
         let mut polarities = Polarities::new(RADIUS);
         let rotations = identity();
         polarities.set((0, 1), sub(1, 100e3), DVec3::X, 0.0, &rotations);
-        polarities.set((0, 1), sub(1, 0.0), DVec3::Y, 0.0, &rotations);
+        polarities.set((0, 1), sub(1, 0.0), DVec3::Y, 90.0, &rotations);
         polarities.end_step(100.0, 20.0, &rotations);
         let segments = polarities.pair_segments(0, 1);
         assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].slab_length, 100e3);
+        assert_eq!(segments[0].last_contact, 90.0);
+    }
+
+    #[test]
+    fn a_fresh_flip_is_not_merged_away() {
+        let mut polarities = Polarities::new(RADIUS);
+        let rotations = identity();
+        polarities.set((0, 1), sub(1, 600e3), DVec3::X, 0.0, &rotations);
+        let close = (DVec3::X + DVec3::Y * (0.3 * RADIUS).tan()).normalize();
+        let segment = polarities.new_segment(close, 0, 0.0, 0.0, &rotations);
+        polarities
+            .pairs
+            .get_mut(&(0, 1))
+            .unwrap()
+            .segments
+            .push(segment);
+        polarities.end_step(0.0, 20.0, &rotations);
+        let segments = polarities.pair_segments(0, 1);
+        assert_eq!(segments.len(), 2);
     }
 
     #[test]

@@ -353,6 +353,8 @@ impl Simulation {
                 let had_slab = segment.slab_length > 0.0;
                 match convergence.get(&segment.id) {
                     Some(&(sum, count)) if count > 0 => {
+                        // A trench keeps the segment in contact, also without overlap.
+                        segment.last_contact = segment.last_contact.max(self.time);
                         segment.slab_length = (segment.slab_length + sum / count as f64 * dt)
                             .min(params.max_slab_length);
                         polarity::Polarities::note_slab_growth(statistics, segment);

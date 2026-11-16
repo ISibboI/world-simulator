@@ -10,7 +10,8 @@ implementation, then prefer issues that also help issue 1, then work through the
 autonomously, with an independent plan review before each issue): 1 (mechanisms) ✓ → 5 ✓
 (partly) → issue 1 soundness fixes ✓ → 3 ✓ (ledger; artifacts remain) → 4 ✓ (peaks still too
 high) → runtime optimisation review ✓ (incremental plate matching, 2.5×; the user decides on
-further options in `research/profiling-2026-11-15.md`) → issue 1 tuning ✓ (ancient ocean remains, see issue 10) → **2** → 7 + 6 → 9 → 8.
+further options in `research/profiling-2026-11-15.md`) → issue 1 tuning ✓ (ancient ocean remains, see issue 10) → per-segment polarity ✓ →
+**boundary length and collision thickening (1o a/b, user 2026-11-16)** → 2 → 7 + 6 → 9 → 8.
 
 ## Open
 
@@ -117,19 +118,28 @@ further options in `research/profiling-2026-11-15.md`) → issue 1 tuning ✓ (a
        mean age without the ≥ 200 Myr tail only 50–57 Myr. The 1 Gyr run drifts in its second
        half (plates > 1% 22 → 11–16, > 150 Myr 13 → 19–21%).
    Outputs: `agent-scratch/eval-issue1-tuning/`.
-   **1k, 1l and the small items of 1m fixed (2026-11-16, plan + review
+   **1k and the small items of 1m fixed; 1l only partly (2026-11-16, plan + review
    `plans/per-segment-polarity.md`):** subduction polarity and slabs per boundary segment
    (`src/tectonics/polarity.rs`; segments ≤ ~1000 km anchored to the overriding plate,
    inherited along strike, flip only after 3 Myr of majority continental arrival with
-   hysteresis; continental crust arriving at a trench stays on top per cell). Seeds 0–2,
-   500 Myr (means 200–500 Myr; before → after): flips 7,300–9,300 → 239–302; ≥ 200 Myr ocean
-   7–12% → 2.7–6.3%; > 150 Myr 12–18% → 6–10%; mean age 66–86 → 52–65 Myr (median 34–39, below
-   the 45–55 target); mean speed 3.4–3.8 → 3.7–4.1 cm/yr; plates 14–20 → 8–11 (births = deaths;
-   more sutures); production 130–147 → 152–172 Gt/yr (kinematic 6.7–7.4 km²/yr, ~2× Earth);
-   60–70% of initiation segments grow a 300 km slab. **Continental mass −16%, 0%, −13% per
-   500 Myr (was −5%)**: more sutures → more stacking above the 75 km cap ("additions lost"
-   −4.7 Gt/yr) and more hidden crust lost in merges (−15 Gt/yr) — fix with issue 3's artifacts
-   and the thickness cap, not by tuning.
+   hysteresis; continental crust arriving at a trench stays on top per cell). Flips 7,300–9,300
+   → 239–302 per 500 Myr; slabs persist (mean slab factor at trenches 0.58 → 0.78, median life
+   2–27 → 16–41 Myr); ancient ocean halved; reversals survive now, but induced subduction at
+   transform-type boundaries still (almost) never fires (1l partly open).
+   **Independent evaluation of 57240c3:** implementation correct; follow-ups done: merges no
+   longer undo fresh flips, segments without contact or trench for 20 Myr expire (no stranded
+   slabs), split copies do not double-count initiations, slab diagnostic averaged over trench
+   cells. The continental mass changes (−16/0/−13% "continental", −12/+4/−9% felsic) were mostly
+   seed noise plus finding 1o, **not** stacking above the 75 km cap (only +0.4–1.2 Gt/yr).
+   1o. **Sutures welded plates that still shared long active trenches** (mean 68–89 trench
+       cells at suture, up to 564). Fixed: a colliding pair only sutures while its collision
+       cells are at least `suture_trench_ratio` (1.0, user decision for the sound rule) of its
+       trench cells. Effect (seeds 0–3, 500 Myr; ratio 0 / 0.25 / 0.5 / 1.0 compared): plates
+       10–13 → 14–16, but production 172–200 → 205–258 Gt/yr (kinematic 9–11 km²/yr, ~3×
+       Earth), mean age 50–58 → 35–42 Myr, mean land 1.5–1.9 → 2.2–2.4 km, continental area
+       25–29% → 20–24%. **Exposed problems, next:** (a) plate boundaries 2–3× too long for the
+       plate count (trench 186–237k km, ridge 150–203k km with 15 plates; Earth ~55k / 65k);
+       (b) long-lasting collisions thicken continents (mean land > 2 km).
 2. **Sea level fixed at 0 → ocean water volume not conserved** (1.75–2.35e9 km³ [1.335e9],
    drifting ~1 km sea-level equivalent). Solve sea level for constant water volume each step.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):

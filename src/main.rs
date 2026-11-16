@@ -316,7 +316,7 @@ fn snapshot(
     ));
     let segments = &statistics.segment_events;
     info!(
-        "    segments {} ({} with slab, mean {:.0} km) | created {}, merged {}, expired {}, \
+        "    segments {} ({} with slab; slab at trenches {:.0} km) | created {}, merged {}, expired {}, \
          flips {}, continental overrides {}, initiation segments {} ({} grew to 300 km), \
          failed initiations {}",
         statistics.segments,

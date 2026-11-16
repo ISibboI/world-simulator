@@ -56,7 +56,7 @@ pub struct Statistics {
     /// in km². Earth: ~3.4 km²/yr.
     pub opened_area: f64,
     /// Boundary segments with their own polarity, those with a slab, and the mean slab length
-    /// (km) of those.
+    /// (km) at trench cells.
     pub segments: usize,
     pub slab_segments: usize,
     pub mean_slab_length: f64,
@@ -219,12 +219,18 @@ impl Simulation {
         let (mut trench_length, mut ridge_flank_length, mut slab_pull, mut ridge_push) =
             (0.0, 0.0, 0.0, 0.0);
         let boundaries = self.boundary_cells();
+        let (mut trench_cells, mut trench_slab) = (0usize, 0.0);
         for boundary in &boundaries {
             let force = self.boundary_force(boundary).length();
             match boundary.kind {
                 super::dynamics::BoundaryKind::Trench { .. } => {
                     trench_length += boundary_length;
                     slab_pull += force;
+                    trench_cells += 1;
+                    trench_slab += boundary
+                        .segment
+                        .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id))
+                        .map_or(0.0, |segment| segment.slab_length);
                 }
                 super::dynamics::BoundaryKind::Ridge => {
                     ridge_flank_length += boundary_length;
@@ -345,7 +351,7 @@ impl Simulation {
             opened_area: self.opened_area,
             segments: self.polarities.segments().count(),
             slab_segments: slabs.len(),
-            mean_slab_length: slabs.iter().sum::<f64>() / slabs.len().max(1) as f64 / 1000.0,
+            mean_slab_length: trench_slab / trench_cells.max(1) as f64 / 1000.0,
             segment_events: self.polarities.statistics.clone(),
             age_histogram,
             speed_p99,
