@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-16 (per-segment polarity, plate connectivity)_
+_Last updated: 2026-11-16 (boundary shear coupling)_
 
 ## Goal
 
@@ -51,8 +51,9 @@ components (climate, erosion, …) are expected to build on it.
     slivers where crust was consumed).
   - `dynamics.rs`: boundary classification (trench, ridge, collision) and a quasi-static
     torque balance per plate (slab pull ∝ √age, ridge push, basal drag against the mantle flow,
-    ×4 under continents, slab resistance at trenches capping slab-driven speed at 10 cm/yr,
-    collision resistance with an active set), one dense linear system. Slabs grow with
+    ×4 under continents, slab resistance at trenches (terminal speed 10 cm/yr), collision
+    resistance with an active set, shear coupling along boundaries: 200 km-equivalent on
+    oceanic boundaries, strong in collisions), one dense linear system. Slabs grow with
     convergence, decay when it stops and break off below 20 km.
   - `mantle.rs`: mantle flow from slab downwellings (decaying memory) and plumes.
   - `polarity.rs`: subduction polarity and slab length per boundary segment (≤ ~1000 km,
@@ -117,8 +118,8 @@ components (climate, erosion, …) are expected to build on it.
 - **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
   plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms + tuning), 5, 3,
   4 done and the runtime optimisations. **Next (user): issue 1o — fragmentation fixed (1p);
-  remaining over-production (~2× Earth, ocean median ~30 Myr) needs shear coupling across
-  boundaries (1q); thickening (mean land 1.2–1.9 km) needs orogenic collapse and rift
+  boundary shear coupling added (1q; modest effect); production still ~2× Earth (median ocean
+  age ~35 Myr) — the lever is the magnitude of relative plate speeds; thickening (mean land 1.2–1.9 km) needs orogenic collapse and rift
   stretching (1r); then issue 2 (sea level).** 2–6% ancient (≥ 200 Myr) ocean remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water

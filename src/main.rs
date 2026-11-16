@@ -248,6 +248,17 @@ fn snapshot(
         statistics.speed_p99 * cm_per_year,
         statistics.rms_plate_speed * cm_per_year,
     );
+    info!(
+        "    boundary motion: relative speed median {:.1} cm/yr, {:.0}% slower than 2 cm/yr | \
+         mean |cos| {:.2}, opening/closing {:.0}%, strike-slip {:.0}% | shear/slab-pull power \
+         {:.3}",
+        statistics.median_relative_speed * cm_per_year,
+        100.0 * statistics.slow_boundary_fraction,
+        statistics.mean_obliquity_cos,
+        100.0 * statistics.normal_motion_fraction,
+        100.0 * statistics.strike_slip_fraction,
+        statistics.shear_power_ratio,
+    );
     let histogram: Vec<String> = statistics
         .age_histogram
         .iter()

@@ -180,6 +180,19 @@ done)** → 2 → 7 + 6 → 9 → 8.
        only > 40 km); no rift stretching (issue 7). Fix: collapse onto the foreland across
        plate boundaries (10⁴–10⁵ km²/Myr), rift stretching (β 2–4), shear coupling (1q) also
        slows collisions.
+   **1q: boundary shear coupling done (2026-11-16, plan + review `plans/boundary-friction.md`):**
+   strike-slip along plate boundaries resisted in the torque balance (smoothed 3-ring normals,
+   per boundary cell, symmetric); oceanic/mixed boundaries `boundary_coupling_width` 200 km
+   (physical estimate; ≈ 5–10% of slab-pull power), collisions as strong as their normal
+   resistance. Sweep (seeds 0–2): W = 0 / 300 / 1000 km → production 138–160 / 141–153 /
+   115–142 Gt/yr, relative-speed median 6.5–7.0 / 5.9–6.6 / 5.3–5.6 cm/yr; W = 1000 km costs 30%
+   of slab-pull power (unphysical). **As the plan review predicted, coupling only damps the
+   strike-slip component and is not the lever for production** (relative motion is already
+   slightly more boundary-normal than random: mean |cos| 0.7 vs 0.64). Defaults, seeds 0–3:
+   production 136–147 Gt/yr (kinematic 5.7–6.3 km²/yr, ~2× Earth), mean age 52–61 Myr (median
+   34–37), 15–22 plates, runtime unchanged. **Remaining lever: the magnitude of the relative
+   speeds** (median 6.0–6.5 cm/yr; slab sinking speed 10 cm/yr, mantle traction, plate count)
+   — needs Earth references with the same conventions (PB2002 relative speeds by class) first.
 2. **Sea level fixed at 0 → ocean water volume not conserved** (1.75–2.35e9 km³ [1.335e9],
    drifting ~1 km sea-level equivalent). Solve sea level for constant water volume each step.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):

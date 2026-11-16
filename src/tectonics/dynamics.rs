@@ -13,7 +13,11 @@
 //! * **basal drag** between each plate and the mantle below it, `τ = c (v_mantle − v_plate)`,
 //!   stronger under thick continental keels;
 //! * **collision resistance** where continental crust of two plates converges, which opposes the
-//!   relative motion of the plates across the boundary.
+//!   relative motion of the plates across the boundary;
+//! * **boundary shear coupling**: plate boundaries are weak shear zones through the lithosphere,
+//!   which resist strike-slip motion along them (transform faults, oblique ridges and trenches;
+//!   strongly in continental collisions). Opening and closing across a boundary are not
+//!   resisted by it.
 //!
 //! Drag and the resistances are linear in the plate velocities, so the torque balance of all
 //! plates is one linear system for their angular velocities, solved directly. Collision
@@ -188,6 +192,45 @@ impl Simulation {
             }
         }
 
+        let size = 3 * plate_count;
+        let mut base = vec![0.0; size * size];
+        let mut rhs = vec![0.0; size];
+        for plate in 0..plate_count {
+            // A small regularisation (like the drag under a millionth of a cell) keeps plates
+            // without cells, or with a single cell (free to spin about its own axis), solvable.
+            let block = drag[plate]
+                + DMat3::IDENTITY * (1e-6 * params.basal_drag * cell_area * radius * radius);
+            add_block(&mut base, size, plate, plate, block);
+            for i in 0..3 {
+                rhs[3 * plate + i] = driving[plate][i];
+            }
+        }
+
+        // Boundary shear coupling: the force −k ((v_p − v_q) · t) t on p (and the opposite on q)
+        // with the strike t = r × n gives, since (ω × r) · t = −ω · n, the torque
+        // −k R² n nᵀ (ω_p − ω_q). Each side of a boundary contributes half, with the smoothed
+        // boundary normal n of its cell.
+        let length_per_cell = self.boundary_length_per_cell();
+        let normals = self.smoothed_normals(&boundaries);
+        for (boundary, &normal) in boundaries.iter().zip(&normals) {
+            let k = 0.5
+                * params.basal_drag
+                * if boundary.kind == BoundaryKind::Collision {
+                    params.collision_resistance * cell_area
+                } else {
+                    params.boundary_coupling_width * length_per_cell
+                };
+            if k <= 0.0 {
+                continue;
+            }
+            let block = outer(normal, normal) * (k * radius * radius);
+            let (p, q) = (boundary.plate as usize, boundary.other as usize);
+            add_block(&mut base, size, p, p, block);
+            add_block(&mut base, size, q, q, block);
+            add_block(&mut base, size, p, q, -block);
+            add_block(&mut base, size, q, p, -block);
+        }
+
         // Collision resistance: the force on the plate −k ((v_p − v_q) · n) n at R r gives the
         // torque −k R² m mᵀ (ω_p − ω_q) with m = r × n. Per boundary cell, it is as strong as the
         // basal drag under `collision_resistance` cells.
@@ -201,20 +244,7 @@ impl Simulation {
         let mut omega = vec![DVec3::ZERO; plate_count];
         let mut converged = false;
         for _ in 0..MAX_ACTIVE_SET_ITERATIONS {
-            let size = 3 * plate_count;
-            let mut matrix = vec![0.0; size * size];
-            let mut rhs = vec![0.0; size];
-            for plate in 0..plate_count {
-                // A small regularisation (like the drag under a millionth of a cell) keeps plates
-                // without cells, or with a single cell (free to spin about its own axis),
-                // solvable.
-                let block = drag[plate]
-                    + DMat3::IDENTITY * (1e-6 * params.basal_drag * cell_area * radius * radius);
-                add_block(&mut matrix, size, plate, plate, block);
-                for i in 0..3 {
-                    rhs[3 * plate + i] = driving[plate][i];
-                }
-            }
+            let mut matrix = base.clone();
             for (boundary, _) in collisions
                 .iter()
                 .zip(&active)
@@ -239,7 +269,7 @@ impl Simulation {
                 );
             }
 
-            let solution = solve_linear_system(matrix, rhs, size);
+            let solution = solve_linear_system(matrix, rhs.clone(), size);
             for (plate, omega) in omega.iter_mut().enumerate() {
                 *omega = DVec3::new(
                     solution[3 * plate],
@@ -296,6 +326,48 @@ impl Simulation {
             BoundaryKind::Ridge => -boundary.normal * (params.ridge_push * boundary_length),
             BoundaryKind::Collision | BoundaryKind::Other => DVec3::ZERO,
         }
+    }
+
+    /// Boundary normals (unit, tangent, from the plate towards the other plate) smoothed over a
+    /// few rings: the direction between the centroids of the two plates' cells near each
+    /// boundary cell. Single mesh edges zig-zag at ±30° or more around the true normal.
+    pub(super) fn smoothed_normals(&self, boundaries: &[BoundaryCell]) -> Vec<DVec3> {
+        const RINGS: usize = 3;
+        let mut stamp = vec![u32::MAX; self.mesh.len()];
+        let (mut frontier, mut next) = (Vec::new(), Vec::new());
+        boundaries
+            .iter()
+            .enumerate()
+            .map(|(index, boundary)| {
+                let index = index as u32;
+                let (mut own, mut other) = (DVec3::ZERO, DVec3::ZERO);
+                frontier.clear();
+                frontier.push(boundary.cell);
+                stamp[boundary.cell as usize] = index;
+                for _ in 0..=RINGS {
+                    next.clear();
+                    for &cell in &frontier {
+                        let plate = self.owners[cell as usize].plate;
+                        if plate == boundary.plate {
+                            own += self.mesh.vertex(cell);
+                        } else if plate == boundary.other {
+                            other += self.mesh.vertex(cell);
+                        }
+                        for &neighbor in self.mesh.neighbors(cell) {
+                            if stamp[neighbor as usize] != index {
+                                stamp[neighbor as usize] = index;
+                                next.push(neighbor);
+                            }
+                        }
+                    }
+                    std::mem::swap(&mut frontier, &mut next);
+                }
+                let r = self.mesh.vertex(boundary.cell);
+                let direction = other.normalize_or_zero() - own.normalize_or_zero();
+                let tangent = direction - r * direction.dot(r);
+                tangent.try_normalize().unwrap_or(boundary.normal)
+            })
+            .collect()
     }
 
     /// Slab resistance coefficient (N·s/m) at a boundary cell: at trenches, the force opposing
@@ -656,6 +728,96 @@ mod tests {
         // Without resistance, the plates would converge at roughly the mantle speed
         // (3e-9 m/s ≈ 0.015 rad/Myr). Collision resistance reduces this to a small fraction.
         assert!(mean < 0.002, "{mean}");
+    }
+
+    /// Two oceanic hemispheres split at the equator, without subduction, at rest, with the given
+    /// boundary coupling width; returns the simulation and the boundary cells of plate 0.
+    fn hemispheres(width: f64, subdivisions: u32) -> Simulation {
+        let params = TectonicParams {
+            boundary_coupling_width: width,
+            ..TectonicParams::default()
+        };
+        let mut simulation = Simulation::new(SphereMesh::icosphere(subdivisions), 1, params, 1);
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            *crust = new_oceanic_crust(-50.0);
+        }
+        simulation.split_plate(0, DVec3::Z).unwrap();
+        simulation.polarities.clear();
+        simulation
+    }
+
+    /// Solves the plate velocities with the mantle under plate 0 moving like the rotation
+    /// `omega` (rad/s), and returns the mean strike-slip and opening speed (rad/Myr) of plate 1
+    /// relative to plate 0 at the boundary.
+    fn relative_boundary_motion(simulation: &mut Simulation, omega: DVec3) -> (f64, f64) {
+        let mantle: Vec<DVec3> = (0..simulation.mesh.len() as u32)
+            .map(|cell| {
+                if simulation.owners[cell as usize].plate == 0 {
+                    omega.cross(simulation.mesh.vertex(cell)) * simulation.params.planet_radius
+                } else {
+                    DVec3::ZERO
+                }
+            })
+            .collect();
+        simulation.update_plate_velocities(&mantle);
+        let boundaries: Vec<BoundaryCell> = simulation
+            .boundary_cells()
+            .into_iter()
+            .filter(|b| b.plate == 0)
+            .collect();
+        let normals = simulation.smoothed_normals(&boundaries);
+        let (mut strike, mut opening) = (0.0, 0.0);
+        for (b, n) in boundaries.iter().zip(&normals) {
+            let r = simulation.mesh.vertex(b.cell);
+            let relative = (simulation.plates[1].angular_velocity
+                - simulation.plates[0].angular_velocity)
+                .cross(r);
+            strike += relative.dot(r.cross(*n)).abs();
+            opening += relative.dot(*n).abs();
+        }
+        let count = boundaries.len() as f64;
+        (strike / count, opening / count)
+    }
+
+    #[test]
+    fn boundary_coupling_resists_strike_slip_but_not_opening() {
+        // Strike-slip: the mantle rotates plate 0 about the pole, along the boundary.
+        let strike_slip = DVec3::Z * 1e-15;
+        let (free, _) = relative_boundary_motion(&mut hemispheres(0.0, 4), strike_slip);
+        let (coupled, _) = relative_boundary_motion(&mut hemispheres(2000e3, 4), strike_slip);
+        assert!(coupled < 0.8 * free, "{coupled} vs {free}");
+        // Opening: the mantle rotates plate 0 about an equatorial axis, which moves the boundary
+        // apart on one side and together on the other.
+        let opening = DVec3::X * 1e-15;
+        let (_, free) = relative_boundary_motion(&mut hemispheres(0.0, 4), opening);
+        let (_, coupled) = relative_boundary_motion(&mut hemispheres(2000e3, 4), opening);
+        assert!((coupled / free - 1.0).abs() < 0.05, "{coupled} vs {free}");
+    }
+
+    #[test]
+    fn boundary_coupling_is_resolution_independent() {
+        let strike_slip = DVec3::Z * 1e-15;
+        let ratio = |subdivisions| {
+            let (free, _) =
+                relative_boundary_motion(&mut hemispheres(0.0, subdivisions), strike_slip);
+            let (coupled, _) =
+                relative_boundary_motion(&mut hemispheres(1000e3, subdivisions), strike_slip);
+            coupled / free
+        };
+        let (coarse, fine) = (ratio(4), ratio(5));
+        assert!((coarse / fine - 1.0).abs() < 0.05, "{coarse} vs {fine}");
+    }
+
+    #[test]
+    fn strong_boundary_coupling_locks_strike_slip() {
+        let strike_slip = DVec3::Z * 1e-15;
+        let mut free_simulation = hemispheres(0.0, 4);
+        let (free, _) = relative_boundary_motion(&mut free_simulation, strike_slip);
+        let mut simulation = hemispheres(1e9, 4);
+        let (locked, _) = relative_boundary_motion(&mut simulation, strike_slip);
+        assert!(locked < 0.02 * free, "{locked} vs {free}");
+        // The driven plate drags the other one along (equal and opposite coupling torques).
+        assert!(simulation.plates[1].angular_velocity.z > 0.0);
     }
 
     /// Two plates, all oceanic crust, plate 0 would subduct under plate 1.

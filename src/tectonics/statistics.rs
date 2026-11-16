@@ -55,6 +55,18 @@ pub struct Statistics {
     /// Area of sea floor opened by diverging plates so far (one flank), from the plate motions,
     /// in km². Earth: ~3.4 km²/yr.
     pub opened_area: f64,
+    /// Relative speed of the plates across boundaries (per boundary cell, both sides): median
+    /// (rad/Myr) and fraction slower than 2 cm/yr.
+    pub median_relative_speed: f64,
+    pub slow_boundary_fraction: f64,
+    /// Mean |cos| of the angle between relative motion and the smoothed boundary normal (2/π
+    /// for random orientation), and the boundary fractions with |cos| > 0.7 (opening/closing)
+    /// and < 0.3 (strike-slip).
+    pub mean_obliquity_cos: f64,
+    pub normal_motion_fraction: f64,
+    pub strike_slip_fraction: f64,
+    /// Power dissipated by boundary shear coupling relative to the power of slab pull.
+    pub shear_power_ratio: f64,
     /// Boundary segments with their own polarity, those with a slab, and the mean slab length
     /// (km) at trench cells.
     pub segments: usize,
@@ -137,7 +149,72 @@ pub fn components(mesh: &SphereMesh, include: impl Fn(u32) -> bool) -> Component
     }
 }
 
+/// Relative motion across plate boundaries (see [`Statistics`]).
+struct BoundaryMotion {
+    median_relative_speed: f64,
+    slow_fraction: f64,
+    mean_cos: f64,
+    normal_fraction: f64,
+    strike_slip_fraction: f64,
+    shear_power_ratio: f64,
+}
+
 impl Simulation {
+    fn boundary_motion(&self, boundaries: &[super::dynamics::BoundaryCell]) -> BoundaryMotion {
+        let params = &self.params;
+        let radius = params.planet_radius;
+        let cell_area = 4.0 * std::f64::consts::PI * radius * radius / self.mesh.len() as f64;
+        // rad/Myr → m/s
+        let to_m_per_s = radius / (1e6 * 365.25 * 24.0 * 3600.0);
+        let slow = 2.0 / 100.0 / (radius / 1e6);
+        let normals = self.smoothed_normals(boundaries);
+        let mut speeds = Vec::with_capacity(boundaries.len());
+        let (mut cos_sum, mut normal, mut strike, mut shear_power, mut pull_power) =
+            (0.0, 0usize, 0usize, 0.0, 0.0);
+        for (boundary, &normal_vector) in boundaries.iter().zip(&normals) {
+            let r = self.mesh.vertex(boundary.cell);
+            let relative = (self.plates[boundary.plate as usize].angular_velocity
+                - self.plates[boundary.other as usize].angular_velocity)
+                .cross(r);
+            let speed = relative.length();
+            speeds.push(speed);
+            let cos = if speed > 0.0 {
+                relative.dot(normal_vector).abs() / speed
+            } else {
+                0.0
+            };
+            cos_sum += cos;
+            normal += usize::from(cos > 0.7);
+            strike += usize::from(cos < 0.3);
+            let strike_slip = relative.dot(r.cross(normal_vector)) * to_m_per_s;
+            let k = 0.5
+                * params.basal_drag
+                * if boundary.kind == super::dynamics::BoundaryKind::Collision {
+                    params.collision_resistance * cell_area
+                } else {
+                    params.boundary_coupling_width * self.boundary_length_per_cell()
+                };
+            shear_power += k * strike_slip * strike_slip;
+            let velocity = self.plates[boundary.plate as usize]
+                .angular_velocity
+                .cross(r)
+                * to_m_per_s;
+            if let super::dynamics::BoundaryKind::Trench { .. } = boundary.kind {
+                pull_power += self.boundary_force(boundary).dot(velocity).max(0.0);
+            }
+        }
+        let count = speeds.len().max(1) as f64;
+        speeds.sort_by(f64::total_cmp);
+        BoundaryMotion {
+            median_relative_speed: speeds.get(speeds.len() / 2).copied().unwrap_or(0.0),
+            slow_fraction: speeds.iter().filter(|&&speed| speed < slow).count() as f64 / count,
+            mean_cos: cos_sum / count,
+            normal_fraction: normal as f64 / count,
+            strike_slip_fraction: strike as f64 / count,
+            shear_power_ratio: shear_power / pull_power.max(1e-30),
+        }
+    }
+
     /// Boundary length relative to circular plates of the same areas.
     fn boundary_ratio(&self, plate_areas: &[usize]) -> f64 {
         let cell_count = self.mesh.len();
@@ -314,6 +391,7 @@ impl Simulation {
             .map(|(_, hazard)| hazard)
             .sum();
         let boundary_ratio = self.boundary_ratio(&plate_areas);
+        let motion = self.boundary_motion(&boundaries);
         let mut age_histogram = [0.0; 11];
         for &age in &oceanic_ages {
             age_histogram[((age / 20.0).max(0.0) as usize).min(10)] += 1.0;
@@ -390,6 +468,12 @@ impl Simulation {
             rms_plate_speed,
             plates_above_one_percent,
             boundary_ratio,
+            median_relative_speed: motion.median_relative_speed,
+            slow_boundary_fraction: motion.slow_fraction,
+            mean_obliquity_cos: motion.mean_cos,
+            normal_motion_fraction: motion.normal_fraction,
+            strike_slip_fraction: motion.strike_slip_fraction,
+            shear_power_ratio: motion.shear_power_ratio,
             old_margin_length,
             initiation_rate,
             induced_rate,

@@ -150,8 +150,13 @@ pub struct TectonicParams {
     /// Basal drag is this many times stronger under continental crust (deep lithospheric keels).
     pub continental_drag_factor: f64,
     /// Resistance to converging continental crust per collision boundary cell, as a multiple of
-    /// the basal drag under one cell.
+    /// the basal drag under one cell. Collisions resist strike-slip motion as strongly.
     pub collision_resistance: f64,
+    /// Resistance of oceanic and mixed plate boundaries to strike-slip motion along them: each
+    /// metre of boundary resists like the basal drag under this many metres times a metre.
+    /// Transform faults are weak (≈ 20 MPa over ≈ 15 km brittle depth at 5 cm/yr: ≈ 200 km;
+    /// Forsyth & Uyeda 1975 found transform resistance small).
+    pub boundary_coupling_width: f64,
     /// Mantle flow below the plates.
     pub mantle: MantleParams,
     /// How plates are matched to cells.
@@ -203,6 +208,7 @@ impl Default for TectonicParams {
             basal_drag: 1e15,
             continental_drag_factor: 4.0,
             collision_resistance: 50.0,
+            boundary_coupling_width: 200e3,
             mantle: MantleParams::default(),
             matching: MatchingParams::default(),
             events: PlateEventParams::default(),
@@ -222,6 +228,7 @@ impl TectonicParams {
             "basal_drag" => &mut self.basal_drag,
             "continental_drag_factor" => &mut self.continental_drag_factor,
             "collision_resistance" => &mut self.collision_resistance,
+            "boundary_coupling_width" => &mut self.boundary_coupling_width,
             "slab_pull" => &mut self.slab_pull,
             "slab_sinking_speed" => &mut self.slab_sinking_speed,
             "ridge_push" => &mut self.ridge_push,
