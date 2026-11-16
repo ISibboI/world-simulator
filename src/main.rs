@@ -255,14 +255,13 @@ fn snapshot(
         .collect();
     info!(
         "    ocean area by age (% per 20 Myr): {} | ≥ 200 Myr {:.1}% ({:.0}% at continents) | \
-         plates > 1%: {}, detached {} cells, \
+         plates > 1%: {}, \
          boundary ratio {:.2} | old passive margins {:.0} km, {:.3} initiations/Myr, \
          induced {:.3}/Myr",
         histogram.join(" "),
         100.0 * statistics.ancient_ocean_fraction,
         100.0 * statistics.ancient_ocean_at_continents,
         statistics.plates_above_one_percent,
-        statistics.detached_cells,
         statistics.boundary_ratio,
         statistics.old_margin_length,
         statistics.initiation_rate,
@@ -270,7 +269,7 @@ fn snapshot(
     );
     info!(
         "    trenches {:.0} km, ridges {:.0} km | slab pull {:.2e} N, ridge push {:.2e} N | \
-         rifts {}, initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces), consumed {}, merge loss {:.0} km·cells, \
+         rifts {}, initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
          blocked splits {}",
         statistics.trench_length,
         statistics.ridge_length,
@@ -284,6 +283,8 @@ fn snapshot(
         statistics.events.sutures,
         statistics.events.captures,
         statistics.events.piece_captures,
+        statistics.events.captured_piece_cells,
+        statistics.events.breakup_cells,
         statistics.events.consumed,
         statistics.events.merge_lost_continental_volume / 1000.0,
         statistics.events.blocked_splits,

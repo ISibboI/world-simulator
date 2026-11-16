@@ -63,11 +63,44 @@ impl Simulation {
                 new_side[local] = near_piece[cell as usize];
             }
         }
+        // Boundary segments go to the part(s) with cells within a segment radius.
+        let rings = (self.polarities.radius() / self.mesh.mean_edge_angle()).ceil() as usize;
+        let rest: Vec<u32> = (0..cell_count as u32)
+            .filter(|&cell| self.owners[cell as usize].plate == plate && !in_piece[cell as usize])
+            .collect();
+        let near_new = self.within_rings(piece, rings);
+        let near_old = self.within_rings(&rest, rings);
         let side_of_segment = move |mesh: &SphereMesh, r: DVec3| {
-            let new = near_piece[mesh.nearest(r) as usize];
-            polarity::Side { new, old: !new }
+            let cell = mesh.nearest(r) as usize;
+            let (new, old) = (near_new[cell], near_old[cell]);
+            polarity::Side {
+                new,
+                old: old || !new,
+            }
         };
         self.split_plate_by(plate, new_side, side_of_segment)
+    }
+
+    /// Cells within `rings` neighbour steps of any of `cells`.
+    fn within_rings(&self, cells: &[u32], rings: usize) -> Vec<bool> {
+        let mut reached = vec![false; self.mesh.len()];
+        let mut frontier: Vec<u32> = cells.to_vec();
+        for &cell in cells {
+            reached[cell as usize] = true;
+        }
+        for _ in 0..rings {
+            let mut next = Vec::new();
+            for &cell in &frontier {
+                for &neighbor in self.mesh.neighbors(cell) {
+                    if !reached[neighbor as usize] {
+                        reached[neighbor as usize] = true;
+                        next.push(neighbor);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        reached
     }
 
     /// Splits off the crust samples of `plate` whose local vertex is marked in `new_side` into a

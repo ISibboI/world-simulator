@@ -116,10 +116,10 @@ components (climate, erosion, …) are expected to build on it.
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
 - **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
   plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms + tuning), 5, 3,
-  4 done and the runtime optimisations. **Next (user): issue 1o — (a) long boundaries: plate
-  fragmentation fixed by a connectivity rule (1p); production still ~2× Earth, ocean young
-  (median ~30 Myr); (b) continental thickening in long collisions (mean land 1.2–1.9 km); then
-  issue 2 (sea level).** 2–6% ancient (≥ 200 Myr) ocean remains (issue 10).
+  4 done and the runtime optimisations. **Next (user): issue 1o — fragmentation fixed (1p);
+  remaining over-production (~2× Earth, ocean median ~30 Myr) needs shear coupling across
+  boundaries (1q); thickening (mean land 1.2–1.9 km) needs orogenic collapse and rift
+  stretching (1r); then issue 2 (sea level).** 2–6% ancient (≥ 200 Myr) ocean remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal

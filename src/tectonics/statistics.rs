@@ -70,10 +70,9 @@ pub struct Statistics {
     pub rms_plate_speed: f64,
     /// Number of plates covering more than 1% of the surface.
     pub plates_above_one_percent: usize,
-    /// Cells in pieces of plates that are not connected to the plate's largest piece.
-    pub detached_cells: usize,
     /// Total length of plate boundaries relative to that of circular plates of the same areas
-    /// (1 for compact plates; ragged or fragmented plates have longer boundaries).
+    /// (1 for compact plates; ragged or fragmented plates have longer boundaries; Earth's 52
+    /// plates of PB2002: ~1.6).
     pub boundary_ratio: f64,
     /// Length (km) of passive margins (oceanic next to continental crust of the same plate)
     /// old enough for subduction initiation, and the expected number of initiations per Myr.
@@ -139,34 +138,9 @@ pub fn components(mesh: &SphereMesh, include: impl Fn(u32) -> bool) -> Component
 }
 
 impl Simulation {
-    /// Cells in detached plate pieces, and the boundary length relative to circular plates.
-    fn plate_shapes(&self, plate_areas: &[usize]) -> (usize, f64) {
+    /// Boundary length relative to circular plates of the same areas.
+    fn boundary_ratio(&self, plate_areas: &[usize]) -> f64 {
         let cell_count = self.mesh.len();
-        let mut visited = vec![false; cell_count];
-        let mut largest = vec![0usize; self.plates.len()];
-        let mut stack = Vec::new();
-        for start in 0..cell_count as u32 {
-            if visited[start as usize] {
-                continue;
-            }
-            let plate = self.owner(start).plate;
-            visited[start as usize] = true;
-            stack.push(start);
-            let mut size = 0;
-            while let Some(cell) = stack.pop() {
-                size += 1;
-                for &neighbor in self.mesh.neighbors(cell) {
-                    if !visited[neighbor as usize] && self.owner(neighbor).plate == plate {
-                        visited[neighbor as usize] = true;
-                        stack.push(neighbor);
-                    }
-                }
-            }
-            let largest = &mut largest[plate as usize];
-            *largest = (*largest).max(size);
-        }
-        let detached = plate_areas.iter().sum::<usize>() - largest.iter().sum::<usize>();
-
         let boundary_cells = (0..cell_count as u32)
             .filter(|&cell| {
                 let plate = self.owner(cell).plate;
@@ -188,7 +162,7 @@ impl Simulation {
                 2.0 * std::f64::consts::PI * (1.0 - 2.0 * fraction).clamp(-1.0, 1.0).acos().sin()
             })
             .sum();
-        (detached, boundary / circles.max(1e-9))
+        boundary / circles.max(1e-9)
     }
 
     pub fn statistics(&self) -> Statistics {
@@ -339,7 +313,7 @@ impl Simulation {
             })
             .map(|(_, hazard)| hazard)
             .sum();
-        let (detached_cells, boundary_ratio) = self.plate_shapes(&plate_areas);
+        let boundary_ratio = self.boundary_ratio(&plate_areas);
         let mut age_histogram = [0.0; 11];
         for &age in &oceanic_ages {
             age_histogram[((age / 20.0).max(0.0) as usize).min(10)] += 1.0;
@@ -415,7 +389,6 @@ impl Simulation {
             speed_p99,
             rms_plate_speed,
             plates_above_one_percent,
-            detached_cells,
             boundary_ratio,
             old_margin_length,
             initiation_rate,

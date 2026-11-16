@@ -137,6 +137,9 @@ pub struct EventCounts {
     pub breakups: usize,
     /// Small detached pieces of plates captured by a neighbour (no change of the plate count).
     pub piece_captures: usize,
+    /// Cells in pieces that broke up, and in pieces that were captured.
+    pub breakup_cells: usize,
+    pub captured_piece_cells: usize,
     /// Plates merged after continental collisions.
     pub sutures: usize,
     /// Tiny plates captured by a neighbour.
@@ -231,9 +234,11 @@ impl Simulation {
                         // The new plate is the last one, so merging renumbers no other plate.
                         self.merge_and_record(neighbour, new_plate);
                         self.event_counts.piece_captures += 1;
+                        self.event_counts.captured_piece_cells += piece.len();
                     }
                     None => {
                         self.event_counts.breakups += 1;
+                        self.event_counts.breakup_cells += piece.len();
                         debug!(
                             plate,
                             new_plate,

@@ -155,6 +155,31 @@ done)** → 2 → 7 + 6 → 9 → 8.
        (kinematic 6.4–7.1 km²/yr, ~2× Earth), mean age 44–58 Myr (median 28–35 [45–55]),
        continental area 27–31%, mean land 1.2–1.9 km (b: still high), runtime ~2× (more plates).
        With a 0.3% threshold: 24–30 plates, production 175–207 Gt/yr.
+       **Independent evaluation of 3af40dc:** keep the rule. ~1,800 pieces per 500 Myr, 87% of
+       them 1–9-cell resampling noise; the 17–21 large pieces form where a narrow neck is cut,
+       ~45% by real overriding at a trench, the rest by gap filling/resampling (ragged per-cell
+       ownership makes the necks). Fixed after the evaluation: boundary segments are handed over
+       to the part(s) with cells within a segment radius (was one ring); the always-0 detached
+       diagnostic replaced by cells broken up / captured. Hidden crust of captured pieces is
+       lost in the merge (known merge loss).
+   1q. **The over-production is kinematic, not geometric** (evaluation): total boundary length
+       ≈ Earth's (boundary ratio 1.8–1.9 vs ~1.6 for Earth's 52 PB2002 plates; smoothing the
+       boundary normals changes opening by only 2–6%), spreading rate Earth-like (3.8–5.3
+       cm/yr), but neighbouring plates move independently: median relative speed 6.6–7.0 cm/yr,
+       only 2–11% of boundary length slower than 2 cm/yr, relative motion randomly oriented to
+       the boundary, ~90% of the boundary ridge or trench (Earth ~45–50%). Missing physics:
+       **shear coupling across transform/oblique/collision boundaries** (transform friction was
+       dropped in the tuning). Plus 15–25% numerical excess of created over kinematic
+       production and gap-filling copies (+40…+68 Gt/yr, 1b). Fewer breakups help too
+       (no breakups: production −15%, age +20%). Young ocean follows from production.
+   1r. **Thickening (1o b)** (evaluation): visible continental crust thickens 36.8 → 42–47 km
+       mean (10–35% of it > 50 km; Earth a few %), never thins (10th percentile 31 km, only
+       2–8% of continental crust below sea level; Earth ~25–30%). Isostasy fine (150 m/km).
+       Causes: collisions keep converging (~2 cm/yr over 7–28k km, stacking 20–40 Gt/yr);
+       orogenic collapse ~100× too slow (crustal flow ≈ 600 km²/Myr, only within a plate,
+       only > 40 km); no rift stretching (issue 7). Fix: collapse onto the foreland across
+       plate boundaries (10⁴–10⁵ km²/Myr), rift stretching (β 2–4), shear coupling (1q) also
+       slows collisions.
 2. **Sea level fixed at 0 → ocean water volume not conserved** (1.75–2.35e9 km³ [1.335e9],
    drifting ~1 km sea-level equivalent). Solve sea level for constant water volume each step.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):
