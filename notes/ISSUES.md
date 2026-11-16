@@ -204,10 +204,19 @@ done)** → 2 ✓ → **open: 1q relative-speed tuning (later, user), 1r thicken
    1000 km margins, triangular initial age–area distribution (mean 60 Myr) → at t = 0 land
    28–29%, mean land 0.82 km, 24–30% of continental crust flooded, sea level −0.41 km (dry
    offset). Seeds 0–3, 500 Myr (means 200–500 Myr): production 114–129 Gt/yr (was 136–147),
-   mean/median ocean age 59–75 / 38–45 Myr, 16–19 plates, runtime unchanged. Sea level rises to
-   +0.02…+0.46 km by 500 Myr (sediment +8 m/Myr vs tectonics −7 m/Myr); flooded continental
-   crust falls to 2–24% and freeboard rises 0.4 → 1.3–1.6 km as continents thicken (1r).
-   Continental crust mass now grows (seed 0: +16% in 500 Myr; was −5…−16%). Not included:
+   mean/median ocean age 59–75 / 38–45 Myr, 16–19 plates, runtime unchanged.
+   **Independent evaluation of b510e29: correct, accepted.** Causes: the lower production and
+   older ocean come from the 40% continents (with 30% the old values return; production
+   −20%); sea level rises to +0.02…+0.46 km by 500 Myr because the marine sediment stock
+   builds up from zero (≈ 2.5 Gt/yr; the "tectonic" −7 m/Myr is subducted sediment-laden sea
+   floor — without erosion tectonics raises sea level by +0.3 km; the stock is probably ~2×
+   Earth's since fans fill to −120 m); continental mass end/start 1.16/0.88/1.10/1.06 (seed
+   scatter ±15%, +0.1 from the new initial planet; old code 1.10/0.79/0.96/0.89);
+   thickening is tectonic (1r; without erosion freeboard 0.4 → 2.7 km). Fixed after the
+   evaluation: initial ocean ages grow away from the non-trench boundaries (the youngest crust
+   sat at the initial trenches and halved the initial slab pull). Open: sediment booked as lost
+   displaces no water (~0.1 km low, with issue 3); deltas/shelves re-flood each step as sea
+   level rises (acceptable). Not included:
    ice-sheet storage, thermal expansion, mantle water exchange.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):
    - eroded bedrock → sediment 1:1 by volume despite 2750 vs 2300 kg/m³ (16% mass loss);

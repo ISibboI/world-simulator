@@ -285,6 +285,28 @@ pub struct Plate {
     matched_rotation: DQuat,
 }
 
+/// Initial ocean ages with Earth's roughly triangular age–area distribution: the oceanic cells
+/// ranked by `distance` (ties by `jitter`) get the age 180 Myr · (1 − √(1 − u)) of their
+/// quantile u (mean 60 Myr).
+fn triangular_ages(distance: &[u32], jitter: &[f64], is_continental: &[bool]) -> Vec<f64> {
+    let mut oceanic: Vec<usize> = (0..distance.len())
+        .filter(|&cell| !is_continental[cell])
+        .collect();
+    oceanic.sort_unstable_by(|&a, &b| {
+        distance[a]
+            .cmp(&distance[b])
+            .then(jitter[a].total_cmp(&jitter[b]))
+            .then(a.cmp(&b))
+    });
+    let mut ages = vec![0.0; distance.len()];
+    let count = oceanic.len().max(1) as f64;
+    for (rank, &cell) in oceanic.iter().enumerate() {
+        let quantile = (rank as f64 + 0.5) / count;
+        ages[cell] = 180.0 * (1.0 - (1.0 - quantile).sqrt());
+    }
+    ages
+}
+
 /// Ratio of the length of a straight boundary measured as boundary cells × mean edge length to
 /// its true length: boundaries on the mesh zig-zag (see the test in [`statistics`]).
 const BOUNDARY_ZIGZAG: f64 = 1.1;
@@ -384,19 +406,19 @@ impl Simulation {
         });
 
         // Ocean ages grow away from plate boundaries with Earth's roughly triangular age–area
-        // distribution: the oceanic cells ranked by boundary distance (ties at random) get the
-        // age 180 Myr · (1 − √(1 − u)) of their quantile u (mean 60 Myr).
-        let mut oceanic: Vec<(u32, f64, usize)> = (0..cell_count)
-            .filter(|&cell| !is_continental[cell])
-            .map(|cell| (boundary_distance[cell], rng.random_range(0.0..1.0), cell))
+        // distribution (see `triangular_ages`); first from all boundaries, which only matters
+        // for choosing the initial subduction zones below, then away from the boundaries that
+        // do not become trenches (ridges), so that old crust subducts at the trenches.
+        let jitter: Vec<f64> = (0..cell_count)
+            .map(|cell| {
+                if is_continental[cell] {
+                    0.0
+                } else {
+                    rng.random_range(0.0..1.0)
+                }
+            })
             .collect();
-        oceanic.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-        let mut ocean_age = vec![0.0; cell_count];
-        let count = oceanic.len().max(1) as f64;
-        for (rank, &(_, _, cell)) in oceanic.iter().enumerate() {
-            let quantile = (rank as f64 + 0.5) / count;
-            ocean_age[cell] = 180.0 * (1.0 - (1.0 - quantile).sqrt());
-        }
+        let ocean_age = triangular_ages(&boundary_distance, &jitter, &is_continental);
 
         let mut plates: Vec<Plate> = (0..plate_count)
             .map(|_| Plate {
@@ -457,6 +479,23 @@ impl Simulation {
                 initial_subduction.push(((a, b), overriding));
             }
         }
+        // Ages grow away from the boundaries that are no subduction zones.
+        let trench_pairs: HashSet<(u32, u32)> =
+            initial_subduction.iter().map(|&(pair, _)| pair).collect();
+        let ridge_distance = distance_to(&mesh, |cell| {
+            let plate = plate_of_cell[cell as usize];
+            mesh.neighbors(cell).iter().any(|&n| {
+                let other = plate_of_cell[n as usize];
+                other != plate && !trench_pairs.contains(&pair_key(plate, other))
+            })
+        });
+        let ocean_age = triangular_ages(&ridge_distance, &jitter, &is_continental);
+        for (cell, &age) in ocean_age.iter().enumerate() {
+            if !is_continental[cell] {
+                plates[plate_of_cell[cell] as usize].crust[cell] = Some(new_oceanic_crust(-age));
+            }
+        }
+
         let segment_radius =
             (params.segment_radius / params.planet_radius).max(3.0 * mesh.mean_edge_angle());
         let polarities = polarity::Polarities::new(segment_radius);
