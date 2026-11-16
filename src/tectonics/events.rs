@@ -265,7 +265,7 @@ impl Simulation {
     fn suture_colliding_plates(&mut self, dt: f64) {
         let min_convergence =
             self.params.min_trench_convergence / (self.params.planet_radius * 100.0 / 1e6);
-        let mut colliding: HashMap<(u32, u32), usize> = HashMap::new();
+        let mut colliding: HashMap<(u32, u32), usize> = HashMap::default();
         for boundary in self.boundary_cells() {
             if boundary.kind == BoundaryKind::Collision && boundary.convergence > -min_convergence {
                 *colliding
@@ -317,7 +317,7 @@ impl Simulation {
             };
             let tiny = tiny as u32;
             // Shared boundary length and summed relative speed per neighbour.
-            let mut neighbours: HashMap<u32, (usize, f64)> = HashMap::new();
+            let mut neighbours: HashMap<u32, (usize, f64)> = HashMap::default();
             for cell in 0..self.mesh.len() as u32 {
                 if self.owners[cell as usize].plate != tiny {
                     continue;

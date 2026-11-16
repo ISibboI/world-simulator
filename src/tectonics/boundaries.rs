@@ -1,7 +1,7 @@
 //! Plate boundaries: assigning cells to plates, subduction, arc growth, continental
 //! collision and crustal flow.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use glam::{DQuat, DVec3};
 
@@ -28,8 +28,19 @@ impl Simulation {
     fn crustal_flow_inner(&mut self, dt: f64) {
         let params = &self.params;
         let rate = (params.crustal_flow_rate * dt).min(0.15);
-        // Per crust sample: (outgoing thickness, incoming thickness, incoming mass per area).
-        let mut delta: HashMap<Ownership, (f64, f64, f64)> = HashMap::new();
+        // Per crust sample: (outgoing thickness, incoming thickness, incoming mass per area),
+        // with the position of each sample's entry in a dense per-sample index.
+        let cell_count = self.mesh.len();
+        let mut delta: Vec<(Ownership, (f64, f64, f64))> = Vec::new();
+        let mut index = vec![u32::MAX; self.plates.len() * cell_count];
+        let entry = |delta: &mut Vec<_>, index: &mut Vec<u32>, owner: Ownership| {
+            let slot = &mut index[sample_index(owner, cell_count)];
+            if *slot == u32::MAX {
+                *slot = delta.len() as u32;
+                delta.push((owner, (0.0, 0.0, 0.0)));
+            }
+            *slot as usize
+        };
         for cell in 0..self.mesh.len() as u32 {
             let owner = self.owners[cell as usize];
             let crust = self.surface_crust(cell);
@@ -55,8 +66,10 @@ impl Simulation {
                     (neighbor_owner, owner, other)
                 };
                 let amount = flow.abs();
-                delta.entry(from).or_default().0 += amount;
-                let receiver = delta.entry(to).or_default();
+                let from = entry(&mut delta, &mut index, from);
+                let to = entry(&mut delta, &mut index, to);
+                delta[from].1.0 += amount;
+                let receiver = &mut delta[to].1;
                 receiver.1 += amount;
                 receiver.2 += amount * from_crust.density;
             }
@@ -107,7 +120,7 @@ impl Simulation {
         // Overriding crust at trenches, eroded from below by the subducting slab.
         let mut eroded = Vec::new();
         let mut additions = Vec::new();
-        let mut collisions: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut collisions: HashMap<(u32, u32), u32> = HashMap::default();
         let mut candidates: Vec<(Ownership, Crust)> = Vec::with_capacity(plates.len());
 
         let (matches, found) = matching::match_plates(
@@ -152,12 +165,17 @@ impl Simulation {
         // A sample that is overridden at one cell but still forms the surface of another cell is
         // kept until it is covered everywhere: deleting it now would leave a hole behind the
         // trench. Each consumed sample is accounted for exactly once.
-        let visible: HashSet<Ownership> = new_owners.iter().flatten().copied().collect();
-        let mut consumed: HashSet<Ownership> = HashSet::new();
+        // Per crust sample: 1 if it forms the surface of a cell, 2 once consumed.
+        let mut state = vec![0u8; plates.len() * cell_count];
+        for &owner in new_owners.iter().flatten() {
+            state[sample_index(owner, cell_count)] = 1;
+        }
         for contact in &lost_contacts {
-            if visible.contains(&contact.loser) || !consumed.insert(contact.loser) {
+            let state = &mut state[sample_index(contact.loser, cell_count)];
+            if *state != 0 {
                 continue;
             }
+            *state = 2;
             let loser_plate = &mut plates[contact.loser.plate as usize];
             loser_plate.crust[contact.loser.local as usize] = None;
             loser_plate.consumed[contact.loser.local as usize] = true;

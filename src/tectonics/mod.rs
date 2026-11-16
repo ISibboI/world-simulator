@@ -56,7 +56,11 @@ pub use statistics::*;
 use boundaries::{ResolvedBoundaries, pair_key};
 use generation::*;
 
-use std::collections::HashMap;
+/// Hash map with the hasher used throughout the tectonics (keys are small integers).
+pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, Hasher>;
+/// Hash set with the hasher used throughout the tectonics.
+pub(crate) type HashSet<T> = std::collections::HashSet<T, Hasher>;
+type Hasher = rustc_hash::FxBuildHasher;
 
 use glam::{DQuat, DVec3};
 use rand::rngs::ChaCha8Rng;
@@ -211,6 +215,11 @@ pub struct Plate {
     matched_rotation: DQuat,
 }
 
+/// Position of crust sample `owner` in a dense per-sample array over all plates.
+fn sample_index(owner: Ownership, cell_count: usize) -> usize {
+    owner.plate as usize * cell_count + owner.local as usize
+}
+
 impl Plate {
     /// Maps a world cell to the nearest local vertex of this plate.
     fn local_vertex(&mut self, mesh: &SphereMesh, inverse_rotation: DQuat, cell: u32) -> u32 {
@@ -336,7 +345,7 @@ impl Simulation {
         }
 
         // Start some plate boundaries as subduction zones; there the denser side subducts.
-        let mut boundary_buoyancy: HashMap<(u32, u32), (f64, f64)> = HashMap::new();
+        let mut boundary_buoyancy: HashMap<(u32, u32), (f64, f64)> = HashMap::default();
         for cell in 0..cell_count as u32 {
             let plate = plate_of_cell[cell as usize];
             for &neighbor in mesh.neighbors(cell) {
@@ -355,7 +364,7 @@ impl Simulation {
         }
         let mut pairs: Vec<_> = boundary_buoyancy.into_iter().collect();
         pairs.sort_unstable_by_key(|((a, b), _)| (*a, *b));
-        let mut polarities = HashMap::new();
+        let mut polarities = HashMap::default();
         for ((a, b), (buoyancy_a, buoyancy_b)) in pairs {
             if rng.random_bool(params.initial_subduction_fraction.clamp(0.0, 1.0)) {
                 let overriding = if buoyancy_a >= buoyancy_b { a } else { b };
@@ -521,13 +530,17 @@ impl Simulation {
     /// Sediment removal beyond the available sediment comes from the bedrock at the same mass.
     pub fn apply_surface_changes(&mut self, thickness_delta: &[f64], sediment_delta: &[f64]) {
         let mut changes: Vec<(Ownership, f64, f64)> = Vec::new();
-        let mut index: HashMap<Ownership, usize> = HashMap::new();
-        for cell in 0..self.mesh.len() {
+        let cell_count = self.mesh.len();
+        // Per crust sample: its position in `changes`, or `u32::MAX`.
+        let mut index = vec![u32::MAX; self.plates.len() * cell_count];
+        for cell in 0..cell_count {
             let owner = self.owners[cell];
-            let slot = *index.entry(owner).or_insert_with(|| {
+            let slot = &mut index[sample_index(owner, cell_count)];
+            if *slot == u32::MAX {
+                *slot = changes.len() as u32;
                 changes.push((owner, 0.0, 0.0));
-                changes.len() - 1
-            });
+            }
+            let slot = *slot as usize;
             changes[slot].1 += thickness_delta[cell];
             changes[slot].2 += sediment_delta[cell];
         }

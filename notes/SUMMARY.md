@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-15 (incremental plate matching)_
+_Last updated: 2026-11-16 (matching sample tracking, arrays + Fx hashing)_
 
 ## Goal
 
@@ -110,7 +110,8 @@ components (climate, erosion, …) are expected to build on it.
   plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms), 5, 3, 4 done and
   the runtime optimisation (incremental matching). **Next: issue 1 tuning per
   `plans/issue-1-tuning.md` incl. its review items R1–R8; ask the user first whether to do
-  further optimisations from `research/profiling-2026-11-15.md`.**
+  further optimisations from `research/profiling-2026-11-15.md` (done so far: incremental
+  matching, sample tracking, arrays + Fx; see `sessions/2026-11-16.md`).**
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal
@@ -128,7 +129,9 @@ components (climate, erosion, …) are expected to build on it.
   at subduction.
 - Single-threaded by user choice (efficiency before parallelism). Plate–cell matching is
   incremental (`src/tectonics/matching.rs`: crust cells + 3 rings, full-scan fallback,
-  `--verify-matching`); remaining optimisation options in `research/profiling-2026-11-15.md`.
+  `--verify-matching`; hidden samples tracked with a nearby cell). Per-sample scratch maps are
+  dense arrays (`sample_index`); other tectonics maps use `rustc-hash` via the `HashMap`/`HashSet`
+  aliases in `tectonics/mod.rs`. Remaining options in `research/profiling-2026-11-15.md`.
 - 3D view under KDE Wayland only draws its first frame when launched from Claude's sandboxed
   shell (compositor sends no redraw events). The user confirmed it works normally when launched
   from their own terminal. For screenshots from the sandbox, use X11:

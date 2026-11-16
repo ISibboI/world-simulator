@@ -1,8 +1,6 @@
 //! Changes of the plate configuration: splitting a plate in two, merging two plates, and
 //! removing plates that have been consumed.
 
-use std::collections::HashMap;
-
 use glam::DVec3;
 
 use super::ledger::{self, Term};
@@ -115,7 +113,7 @@ impl Simulation {
         let inverse_rotation = self.plates[into as usize].rotation.inverse();
         let max_thickness = self.params.max_crust_thickness;
         // Where each sample of `absorbed` went, for cells sharing a sample.
-        let mut destination: HashMap<u32, u32> = HashMap::new();
+        let mut destination: HashMap<u32, u32> = HashMap::default();
 
         for cell in 0..self.mesh.len() as u32 {
             let owner = self.owners[cell as usize];

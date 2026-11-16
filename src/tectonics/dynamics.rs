@@ -286,7 +286,7 @@ impl Simulation {
     pub(super) fn update_slab_lengths(&mut self, dt: f64) {
         let params = &self.params;
         // Mean convergence at the trench cells of each pair, in m/Myr.
-        let mut convergence: HashMap<(u32, u32), (f64, usize)> = HashMap::new();
+        let mut convergence: HashMap<(u32, u32), (f64, usize)> = HashMap::default();
         for boundary in self.boundary_cells() {
             if matches!(boundary.kind, BoundaryKind::Trench { .. }) && boundary.convergence > 0.0 {
                 let entry = convergence

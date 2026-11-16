@@ -157,7 +157,7 @@ impl Simulation {
         let to_gigatonnes = cell_area / 1e12;
         let mut masses = [0.0; 5];
         let mut visible_mass = 0.0;
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::default();
         for owner in &self.owners {
             if !seen.insert(*owner) {
                 continue;

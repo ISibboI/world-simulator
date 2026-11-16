@@ -48,3 +48,8 @@ less frequent temperature/mantle updates, f32) remain open for the user to decid
 matchings incremental, ~0.1 searched cells per plate and cell. A post-change perf profile
 (200 Myr, debug symbols) is in `agent-scratch/speed/perf.data` if still present; see the session
 log for its summary.
+
+## Follow-ups (2026-11-16)
+
+Hidden-sample tracking in the matching (−12% cycles) and arrays + `rustc-hash` instead of SipHash
+maps (−11% cycles); details and the hasher comparison in `../sessions/2026-11-16.md`.
