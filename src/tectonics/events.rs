@@ -57,6 +57,9 @@ pub struct PlateEventParams {
     pub suture_trench_ratio: f64,
     /// Plates smaller than this fraction of the surface are captured by a neighbour.
     pub min_plate_area_before_capture: f64,
+    /// Detached pieces of plates covering at least this fraction of the surface become plates
+    /// of their own; smaller ones are captured by a neighbour.
+    pub min_breakup_area: f64,
 }
 
 impl Default for PlateEventParams {
@@ -77,6 +80,7 @@ impl Default for PlateEventParams {
             suture_min_cells: 10,
             suture_trench_ratio: 1.0,
             min_plate_area_before_capture: 0.003,
+            min_breakup_area: 0.01,
         }
     }
 }
@@ -129,6 +133,10 @@ pub struct EventCounts {
     pub induced_subductions: usize,
     /// Subduction induced at the overriding side of a trench, which reverses the polarity.
     pub polarity_reversals: usize,
+    /// Detached pieces of plates that became plates of their own.
+    pub breakups: usize,
+    /// Small detached pieces of plates captured by a neighbour (no change of the plate count).
+    pub piece_captures: usize,
     /// Plates merged after continental collisions.
     pub sutures: usize,
     /// Tiny plates captured by a neighbour.
@@ -147,7 +155,7 @@ pub struct EventCounts {
 
 impl EventCounts {
     pub fn births(&self) -> usize {
-        self.rifts + self.initiations
+        self.rifts + self.initiations + self.breakups
     }
 
     pub fn deaths(&self) -> usize {
@@ -171,7 +179,100 @@ impl Simulation {
             let boundaries = self.boundary_cells();
             self.initiate_subduction(dt, first_new_plate, &boundaries);
         }
+        self.separate_detached_pieces();
         self.remove_dead_plates();
+    }
+
+    /// A rigid plate is one connected region. Pieces of a plate that lost their connection to its
+    /// largest piece (its middle was consumed or overridden, like the Farallon plate breaking up
+    /// into the Juan de Fuca and Cocos plates) become plates of their own and move
+    /// independently; pieces smaller than [`PlateEventParams::min_breakup_area`]
+    /// (or beyond the plate limit) are captured by the neighbour they share most boundary with.
+    pub(super) fn separate_detached_pieces(&mut self) {
+        let cell_count = self.mesh.len();
+        let min_cells = self.params.events.min_breakup_area * cell_count as f64;
+        let plate_count = self.plates.len() as u32;
+        for plate in 0..plate_count {
+            let mut pieces = self.plate_pieces(plate);
+            if pieces.len() <= 1 {
+                continue;
+            }
+            // The largest piece stays (the first one of equal size).
+            let largest = (0..pieces.len())
+                .max_by(|&a, &b| pieces[a].len().cmp(&pieces[b].len()).then(b.cmp(&a)))
+                .expect("pieces exist");
+            pieces.swap_remove(largest);
+            for piece in pieces {
+                let independent = piece.len() as f64 >= min_cells
+                    && self.plates.len() < self.params.events.max_plates;
+                let neighbour = if independent {
+                    None
+                } else {
+                    // The neighbour sharing most boundary, ties to the lower index.
+                    let mut shared: HashMap<u32, usize> = HashMap::default();
+                    for &cell in &piece {
+                        for &other in self.mesh.neighbors(cell) {
+                            let other = self.owners[other as usize].plate;
+                            if other != plate {
+                                *shared.entry(other).or_default() += 1;
+                            }
+                        }
+                    }
+                    shared
+                        .into_iter()
+                        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+                        .map(|(other, _)| other)
+                };
+                let Some(new_plate) = self.split_plate_cells(plate, &piece) else {
+                    continue;
+                };
+                match neighbour {
+                    Some(neighbour) => {
+                        // The new plate is the last one, so merging renumbers no other plate.
+                        self.merge_and_record(neighbour, new_plate);
+                        self.event_counts.piece_captures += 1;
+                    }
+                    None => {
+                        self.event_counts.breakups += 1;
+                        debug!(
+                            plate,
+                            new_plate,
+                            cells = piece.len(),
+                            time = self.time,
+                            "Plate broke up"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The connected pieces (lists of world cells) of a plate.
+    pub(super) fn plate_pieces(&self, plate: u32) -> Vec<Vec<u32>> {
+        let cell_count = self.mesh.len();
+        let mut visited = vec![false; cell_count];
+        let mut pieces = Vec::new();
+        let mut stack = Vec::new();
+        for start in 0..cell_count as u32 {
+            if visited[start as usize] || self.owners[start as usize].plate != plate {
+                continue;
+            }
+            visited[start as usize] = true;
+            stack.push(start);
+            let mut piece = Vec::new();
+            while let Some(cell) = stack.pop() {
+                piece.push(cell);
+                for &neighbor in self.mesh.neighbors(cell) {
+                    if !visited[neighbor as usize] && self.owners[neighbor as usize].plate == plate
+                    {
+                        visited[neighbor as usize] = true;
+                        stack.push(neighbor);
+                    }
+                }
+            }
+            pieces.push(piece);
+        }
+        pieces
     }
 
     /// Area of each plate as a fraction of the surface.
@@ -774,6 +875,47 @@ mod tests {
             .filter(|&cell| simulation.surface_crust(cell).is_continental())
             .count();
         assert!(continental_cells > 0);
+    }
+
+    #[test]
+    fn detached_pieces_become_plates_or_are_captured() {
+        let mut params = TectonicParams::default();
+        params.events.min_breakup_area = 0.05;
+        let mut simulation = Simulation::new(SphereMesh::icosphere(4), 2, params, 4);
+        let cells = simulation.mesh.len() as u32;
+        // Give plate 0 two detached pieces inside plate 1: a large cap around +z and a tiny one
+        // around -z (moving the samples shown there; plate 0's own area stays its largest piece).
+        let cap = |axis: DVec3, angle: f64| -> Vec<u32> {
+            (0..cells)
+                .filter(|&cell| simulation.mesh.vertex(cell).angle_between(axis) < angle)
+                .collect()
+        };
+        let large = cap(DVec3::Z, 0.5);
+        let tiny = cap(-DVec3::Z, 0.1);
+        let main_plate = simulation.owners[simulation.mesh.nearest(DVec3::X) as usize].plate;
+        let other = 1 - main_plate;
+        for &cell in large.iter().chain(&tiny) {
+            simulation.owners[cell as usize] = Ownership {
+                plate: other,
+                local: cell,
+            };
+            simulation.plates[other as usize].crust[cell as usize] = Some(new_oceanic_crust(-50.0));
+            simulation.plates[main_plate as usize].crust[cell as usize] = None;
+        }
+        // Ensure the pieces are detached from the other plate's main part.
+        let pieces = simulation.plate_pieces(other);
+        assert!(pieces.len() >= 3, "{} pieces", pieces.len());
+        let plates_before = simulation.plates.len();
+        simulation.separate_detached_pieces();
+        for plate in 0..simulation.plates.len() as u32 {
+            assert!(
+                simulation.plate_pieces(plate).len() <= 1,
+                "plate {plate} is not connected"
+            );
+        }
+        assert!(simulation.event_counts.breakups >= 1);
+        assert!(simulation.event_counts.piece_captures >= 1);
+        assert!(simulation.plates.len() > plates_before);
     }
 
     #[test]

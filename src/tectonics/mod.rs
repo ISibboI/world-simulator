@@ -238,6 +238,7 @@ impl TectonicParams {
             "events.rift_continent_radius" => &mut self.events.rift_continent_radius,
             "events.suture_time" => &mut self.events.suture_time,
             "events.suture_trench_ratio" => &mut self.events.suture_trench_ratio,
+            "events.min_breakup_area" => &mut self.events.min_breakup_area,
             "mantle.plume_interval" => &mut self.mantle.plume_interval,
             _ => anyhow::bail!("unknown or untunable tectonic parameter {name}"),
         };

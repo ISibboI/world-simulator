@@ -11,8 +11,76 @@ impl Simulation {
     /// the normal points to moves to a new plate with the same rotation and motion. Returns the
     /// new plate, or `None` if one side would be empty.
     pub(super) fn split_plate(&mut self, plate: u32, normal: DVec3) -> Option<u32> {
+        let rotation = self.plates[plate as usize].rotation;
+        let new_side: Vec<bool> = (0..self.mesh.len() as u32)
+            .map(|local| (rotation * self.mesh.vertex(local)).dot(normal) > 0.0)
+            .collect();
+        let near = self.polarities.radius().sin();
+        self.split_plate_by(plate, new_side, move |_, r| {
+            let side = r.dot(normal);
+            polarity::Side {
+                new: side > -near,
+                old: side < near,
+            }
+        })
+    }
+
+    /// Splits the piece of `plate` made of the world cells `piece` off into a new plate with the
+    /// same rotation and motion: the crust samples shown at those cells, and hidden samples whose
+    /// nearest cell is in or next to the piece. Returns the new plate, or `None` if one side would
+    /// be empty.
+    pub(super) fn split_plate_cells(&mut self, plate: u32, piece: &[u32]) -> Option<u32> {
+        let cell_count = self.mesh.len();
+        let mut in_piece = vec![false; cell_count];
+        for &cell in piece {
+            in_piece[cell as usize] = true;
+        }
+        // Cells in or next to the piece.
+        let near_piece: Vec<bool> = (0..cell_count as u32)
+            .map(|cell| {
+                in_piece[cell as usize]
+                    || self
+                        .mesh
+                        .neighbors(cell)
+                        .iter()
+                        .any(|&neighbor| in_piece[neighbor as usize])
+            })
+            .collect();
+        let mut new_side = vec![false; cell_count];
+        let mut visible = vec![false; cell_count];
+        for (cell, owner) in self.owners.iter().enumerate() {
+            if owner.plate == plate {
+                visible[owner.local as usize] = true;
+                if in_piece[cell] {
+                    new_side[owner.local as usize] = true;
+                }
+            }
+        }
+        let rotation = self.plates[plate as usize].rotation;
+        for (local, crust) in self.plates[plate as usize].crust.iter().enumerate() {
+            if crust.is_some() && !visible[local] {
+                let cell = self.mesh.nearest(rotation * self.mesh.vertex(local as u32));
+                new_side[local] = near_piece[cell as usize];
+            }
+        }
+        let side_of_segment = move |mesh: &SphereMesh, r: DVec3| {
+            let new = near_piece[mesh.nearest(r) as usize];
+            polarity::Side { new, old: !new }
+        };
+        self.split_plate_by(plate, new_side, side_of_segment)
+    }
+
+    /// Splits off the crust samples of `plate` whose local vertex is marked in `new_side` into a
+    /// new plate; `segment_side` tells which plate(s) a boundary segment at a world position goes
+    /// to (given the mesh).
+    fn split_plate_by(
+        &mut self,
+        plate: u32,
+        new_side: Vec<bool>,
+        segment_side: impl Fn(&SphereMesh, DVec3) -> polarity::Side,
+    ) -> Option<u32> {
         let before = ledger::plates_mass(&self.plates);
-        let result = self.split_plate_inner(plate, normal);
+        let result = self.split_plate_inner(plate, &new_side, segment_side);
         let after = ledger::plates_mass(&self.plates);
         self.ledger.record(Term::Splits, after - before);
         if result.is_some() {
@@ -21,15 +89,16 @@ impl Simulation {
         result
     }
 
-    fn split_plate_inner(&mut self, plate: u32, normal: DVec3) -> Option<u32> {
-        let rotation = self.plates[plate as usize].rotation;
-        let new_side: Vec<bool> = (0..self.mesh.len() as u32)
-            .map(|local| (rotation * self.mesh.vertex(local)).dot(normal) > 0.0)
-            .collect();
+    fn split_plate_inner(
+        &mut self,
+        plate: u32,
+        new_side: &[bool],
+        segment_side: impl Fn(&SphereMesh, DVec3) -> polarity::Side,
+    ) -> Option<u32> {
         let (moving, staying) = self.plates[plate as usize]
             .crust
             .iter()
-            .zip(&new_side)
+            .zip(new_side)
             .filter(|(crust, _)| crust.is_some())
             .fold((0usize, 0usize), |(moving, staying), (_, &new)| {
                 if new {
@@ -45,7 +114,7 @@ impl Simulation {
         let crust: Vec<Option<Crust>> = self.plates[plate as usize]
             .crust
             .iter_mut()
-            .zip(&new_side)
+            .zip(new_side)
             .map(|(slot, &new)| if new { slot.take() } else { None })
             .collect();
         let new_plate = Plate {
@@ -72,7 +141,9 @@ impl Simulation {
 
         // Segments of the original plate's boundaries go to the half they lie on.
         let rotations = self.rotations();
-        self.polarities.split(plate, new_index, normal, &rotations);
+        let mesh = &self.mesh;
+        self.polarities
+            .split(plate, new_index, |r| segment_side(mesh, r), &rotations);
         Some(new_index)
     }
 

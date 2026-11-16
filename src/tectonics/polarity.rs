@@ -64,6 +64,15 @@ pub(super) struct Subduction {
     pub(super) initiation: bool,
 }
 
+/// Which plate(s) a boundary segment goes to when a plate is split.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Side {
+    /// The new plate.
+    pub(super) new: bool,
+    /// The remaining old plate.
+    pub(super) old: bool,
+}
+
 /// State of a pair of plates in contact.
 #[derive(Clone, Debug, Default)]
 pub(super) struct PairState {
@@ -428,12 +437,22 @@ impl Polarities {
         }
     }
 
-    /// Plate `plate` was split along the plane with the given normal into itself and
-    /// `new_plate` (on the side the normal points to, with the same rotation). Segments of its
-    /// pairs go to the side they lie on; those within the segment radius of the plane go to
-    /// both. The new plate has no history of collision with its neighbours.
-    pub(super) fn split(&mut self, plate: u32, new_plate: u32, normal: DVec3, rotations: &[DQuat]) {
-        let near = self.radius.sin();
+    /// Segment radius as an angle (radians).
+    pub(super) fn radius(&self) -> f64 {
+        self.radius
+    }
+
+    /// Plate `plate` was split into itself and `new_plate` (with the same rotation). Segments of
+    /// its pairs go to the plate(s) `side` gives for their world position (both near a split
+    /// line); copies get their own id. The new plate has no history of collision with its
+    /// neighbours.
+    pub(super) fn split(
+        &mut self,
+        plate: u32,
+        new_plate: u32,
+        side: impl Fn(DVec3) -> Side,
+        rotations: &[DQuat],
+    ) {
         let keys: Vec<(u32, u32)> = self
             .pairs
             .keys()
@@ -447,10 +466,10 @@ impl Polarities {
             let mut staying = Vec::new();
             let mut moving = Vec::new();
             for segment in pair.segments.drain(..) {
-                let side = world(&segment, rotations).dot(normal);
-                if side.abs() < near || side > 0.0 {
+                let side = side(world(&segment, rotations));
+                if side.new {
                     let mut copy = segment.clone();
-                    if side.abs() < near {
+                    if side.old {
                         // Counted once, on the staying side.
                         copy.initiation = None;
                     }
@@ -460,7 +479,7 @@ impl Polarities {
                     }
                     moving.push(copy);
                 }
-                if side.abs() < near || side <= 0.0 {
+                if side.old || !side.new {
                     staying.push(segment);
                 }
             }
@@ -828,7 +847,15 @@ mod tests {
         polarities.set((0, 2), sub(0, 600e3), DVec3::X, 0.0, &rotations);
         polarities.set((0, 2), sub(0, 300e3), -DVec3::X, 0.0, &rotations);
         // Split plate 0 at the plane x = 0 into 0 (-x) and 1 (+x).
-        polarities.split(0, 1, DVec3::X, &rotations);
+        polarities.split(
+            0,
+            1,
+            |r| Side {
+                new: r.x > 0.0,
+                old: r.x <= 0.0,
+            },
+            &rotations,
+        );
         assert_eq!(polarities.pair_segments(0, 2).len(), 1);
         assert_eq!(polarities.pair_segments(0, 2)[0].slab_length, 300e3);
         assert_eq!(polarities.pair_segments(1, 2).len(), 1);

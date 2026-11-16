@@ -11,7 +11,8 @@ autonomously, with an independent plan review before each issue): 1 (mechanisms)
 (partly) → issue 1 soundness fixes ✓ → 3 ✓ (ledger; artifacts remain) → 4 ✓ (peaks still too
 high) → runtime optimisation review ✓ (incremental plate matching, 2.5×; the user decides on
 further options in `research/profiling-2026-11-15.md`) → issue 1 tuning ✓ (ancient ocean remains, see issue 10) → per-segment polarity ✓ →
-**boundary length and collision thickening (1o a/b, user 2026-11-16)** → 2 → 7 + 6 → 9 → 8.
+**boundary length and collision thickening (1o a/b, user 2026-11-16; a: plate connectivity
+done)** → 2 → 7 + 6 → 9 → 8.
 
 ## Open
 
@@ -140,6 +141,20 @@ further options in `research/profiling-2026-11-15.md`) → issue 1 tuning ✓ (a
        25–29% → 20–24%. **Exposed problems, next:** (a) plate boundaries 2–3× too long for the
        plate count (trench 186–237k km, ridge 150–203k km with 15 plates; Earth ~55k / 65k);
        (b) long-lasting collisions thicken continents (mean land > 2 km).
+   1p. **Cause of (a): plates fall apart into disconnected pieces** (diagnostic: up to 26% of
+       all cells in pieces detached from their plate's largest piece, 4–12 pieces per plate,
+       boundary length 3.4× that of circular plates). Mostly large pieces (> 100 cells) created
+       in the ownership resolution when a plate's middle is consumed or overridden; the old
+       pair-wide polarity and the old suture rule hid them (welding). Terrane accretion
+       (stacking arriving continental crust onto the overriding plate) was tried: no effect on
+       pieces, mean land 2.8–3.3 km — reverted. **Fixed:** connectivity rule — each step,
+       detached pieces ≥ `min_breakup_area` (1%) become plates of their own (breakups, like
+       Farallon → Juan de Fuca/Cocos), smaller ones are captured by the neighbour sharing most
+       boundary. Seeds 0–3, 500 Myr (means 200–500 Myr): detached cells 0, boundary ratio 1.8
+       (t = 0: 1.45), 18–23 plates (births 50–57, deaths 41–51), production 152–170 Gt/yr
+       (kinematic 6.4–7.1 km²/yr, ~2× Earth), mean age 44–58 Myr (median 28–35 [45–55]),
+       continental area 27–31%, mean land 1.2–1.9 km (b: still high), runtime ~2× (more plates).
+       With a 0.3% threshold: 24–30 plates, production 175–207 Gt/yr.
 2. **Sea level fixed at 0 → ocean water volume not conserved** (1.75–2.35e9 km³ [1.335e9],
    drifting ~1 km sea-level equivalent). Solve sea level for constant water volume each step.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):

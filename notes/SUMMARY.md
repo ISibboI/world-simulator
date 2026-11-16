@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-16 (per-segment subduction polarity)_
+_Last updated: 2026-11-16 (per-segment polarity, plate connectivity)_
 
 ## Goal
 
@@ -61,7 +61,8 @@ components (climate, erosion, …) are expected to build on it.
   - `topology.rs` / `events.rs`: split, merge, remove plates; rifting above plumes, subduction
     initiation as an age hazard per margin length (passive margins split the plate; existing
     boundaries, mostly polarity reversals where old ocean overrides younger ocean), suturing,
-    capture of tiny plates. `--set NAME=VALUE` overrides tunable parameters.
+    capture of tiny plates, connectivity rule (detached pieces ≥ 1% become plates, smaller ones
+    are captured). `--set NAME=VALUE` overrides tunable parameters.
   - `generation.rs` (initial conditions), `statistics.rs` (diagnostics incl. ocean-age
     percentiles, plate births/deaths, gap statistics, connected land masses).
 - `src/climate.rs`: water cycle. Three-cell prevailing winds (trades, westerlies, polar
@@ -115,10 +116,10 @@ components (climate, erosion, …) are expected to build on it.
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
 - **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
   plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms + tuning), 5, 3,
-  4 done and the runtime optimisations. **Next (user): issue 1o — boundaries 2–3× too long
-  for the plate count (production ~3× Earth, ocean too young) and continental thickening in
-  long collisions (mean land > 2 km), exposed by the sound suture rule; then issue 2 (sea
-  level).** 2–6% ancient (≥ 200 Myr) ocean remains (issue 10).
+  4 done and the runtime optimisations. **Next (user): issue 1o — (a) long boundaries: plate
+  fragmentation fixed by a connectivity rule (1p); production still ~2× Earth, ocean young
+  (median ~30 Myr); (b) continental thickening in long collisions (mean land 1.2–1.9 km); then
+  issue 2 (sea level).** 2–6% ancient (≥ 200 Myr) ocean remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal
