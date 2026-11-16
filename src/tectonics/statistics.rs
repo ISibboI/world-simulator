@@ -55,6 +55,16 @@ pub struct Statistics {
     /// Area of sea floor opened by diverging plates so far (one flank), from the plate motions,
     /// in km². Earth: ~3.4 km²/yr.
     pub opened_area: f64,
+    /// Sea level (m, an offset of dry elevations relative to the isostatic datum) and its
+    /// changes so far by tectonics and by surface processes.
+    pub sea_level: f64,
+    pub sea_level_change: (f64, f64),
+    /// Volume of the ocean (km³) from the surface elevations.
+    pub ocean_volume: f64,
+    /// Fraction of the continental crust below sea level, and the mean surface elevation of
+    /// continental crust (freeboard, m).
+    pub flooded_continental_fraction: f64,
+    pub freeboard: f64,
     /// Relative speed of the plates across boundaries (per boundary cell, both sides): median
     /// (rad/Myr) and fraction slower than 2 cm/yr.
     pub median_relative_speed: f64,
@@ -257,6 +267,7 @@ impl Simulation {
         let (mut oceanic_speed, mut continental_speed) = (0.0, 0.0);
         let mut max_speed: f64 = 0.0;
         let mut speeds = Vec::with_capacity(cell_count);
+        let (mut freeboard_sum, mut flooded_continental, mut water_depth_sum) = (0.0, 0usize, 0.0);
         let mut plate_speed_sums = vec![0.0; self.plates.len()];
 
         for cell in 0..cell_count as u32 {
@@ -280,7 +291,16 @@ impl Simulation {
                 oceanic_ages.push(age);
                 oceanic_speed += speed;
             }
-            let elevation = crust.surface_elevation(self.time);
+            let elevation = crust.surface_elevation(self.time, self.sea_level);
+            if crust.is_continental() {
+                freeboard_sum += elevation;
+                if elevation < 0.0 {
+                    flooded_continental += 1;
+                }
+            }
+            if elevation < 0.0 {
+                water_depth_sum -= elevation;
+            }
             if elevation < -6000.0 {
                 deep += 1;
             }
@@ -468,6 +488,11 @@ impl Simulation {
             rms_plate_speed,
             plates_above_one_percent,
             boundary_ratio,
+            sea_level: self.sea_level,
+            sea_level_change: self.sea_level_change,
+            ocean_volume: water_depth_sum * cell_area / 1e9,
+            flooded_continental_fraction: flooded_continental as f64 / continental.max(1) as f64,
+            freeboard: freeboard_sum / continental.max(1) as f64,
             median_relative_speed: motion.median_relative_speed,
             slow_boundary_fraction: motion.slow_fraction,
             mean_obliquity_cos: motion.mean_cos,

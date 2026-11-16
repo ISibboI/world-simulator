@@ -61,9 +61,90 @@ pub fn layer_for_rise(from: f64, to: f64, density: f64) -> f64 {
     (to_dry(to) - to_dry(from)) / dry_response(density)
 }
 
+/// The sea level (as an offset of dry elevations, m) at which the ocean holds `volume` (m³) of
+/// water, for cells of equal `cell_area` (m²) with the given dry elevations (m, relative to the
+/// same datum). The water depth over a cell with dry elevation `d` below sea level `S` is
+/// `(S − d) · ρm / (ρm − ρw)` (the water load depresses the floor), so the volume is piecewise
+/// linear and increasing in `S`; it is solved exactly. A volume of zero gives the lowest dry
+/// elevation; a volume beyond all cells floods the planet.
+pub fn sea_level_for_volume(dry_elevations: &[f64], cell_area: f64, volume: f64) -> f64 {
+    let mut dry = dry_elevations.to_vec();
+    dry.sort_unstable_by(f64::total_cmp);
+    let Some(&lowest) = dry.first() else {
+        return 0.0;
+    };
+    // Σ max(0, S − dᵢ) that holds the volume.
+    let target = volume / (cell_area * WATER_LOADING);
+    if target <= 0.0 {
+        return lowest;
+    }
+    let mut prefix = 0.0;
+    for k in 1..=dry.len() {
+        prefix += dry[k - 1];
+        // With the k lowest cells below sea level: k S − Σ dᵢ = target.
+        let level = (target + prefix) / k as f64;
+        if k == dry.len() || level <= dry[k] {
+            return level;
+        }
+    }
+    unreachable!("the loop returns at the last cell")
+}
+
+/// Volume (m³) of the ocean over cells of equal `cell_area` with the given surface elevations
+/// relative to sea level.
+#[cfg(test)]
+pub fn ocean_volume(surface_elevations: &[f64], cell_area: f64) -> f64 {
+    surface_elevations
+        .iter()
+        .map(|&elevation| (-elevation).max(0.0))
+        .sum::<f64>()
+        * cell_area
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sea_level_holds_the_volume_exactly() {
+        let dry: Vec<f64> = (0..1000)
+            .map(|i| ((i * 7919) % 1000) as f64 * 7.3 - 4000.0)
+            .collect();
+        let area = 1e10;
+        for volume in [1e12, 1e15, 2.5e16, 1e17] {
+            let level = sea_level_for_volume(&dry, area, volume);
+            let surface: Vec<f64> = dry.iter().map(|&d| to_surface(d - level)).collect();
+            let held = ocean_volume(&surface, area);
+            assert!((held / volume - 1.0).abs() < 1e-9, "{held} vs {volume}");
+        }
+        // More water, higher sea level.
+        assert!(sea_level_for_volume(&dry, area, 2e16) > sea_level_for_volume(&dry, area, 1e16));
+    }
+
+    #[test]
+    fn sea_level_edge_cases() {
+        let dry = [-100.0, -100.0, 50.0, 200.0];
+        assert_eq!(sea_level_for_volume(&dry, 1.0, 0.0), -100.0);
+        // Ties: two cells at the same depth share the water.
+        let level = sea_level_for_volume(&dry, 1.0, 2.0 * 10.0 * WATER_LOADING);
+        assert!((level + 90.0).abs() < 1e-9, "{level}");
+        // Beyond all cells the whole planet is flooded.
+        let level = sea_level_for_volume(&dry, 1.0, 4.0 * 1000.0 * WATER_LOADING);
+        assert!((level - (1000.0 + (-100.0 - 100.0 + 50.0 + 200.0) / 4.0)).abs() < 1e-9);
+        assert_eq!(sea_level_for_volume(&[], 1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn a_uniform_shift_moves_sea_level_and_keeps_surfaces() {
+        let dry = [-3000.0, -1000.0, 200.0, 800.0];
+        let level = sea_level_for_volume(&dry, 1e10, 3e13);
+        let shifted: Vec<f64> = dry.iter().map(|d| d - 250.0).collect();
+        let shifted_level = sea_level_for_volume(&shifted, 1e10, 3e13);
+        assert!((shifted_level - (level - 250.0)).abs() < 1e-9);
+        for (d, s) in dry.iter().zip(&shifted) {
+            assert!((to_surface(d - level) - to_surface(s - shifted_level)).abs() < 1e-9);
+        }
+    }
 
     #[test]
     fn layers_are_consistent() {

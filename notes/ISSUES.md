@@ -12,7 +12,8 @@ autonomously, with an independent plan review before each issue): 1 (mechanisms)
 high) → runtime optimisation review ✓ (incremental plate matching, 2.5×; the user decides on
 further options in `research/profiling-2026-11-15.md`) → issue 1 tuning ✓ (ancient ocean remains, see issue 10) → per-segment polarity ✓ →
 **boundary length and collision thickening (1o a/b, user 2026-11-16; a: plate connectivity
-done)** → 2 → 7 + 6 → 9 → 8.
+done)** → 2 ✓ → **open: 1q relative-speed tuning (later, user), 1r thickening** → 7 + 6
+→ 9 → 8.
 
 ## Open
 
@@ -195,6 +196,19 @@ done)** → 2 → 7 + 6 → 9 → 8.
    — needs Earth references with the same conventions (PB2002 relative speeds by class) first.
 2. **Sea level fixed at 0 → ocean water volume not conserved** (1.75–2.35e9 km³ [1.335e9],
    drifting ~1 km sea-level equivalent). Solve sea level for constant water volume each step.
+   **Done (2026-11-16, plan + review `plans/issue-2-sea-level.md`):** sea level is an offset of
+   the dry elevation (exact with Airy water loading), solved exactly for Earth's volume
+   (`isostasy::sea_level_for_volume`) after construction, each tectonic step and each surface
+   change; everything downstream keeps 0 = sea level. **User decision: Earth's volume with an
+   Earth-like initial planet:** 40% continental crust, 35 km interiors thinning to 22 km over
+   1000 km margins, triangular initial age–area distribution (mean 60 Myr) → at t = 0 land
+   28–29%, mean land 0.82 km, 24–30% of continental crust flooded, sea level −0.41 km (dry
+   offset). Seeds 0–3, 500 Myr (means 200–500 Myr): production 114–129 Gt/yr (was 136–147),
+   mean/median ocean age 59–75 / 38–45 Myr, 16–19 plates, runtime unchanged. Sea level rises to
+   +0.02…+0.46 km by 500 Myr (sediment +8 m/Myr vs tectonics −7 m/Myr); flooded continental
+   crust falls to 2–24% and freeboard rises 0.4 → 1.3–1.6 km as continents thicken (1r).
+   Continental crust mass now grows (seed 0: +16% in 500 Myr; was −5…−16%). Not included:
+   ice-sheet storage, thermal expansion, mantle water exchange.
 3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):
    - eroded bedrock → sediment 1:1 by volume despite 2750 vs 2300 kg/m³ (16% mass loss);
    - sediment beyond the shelf is deleted (~7% of flux) → deep-sea fans instead;

@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-16 (boundary shear coupling)_
+_Last updated: 2026-11-16 (sea level from a fixed water volume)_
 
 ## Goal
 
@@ -87,6 +87,10 @@ components (climate, erosion, …) are expected to build on it.
   (full at ≥ 0.3 m/yr of last step's precipitation), so cold deserts don't glaciate. 20 spin-up years, then 2 per Myr step.
   Month 0 = January (year starts at perihelion).
 - Evaporation over the ocean follows sea-surface temperature (+5%/K).
+- Sea level: `isostasy::sea_level_for_volume` solves the sea level (an offset of dry
+  elevations, exact with water loading) for Earth's ocean volume after every topographic change;
+  `Simulation::surface_elevation` is relative to it. Initial planet: 40% continental crust with
+  thinned, partly flooded margins, triangular ocean age distribution.
 - `src/planet.rs`: couples tectonics (substeps) with temperature, precipitation and erosion per
   time step.
 - `src/render.rs`: equirectangular PNG rendering (elevation with rivers, plates, precipitation,

@@ -48,7 +48,7 @@ struct Cli {
     plates: usize,
 
     /// Fraction of the surface initially covered by continental crust.
-    #[arg(long, default_value_t = 0.3)]
+    #[arg(long, default_value_t = 0.4)]
     continental_fraction: f64,
 
     /// Simulated duration in Myr.
@@ -247,6 +247,16 @@ fn snapshot(
         statistics.max_speed * cm_per_year,
         statistics.speed_p99 * cm_per_year,
         statistics.rms_plate_speed * cm_per_year,
+    );
+    info!(
+        "    sea level {:+.0} m (dry offset; changes by tectonics {:+.0} m, surface processes \
+         {:+.0} m) | ocean volume {:.3e} km³ | continental crust flooded {:.0}%, freeboard {:.0} m",
+        statistics.sea_level,
+        statistics.sea_level_change.0,
+        statistics.sea_level_change.1,
+        statistics.ocean_volume,
+        100.0 * statistics.flooded_continental_fraction,
+        statistics.freeboard,
     );
     info!(
         "    boundary motion: relative speed median {:.1} cm/yr, {:.0}% slower than 2 cm/yr | \

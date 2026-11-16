@@ -80,8 +80,12 @@ pub struct TectonicParams {
     pub continental_fraction: f64,
     /// The number of initial continents.
     pub continent_count: usize,
-    /// Crust thickness at the coasts of the initial continents in metres.
+    /// Crust thickness at the edges of the initial continents in metres (thinned, partly
+    /// flooded margins).
     pub continental_coast_thickness: f64,
+    /// Width (m) of the margins of the initial continents over which the crust thickens from the
+    /// edge to the interior.
+    pub continental_margin_width: f64,
     /// Crust thickness in the interior of the initial continents in metres.
     pub continental_interior_thickness: f64,
     /// Fraction of the sediment on a subducting plate that is scraped off at the trench into an
@@ -157,6 +161,8 @@ pub struct TectonicParams {
     /// Transform faults are weak (≈ 20 MPa over ≈ 15 km brittle depth at 5 cm/yr: ≈ 200 km;
     /// Forsyth & Uyeda 1975 found transform resistance small).
     pub boundary_coupling_width: f64,
+    /// Volume of the ocean water in m³ (Earth: 1.335e18), which sets the sea level.
+    pub ocean_volume: f64,
     /// Mantle flow below the plates.
     pub mantle: MantleParams,
     /// How plates are matched to cells.
@@ -180,10 +186,11 @@ impl Default for TectonicParams {
     fn default() -> Self {
         Self {
             initial_subduction_fraction: 0.5,
-            continental_fraction: 0.3,
+            continental_fraction: 0.4,
             continent_count: 7,
-            continental_coast_thickness: 30_000.0,
-            continental_interior_thickness: 38_000.0,
+            continental_coast_thickness: 22_000.0,
+            continental_interior_thickness: 35_000.0,
+            continental_margin_width: 1000e3,
             frontal_accretion: 0.2,
             arc_crust_per_subduction: 500.0,
             subduction_erosion: 300.0,
@@ -209,6 +216,7 @@ impl Default for TectonicParams {
             continental_drag_factor: 4.0,
             collision_resistance: 50.0,
             boundary_coupling_width: 200e3,
+            ocean_volume: 1.335e18,
             mantle: MantleParams::default(),
             matching: MatchingParams::default(),
             events: PlateEventParams::default(),
@@ -231,6 +239,10 @@ impl TectonicParams {
             "boundary_coupling_width" => &mut self.boundary_coupling_width,
             "slab_pull" => &mut self.slab_pull,
             "slab_sinking_speed" => &mut self.slab_sinking_speed,
+            "ocean_volume" => &mut self.ocean_volume,
+            "continental_coast_thickness" => &mut self.continental_coast_thickness,
+            "continental_interior_thickness" => &mut self.continental_interior_thickness,
+            "continental_margin_width" => &mut self.continental_margin_width,
             "ridge_push" => &mut self.ridge_push,
             "arc_crust_per_subduction" => &mut self.arc_crust_per_subduction,
             "subduction_erosion" => &mut self.subduction_erosion,
@@ -322,6 +334,11 @@ pub struct Simulation {
     configuration_changes: u64,
     /// Area of sea floor opened by diverging plates so far (one flank), in km².
     opened_area: f64,
+    /// Sea level as an offset of dry elevations (m) relative to the datum of the isostasy, set
+    /// so that the ocean holds [`TectonicParams::ocean_volume`].
+    sea_level: f64,
+    /// Changes of the sea level so far (m) by tectonics and by surface processes.
+    sea_level_change: (f64, f64),
     /// Simulated time in Myr.
     time: f64,
 }
@@ -356,12 +373,30 @@ impl Simulation {
         let is_continental: Vec<bool> = continent_of_cell.iter().map(|&c| c != u32::MAX).collect();
 
         // Continents rise towards their interior, oceans get older away from plate boundaries.
+        let margin_cells = (params.continental_margin_width
+            / (params.planet_radius * mesh.mean_edge_angle()))
+        .max(1.0);
         let coast_distance = distance_to(&mesh, |cell| !is_continental[cell as usize]);
         let boundary_distance = distance_to(&mesh, |cell| {
             mesh.neighbors(cell)
                 .iter()
                 .any(|&n| plate_of_cell[n as usize] != plate_of_cell[cell as usize])
         });
+
+        // Ocean ages grow away from plate boundaries with Earth's roughly triangular age–area
+        // distribution: the oceanic cells ranked by boundary distance (ties at random) get the
+        // age 180 Myr · (1 − √(1 − u)) of their quantile u (mean 60 Myr).
+        let mut oceanic: Vec<(u32, f64, usize)> = (0..cell_count)
+            .filter(|&cell| !is_continental[cell])
+            .map(|cell| (boundary_distance[cell], rng.random_range(0.0..1.0), cell))
+            .collect();
+        oceanic.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        let mut ocean_age = vec![0.0; cell_count];
+        let count = oceanic.len().max(1) as f64;
+        for (rank, &(_, _, cell)) in oceanic.iter().enumerate() {
+            let quantile = (rank as f64 + 0.5) / count;
+            ocean_age[cell] = 180.0 * (1.0 - (1.0 - quantile).sqrt());
+        }
 
         let mut plates: Vec<Plate> = (0..plate_count)
             .map(|_| Plate {
@@ -378,7 +413,7 @@ impl Simulation {
         for cell in 0..cell_count {
             let crust = if is_continental[cell] {
                 // Continents thicken from their coasts towards their interior.
-                let inland = (f64::from(coast_distance[cell]) / 5.0).min(1.0);
+                let inland = (f64::from(coast_distance[cell]) / margin_cells).min(1.0);
                 let thickness = params.continental_coast_thickness
                     + (params.continental_interior_thickness - params.continental_coast_thickness)
                         * inland
@@ -390,9 +425,7 @@ impl Simulation {
                     sediment: 0.0,
                 }
             } else {
-                let age = (10.0 + 8.0 * f64::from(boundary_distance[cell])).min(180.0)
-                    + rng.random_range(0.0..5.0);
-                new_oceanic_crust(-age)
+                new_oceanic_crust(-ocean_age[cell])
             };
             plates[plate_of_cell[cell] as usize].crust[cell] = Some(crust);
         }
@@ -451,9 +484,12 @@ impl Simulation {
             rng: owned_rng,
             configuration_changes: 0,
             opened_area: 0.0,
+            sea_level: 0.0,
+            sea_level_change: (0.0, 0.0),
             time: 0.0,
         };
         simulation.ledger = MassLedger::new(simulation.total_mass());
+        simulation.sea_level = simulation.solve_sea_level();
         // Initial subduction zones have fully developed slabs.
         let max_slab_length = simulation.params.max_slab_length;
         for (pair, overriding) in initial_subduction {
@@ -571,6 +607,10 @@ impl Simulation {
 
         let subduction = self.subduction_rates(&boundaries);
         self.mantle.step(dt, &subduction, &mut self.rng);
+
+        let sea_level = self.solve_sea_level();
+        self.sea_level_change.0 += sea_level - self.sea_level;
+        self.sea_level = sea_level;
     }
 
     /// Areal mass (kg/m², summed over cells) of all crust, including hidden samples.
@@ -606,7 +646,18 @@ impl Simulation {
 
     /// Surface elevation (bedrock plus sediment) of a world cell relative to sea level in metres.
     pub fn surface_elevation(&self, cell: u32) -> f64 {
-        self.surface_crust(cell).surface_elevation(self.time)
+        self.surface_crust(cell)
+            .surface_elevation(self.time, self.sea_level)
+    }
+
+    /// The sea level at which the ocean holds [`TectonicParams::ocean_volume`].
+    fn solve_sea_level(&self) -> f64 {
+        let dry: Vec<f64> = (0..self.mesh.len() as u32)
+            .map(|cell| self.surface_crust(cell).dry_elevation(self.time))
+            .collect();
+        let cell_area =
+            4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
+        crate::isostasy::sea_level_for_volume(&dry, cell_area, self.params.ocean_volume)
     }
 
     /// Surface elevation (bedrock plus sediment) of every world cell.
@@ -673,6 +724,11 @@ impl Simulation {
             change += crust.mass() - before;
         }
         self.ledger.record(ledger::Term::SurfaceProcesses, change);
+
+        // Sediment displaces water and eroded land no longer holds it back.
+        let sea_level = self.solve_sea_level();
+        self.sea_level_change.1 += sea_level - self.sea_level;
+        self.sea_level = sea_level;
     }
 }
 
@@ -686,10 +742,42 @@ mod tests {
     }
 
     #[test]
+    fn the_ocean_holds_its_volume() {
+        let mut simulation = simulation(1);
+        let cell_area = 4.0 * std::f64::consts::PI * simulation.params.planet_radius.powi(2)
+            / simulation.mesh.len() as f64;
+        let check = |simulation: &Simulation| {
+            let volume = crate::isostasy::ocean_volume(&simulation.surface_elevations(), cell_area);
+            let target = simulation.params.ocean_volume;
+            assert!((volume / target - 1.0).abs() < 1e-9, "{volume} vs {target}");
+        };
+        check(&simulation);
+        for _ in 0..5 {
+            simulation.step(1.0);
+            check(&simulation);
+            // Sediment on the sea floor displaces water.
+            let cells = simulation.mesh.len();
+            let sediment: Vec<f64> = (0..cells as u32)
+                .map(|c| {
+                    if simulation.surface_elevation(c) < 0.0 {
+                        50.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let before = simulation.sea_level;
+            simulation.apply_surface_changes(&vec![0.0; cells], &sediment);
+            check(&simulation);
+            assert!(simulation.sea_level > before);
+        }
+    }
+
+    #[test]
     fn isostasy_gives_earth_like_elevations() {
         let ocean = |age: f64| new_oceanic_crust(-age);
-        assert!((ocean(0.0).surface_elevation(0.0) + 2600.0).abs() < 1.0);
-        assert!((ocean(1000.0).surface_elevation(0.0) + 5651.0).abs() < 1.0);
+        assert!((ocean(0.0).surface_elevation(0.0, 0.0) + 2600.0).abs() < 1.0);
+        assert!((ocean(1000.0).surface_elevation(0.0, 0.0) + 5651.0).abs() < 1.0);
         assert!(!ocean(0.0).is_continental());
 
         let continent = |thickness| Crust {
@@ -700,9 +788,9 @@ mod tests {
         };
         // Normal continental crust stands a few hundred metres above sea level, doubly
         // thickened crust forms high plateaus like Tibet, thinned crust forms shelves.
-        assert!((200.0..900.0).contains(&continent(35_000.0).surface_elevation(0.0)));
-        assert!((4500.0..5500.0).contains(&continent(70_000.0).surface_elevation(0.0)));
-        assert!((-500.0..0.0).contains(&continent(30_000.0).surface_elevation(0.0)));
+        assert!((200.0..900.0).contains(&continent(35_000.0).surface_elevation(0.0, 0.0)));
+        assert!((4500.0..5500.0).contains(&continent(70_000.0).surface_elevation(0.0, 0.0)));
+        assert!((-500.0..0.0).contains(&continent(30_000.0).surface_elevation(0.0, 0.0)));
         assert!(continent(30_000.0).is_continental());
     }
 
@@ -758,8 +846,9 @@ mod tests {
             sediment: 0.0,
         };
         assert!(
-            (continent(0.0).surface_elevation(0.0) - continent(1000.0).surface_elevation(0.0))
-                .abs()
+            (continent(0.0).surface_elevation(0.0, 0.0)
+                - continent(1000.0).surface_elevation(0.0, 0.0))
+            .abs()
                 < 1.0
         );
     }
@@ -778,9 +867,9 @@ mod tests {
                 thickness: thickness - removed,
                 ..crust
             };
-            let expected = thinner.surface_elevation(0.0);
+            let expected = thinner.surface_elevation(0.0, 0.0);
             let predicted = crate::isostasy::add_layer(
-                crust.surface_elevation(0.0),
+                crust.surface_elevation(0.0, 0.0),
                 -removed,
                 crust.removal_isostatic_density(),
             );
@@ -817,7 +906,7 @@ mod tests {
         let thickness = became_continental_at.expect("arc became continental");
         assert!((18_000.0..28_000.0).contains(&thickness), "{thickness}");
         // A mature arc emerges above sea level.
-        assert!(crust.surface_elevation(0.0) > 0.0);
+        assert!(crust.surface_elevation(0.0, 0.0) > 0.0);
     }
 
     #[test]
@@ -839,7 +928,7 @@ mod tests {
             simulation.mesh().len()
         );
         assert!(statistics.plate_areas.iter().all(|&area| area > 0));
-        assert!((statistics.continental_fraction - 0.3).abs() < 0.01);
+        assert!((statistics.continental_fraction - 0.4).abs() < 0.01);
     }
 
     #[test]

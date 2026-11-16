@@ -63,10 +63,11 @@ impl Crust {
     }
 
     /// Elevation of the surface relative to sea level in metres at the simulated time `time`
-    /// (Myr), from Airy isostasy of crust and sediment plus the thermal uplift of young
-    /// lithosphere.
-    pub fn surface_elevation(&self, time: f64) -> f64 {
-        isostasy::to_surface(self.dry_elevation(time))
+    /// (Myr) and the sea level `sea_level` (an offset of dry elevations, see
+    /// [`crate::isostasy::sea_level_for_volume`]), from Airy isostasy of crust and sediment plus
+    /// the thermal uplift of young lithosphere.
+    pub fn surface_elevation(&self, time: f64, sea_level: f64) -> f64 {
+        isostasy::to_surface(self.dry_elevation(time) - sea_level)
     }
 
     /// Surface elevation at time `time` without the water load (see [`crate::isostasy`]).
