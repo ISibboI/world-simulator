@@ -110,7 +110,7 @@ impl Simulation {
         let mut collisions: HashMap<(u32, u32), u32> = HashMap::new();
         let mut candidates: Vec<(Ownership, Crust)> = Vec::with_capacity(plates.len());
 
-        let (matches, searched) = matching::match_plates(
+        let (matches, found) = matching::match_plates(
             mesh,
             plates,
             &inverse_rotations,
@@ -299,6 +299,7 @@ impl Simulation {
             plates[0].crust[0] = Some(new_oceanic_crust());
             ledger.record(Term::NewSeaFloor, new_oceanic_crust().mass());
             new_owners[0] = Some(Ownership { plate: 0, local: 0 });
+            plates[0].tracked = None;
             queue.push_back(0);
         }
         while let Some(cell) = queue.pop_front() {
@@ -375,7 +376,7 @@ impl Simulation {
         for (owner, new_owner) in owners.iter_mut().zip(new_owners) {
             *owner = new_owner.expect("all cells are owned after gap filling");
         }
-        matching::update_crust_cells(mesh, plates, searched, &filled, matching_scratch);
+        matching::update_crust_cells(mesh, plates, found, &filled, matching_scratch);
         ResolvedBoundaries {
             additions,
             collisions,

@@ -204,9 +204,9 @@ pub struct Plate {
     /// Local vertices whose crust was consumed (subducted or stacked onto another plate). Gaps
     /// there are never refilled with copies, which would recreate consumed crust.
     consumed: Vec<bool>,
-    /// World cells where the plate had crust after the last matching, or `None` if unknown (new,
-    /// split or merged plates). See [`matching`].
-    crust_cells: Option<Vec<u32>>,
+    /// Where the plate's crust was after the last matching, or `None` if unknown (new, split or
+    /// merged plates). See [`matching`].
+    tracked: Option<matching::TrackedCrust>,
     /// The rotation at the last matching.
     matched_rotation: DQuat,
 }
@@ -305,7 +305,7 @@ impl Simulation {
                 crust: vec![None; cell_count],
                 lookup_cache: (0..cell_count as u32).collect(),
                 consumed: vec![false; cell_count],
-                crust_cells: None,
+                tracked: None,
                 matched_rotation: DQuat::IDENTITY,
             })
             .collect();
