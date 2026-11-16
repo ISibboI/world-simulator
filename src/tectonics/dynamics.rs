@@ -109,11 +109,11 @@ impl Simulation {
                     BoundaryKind::Collision
                 } else if subducts_here && !crust.is_continental() {
                     BoundaryKind::Trench {
-                        slab_age: crust.age,
+                        slab_age: crust.age(self.time),
                     }
                 } else if convergence < 0.0
                     && !crust.is_continental()
-                    && crust.age <= params.ridge_age
+                    && crust.age(self.time) <= params.ridge_age
                 {
                     BoundaryKind::Ridge
                 } else {
@@ -282,12 +282,15 @@ impl Simulation {
 
     /// Updates the length of slab below each subduction zone: it grows with the convergence at
     /// the trench (up to the length of an upper-mantle slab) and decays when subduction stops
-    /// (the slab sinks or breaks off).
-    pub(super) fn update_slab_lengths(&mut self, dt: f64) {
+    /// (the slab sinks or breaks off). `boundaries` are the current [`Self::boundary_cells`].
+    ///
+    /// Returns whether a slab appeared or disappeared, which changes the classification of
+    /// boundary cells (see [`Self::boundary_cells`]).
+    pub(super) fn update_slab_lengths(&mut self, dt: f64, boundaries: &[BoundaryCell]) -> bool {
         let params = &self.params;
         // Mean convergence at the trench cells of each pair, in m/Myr.
         let mut convergence: HashMap<(u32, u32), (f64, usize)> = HashMap::default();
-        for boundary in self.boundary_cells() {
+        for boundary in boundaries {
             if matches!(boundary.kind, BoundaryKind::Trench { .. }) && boundary.convergence > 0.0 {
                 let entry = convergence
                     .entry(pair_key(boundary.plate, boundary.other))
@@ -297,7 +300,9 @@ impl Simulation {
             }
         }
         let decay = (-dt / params.slab_decay_time).exp();
+        let mut slabs_changed = false;
         for (pair, polarity) in &mut self.polarities {
+            let had_slab = polarity.slab_length > 0.0;
             match convergence.get(pair) {
                 Some(&(sum, count)) if count > 0 => {
                     polarity.slab_length = (polarity.slab_length + sum / count as f64 * dt)
@@ -305,15 +310,18 @@ impl Simulation {
                 }
                 _ => polarity.slab_length *= decay,
             }
+            slabs_changed |= had_slab != (polarity.slab_length > 0.0);
         }
+        slabs_changed
     }
 
     /// Positions of trench cells with their subduction rate (convergence speed times boundary
-    /// length, in m²/s), which feed the mantle downwellings.
-    pub(super) fn subduction_rates(&self) -> Vec<(DVec3, f64)> {
+    /// length, in m²/s), which feed the mantle downwellings. `boundaries` are the current
+    /// [`Self::boundary_cells`].
+    pub(super) fn subduction_rates(&self, boundaries: &[BoundaryCell]) -> Vec<(DVec3, f64)> {
         let boundary_length = self.params.planet_radius * self.mesh.mean_edge_angle();
-        self.boundary_cells()
-            .into_iter()
+        boundaries
+            .iter()
             .filter(|boundary| matches!(boundary.kind, BoundaryKind::Trench { .. }))
             .filter_map(|boundary| {
                 let r = self.mesh.vertex(boundary.cell);
@@ -465,14 +473,11 @@ mod tests {
                         Crust {
                             thickness: 35_000.0,
                             density: crate::isostasy::CONTINENTAL_DENSITY,
-                            age: 1000.0,
+                            birth: -1000.0,
                             sediment: 0.0,
                         }
                     } else {
-                        Crust {
-                            age: 100.0,
-                            ..new_oceanic_crust()
-                        }
+                        new_oceanic_crust(-100.0)
                     };
                 }
             }
@@ -516,7 +521,7 @@ mod tests {
                 *crust = Crust {
                     thickness: 35_000.0,
                     density: crate::isostasy::CONTINENTAL_DENSITY,
-                    age: 1000.0,
+                    birth: -1000.0,
                     sediment: 0.0,
                 };
             }
@@ -571,10 +576,7 @@ mod tests {
         );
         for plate in &mut simulation.plates {
             for crust in plate.crust.iter_mut().flatten() {
-                *crust = Crust {
-                    age: 100.0,
-                    ..new_oceanic_crust()
-                };
+                *crust = new_oceanic_crust(-100.0);
             }
         }
         simulation
@@ -618,14 +620,18 @@ mod tests {
         let mut simulation = two_oceanic_plates(0.0);
         set_relative_motion(&mut simulation, -1.0);
         let mut previous = 0.0;
+        let update = |simulation: &mut Simulation, dt| {
+            let boundaries = simulation.boundary_cells();
+            simulation.update_slab_lengths(dt, &boundaries);
+        };
         for _ in 0..5 {
-            simulation.update_slab_lengths(1.0);
+            update(&mut simulation, 1.0);
             let length = simulation.polarities[&(0, 1)].slab_length;
             assert!(length > previous);
             previous = length;
         }
         for _ in 0..200 {
-            simulation.update_slab_lengths(1.0);
+            update(&mut simulation, 1.0);
         }
         assert_eq!(
             simulation.polarities[&(0, 1)].slab_length,
@@ -635,7 +641,7 @@ mod tests {
         for plate in &mut simulation.plates {
             plate.angular_velocity = DVec3::ZERO;
         }
-        simulation.update_slab_lengths(10.0);
+        update(&mut simulation, 10.0);
         let decayed = simulation.polarities[&(0, 1)].slab_length;
         assert!(decayed < 0.5 * simulation.params.max_slab_length);
     }

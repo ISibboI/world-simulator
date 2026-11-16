@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-16 (matching sample tracking, arrays + Fx hashing)_
+_Last updated: 2026-11-16 (ledger, birth time, boundary reuse, mantle optimisations)_
 
 ## Goal
 
@@ -38,7 +38,7 @@ components (climate, erosion, …) are expected to build on it.
   - `mod.rs`: parameters, `Plate` (rigid rotation + angular velocity; crust samples in its own
     local frame, indexed by mesh vertex; lookup cache; `consumed` flags), `Simulation`, step loop
     (velocities → substeps → crustal flow → dead plates → events → mantle).
-  - `crust.rs`: crust samples (thickness, density, age, sediment); elevation from Airy isostasy
+  - `crust.rs`: crust samples (thickness, density, formation time `birth`, sediment); elevation from Airy isostasy
     (`src/isostasy.rs`: mantle 3300, water 1030, sediment 2300, oceanic 2900, continental 2800,
     arc 2800 kg/m³) plus thermal uplift from the GDH1 depth–age curve (ridge −2600 m, old ocean
     −5651 m; 35 km continent ≈ +570 m). "Continental" = crustal buoyancy ≥ 3000 m.
@@ -111,7 +111,8 @@ components (climate, erosion, …) are expected to build on it.
   the runtime optimisation (incremental matching). **Next: issue 1 tuning per
   `plans/issue-1-tuning.md` incl. its review items R1–R8; ask the user first whether to do
   further optimisations from `research/profiling-2026-11-15.md` (done so far: incremental
-  matching, sample tracking, arrays + Fx; see `sessions/2026-11-16.md`).**
+  matching, sample tracking, arrays + Fx, cheap ledger, birth time, boundary reuse, trig-free
+  mantle; see `sessions/2026-11-16.md`).**
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal

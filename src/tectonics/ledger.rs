@@ -3,7 +3,9 @@
 //! Every operation that creates, destroys or moves crust records the change of mass it actually
 //! caused (not its nominal size) in a term of the ledger. Comparing the total mass of all crust
 //! samples, including samples hidden below other plates, with the recorded terms gives a
-//! residual, which shows any change that is not accounted for.
+//! residual, which shows any change that is not accounted for. Summing all samples is costly, so
+//! the comparison only runs when the ledger is reported (see [`MassLedger::checked`]); the
+//! residual telescopes, so this gives the same result as checking after every operation.
 //!
 //! Masses are areal masses (kg/m²) summed over cells: crystalline crust counts as
 //! `thickness · density`, sediment as `thickness · ρ_rock` (its rock mass, see
@@ -119,6 +121,13 @@ impl MassLedger {
         self.residual += total - self.last_total - self.recorded_since_check;
         self.last_total = total;
         self.recorded_since_check = 0.0;
+    }
+
+    /// A copy of the ledger, checked against the actual total mass `total`.
+    pub(super) fn checked(&self, total: f64) -> Self {
+        let mut ledger = self.clone();
+        ledger.check(total);
+        ledger
     }
 
     /// The terms with their names, for reporting.

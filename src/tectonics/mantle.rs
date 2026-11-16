@@ -149,13 +149,13 @@ impl MantleFlow {
 
         if rng.random_bool((dt / params.plume_interval).clamp(0.0, 1.0)) {
             // Plumes rise where no slabs have sunk recently.
-            let position = (0..params.plume_candidates.max(1))
+            let candidates: Vec<(DVec3, f64)> = (0..params.plume_candidates.max(1))
                 .map(|_| random_unit_vector(rng))
-                .max_by(|a, b| {
-                    self.downwelling_inflow(*a)
-                        .total_cmp(&self.downwelling_inflow(*b))
-                        .reverse()
-                })
+                .map(|candidate| (candidate, self.downwelling_inflow(candidate)))
+                .collect();
+            let (position, _) = candidates
+                .into_iter()
+                .max_by(|a, b| a.1.total_cmp(&b.1).reverse())
                 .expect("at least one candidate");
             self.plumes.push(Plume {
                 position,
@@ -167,15 +167,16 @@ impl MantleFlow {
         }
     }
 
-    /// How strongly a position is influenced by downwellings (sum of their speeds there).
+    /// How strongly a position (unit vector) is influenced by downwellings (sum of their speeds
+    /// there).
     fn downwelling_inflow(&self, position: DVec3) -> f64 {
+        let core = core_term(self.params.core_radius);
         (0..self.grid.len() as u32)
             .map(|cell| {
                 let flux = self.downwelling[cell as usize] * self.params.return_flow_fraction;
-                flux * radial_speed_factor(
-                    self.grid.vertex(cell).angle_between(position),
-                    self.params.core_radius,
-                )
+                let vertex = self.grid.vertex(cell);
+                let sin = vertex.cross(position).length();
+                flux * sin * radial_speed_per_sine(vertex.dot(position), core)
             })
             .sum()
     }
@@ -229,17 +230,18 @@ impl MantleFlow {
             }
         }
 
+        let core = core_term(self.params.core_radius);
         (0..mesh.len() as u32)
             .map(|cell| {
                 let r = mesh.vertex(cell);
                 sources
                     .iter()
                     .map(|&(position, flux)| {
-                        // Unit tangent at r pointing away from the source along the great circle.
-                        let away = (r * r.dot(position) - position).normalize_or_zero();
-                        let angle = position.angle_between(r);
-                        away * (flux * radial_speed_factor(angle, self.params.core_radius)
-                            / planet_radius)
+                        // Tangent at r pointing away from the source along the great circle; its
+                        // length is sin θ, which turns the factor below into the radial speed.
+                        let cos = r.dot(position);
+                        let away = r * cos - position;
+                        away * (flux * radial_speed_per_sine(cos, core) / planet_radius)
                     })
                     .sum()
             })
@@ -247,11 +249,24 @@ impl MantleFlow {
     }
 }
 
-/// Radial speed (times the planet radius, per unit flux) of the flow from a point source at
-/// angular distance `angle`: `cot(θ/2) / (4π) = sin θ / (4π (1 − cos θ))`, softened within
-/// `core_radius` (the near field becomes `θ / (2π (θ² + c²))`).
+/// Radial speed factor of [`radial_speed_per_sine`] at the angular distance `angle`, for tests.
+#[cfg(test)]
 fn radial_speed_factor(angle: f64, core_radius: f64) -> f64 {
-    angle.sin() / (4.0 * std::f64::consts::PI * (1.0 - angle.cos() + (1.0 - core_radius.cos())))
+    angle.sin() * radial_speed_per_sine(angle.cos(), core_term(core_radius))
+}
+
+/// The softening term `1 − cos c` of the radial speed for the core radius `c`.
+fn core_term(core_radius: f64) -> f64 {
+    1.0 - core_radius.cos()
+}
+
+/// Radial speed (times the planet radius, per unit flux) of the flow from a point source,
+/// divided by `sin θ` at the angular distance `θ`: `1 / (4π (1 − cos θ + (1 − cos c)))` with
+/// the softening [`core_term`] `1 − cos c` (far field `cot(θ/2) / (4π)`, near field
+/// `θ / (2π (θ² + c²))`). Takes `cos θ`, so no trigonometric functions are needed when
+/// `cos θ` and `sin θ` come from dot and cross products.
+fn radial_speed_per_sine(cos: f64, core_term: f64) -> f64 {
+    1.0 / (4.0 * std::f64::consts::PI * (1.0 - cos + core_term))
 }
 
 #[cfg(test)]

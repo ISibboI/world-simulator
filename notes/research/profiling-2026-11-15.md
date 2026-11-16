@@ -53,3 +53,8 @@ log for its summary.
 
 Hidden-sample tracking in the matching (−12% cycles) and arrays + `rustc-hash` instead of SipHash
 maps (−11% cycles); details and the hasher comparison in `../sessions/2026-11-16.md`.
+
+Further (2026-11-16, session 2): ledger checked only when reported, formation time instead of
+age, boundary list reused within a step, ring scratch in the gap filling, trig-free mantle flow:
+−34% cycles at 200 Myr (rounding changes only; see the session log). Still open: flat neighbour
+arrays and the accuracy-changing options above.

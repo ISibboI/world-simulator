@@ -7,7 +7,7 @@ use glam::{DQuat, DVec3};
 
 use crate::isostasy::{ARC_DENSITY, SEDIMENT_ROCK_DENSITY};
 
-use super::ledger::{self, Term};
+use super::ledger::Term;
 use super::matching;
 use super::*;
 
@@ -19,13 +19,12 @@ impl Simulation {
     /// Thick crust spreads under its own weight towards thinner neighbouring crust of the same
     /// plate, conserving its volume (lower crustal flow, gravitational collapse of orogens).
     pub(super) fn crustal_flow(&mut self, dt: f64) {
-        let before = ledger::plates_mass(&self.plates);
-        self.crustal_flow_inner(dt);
-        let after = ledger::plates_mass(&self.plates);
-        self.ledger.record(Term::CrustalFlow, after - before);
+        let change = self.crustal_flow_inner(dt);
+        self.ledger.record(Term::CrustalFlow, change);
     }
 
-    fn crustal_flow_inner(&mut self, dt: f64) {
+    /// Returns the change of mass.
+    fn crustal_flow_inner(&mut self, dt: f64) -> f64 {
         let params = &self.params;
         let rate = (params.crustal_flow_rate * dt).min(0.15);
         // Per crust sample: (outgoing thickness, incoming thickness, incoming mass per area),
@@ -74,10 +73,12 @@ impl Simulation {
                 receiver.2 += amount * from_crust.density;
             }
         }
+        let mut change = 0.0;
         for (owner, (outgoing, incoming, incoming_mass)) in delta {
             let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
                 .as_mut()
                 .expect("owners always point to existing crust");
+            let before = crust.mass();
             // Outgoing crust leaves the density unchanged; incoming crust is mixed in by mass.
             crust.thickness = (crust.thickness - outgoing).max(0.0);
             if incoming > 0.0 {
@@ -87,7 +88,9 @@ impl Simulation {
                     params.max_crust_thickness,
                 );
             }
+            change += crust.mass() - before;
         }
+        change
     }
 
     /// Assigns every world cell to a plate, subducting crust at convergent boundaries and creating
@@ -106,7 +109,8 @@ impl Simulation {
             matching_statistics,
             ..
         } = self;
-        polarities.retain(|_, polarity| *time - polarity.last_contact <= params.polarity_memory);
+        let time = *time;
+        polarities.retain(|_, polarity| time - polarity.last_contact <= params.polarity_memory);
         let cell_count = mesh.len();
         let inverse_rotations: Vec<DQuat> = plates.iter().map(|p| p.rotation.inverse()).collect();
         let alive: Vec<bool> = plates
@@ -143,7 +147,7 @@ impl Simulation {
                 candidates.push((Ownership { plate, local }, crust));
             }
 
-            let Some((winner, winner_crust)) = choose_overriding(&candidates, polarities, *time)
+            let Some((winner, winner_crust)) = choose_overriding(&candidates, polarities, time)
             else {
                 continue;
             };
@@ -308,14 +312,15 @@ impl Simulation {
         // and transform faults), and the gap gets a copy of the adjacent crust.
         let angular_velocities: Vec<DVec3> = plates.iter().map(|p| p.angular_velocity).collect();
         let min_opening = params.min_spreading_rate / (params.planet_radius * 100.0 / 1e6);
+        let mut rings = RingScratch::new(cell_count);
         let mut queue: VecDeque<u32> = (0..cell_count as u32)
             .filter(|&cell| new_owners[cell as usize].is_some())
             .collect();
         if queue.is_empty() {
             // All crust was destroyed, which can only happen in degenerate configurations.
             // Restart with the first plate covering the first cell.
-            plates[0].crust[0] = Some(new_oceanic_crust());
-            ledger.record(Term::NewSeaFloor, new_oceanic_crust().mass());
+            plates[0].crust[0] = Some(new_oceanic_crust(time));
+            ledger.record(Term::NewSeaFloor, new_oceanic_crust(time).mass());
             new_owners[0] = Some(Ownership { plate: 0, local: 0 });
             plates[0].tracked = None;
             queue.push_back(0);
@@ -329,6 +334,7 @@ impl Simulation {
                 }
                 filled.push((plate_index, neighbor));
                 let spreading = opens_away(
+                    &mut rings,
                     mesh,
                     &new_owners,
                     &angular_velocities,
@@ -342,9 +348,9 @@ impl Simulation {
                 if spreading {
                     gap_statistics.new_crust_cells += 1;
                     if plate.crust[local as usize].is_none() {
-                        ledger.record(Term::NewSeaFloor, new_oceanic_crust().mass());
+                        ledger.record(Term::NewSeaFloor, new_oceanic_crust(time).mass());
                     }
-                    plate.crust[local as usize].get_or_insert_with(new_oceanic_crust);
+                    plate.crust[local as usize].get_or_insert_with(|| new_oceanic_crust(time));
                     plate.consumed[local as usize] = false;
                     new_owners[neighbor as usize] = Some(Ownership {
                         plate: plate_index,
@@ -364,8 +370,8 @@ impl Simulation {
                         // Away from other plates, the uncovered area is open sea floor.
                         gap_statistics.new_crust_cells += 1;
                         let replaced = plate.crust[local as usize].map_or(0.0, |c| c.mass());
-                        ledger.record(Term::NewSeaFloor, new_oceanic_crust().mass() - replaced);
-                        plate.crust[local as usize] = Some(new_oceanic_crust());
+                        ledger.record(Term::NewSeaFloor, new_oceanic_crust(time).mass() - replaced);
+                        plate.crust[local as usize] = Some(new_oceanic_crust(time));
                         plate.consumed[local as usize] = false;
                         new_owners[neighbor as usize] = Some(Ownership {
                             plate: plate_index,
@@ -406,7 +412,6 @@ impl Simulation {
     /// thickness spills further outwards over up to [`SPILL_RINGS`] more rings, and is only
     /// removed (delamination) when there is no room left there either.
     pub(super) fn apply_additions(&mut self, additions: &[CrustAddition]) {
-        let before = ledger::plates_mass(&self.plates);
         let mut nominal = 0.0;
         for addition in additions {
             let mass = addition.thickness * addition.density;
@@ -418,12 +423,13 @@ impl Simulation {
             };
             self.ledger.record(term, mass);
         }
-        self.apply_additions_inner(additions);
-        let actual = ledger::plates_mass(&self.plates) - before;
+        let actual = self.apply_additions_inner(additions);
         self.ledger.record(Term::AdditionsLost, actual - nominal);
     }
 
-    fn apply_additions_inner(&mut self, additions: &[CrustAddition]) {
+    /// Returns the change of mass.
+    fn apply_additions_inner(&mut self, additions: &[CrustAddition]) -> f64 {
+        let mut change = 0.0;
         let mut visited_in_event = vec![usize::MAX; self.mesh.len()];
         let mut frontier = Vec::new();
         let mut next_frontier = Vec::new();
@@ -472,7 +478,9 @@ impl Simulation {
                     .expect("owners always point to existing crust");
                 let share = addition.thickness * weight / total_weight;
                 let fitting = share.min((max_thickness - crust.thickness).max(0.0));
+                let before = crust.mass();
                 crust.add_crust(fitting, addition.density, max_thickness);
+                change += crust.mass() - before;
                 leftover += share - fitting;
             }
             for &(owner, _) in &reached {
@@ -483,10 +491,13 @@ impl Simulation {
                     .as_mut()
                     .expect("owners always point to existing crust");
                 let fitting = leftover.min((max_thickness - crust.thickness).max(0.0));
+                let before = crust.mass();
                 crust.add_crust(fitting, addition.density, max_thickness);
+                change += crust.mass() - before;
                 leftover -= fitting;
             }
         }
+        change
     }
 }
 
@@ -527,6 +538,7 @@ pub struct GapStatistics {
 /// from the centroids of their cells within a few rings around `cell`, which is smoother than
 /// single mesh edges, and the motion must not be too oblique (transform faults do not spread).
 fn opens_away(
+    scratch: &mut RingScratch,
     mesh: &SphereMesh,
     owners: &[Option<Ownership>],
     angular_velocities: &[DVec3],
@@ -538,17 +550,32 @@ fn opens_away(
     /// Opening must be at least this fraction of the relative speed.
     const MIN_OBLIQUITY: f64 = 0.25;
 
-    let mut centroids: Vec<(u32, DVec3)> = Vec::new();
-    let mut visited = vec![cell];
-    let mut frontier = vec![cell];
+    let RingScratch {
+        visited,
+        stamp,
+        frontier,
+        next,
+        centroids,
+    } = scratch;
+    // A new stamp marks the cells visited in this call.
+    *stamp += 1;
+    if *stamp == 0 {
+        visited.fill(0);
+        *stamp = 1;
+    }
+    let stamp = *stamp;
+    centroids.clear();
+    frontier.clear();
+    visited[cell as usize] = stamp;
+    frontier.push(cell);
     for _ in 0..RINGS {
-        let mut next = Vec::new();
-        for &current in &frontier {
+        next.clear();
+        for &current in frontier.iter() {
             for &neighbor in mesh.neighbors(current) {
-                if visited.contains(&neighbor) {
+                if visited[neighbor as usize] == stamp {
                     continue;
                 }
-                visited.push(neighbor);
+                visited[neighbor as usize] = stamp;
                 next.push(neighbor);
                 if let Some(owner) = owners[neighbor as usize] {
                     let position = mesh.vertex(neighbor);
@@ -559,7 +586,7 @@ fn opens_away(
                 }
             }
         }
-        frontier = next;
+        std::mem::swap(frontier, next);
     }
 
     let r = mesh.vertex(cell);
@@ -577,6 +604,29 @@ fn opens_away(
         let opening = relative.dot(normal);
         opening > min_opening && opening > MIN_OBLIQUITY * relative.length()
     })
+}
+
+/// Reusable buffers for [`opens_away`].
+struct RingScratch {
+    /// Per cell: the stamp of the last call that visited it.
+    visited: Vec<u32>,
+    stamp: u32,
+    frontier: Vec<u32>,
+    next: Vec<u32>,
+    /// Per plate near the cell: the sum of the positions of its cells.
+    centroids: Vec<(u32, DVec3)>,
+}
+
+impl RingScratch {
+    fn new(cell_count: usize) -> Self {
+        Self {
+            visited: vec![0; cell_count],
+            stamp: 0,
+            frontier: Vec::new(),
+            next: Vec::new(),
+            centroids: Vec::new(),
+        }
+    }
 }
 
 /// New crust added to a plate around a cell.
@@ -619,7 +669,7 @@ pub(super) fn choose_overriding(
             let polarity = polarities
                 .entry(pair_key(a.plate, b.plate))
                 .or_insert_with(|| Polarity {
-                    overriding: if a_crust.buoyancy() >= b_crust.buoyancy() {
+                    overriding: if a_crust.buoyancy(time) >= b_crust.buoyancy(time) {
                         a.plate
                     } else {
                         b.plate
@@ -657,7 +707,7 @@ pub(super) fn choose_overriding(
         .or_else(|| {
             candidates
                 .iter()
-                .max_by(|a, b| a.1.buoyancy().total_cmp(&b.1.buoyancy()))
+                .max_by(|a, b| a.1.buoyancy(time).total_cmp(&b.1.buoyancy(time)))
         })
         .copied()
 }
@@ -694,7 +744,15 @@ mod tests {
             .unwrap();
         // 0.5 cm/yr in rad/Myr.
         let min_opening = 0.5 / 637.1;
-        opens_away(&mesh, &owners, &[omega_0, omega_1], gap, 1, min_opening)
+        opens_away(
+            &mut RingScratch::new(mesh.len()),
+            &mesh,
+            &owners,
+            &[omega_0, omega_1],
+            gap,
+            1,
+            min_opening,
+        )
     }
 
     #[test]

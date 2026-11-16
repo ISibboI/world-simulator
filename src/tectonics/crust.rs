@@ -1,5 +1,5 @@
-//! Crust samples: thickness, density, age and sediment, and the elevation that follows
-//! from isostasy and thermal subsidence.
+//! Crust samples: thickness, density, time of formation and sediment, and the elevation that
+//! follows from isostasy and thermal subsidence.
 
 use crate::isostasy::{
     self, CONTINENTAL_DENSITY, MANTLE_DENSITY, OCEANIC_DENSITY, SEDIMENT_DENSITY,
@@ -48,25 +48,32 @@ pub struct Crust {
     pub thickness: f64,
     /// Mean density of the crystalline crust in kg/m³.
     pub density: f64,
-    /// Age of the lithosphere in Myr: time since it formed at a ridge. Continental lithosphere
-    /// is old and fully cooled.
-    pub age: f64,
+    /// Simulated time in Myr at which the lithosphere formed at a ridge (negative for
+    /// lithosphere older than the simulation). Its age is the time since then (see
+    /// [`Crust::age`]); continental lithosphere is old and fully cooled.
+    pub birth: f64,
     /// Thickness of loose sediment on top of the bedrock in metres.
     pub sediment: f64,
 }
 
 impl Crust {
-    /// Elevation of the surface relative to sea level in metres, from Airy isostasy of crust and
-    /// sediment plus the thermal uplift of young lithosphere.
-    pub fn surface_elevation(&self) -> f64 {
-        isostasy::to_surface(self.dry_elevation())
+    /// Age of the lithosphere in Myr at the simulated time `time` (Myr).
+    pub fn age(&self, time: f64) -> f64 {
+        time - self.birth
     }
 
-    /// Surface elevation without the water load (see [`crate::isostasy`]).
-    pub(super) fn dry_elevation(&self) -> f64 {
+    /// Elevation of the surface relative to sea level in metres at the simulated time `time`
+    /// (Myr), from Airy isostasy of crust and sediment plus the thermal uplift of young
+    /// lithosphere.
+    pub fn surface_elevation(&self, time: f64) -> f64 {
+        isostasy::to_surface(self.dry_elevation(time))
+    }
+
+    /// Surface elevation at time `time` without the water load (see [`crate::isostasy`]).
+    pub(super) fn dry_elevation(&self, time: f64) -> f64 {
         self.crustal_buoyancy()
             + self.sediment * isostasy::dry_response(SEDIMENT_DENSITY)
-            + self.thermal_weight() * thermal_uplift(self.age)
+            + self.thermal_weight() * thermal_uplift(self.age(time))
             - COMPENSATION
     }
 
@@ -121,8 +128,8 @@ impl Crust {
 
     /// Crust with higher buoyancy overrides crust with lower buoyancy at convergent boundaries:
     /// continental before oceanic, young (hot) oceanic before old oceanic.
-    pub(super) fn buoyancy(&self) -> f64 {
-        self.dry_elevation()
+    pub(super) fn buoyancy(&self, time: f64) -> f64 {
+        self.dry_elevation(time)
     }
 
     /// Adds crust of the given thickness and density, mixing the densities by mass. Crust beyond
@@ -153,11 +160,12 @@ pub fn oceanic_depth(age: f64) -> f64 {
     }
 }
 
-pub(super) fn new_oceanic_crust() -> Crust {
+/// New oceanic crust formed at the simulated time `time` (Myr).
+pub(super) fn new_oceanic_crust(time: f64) -> Crust {
     Crust {
         thickness: OCEANIC_THICKNESS,
         density: OCEANIC_DENSITY,
-        age: 0.0,
+        birth: time,
         sediment: 0.0,
     }
 }

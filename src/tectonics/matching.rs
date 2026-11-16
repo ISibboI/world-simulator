@@ -315,7 +315,7 @@ mod tests {
                         [
                             c.thickness.to_bits(),
                             c.density.to_bits(),
-                            c.age.to_bits(),
+                            c.birth.to_bits(),
                             c.sediment.to_bits(),
                         ]
                     })

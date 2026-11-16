@@ -15,6 +15,9 @@ impl Simulation {
         let result = self.split_plate_inner(plate, normal);
         let after = ledger::plates_mass(&self.plates);
         self.ledger.record(Term::Splits, after - before);
+        if result.is_some() {
+            self.topology_changes += 1;
+        }
         result
     }
 
@@ -162,6 +165,7 @@ impl Simulation {
             self.owners.iter().all(|owner| owner.plate != plate),
             "removed plates must not own cells"
         );
+        self.topology_changes += 1;
         let last = self.plates.len() as u32 - 1;
         self.plates.swap_remove(plate as usize);
         self.polarities
@@ -190,15 +194,8 @@ impl Simulation {
             .collect();
     }
 
-    /// Removes all plates that no longer own any cell.
+    /// Removes all plates that no longer own any cell; their hidden crust is lost.
     pub(super) fn remove_dead_plates(&mut self) {
-        let before = ledger::plates_mass(&self.plates);
-        self.remove_dead_plates_inner();
-        let after = ledger::plates_mass(&self.plates);
-        self.ledger.record(Term::RemovedPlates, after - before);
-    }
-
-    fn remove_dead_plates_inner(&mut self) {
         let mut area = vec![0usize; self.plates.len()];
         for owner in &self.owners {
             area[owner.plate as usize] += 1;
@@ -206,6 +203,8 @@ impl Simulation {
         // Remove from the back so that indices of plates still to be checked stay valid.
         for plate in (0..self.plates.len()).rev() {
             if area[plate] == 0 {
+                let lost = ledger::plates_mass(&self.plates[plate..=plate]);
+                self.ledger.record(Term::RemovedPlates, -lost);
                 self.remove_plate(plate as u32);
                 self.event_counts.consumed += 1;
             }

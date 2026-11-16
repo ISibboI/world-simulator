@@ -17,9 +17,9 @@
 //!     the crust of the lower plate is stacked onto the overriding plate around the collision
 //!     (crustal thickening, orogeny, terrane accretion), so continental crust is conserved.
 //!
-//! Every crust sample stores its thickness, density, age and sediment cover; its elevation follows
-//! from Airy isostasy plus the thermal subsidence of the lithosphere with age (see
-//! [`crate::isostasy`]). Continental crust is not a separate type: crust counts as continental
+//! Every crust sample stores its thickness, density, time of formation and sediment cover; its
+//! elevation follows from Airy isostasy plus the thermal subsidence of the lithosphere with age
+//! (see [`crate::isostasy`]). Continental crust is not a separate type: crust counts as continental
 //! when it is thick and light enough (see [`Crust::is_continental`]), so island arcs gradually
 //! become continental crust as they thicken.
 //!
@@ -266,6 +266,8 @@ pub struct Simulation {
     /// How plates were matched to cells.
     matching_statistics: MatchingStatistics,
     matching_scratch: matching::MatchingScratch,
+    /// Number of changes of the plate configuration (splits, merges, removals) so far.
+    topology_changes: u64,
     /// Simulated time in Myr.
     time: f64,
 }
@@ -330,16 +332,13 @@ impl Simulation {
                 Crust {
                     thickness,
                     density: CONTINENTAL_DENSITY,
-                    age: 1000.0,
+                    birth: -1000.0,
                     sediment: 0.0,
                 }
             } else {
                 let age = (10.0 + 8.0 * f64::from(boundary_distance[cell])).min(180.0)
                     + rng.random_range(0.0..5.0);
-                Crust {
-                    age,
-                    ..new_oceanic_crust()
-                }
+                new_oceanic_crust(-age)
             };
             plates[plate_of_cell[cell] as usize].crust[cell] = Some(crust);
         }
@@ -355,9 +354,9 @@ impl Simulation {
                         .expect("every cell has initial crust");
                     let sums = boundary_buoyancy.entry(pair_key(plate, other)).or_default();
                     if plate < other {
-                        sums.0 += crust.buoyancy();
+                        sums.0 += crust.buoyancy(0.0);
                     } else {
-                        sums.1 += crust.buoyancy();
+                        sums.1 += crust.buoyancy(0.0);
                     }
                 }
             }
@@ -402,6 +401,7 @@ impl Simulation {
             matching_statistics: MatchingStatistics::default(),
             matching_scratch: matching::MatchingScratch::default(),
             rng: owned_rng,
+            topology_changes: 0,
             time: 0.0,
         };
         simulation.ledger = MassLedger::new(simulation.total_mass());
@@ -448,13 +448,20 @@ impl Simulation {
         }
         self.crustal_flow(dt);
         self.remove_dead_plates();
-        self.update_slab_lengths(dt);
-        self.plate_events(dt);
+        let boundaries = self.boundary_cells();
+        let slabs_changed = self.update_slab_lengths(dt, &boundaries);
+        let topology = self.topology_changes;
+        self.plate_events(dt, &boundaries);
+        // The boundaries only change if plates were split, merged or removed, or if a slab
+        // appeared or disappeared (trenches with slabs persist at slight divergence).
+        let boundaries = if self.topology_changes == topology && !slabs_changed {
+            boundaries
+        } else {
+            self.boundary_cells()
+        };
 
-        let subduction = self.subduction_rates();
+        let subduction = self.subduction_rates(&boundaries);
         self.mantle.step(dt, &subduction, &mut self.rng);
-        let total = self.total_mass();
-        self.ledger.check(total);
     }
 
     /// Areal mass (kg/m², summed over cells) of all crust, including hidden samples.
@@ -470,7 +477,6 @@ impl Simulation {
     fn substep(&mut self, dt: f64) {
         self.time += dt;
         self.move_plates(dt);
-        self.evolve_crust(dt);
         let ResolvedBoundaries {
             additions,
             collisions,
@@ -486,20 +492,15 @@ impl Simulation {
         }
     }
 
-    /// Ages all crust; its elevation follows from its age (thermal subsidence). Erosion is
-    /// handled separately, see [`crate::erosion`].
-    fn evolve_crust(&mut self, dt: f64) {
-        for plate in &mut self.plates {
-            for crust in plate.crust.iter_mut().flatten() {
-                crust.age += dt;
-            }
-        }
+    /// Surface elevation (bedrock plus sediment) of a world cell relative to sea level in metres.
+    pub fn surface_elevation(&self, cell: u32) -> f64 {
+        self.surface_crust(cell).surface_elevation(self.time)
     }
 
     /// Surface elevation (bedrock plus sediment) of every world cell.
     pub fn surface_elevations(&self) -> Vec<f64> {
         (0..self.mesh.len() as u32)
-            .map(|cell| self.surface_crust(cell).surface_elevation())
+            .map(|cell| self.surface_elevation(cell))
             .collect()
     }
 
@@ -560,8 +561,6 @@ impl Simulation {
             change += crust.mass() - before;
         }
         self.ledger.record(ledger::Term::SurfaceProcesses, change);
-        let total = self.total_mass();
-        self.ledger.check(total);
     }
 }
 
@@ -576,25 +575,22 @@ mod tests {
 
     #[test]
     fn isostasy_gives_earth_like_elevations() {
-        let ocean = |age| Crust {
-            age,
-            ..new_oceanic_crust()
-        };
-        assert!((ocean(0.0).surface_elevation() + 2600.0).abs() < 1.0);
-        assert!((ocean(1000.0).surface_elevation() + 5651.0).abs() < 1.0);
+        let ocean = |age: f64| new_oceanic_crust(-age);
+        assert!((ocean(0.0).surface_elevation(0.0) + 2600.0).abs() < 1.0);
+        assert!((ocean(1000.0).surface_elevation(0.0) + 5651.0).abs() < 1.0);
         assert!(!ocean(0.0).is_continental());
 
         let continent = |thickness| Crust {
             thickness,
             density: CONTINENTAL_DENSITY,
-            age: 1000.0,
+            birth: -1000.0,
             sediment: 0.0,
         };
         // Normal continental crust stands a few hundred metres above sea level, doubly
         // thickened crust forms high plateaus like Tibet, thinned crust forms shelves.
-        assert!((200.0..900.0).contains(&continent(35_000.0).surface_elevation()));
-        assert!((4500.0..5500.0).contains(&continent(70_000.0).surface_elevation()));
-        assert!((-500.0..0.0).contains(&continent(30_000.0).surface_elevation()));
+        assert!((200.0..900.0).contains(&continent(35_000.0).surface_elevation(0.0)));
+        assert!((4500.0..5500.0).contains(&continent(70_000.0).surface_elevation(0.0)));
+        assert!((-500.0..0.0).contains(&continent(30_000.0).surface_elevation(0.0)));
         assert!(continent(30_000.0).is_continental());
     }
 
@@ -608,10 +604,10 @@ mod tests {
                     let crust = Crust {
                         thickness,
                         density,
-                        age,
+                        birth: -age,
                         sediment: 0.0,
                     };
-                    let elevation = crust.dry_elevation();
+                    let elevation = crust.dry_elevation(0.0);
                     // At least 0.5 m per 100 m of crust (the thermal uplift fading out over the
                     // continental transition leaves a margin of ~1 m per 100 m on young
                     // lithosphere).
@@ -633,24 +629,25 @@ mod tests {
                 let arc = Crust {
                     thickness,
                     density: ARC_DENSITY,
-                    age,
+                    birth: -age,
                     sediment: 0.0,
                 };
-                assert!(arc.buoyancy() > new_oceanic_crust().buoyancy());
+                assert!(arc.buoyancy(0.0) > new_oceanic_crust(0.0).buoyancy(0.0));
             }
         }
     }
 
     #[test]
     fn continental_crust_gets_no_oceanic_thermal_uplift() {
-        let continent = |age| Crust {
+        let continent = |age: f64| Crust {
             thickness: 40_000.0,
             density: CONTINENTAL_DENSITY,
-            age,
+            birth: -age,
             sediment: 0.0,
         };
         assert!(
-            (continent(0.0).surface_elevation() - continent(1000.0).surface_elevation()).abs()
+            (continent(0.0).surface_elevation(0.0) - continent(1000.0).surface_elevation(0.0))
+                .abs()
                 < 1.0
         );
     }
@@ -661,7 +658,7 @@ mod tests {
             let crust = Crust {
                 thickness,
                 density: CONTINENTAL_DENSITY,
-                age: 1000.0,
+                birth: -1000.0,
                 sediment: 0.0,
             };
             let removed = 10.0;
@@ -669,9 +666,9 @@ mod tests {
                 thickness: thickness - removed,
                 ..crust
             };
-            let expected = thinner.surface_elevation();
+            let expected = thinner.surface_elevation(0.0);
             let predicted = crate::isostasy::add_layer(
-                crust.surface_elevation(),
+                crust.surface_elevation(0.0),
                 -removed,
                 crust.removal_isostatic_density(),
             );
@@ -687,20 +684,17 @@ mod tests {
         let eroded = Crust {
             thickness: OCEANIC_THICKNESS,
             density: CONTINENTAL_DENSITY,
-            age: 1000.0,
+            birth: -1000.0,
             sediment: 0.0,
         };
         assert!(!eroded.is_oceanic());
         assert!(!eroded.is_continental());
-        assert!(new_oceanic_crust().is_oceanic());
+        assert!(new_oceanic_crust(0.0).is_oceanic());
     }
 
     #[test]
     fn arcs_mature_into_continental_crust() {
-        let mut crust = Crust {
-            age: 80.0,
-            ..new_oceanic_crust()
-        };
+        let mut crust = new_oceanic_crust(-80.0);
         let mut became_continental_at = None;
         for _ in 0..100 {
             crust.add_crust(500.0, ARC_DENSITY, 75_000.0);
@@ -711,7 +705,7 @@ mod tests {
         let thickness = became_continental_at.expect("arc became continental");
         assert!((18_000.0..28_000.0).contains(&thickness), "{thickness}");
         // A mature arc emerges above sea level.
-        assert!(crust.surface_elevation() > 0.0);
+        assert!(crust.surface_elevation(0.0) > 0.0);
     }
 
     #[test]
@@ -756,7 +750,7 @@ mod tests {
         // New crust was created at ridges.
         assert!(
             (0..simulation.mesh().len() as u32)
-                .any(|cell| simulation.surface_crust(cell).age < 10.0)
+                .any(|cell| simulation.surface_crust(cell).age(simulation.time()) < 10.0)
         );
     }
 
@@ -775,22 +769,27 @@ mod tests {
     fn crust_mass_ledger_closes() {
         let mut simulation = simulation(3);
         let total = simulation.total_mass();
-        for _ in 0..40 {
+        let assert_closes = |simulation: &Simulation, context: &str| {
+            let residual = simulation.ledger.checked(simulation.total_mass()).residual;
+            assert!(
+                residual.abs() < 1e-9 * total,
+                "{context}: residual {residual} of total {total}"
+            );
+        };
+        for step in 0..40 {
             simulation.step(1.0);
+            assert_closes(&simulation, &format!("step {step}"));
             // Erosion-like changes, including a sample shown at several cells.
             let cells = simulation.mesh.len();
             let thickness: Vec<f64> = (0..cells).map(|c| -((c % 7) as f64)).collect();
             let sediment: Vec<f64> = (0..cells).map(|c| (c % 5) as f64 - 2.0).collect();
             simulation.apply_surface_changes(&thickness, &sediment);
+            assert_closes(&simulation, &format!("surface changes {step}"));
         }
-        let residual = simulation.ledger.residual;
-        assert!(
-            residual.abs() < 1e-9 * total,
-            "residual {residual} of total {total}"
-        );
         // Plates moved and things happened.
-        assert!(simulation.ledger.new_sea_floor > 0.0);
-        assert!(simulation.ledger.subducted_oceanic < 0.0);
+        let ledger = simulation.ledger.checked(simulation.total_mass());
+        assert!(ledger.new_sea_floor > 0.0);
+        assert!(ledger.subducted_oceanic < 0.0);
     }
 
     #[test]

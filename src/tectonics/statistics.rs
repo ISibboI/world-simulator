@@ -134,11 +134,12 @@ impl Simulation {
                 continental += 1;
                 continental_speed += speed;
             } else if crust.is_oceanic() {
-                oceanic_age_sum += crust.age;
-                oceanic_ages.push(crust.age);
+                let age = crust.age(self.time);
+                oceanic_age_sum += age;
+                oceanic_ages.push(age);
                 oceanic_speed += speed;
             }
-            let elevation = crust.surface_elevation();
+            let elevation = crust.surface_elevation(self.time);
             if elevation < -6000.0 {
                 deep += 1;
             }
@@ -179,6 +180,7 @@ impl Simulation {
             }
             visible_mass += crust.mass();
         }
+        let total_mass = self.total_mass();
         let boundary_length = self.params.planet_radius * self.mesh.mean_edge_angle() / 1000.0;
         let (mut trench_length, mut ridge_length, mut slab_pull, mut ridge_push) =
             (0.0, 0.0, 0.0, 0.0);
@@ -232,21 +234,19 @@ impl Simulation {
             plumes: self.plumes().len(),
             gaps: self.gap_statistics.clone(),
             events: self.event_counts.clone(),
-            ledger: self.ledger.clone(),
+            ledger: self.ledger.checked(total_mass),
             matching: self.matching_statistics.clone(),
             continental_mass: masses[0] * to_gigatonnes,
             transitional_mass: masses[1] * to_gigatonnes,
             oceanic_mass: masses[2] * to_gigatonnes,
             sediment_mass: masses[3] * to_gigatonnes,
             felsic_mass: masses[4] * to_gigatonnes,
-            hidden_mass: (self.total_mass() - visible_mass) * to_gigatonnes,
+            hidden_mass: (total_mass - visible_mass) * to_gigatonnes,
             trench_length,
             ridge_length,
             slab_pull,
             ridge_push,
-            land_masses: components(&self.mesh, |cell| {
-                self.surface_crust(cell).surface_elevation() >= 0.0
-            }),
+            land_masses: components(&self.mesh, |cell| self.surface_elevation(cell) >= 0.0),
             continental_masses: components(&self.mesh, |cell| {
                 self.surface_crust(cell).is_continental()
             }),

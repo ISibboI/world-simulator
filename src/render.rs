@@ -39,7 +39,7 @@ fn render(simulation: &Simulation, width: u32, color: impl Fn(u32) -> Rgb<u8>) -
 pub fn render_elevation(planet: &Planet, width: u32, river_threshold: f64) -> RgbImage {
     let simulation = planet.tectonics();
     render(simulation, width, |cell| {
-        let elevation = simulation.surface_crust(cell).surface_elevation();
+        let elevation = simulation.surface_elevation(cell);
         if elevation >= 0.0 && planet.discharge()[cell as usize] >= river_threshold {
             Rgb([30, 80, 200])
         } else {
@@ -52,7 +52,7 @@ pub fn render_elevation(planet: &Planet, width: u32, river_threshold: f64) -> Rg
 /// permanent ice where the annual mean temperature is below -10 °C.
 pub fn surface_color(planet: &Planet, cell: u32, river_threshold: f64) -> Rgb<u8> {
     let simulation = planet.tectonics();
-    let elevation = simulation.surface_crust(cell).surface_elevation();
+    let elevation = simulation.surface_elevation(cell);
     let frozen = planet
         .temperature()
         .annual_mean
@@ -85,7 +85,7 @@ pub fn render_temperature(planet: &Planet, width: u32, temperature: &[f64]) -> R
     ];
     let simulation = planet.tectonics();
     let mesh = simulation.mesh();
-    let is_land = |cell: u32| simulation.surface_crust(cell).surface_elevation() >= 0.0;
+    let is_land = |cell: u32| simulation.surface_elevation(cell) >= 0.0;
     render(simulation, width, |cell| {
         let coast = is_land(cell)
             && mesh
@@ -112,7 +112,7 @@ pub fn render_precipitation(planet: &Planet, width: u32) -> RgbImage {
     ];
     let simulation = planet.tectonics();
     render(simulation, width, |cell| {
-        if simulation.surface_crust(cell).surface_elevation() < 0.0 {
+        if simulation.surface_elevation(cell) < 0.0 {
             let shade =
                 (90.0 + 60.0 * (planet.precipitation()[cell as usize] / 3.0).min(1.0)) as u8;
             Rgb([shade, shade, shade.saturating_add(20)])

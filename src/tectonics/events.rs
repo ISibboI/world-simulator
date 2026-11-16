@@ -10,7 +10,7 @@ use glam::DVec3;
 use rand::RngExt;
 use tracing::debug;
 
-use super::dynamics::BoundaryKind;
+use super::dynamics::{BoundaryCell, BoundaryKind};
 use super::generation::random_unit_vector;
 use super::*;
 
@@ -91,9 +91,11 @@ impl EventCounts {
 }
 
 impl Simulation {
-    /// Runs the plate events for a time step of `dt` Myr.
-    pub(super) fn plate_events(&mut self, dt: f64) {
-        self.suture_colliding_plates(dt);
+    /// Runs the plate events for a time step of `dt` Myr. `boundaries` are the current
+    /// [`Self::boundary_cells`] (only their collisions and convergence are used, which do not
+    /// depend on the slab lengths).
+    pub(super) fn plate_events(&mut self, dt: f64, boundaries: &[BoundaryCell]) {
+        self.suture_colliding_plates(dt, boundaries);
         self.capture_tiny_plates();
         self.rift_above_plumes();
         self.initiate_subduction(dt);
@@ -191,7 +193,8 @@ impl Simulation {
         for cell in 0..self.mesh.len() as u32 {
             let owner = self.owners[cell as usize];
             let crust = self.surface_crust(cell);
-            if !crust.is_oceanic() || crust.age < params.initiation_age {
+            let age = crust.age(self.time);
+            if !crust.is_oceanic() || age < params.initiation_age {
                 continue;
             }
             let at_margin = self.mesh.neighbors(cell).iter().any(|&neighbor| {
@@ -199,7 +202,7 @@ impl Simulation {
                     && self.surface_crust(neighbor).is_continental()
             });
             if at_margin {
-                candidates.push((cell, crust.age - params.initiation_age + 1.0));
+                candidates.push((cell, age - params.initiation_age + 1.0));
             }
         }
         if candidates.is_empty()
@@ -262,11 +265,11 @@ impl Simulation {
     /// Tracks how long pairs of plates have been in continental collision, and merges them once
     /// the collision has lasted long enough. Contacts count unless the plates clearly move
     /// apart (collision resistance drives locked collisions to near-zero convergence).
-    fn suture_colliding_plates(&mut self, dt: f64) {
+    fn suture_colliding_plates(&mut self, dt: f64, boundaries: &[BoundaryCell]) {
         let min_convergence =
             self.params.min_trench_convergence / (self.params.planet_radius * 100.0 / 1e6);
         let mut colliding: HashMap<(u32, u32), usize> = HashMap::default();
-        for boundary in self.boundary_cells() {
+        for boundary in boundaries {
             if boundary.kind == BoundaryKind::Collision && boundary.convergence > -min_convergence {
                 *colliding
                     .entry(pair_key(boundary.plate, boundary.other))
@@ -371,14 +374,11 @@ mod tests {
                 Crust {
                     thickness: 35_000.0,
                     density: CONTINENTAL_DENSITY,
-                    age: 1000.0,
+                    birth: -1000.0,
                     sediment: 0.0,
                 }
             } else {
-                Crust {
-                    age: 250.0,
-                    ..new_oceanic_crust()
-                }
+                new_oceanic_crust(-250.0)
             });
         }
         simulation.initiate_subduction(1.0);
@@ -403,7 +403,7 @@ mod tests {
                 *crust = Crust {
                     thickness: 35_000.0,
                     density: CONTINENTAL_DENSITY,
-                    age: 1000.0,
+                    birth: -1000.0,
                     sediment: 0.0,
                 };
             }
@@ -418,7 +418,8 @@ mod tests {
             },
         );
         for _ in 0..5 {
-            simulation.suture_colliding_plates(1.0);
+            let boundaries = simulation.boundary_cells();
+            simulation.suture_colliding_plates(1.0, &boundaries);
         }
         assert_eq!(simulation.plates.len(), 1);
         assert_eq!(simulation.event_counts.sutures, 1);
@@ -465,10 +466,7 @@ mod tests {
         let mut simulation =
             Simulation::new(SphereMesh::icosphere(4), 1, TectonicParams::default(), 6);
         for crust in simulation.plates[0].crust.iter_mut().flatten() {
-            *crust = Crust {
-                age: 200.0,
-                ..new_oceanic_crust()
-            };
+            *crust = new_oceanic_crust(-200.0);
         }
         simulation.mantle.insert_plume(Plume {
             position: DVec3::Z,
