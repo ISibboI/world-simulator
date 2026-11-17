@@ -71,10 +71,11 @@ pub struct Statistics {
     pub sea_level_change: (f64, f64),
     /// Volume of the ocean (km³) from the surface elevations.
     pub ocean_volume: f64,
-    /// Fraction of the continental crust below sea level, and the mean surface elevation of
-    /// continental crust (freeboard, m).
+    /// Fraction of the crust of continental origin (see [`Crust::is_continental_origin`]) below
+    /// sea level, and its mean surface elevation (freeboard, m), and its share of the surface.
     pub flooded_continental_fraction: f64,
     pub freeboard: f64,
+    pub continental_origin_fraction: f64,
     /// Relative speed of the plates across boundaries (per boundary cell, both sides): median
     /// (rad/Myr) and fraction slower than 2 cm/yr.
     pub median_relative_speed: f64,
@@ -278,6 +279,7 @@ impl Simulation {
         let mut max_speed: f64 = 0.0;
         let mut speeds = Vec::with_capacity(cell_count);
         let (mut freeboard_sum, mut flooded_continental, mut water_depth_sum) = (0.0, 0usize, 0.0);
+        let mut origin_cells = 0usize;
         let mut plate_speed_sums = vec![0.0; self.plates.len()];
 
         for cell in 0..cell_count as u32 {
@@ -302,7 +304,8 @@ impl Simulation {
                 oceanic_speed += speed;
             }
             let elevation = crust.surface_elevation(self.time, self.sea_level);
-            if crust.is_continental() {
+            if crust.is_continental_origin() {
+                origin_cells += 1;
                 freeboard_sum += elevation;
                 if elevation < 0.0 {
                     flooded_continental += 1;
@@ -396,7 +399,7 @@ impl Simulation {
             let mut same_plate_continent = false;
             let mut any_continent = false;
             for &neighbor in self.mesh.neighbors(cell) {
-                if self.surface_crust(neighbor).is_continental() {
+                if self.surface_crust(neighbor).is_continental_origin() {
                     any_continent = true;
                     same_plate_continent |= self.owner(neighbor).plate == plate;
                 }
@@ -535,8 +538,9 @@ impl Simulation {
             sea_level: self.sea_level,
             sea_level_change: self.sea_level_change,
             ocean_volume: water_depth_sum * cell_area / 1e9,
-            flooded_continental_fraction: flooded_continental as f64 / continental.max(1) as f64,
-            freeboard: freeboard_sum / continental.max(1) as f64,
+            flooded_continental_fraction: flooded_continental as f64 / origin_cells.max(1) as f64,
+            freeboard: freeboard_sum / origin_cells.max(1) as f64,
+            continental_origin_fraction: origin_cells as f64 / cell_count as f64,
             median_relative_speed: motion.median_relative_speed,
             slow_boundary_fraction: motion.slow_fraction,
             mean_obliquity_cos: motion.mean_cos,

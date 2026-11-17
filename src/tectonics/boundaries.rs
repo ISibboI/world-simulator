@@ -311,6 +311,11 @@ impl Simulation {
         // and transform faults), healed without creating crust (see `heal_gap`).
         let angular_velocities: Vec<DVec3> = plates.iter().map(|p| p.angular_velocity).collect();
         let min_opening = params.min_spreading_rate / (params.planet_radius * 100.0 / 1e6);
+        let min_stretching_opening =
+            params.min_stretching_rate / (params.planet_radius * 100.0 / 1e6);
+        let rift_rings = (params.rift_width / (params.planet_radius * mesh.mean_edge_angle()))
+            .ceil()
+            .max(1.0) as usize;
         let mut rings = RingScratch::new(cell_count);
         let mut queue: VecDeque<u32> = (0..cell_count as u32)
             .filter(|&cell| new_owners[cell as usize].is_some())
@@ -341,10 +346,51 @@ impl Simulation {
                     plate_index,
                     min_opening,
                 );
+                let local = plates[plate_index as usize].local_vertex(
+                    mesh,
+                    inverse_rotations[plate_index as usize],
+                    neighbor,
+                );
+                // Continental rifting: where crust of continental origin thicker than the breakup
+                // thickness opens (also slowly), the rift zone is stretched into the gap instead
+                // of forming sea floor.
+                let rifting = {
+                    let plate = &plates[plate_index as usize];
+                    let parent_crust =
+                        plate.crust[parent.local as usize].expect("owners point to crust");
+                    parent_crust.is_continental_origin()
+                        && parent_crust.thickness > params.breakup_thickness
+                        && plate.crust[local as usize].is_none()
+                        && !plate.consumed[local as usize]
+                        && (spreading
+                            || opens_away(
+                                &mut rings,
+                                mesh,
+                                &new_owners,
+                                &angular_velocities,
+                                neighbor,
+                                plate_index,
+                                min_stretching_opening,
+                            ))
+                };
                 let plate = &mut plates[plate_index as usize];
-                let local =
-                    plate.local_vertex(mesh, inverse_rotations[plate_index as usize], neighbor);
-                if spreading {
+                if rifting
+                    && stretch_rift(
+                        mesh,
+                        plate,
+                        local,
+                        rift_rings,
+                        params.breakup_thickness,
+                        time,
+                    )
+                {
+                    gap_statistics.stretched_cells += 1;
+                    plate.consumed[local as usize] = false;
+                    new_owners[neighbor as usize] = Some(Ownership {
+                        plate: plate_index,
+                        local,
+                    });
+                } else if spreading {
                     gap_statistics.new_crust_cells += 1;
                     if plate.crust[local as usize].is_none() {
                         ledger.record(Term::NewSeaFloor, new_oceanic_crust(time).mass());
@@ -519,6 +565,8 @@ struct LostContact {
 pub struct GapStatistics {
     /// Cells filled with new oceanic crust where plates spread apart.
     pub new_crust_cells: usize,
+    /// Gaps filled by stretching continental crust of the rift zone.
+    pub stretched_cells: usize,
     /// Resampling gaps showing a hidden sample of the plate again.
     pub revealed_cells: usize,
     /// Enclosed empty spots of a plate filled with a share of the surrounding crust.
@@ -628,6 +676,78 @@ impl RingScratch {
             centroids: Vec::new(),
         }
     }
+}
+
+/// Fills the empty local vertex `local` of `plate` at an opening rift by stretching the
+/// plate's crust of continental origin within `rings` rings (its frame) that is thicker than
+/// `breakup_thickness`: each of the N donors gives 1/(N + 1) of its crust and sediment (uniform
+/// stretching by β = (N + 1)/N), which conserves mass. Stretching heats the lithosphere
+/// (McKenzie 1978): a donor whose thermal uplift is the fraction U of a ridge's gets
+/// U' = 1 − (1 − U)/β, after which it subsides with the GDH1 curve. Returns false if there is
+/// no donor (the continent breaks up; the gap becomes sea floor).
+fn stretch_rift(
+    mesh: &SphereMesh,
+    plate: &mut Plate,
+    local: u32,
+    rings: usize,
+    breakup_thickness: f64,
+    time: f64,
+) -> bool {
+    // Donors in ring order (deterministic).
+    let mut donors = Vec::new();
+    let mut seen = vec![local];
+    let mut frontier = vec![local];
+    for _ in 0..rings {
+        let mut next = Vec::new();
+        for &vertex in &frontier {
+            for &neighbor in mesh.neighbors(vertex) {
+                if seen.contains(&neighbor) {
+                    continue;
+                }
+                seen.push(neighbor);
+                next.push(neighbor);
+                if plate.crust[neighbor as usize].is_some_and(|crust| {
+                    crust.is_continental_origin() && crust.thickness > breakup_thickness
+                }) {
+                    donors.push(neighbor);
+                }
+            }
+        }
+        frontier = next;
+    }
+    if donors.is_empty() {
+        return false;
+    }
+    let share = 1.0 / (donors.len() + 1) as f64;
+    let beta = (donors.len() + 1) as f64 / donors.len() as f64;
+    let (mut thickness, mut mass, mut felsic, mut sediment, mut heat) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for &donor in &donors {
+        let crust = plate.crust[donor as usize]
+            .as_mut()
+            .expect("donors have crust");
+        let fraction = 1.0 - (1.0 - thermal_fraction(crust.age(time))) / beta;
+        if let Some(age) = age_for_thermal_fraction(fraction) {
+            crust.birth = time - age;
+        }
+        let given = crust.thickness * share;
+        thickness += given;
+        mass += given * crust.density;
+        felsic += given * crust.density * crust.felsic;
+        heat += given * crust.density * fraction;
+        sediment += crust.sediment * share;
+        crust.thickness -= given;
+        crust.sediment -= crust.sediment * share;
+    }
+    let birth =
+        age_for_thermal_fraction(heat / mass.max(1e-9)).map_or(time - 1000.0, |age| time - age);
+    plate.crust[local as usize] = Some(Crust {
+        thickness,
+        density: mass / thickness.max(1e-9),
+        birth,
+        sediment,
+        felsic: felsic / mass.max(1e-9),
+    });
+    true
 }
 
 /// Minimum number of neighbours with crust (in the plate's frame) for an empty spot inside a
@@ -843,6 +963,102 @@ mod tests {
         let ledger = arc_arriving_at_a_trench(true);
         assert_eq!(ledger.subducted_transitional, 0.0, "{ledger:?}");
         assert!(ledger.collision_stacked > 0.0, "{ledger:?}");
+    }
+
+    /// One continental plate covering the sphere (35 km, old).
+    fn single_continent() -> Simulation {
+        let mut simulation = single_plate();
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            *crust = Crust {
+                thickness: 35_000.0,
+                density: crate::isostasy::CONTINENTAL_DENSITY,
+                birth: -1000.0,
+                sediment: 0.0,
+                felsic: 1.0,
+            };
+        }
+        simulation
+    }
+
+    #[test]
+    fn rifts_stretch_continental_crust_with_thermal_subsidence() {
+        // A margin already thinned to 20 km (its thermal anomaly is not damped like that of
+        // normal continental crust; see `Crust::thermal_weight`).
+        let mut simulation = single_continent();
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            crust.thickness = 20_000.0;
+        }
+        let local = 100u32;
+        simulation.plates[0].crust[local as usize] = None;
+        let mass = simulation.total_mass();
+        let felsic = |simulation: &Simulation| -> f64 {
+            simulation.plates[0]
+                .crust
+                .iter()
+                .flatten()
+                .map(|crust| crust.felsic_mass())
+                .sum()
+        };
+        let felsic_before = felsic(&simulation);
+        let time = 0.0;
+        assert!(stretch_rift(
+            &simulation.mesh,
+            &mut simulation.plates[0],
+            local,
+            1,
+            15e3,
+            time
+        ));
+        assert!((simulation.total_mass() / mass - 1.0).abs() < 1e-12);
+        assert!((felsic(&simulation) / felsic_before - 1.0).abs() < 1e-12);
+        let stretched = simulation.plates[0].crust[local as usize].unwrap();
+        assert!(stretched.is_continental_origin());
+        assert!(stretched.thickness < 20_000.0);
+        // Stretching heats the lithosphere: thermal uplift now, subsidence later.
+        let neighbor =
+            simulation.plates[0].crust[simulation.mesh.neighbors(local)[0] as usize].unwrap();
+        assert!(neighbor.age(time) < 1000.0);
+        let now = neighbor.surface_elevation(time, 0.0);
+        let later = neighbor.surface_elevation(time + 100.0, 0.0);
+        assert!(later < now - 50.0, "{now} → {later}");
+    }
+
+    #[test]
+    fn thin_crust_breaks_up_instead_of_stretching() {
+        let mut simulation = single_continent();
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            crust.thickness = 14_000.0;
+        }
+        let local = 100u32;
+        simulation.plates[0].crust[local as usize] = None;
+        assert!(!stretch_rift(
+            &simulation.mesh,
+            &mut simulation.plates[0],
+            local,
+            2,
+            15e3,
+            0.0
+        ));
+        assert!(simulation.plates[0].crust[local as usize].is_none());
+    }
+
+    #[test]
+    fn diverging_continents_stretch_instead_of_forming_sea_floor() {
+        // Two continental hemispheres moving apart about the y axis.
+        let mut simulation = single_continent();
+        simulation.split_plate(0, DVec3::Z).unwrap();
+        simulation.polarities.clear();
+        let mass = simulation.total_mass();
+        simulation.plates[0].angular_velocity = DVec3::Y * 0.004;
+        simulation.plates[1].angular_velocity = -DVec3::Y * 0.004;
+        for _ in 0..10 {
+            simulation.substep(1.0);
+        }
+        assert!(simulation.gap_statistics.stretched_cells > 0);
+        // Stretching creates no crust (the opening side), only subduction/stacking on the
+        // closing side may change the mass.
+        assert!(simulation.ledger.new_sea_floor >= 0.0);
+        assert!(simulation.total_mass() > 0.9 * mass);
     }
 
     #[test]

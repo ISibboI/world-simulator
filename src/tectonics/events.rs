@@ -346,7 +346,7 @@ impl Simulation {
                 self.owners[other as usize].plate == plate
                     && self.mesh.vertex(other).angle_between(position)
                         < params.rift_continent_radius
-                    && self.surface_crust(other).is_continental()
+                    && self.surface_crust(other).is_continental_origin()
             });
             let large = self.plate_area_fractions()[plate as usize] >= params.min_oceanic_rift_area;
             if !continent_nearby && !large {
@@ -433,7 +433,7 @@ impl Simulation {
             .iter()
             .filter(|&&neighbor| {
                 self.owners[neighbor as usize].plate == plate
-                    && self.surface_crust(neighbor).is_continental()
+                    && self.surface_crust(neighbor).is_continental_origin()
             })
             .map(|&neighbor| self.mesh.vertex(neighbor) - position)
             .sum();
@@ -475,7 +475,7 @@ impl Simulation {
             }
             if self.mesh.neighbors(candidate).iter().any(|&neighbor| {
                 self.owners[neighbor as usize].plate == continental_plate
-                    && self.surface_crust(neighbor).is_continental()
+                    && self.surface_crust(neighbor).is_continental_origin()
             }) {
                 seeds.push(candidate);
             }
@@ -525,7 +525,7 @@ impl Simulation {
             }
             let at_margin = self.mesh.neighbors(cell).iter().any(|&neighbor| {
                 self.owners[neighbor as usize].plate == owner.plate
-                    && self.surface_crust(neighbor).is_continental()
+                    && self.surface_crust(neighbor).is_continental_origin()
             });
             if at_margin {
                 candidates.push((
@@ -564,7 +564,7 @@ impl Simulation {
                 continue;
             };
             let other_crust = self.surface_crust(neighbor);
-            if other_crust.is_continental()
+            if other_crust.is_continental_origin()
                 || (other_crust.is_oceanic()
                     && other_crust.age(self.time) + params.initiation_age_contrast <= age)
             {

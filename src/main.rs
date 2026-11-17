@@ -255,11 +255,13 @@ fn snapshot(
     );
     info!(
         "    sea level {:+.0} m (dry offset; changes by tectonics {:+.0} m, surface processes \
-         {:+.0} m) | ocean volume {:.3e} km³ | continental crust flooded {:.0}%, freeboard {:.0} m",
+         {:+.0} m) | ocean volume {:.3e} km³ | crust of continental origin {:.1}% of the surface, \
+         {:.0}% flooded, freeboard {:.0} m",
         statistics.sea_level,
         statistics.sea_level_change.0,
         statistics.sea_level_change.1,
         statistics.ocean_volume,
+        100.0 * statistics.continental_origin_fraction,
         100.0 * statistics.flooded_continental_fraction,
         statistics.freeboard,
     );
@@ -390,9 +392,10 @@ fn snapshot(
         statistics.matching.mismatches,
     );
     info!(
-        "    gaps filled: {} new sea floor, {} revealed, {} filled holes, {} shared ({} inside \
+        "    gaps filled: {} new sea floor, {} stretched, {} revealed, {} filled holes, {} shared ({} inside \
          plates), {} holes, {} freed",
         statistics.gaps.new_crust_cells,
+        statistics.gaps.stretched_cells,
         statistics.gaps.revealed_cells,
         statistics.gaps.enclosed_fills,
         statistics.gaps.shared_cells,

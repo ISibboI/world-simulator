@@ -134,6 +134,13 @@ impl Crust {
         self.crustal_buoyancy() >= SUBDUCTION_RESISTANCE_BUOYANCY
     }
 
+    /// Whether the crust is of continental origin: mostly felsic (see [`Crust::felsic`]) and too
+    /// buoyant to subduct. Unlike [`Crust::is_continental`] this includes stretched continental
+    /// margins, and it excludes thin intra-oceanic arcs.
+    pub fn is_continental_origin(&self) -> bool {
+        self.felsic > 0.5 && self.resists_subduction()
+    }
+
     /// Whether this is normal oceanic crust: thin and dense. Crust that is neither oceanic nor
     /// continental is transitional (thickened arc crust, or thinned continental crust, whose age
     /// is not the age of a sea floor).
@@ -178,6 +185,29 @@ pub(super) fn thermal_uplift(age: f64) -> f64 {
     (oceanic_depth(age) + OLD_OCEAN_DEPTH) / WATER_LOADING
 }
 
+/// Thermal uplift of lithosphere of the given age as a fraction of that of new lithosphere at a
+/// ridge (1 at age 0, falling to 0 as it cools).
+pub(super) fn thermal_fraction(age: f64) -> f64 {
+    thermal_uplift(age) / thermal_uplift(0.0)
+}
+
+/// The age (Myr) of lithosphere whose thermal uplift is the fraction `fraction` of that at a
+/// ridge: the inverse of [`thermal_fraction`], in closed form for both GDH1 branches. Returns
+/// `None` for fractions too close to 0 (fully cooled).
+pub(super) fn age_for_thermal_fraction(fraction: f64) -> Option<f64> {
+    // Depth below the fully cooled depth (m): 3051 at a ridge.
+    let ridge = OLD_OCEAN_DEPTH - 2600.0;
+    let anomaly = fraction.min(1.0) * ridge;
+    // The branches meet at 20 Myr, where the anomaly is 2473 e^(−0.0278 · 20).
+    if anomaly >= 2473.0 * (-0.0278f64 * 20.0).exp() {
+        Some(((ridge - anomaly) / 365.0).powi(2))
+    } else if anomaly > 1e-3 {
+        Some(-(anomaly / 2473.0).ln() / 0.0278)
+    } else {
+        None
+    }
+}
+
 /// Depth of oceanic crust depending on its age, after the GDH1 model (Stein & Stein, 1992):
 /// half-space cooling for young crust, flattening towards the depth of a cooled plate. Both
 /// branches meet at 20 Myr.
@@ -204,6 +234,15 @@ pub(super) fn new_oceanic_crust(time: f64) -> Crust {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thermal_fraction_inverts() {
+        for age in [0.0, 1.0, 10.0, 19.9, 20.0, 20.1, 50.0, 150.0] {
+            let back = age_for_thermal_fraction(thermal_fraction(age)).unwrap();
+            assert!((back - age).abs() < 1e-6 * (1.0 + age), "{age} → {back}");
+        }
+        assert!(age_for_thermal_fraction(0.0).is_none());
+    }
 
     #[test]
     fn felsic_mass_is_conserved_when_mixing() {

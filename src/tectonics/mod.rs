@@ -131,6 +131,14 @@ pub struct TectonicParams {
     /// Plates must separate at least this fast (cm/yr) for a gap between them to become new sea
     /// floor; slower gaps are resampling artifacts. The slowest ridges spread at ~0.6–1.5 cm/yr.
     pub min_spreading_rate: f64,
+    /// Continental crust that opens at least this fast (cm/yr), also below
+    /// [`Self::min_spreading_rate`], is stretched (continental rifts open at 0.1–1 cm/yr).
+    pub min_stretching_rate: f64,
+    /// Width (m) of the zone on each side of a continental rift over which the crust is
+    /// stretched (passive margins are 100–300 km wide).
+    pub rift_width: f64,
+    /// Continental crust thinner than this (m) breaks up: the rift opens into sea floor.
+    pub breakup_thickness: f64,
     /// Plates must converge at least this fast (cm/yr) for a new trench to act (an existing slab
     /// keeps acting until the plates diverge faster than this).
     pub min_trench_convergence: f64,
@@ -210,6 +218,9 @@ impl Default for TectonicParams {
             slab_pull_max_age: 120.0,
             min_spreading_rate: 0.5,
             min_trench_convergence: 0.1,
+            min_stretching_rate: 0.15,
+            rift_width: 200e3,
+            breakup_thickness: 15e3,
             max_slab_length: 600e3,
             slab_decay_time: 10.0,
             min_slab_length: 20e3,
@@ -245,6 +256,9 @@ impl TectonicParams {
             "slab_pull" => &mut self.slab_pull,
             "slab_sinking_speed" => &mut self.slab_sinking_speed,
             "ocean_volume" => &mut self.ocean_volume,
+            "rift_width" => &mut self.rift_width,
+            "breakup_thickness" => &mut self.breakup_thickness,
+            "min_stretching_rate" => &mut self.min_stretching_rate,
             "continental_coast_thickness" => &mut self.continental_coast_thickness,
             "continental_interior_thickness" => &mut self.continental_interior_thickness,
             "continental_margin_width" => &mut self.continental_margin_width,
