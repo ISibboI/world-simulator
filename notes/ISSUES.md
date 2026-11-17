@@ -246,6 +246,11 @@ balance → collapse/stretching if needed** → 1q relative-speed tuning (later,
        collision length mostly pairs blocked by the trench-ratio suture rule; margins still
        unthinned (COB ~32 km, emergent) with 8–9 km sediment on adjacent old ocean. Next: fixes
        1–3, local suture, then sediment routing.
+       **Fixes 1–3, terrane accretion, resistance 50 (2026-11-17):** collision length 9–21k km,
+       stacking 13–23 Gt/yr, ocean age 52–58 Myr, ≥ 200 Myr 3–5%. Evaluation: accretion resets
+       suture clocks (most remaining length is in suture-eligible pairs) and acts on diverging
+       contacts; flooding (30–47%) and low land (0.6–0.8 km) come mainly from a ~580 m sea-level
+       rise driven by an ever-growing sediment stock, plus unthinned margins (COB β 1.2–1.3).
    **1q: boundary shear coupling done (2026-11-16, plan + review `plans/boundary-friction.md`):**
    strike-slip along plate boundaries resisted in the torque balance (smoothed 3-ring normals,
    per boundary cell, symmetric); oceanic/mixed boundaries `boundary_coupling_width` 200 km
