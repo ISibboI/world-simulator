@@ -210,6 +210,34 @@ balance → collapse/stretching if needed** → 1q relative-speed tuning (later,
        some for tens of Myr) — fixed: gaps away from other plates fill from their rim when ≥ 3
        plate-frame neighbours have crust (interior shares 450–780 → 113–155, total shares
        ~1.0–1.2M → 0.34–0.42M per run).
+       **Stretching, collapse, collision resistance (2026-11-17, plan v2 + review
+       `plans/issue-1r-thickening.md`):** rift stretching with McKenzie thermal subsidence,
+       elevation-driven orogenic collapse (channel flow, across non-converging plate contacts),
+       `collision_resistance` 50 → 150. Seeds 0–3, 500 Myr: mean land 0.69–1.06 km, > 50 km 3–6%,
+       flooded continental crust 29–37%, felsic + sediment −0.8…−2.9%, mean speed 2.8–3.6 cm/yr,
+       mean ocean age 72–87 Myr. **Independent evaluation (2026-11-17):** code mostly correct;
+       targets are met by resistance 150 (collapse trims only the tail, stretching is small),
+       at the cost of slower plates (boundaries < 2 cm/yr 9–13% → 17–22%, ocean ≥ 200 Myr 8–12%).
+       Found: (a) **collapse deletes crust above the 75 km cap** (receiver lower in dry elevation
+       but already near the cap: −2…−3 Gt/yr at resistance 50, −0.4…−0.8 at 150); collapse is
+       driven by elevation incl. sediment but moves only crystalline crust; (b) the
+       collision-length statistic counts every contact of two subduction-resisting sides: only
+       47–82% converge, 12–48% diverge (rifts before breakup), rest neutral; the strong shear
+       coupling also acts there (5–30× real continental transforms); (c) stretching can make
+       felsic crust thinner than the 13 km resistance threshold that then subducts (donors
+       should stop at the breakup thickness); (d) stacking 6–9 Gt/yr above the kinematic inflow
+       at high resistance (non-convergent noise floor); (e) missing tests/diagnostics (stretched
+       vs kinematic opening, resolution independence, β = 2 margin profile; one test asserts
+       nothing). Margins: thinned zone 300–450 km, but only β ≈ 1.3 at the continent–ocean
+       boundary [> 3]; adjacent oceanic cells carry 5.5–8 km of sediment. **Collision length
+       (20–50k km) barely depends on resistance**; likely cause: plate splits along full great
+       circles (`split_plate`) cut through other continents on the plate and create new
+       continent–continent contacts (young pairs, suture clocks < 30 Myr). Recommended: fix the
+       cap loss → split the collision statistic by motion, add the opening diagnostic → measure
+       contact length created by splits, split only along the margin/locally → re-tune
+       resistance (force capped by orogen buoyancy, weak shear at strike-slip/diverging
+       contacts; expect 50–100) → margin taper + sediment routing. Lower-crust subduction (C2)
+       not needed now (felsic crust already −14–17% per 500 Myr into the sediment stock).
    **1q: boundary shear coupling done (2026-11-16, plan + review `plans/boundary-friction.md`):**
    strike-slip along plate boundaries resisted in the torque balance (smoothed 3-ring normals,
    per boundary cell, symmetric); oceanic/mixed boundaries `boundary_coupling_width` 200 km
