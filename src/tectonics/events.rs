@@ -154,6 +154,13 @@ pub struct EventCounts {
     /// Continental crust volume (thickness × cells, m) lost in merges: hidden samples of the
     /// absorbed plate.
     pub merge_lost_continental_volume: f64,
+    /// Length (km) of contacts between crust resisting subduction on both sides created by
+    /// plume rifts and passive-margin initiations, in total and farther than
+    /// [`PlateEventParams::rift_continent_radius`] from the plume or margin cell.
+    pub rift_contact_km: f64,
+    pub rift_far_contact_km: f64,
+    pub initiation_contact_km: f64,
+    pub initiation_far_contact_km: f64,
 }
 
 impl EventCounts {
@@ -319,6 +326,32 @@ impl Simulation {
         self.split_plate(plate, normal)
     }
 
+    /// Length (km) of the contact between crust resisting subduction on `a` and on `b` (cells
+    /// of `a` next to such cells of `b`), in total and farther than
+    /// [`PlateEventParams::rift_continent_radius`] from `anchor`.
+    fn split_contact_km(&self, a: u32, b: u32, anchor: DVec3) -> (f64, f64) {
+        let km_per_cell = self.boundary_length_per_cell() / 1000.0;
+        let radius = self.params.events.rift_continent_radius;
+        let (mut total, mut far) = (0.0, 0.0);
+        for cell in 0..self.mesh.len() as u32 {
+            if self.owners[cell as usize].plate != a
+                || !self.surface_crust(cell).resists_subduction()
+            {
+                continue;
+            }
+            if self.mesh.neighbors(cell).iter().any(|&neighbor| {
+                self.owners[neighbor as usize].plate == b
+                    && self.surface_crust(neighbor).resists_subduction()
+            }) {
+                total += km_per_cell;
+                if self.mesh.vertex(cell).angle_between(anchor) > radius {
+                    far += km_per_cell;
+                }
+            }
+        }
+        (total, far)
+    }
+
     /// Merges `absorbed` into `into` and records the continental crust lost.
     fn merge_and_record(&mut self, into: u32, absorbed: u32) {
         let lost = self.merge_plates(into, absorbed);
@@ -360,6 +393,9 @@ impl Simulation {
             }
             if let Some(new_plate) = self.split_if_large_enough(plate, normal) {
                 self.event_counts.rifts += 1;
+                let (total, far) = self.split_contact_km(plate, new_plate, position);
+                self.event_counts.rift_contact_km += total;
+                self.event_counts.rift_far_contact_km += far;
                 debug!(plate, new_plate, time = self.time, "Plume rifted a plate");
             }
             // Each plume rifts at most once, also if the split was not possible.
@@ -445,6 +481,9 @@ impl Simulation {
         // The new plate is the continental side; the oceanic side subducts below it.
         if let Some(continental_plate) = self.split_if_large_enough(plate, normal) {
             self.event_counts.initiations += 1;
+            let (total, far) = self.split_contact_km(plate, continental_plate, position);
+            self.event_counts.initiation_contact_km += total;
+            self.event_counts.initiation_far_contact_km += far;
             self.seed_margin_subduction(plate, continental_plate, cell);
             debug!(
                 oceanic_plate = plate,

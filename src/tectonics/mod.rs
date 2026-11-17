@@ -395,6 +395,9 @@ pub struct Simulation {
     configuration_changes: u64,
     /// Area of sea floor opened by diverging plates so far (one flank), in km².
     opened_area: f64,
+    /// Area opened so far at diverging boundary cells showing crust of continental origin (half
+    /// per side, km²): the kinematic expectation for rift stretching.
+    continental_opened_area: f64,
     /// Mass (Gt) of crust carried into continental collisions by the plates' convergence so
     /// far (kinematic expectation for collision stacking).
     collision_inflow: f64,
@@ -569,6 +572,7 @@ impl Simulation {
             rng: owned_rng,
             configuration_changes: 0,
             opened_area: 0.0,
+            continental_opened_area: 0.0,
             collision_inflow: 0.0,
             material_budget: MaterialBudget::default(),
             sea_level: 0.0,
@@ -718,15 +722,22 @@ impl Simulation {
         };
 
         // Opening rate × boundary length over the diverging cells of both sides, halved.
-        let opening: f64 = boundaries
+        let (opening, continental_opening) = boundaries
             .iter()
             .filter(|boundary| boundary.convergence < 0.0)
-            .map(|boundary| -boundary.convergence)
-            .sum();
-        self.opened_area += 0.5 * opening * self.boundary_length_per_cell() / 1000.0
-            * self.params.planet_radius
+            .fold((0.0, 0.0), |(all, continental), boundary| {
+                let rate = -boundary.convergence;
+                if self.surface_crust(boundary.cell).is_continental_origin() {
+                    (all + rate, continental + rate)
+                } else {
+                    (all + rate, continental)
+                }
+            });
+        let to_area = 0.5 * self.boundary_length_per_cell() / 1000.0 * self.params.planet_radius
             / 1000.0
             * dt;
+        self.opened_area += opening * to_area;
+        self.continental_opened_area += continental_opening * to_area;
 
         // Crust carried into collisions: convergence × boundary length × areal mass, half from
         // each side's boundary cells.

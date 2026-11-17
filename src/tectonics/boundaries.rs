@@ -32,7 +32,9 @@ impl Simulation {
     /// (never oceanic crust, which would carry it into a trench), on another plate only where
     /// the plates do not converge. Explicit sub-cycles keep it stable; flows are summed per
     /// sample (a sample may show at several cells) and each pair moves at most what equalises
-    /// it. Returns the change of mass (zero up to the thickness cap).
+    /// it. A receiver takes at most its room below [`TectonicParams::max_crust_thickness`]
+    /// (its incoming transfers are scaled down together), so no crust is lost at the cap.
+    /// Returns the change of mass (zero up to rounding).
     fn crustal_flow_inner(&mut self, dt: f64) -> f64 {
         let params = &self.params;
         let cell_count = self.mesh.len();
@@ -47,6 +49,8 @@ impl Simulation {
         let mut change = 0.0;
         // Per crust sample (dense index): total requested outflow, and the flows applied.
         let mut outflow = vec![0.0; self.plates.len() * cell_count];
+        // Per crust sample: total requested inflow.
+        let mut inflow = vec![0.0; self.plates.len() * cell_count];
         // Per crust sample: (outgoing thickness, incoming thickness, incoming mass, incoming
         // felsic mass).
         let mut flows = vec![(0.0, 0.0, 0.0, 0.0); self.plates.len() * cell_count];
@@ -96,16 +100,22 @@ impl Simulation {
                     let from = sample_index(owner, cell_count);
                     let to = sample_index(neighbor_owner, cell_count);
                     outflow[from] += amount;
+                    inflow[to] += amount;
                     transfers.push((from, to, amount, source.density, source.felsic));
                 }
             }
             // A sample (possibly shown at several cells) gives at most its crust above the
-            // threshold; its transfers are scaled down together.
+            // threshold and takes at most its room below the cap (ignoring its own outflow);
+            // its transfers are scaled down together.
+            let thickness = |index: usize| {
+                self.plates[index / cell_count].crust[index % cell_count]
+                    .map_or(0.0, |c| c.thickness)
+            };
             for &(from, to, amount, density, felsic) in &transfers {
-                let (plate, local) = (from / cell_count, from % cell_count);
-                let thickness = self.plates[plate].crust[local].map_or(0.0, |c| c.thickness);
-                let available = (thickness - params.crustal_flow_threshold).max(0.0);
-                let scaled = amount * (available / outflow[from]).min(1.0);
+                let available = (thickness(from) - params.crustal_flow_threshold).max(0.0);
+                let room = (params.max_crust_thickness - thickness(to)).max(0.0);
+                let scaled =
+                    amount * (available / outflow[from]).min(1.0) * (room / inflow[to]).min(1.0);
                 for index in [from, to] {
                     if flows[index] == (0.0, 0.0, 0.0, 0.0) {
                         touched.push(index);
@@ -117,8 +127,9 @@ impl Simulation {
                 flow.2 += scaled * density;
                 flow.3 += scaled * density * felsic;
             }
-            for &(from, ..) in &transfers {
+            for &(from, to, ..) in &transfers {
                 outflow[from] = 0.0;
+                inflow[to] = 0.0;
             }
             transfers.clear();
             touched.sort_unstable();
@@ -1103,6 +1114,36 @@ mod tests {
     }
 
     #[test]
+    fn collapse_loses_no_crust_at_the_thickness_cap() {
+        // A light source stands higher than its dense surroundings although they are thicker
+        // and close to the cap: the flow must stop at the cap instead of deleting crust.
+        let mut simulation = single_continent();
+        let max = simulation.params.max_crust_thickness;
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            crust.thickness = max - 300.0;
+            crust.density = 2850.0;
+        }
+        let cell = 100u32;
+        let local = simulation.owners[cell as usize].local as usize;
+        let source = simulation.plates[0].crust[local].as_mut().unwrap();
+        source.thickness = max - 1000.0;
+        source.density = 2650.0;
+        let mass = simulation.total_mass();
+        for _ in 0..10 {
+            simulation.crustal_flow(1.0);
+        }
+        assert!((simulation.total_mass() / mass - 1.0).abs() < 1e-12);
+        assert!(
+            simulation.plates[0]
+                .crust
+                .iter()
+                .flatten()
+                .all(|c| c.thickness <= max + 1e-6)
+        );
+        assert!(simulation.surface_crust(cell).thickness < max - 1000.0);
+    }
+
+    #[test]
     fn collapse_never_flows_onto_oceanic_crust() {
         let mut simulation = single_plate();
         let cell = 100u32;
@@ -1150,9 +1191,9 @@ mod tests {
             simulation.substep(1.0);
         }
         assert!(simulation.gap_statistics.stretched_cells > 0);
-        // Stretching creates no crust (the opening side), only subduction/stacking on the
-        // closing side may change the mass.
-        assert!(simulation.ledger.new_sea_floor >= 0.0);
+        // Thick continental crust stretches: no sea floor before it is thinned to breakup.
+        assert_eq!(simulation.gap_statistics.new_crust_cells, 0);
+        assert_eq!(simulation.ledger.new_sea_floor, 0.0);
         assert!(simulation.total_mass() > 0.9 * mass);
     }
 

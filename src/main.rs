@@ -301,12 +301,14 @@ fn snapshot(
         statistics.induced_rate,
     );
     info!(
-        "    trenches {:.0} km, ridges {:.0} km, collisions {:.0} km | slab pull {:.2e} N, ridge push {:.2e} N | \
+        "    trenches {:.0} km, ridges {:.0} km, collisions {:.0} km ({:.0} converging, {:.0} diverging) | slab pull {:.2e} N, ridge push {:.2e} N | \
          rifts {}, initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
-         blocked splits {}",
+         blocked splits {} | continental contacts made by rifts {:.0} km ({:.0} far), by initiations {:.0} km ({:.0} far)",
         statistics.trench_length,
         statistics.ridge_length,
         statistics.collision_length,
+        statistics.collision_converging_length,
+        statistics.collision_diverging_length,
         statistics.slab_pull,
         statistics.ridge_push,
         statistics.events.rifts,
@@ -322,6 +324,10 @@ fn snapshot(
         statistics.events.consumed,
         statistics.events.merge_lost_continental_volume / 1000.0,
         statistics.events.blocked_splits,
+        statistics.events.rift_contact_km,
+        statistics.events.rift_far_contact_km,
+        statistics.events.initiation_contact_km,
+        statistics.events.initiation_far_contact_km,
     );
     // Crust mass budget since the last snapshot, in Gt/yr.
     let cell_area =
@@ -333,6 +339,8 @@ fn snapshot(
         ledger: previous,
         new_crust_cells: previous_cells,
         opened_area: previous_opened,
+        continental_opened_area: previous_continental_opened,
+        stretched_cells: previous_stretched,
         budget: previous_budget,
         collision_inflow: previous_inflow,
     }) = previous_ledger.as_ref()
@@ -349,9 +357,12 @@ fn snapshot(
             log_material_budget(&budget, previous_budget, cell_area, years);
         }
         info!(
-            "    sea floor production (km²/yr): kinematic {:.2}, created {:.2}",
+            "    sea floor production (km²/yr): kinematic {:.2}, created {:.2} | continental \
+             opening: kinematic {:.3}, stretched {:.3}",
             (statistics.opened_area - previous_opened) / years,
             (new_crust_cells - previous_cells) as f64 * cell_area / 1e6 / years,
+            (statistics.continental_opened_area - previous_continental_opened) / years,
+            (statistics.gaps.stretched_cells - previous_stretched) as f64 * cell_area / 1e6 / years,
         );
         let rates: Vec<String> = statistics
             .ledger
@@ -370,6 +381,8 @@ fn snapshot(
         ledger: statistics.ledger.clone(),
         new_crust_cells,
         opened_area: statistics.opened_area,
+        continental_opened_area: statistics.continental_opened_area,
+        stretched_cells: statistics.gaps.stretched_cells,
         budget,
         collision_inflow: statistics.collision_inflow,
     });
@@ -533,6 +546,8 @@ struct PreviousSnapshot {
     ledger: MassLedger,
     new_crust_cells: usize,
     opened_area: f64,
+    continental_opened_area: f64,
+    stretched_cells: usize,
     budget: Option<MaterialBudget>,
     collision_inflow: f64,
 }

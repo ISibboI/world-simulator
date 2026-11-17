@@ -52,11 +52,19 @@ pub struct Statistics {
     /// the mesh; a ridge has two flanks, a trench one subducting side).
     pub trench_length: f64,
     pub ridge_length: f64,
-    /// Length of continental collision boundaries in km (half of both sides' cells).
+    /// Length of continental collision boundaries in km (half of both sides' cells): contacts
+    /// where both sides resist subduction, whatever their motion.
     pub collision_length: f64,
+    /// Parts of [`Self::collision_length`] converging and diverging faster than
+    /// [`TectonicParams::min_trench_convergence`] (the rest is neutral: locked or strike-slip).
+    pub collision_converging_length: f64,
+    pub collision_diverging_length: f64,
     /// Area of sea floor opened by diverging plates so far (one flank), from the plate motions,
     /// in km². Earth: ~3.4 km²/yr.
     pub opened_area: f64,
+    /// Part of [`Self::opened_area`] at boundary cells of continental origin (km², half per
+    /// side), to compare with the stretched area.
+    pub continental_opened_area: f64,
     /// Cells showing a crust sample that is also shown at another cell (fraction of all
     /// cells), and the most cells showing one sample.
     pub duplicated_cell_fraction: f64,
@@ -369,7 +377,10 @@ impl Simulation {
             (0.0, 0.0, 0.0, 0.0);
         let boundaries = self.boundary_cells();
         let (mut trench_cells, mut trench_slab) = (0usize, 0.0);
-        let mut collision_length = 0.0;
+        let (mut collision_length, mut collision_converging, mut collision_diverging) =
+            (0.0, 0.0, 0.0);
+        let min_convergence =
+            self.params.min_trench_convergence / (self.params.planet_radius * 100.0 / 1e6);
         for boundary in &boundaries {
             let force = self.boundary_force(boundary).length();
             match boundary.kind {
@@ -388,6 +399,11 @@ impl Simulation {
                 }
                 super::dynamics::BoundaryKind::Collision => {
                     collision_length += boundary_length;
+                    if boundary.convergence > min_convergence {
+                        collision_converging += boundary_length;
+                    } else if boundary.convergence < -min_convergence {
+                        collision_diverging += boundary_length;
+                    }
                 }
                 _ => {}
             }
@@ -555,7 +571,10 @@ impl Simulation {
             trench_length,
             ridge_length: ridge_flank_length / 2.0,
             collision_length: collision_length / 2.0,
+            collision_converging_length: collision_converging / 2.0,
+            collision_diverging_length: collision_diverging / 2.0,
             opened_area: self.opened_area,
+            continental_opened_area: self.continental_opened_area,
             segments: self.polarities.segments().count(),
             slab_segments: slabs.len(),
             mean_slab_length: trench_slab / trench_cells.max(1) as f64 / 1000.0,
