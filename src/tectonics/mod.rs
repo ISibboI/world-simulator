@@ -165,11 +165,12 @@ pub struct TectonicParams {
     /// Basal drag is this many times stronger under continental crust (deep lithospheric keels).
     pub continental_drag_factor: f64,
     /// Resistance to converging continental crust per collision boundary cell, as a multiple of
-    /// the basal drag under one cell. Collisions resist strike-slip motion as strongly.
-    /// Calibrated (2026-11-17) on continental thickness, mean land and flooded continental
-    /// crust: 50 → 150 (300 overshoots: mean land ~0.65 km, ~45% flooded, slow plates).
+    /// the basal drag under one cell (normal motion only; strike-slip is resisted like at
+    /// other boundaries, see [`Self::boundary_coupling_width`]). Calibrated (2026-11-17, after
+    /// local splits) on continental thickness, mean land and flooded continental crust: 100
+    /// (50: mean land 1.0–1.5 km, 8–17% > 50 km; 150: 0.6–0.8 km, 33–48% flooded).
     pub collision_resistance: f64,
-    /// Resistance of oceanic and mixed plate boundaries to strike-slip motion along them: each
+    /// Resistance of plate boundaries to strike-slip motion along them: each
     /// metre of boundary resists like the basal drag under this many metres times a metre.
     /// Transform faults are weak (≈ 20 MPa over ≈ 15 km brittle depth at 5 cm/yr: ≈ 200 km;
     /// Forsyth & Uyeda 1975 found transform resistance small).
@@ -233,7 +234,7 @@ impl Default for TectonicParams {
             ridge_age: 20.0,
             basal_drag: 1e15,
             continental_drag_factor: 4.0,
-            collision_resistance: 150.0,
+            collision_resistance: 100.0,
             boundary_coupling_width: 200e3,
             track_material_budget: false,
             ocean_volume: 1.335e18,

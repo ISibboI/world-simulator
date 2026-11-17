@@ -15,8 +15,9 @@
 //! * **collision resistance** where continental crust of two plates converges, which opposes the
 //!   relative motion of the plates across the boundary;
 //! * **boundary shear coupling**: plate boundaries are weak shear zones through the lithosphere,
-//!   which resist strike-slip motion along them (transform faults, oblique ridges and trenches;
-//!   strongly in continental collisions). Opening and closing across a boundary are not
+//!   which resist strike-slip motion along them (transform faults, oblique ridges and trenches,
+//!   continental strike-slip faults; equally at all boundaries, since continental transforms are
+//!   as weak as oceanic ones, ~10¹¹–10¹² N/m). Opening and closing across a boundary are not
 //!   resisted by it.
 //!
 //! Drag and the resistances are linear in the plate velocities, so the torque balance of all
@@ -213,13 +214,7 @@ impl Simulation {
         let length_per_cell = self.boundary_length_per_cell();
         let normals = self.smoothed_normals(&boundaries);
         for (boundary, &normal) in boundaries.iter().zip(&normals) {
-            let k = 0.5
-                * params.basal_drag
-                * if boundary.kind == BoundaryKind::Collision {
-                    params.collision_resistance * cell_area
-                } else {
-                    params.boundary_coupling_width * length_per_cell
-                };
+            let k = 0.5 * params.basal_drag * params.boundary_coupling_width * length_per_cell;
             if k <= 0.0 {
                 continue;
             }
