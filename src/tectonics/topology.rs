@@ -6,6 +6,63 @@ use glam::DVec3;
 use super::ledger::{self, Term};
 use super::*;
 
+/// Rings around the target vertex searched for an empty vertex when merging plates.
+const MERGE_RINGS: usize = 2;
+
+/// The empty vertex of `plate` within [`MERGE_RINGS`] rings of `target` nearest to `position`
+/// (in the plate's frame), if any.
+fn free_vertex(mesh: &SphereMesh, plate: &Plate, target: u32, position: DVec3) -> Option<u32> {
+    let mut ring = vec![target];
+    let mut seen = vec![target];
+    for _ in 0..=MERGE_RINGS {
+        let best = ring
+            .iter()
+            .copied()
+            .filter(|&vertex| plate.crust[vertex as usize].is_none())
+            .max_by(|&a, &b| {
+                mesh.vertex(a)
+                    .dot(position)
+                    .total_cmp(&mesh.vertex(b).dot(position))
+                    .then(b.cmp(&a))
+            });
+        if best.is_some() {
+            return best;
+        }
+        let mut next = Vec::new();
+        for &vertex in &ring {
+            for &neighbor in mesh.neighbors(vertex) {
+                if !seen.contains(&neighbor) {
+                    seen.push(neighbor);
+                    next.push(neighbor);
+                }
+            }
+        }
+        ring = next;
+    }
+    None
+}
+
+/// Adds `crust` to the sample of `plate` at `target` and its neighbours with crust in equal
+/// shares (thickness and sediment; densities mixed by mass, no thickness cap: mass is
+/// conserved, crustal flow and erosion act on it later).
+fn spread_crust(mesh: &SphereMesh, plate: &mut Plate, target: u32, crust: Crust) {
+    let receivers: Vec<u32> = std::iter::once(target)
+        .chain(mesh.neighbors(target).iter().copied())
+        .filter(|&vertex| plate.crust[vertex as usize].is_some())
+        .collect();
+    let share = 1.0 / receivers.len() as f64;
+    for vertex in receivers {
+        let receiver = plate.crust[vertex as usize]
+            .as_mut()
+            .expect("receivers have crust");
+        let added = crust.thickness * share;
+        let mass = receiver.thickness * receiver.density + added * crust.density;
+        receiver.thickness += added;
+        receiver.density = mass / receiver.thickness.max(1e-9);
+        receiver.sediment += crust.sediment * share;
+    }
+}
+
 impl Simulation {
     /// Splits `plate` along the great circle with the given unit `normal`: the crust on the side
     /// the normal points to moves to a new plate with the same rotation and motion. Returns the
@@ -180,68 +237,60 @@ impl Simulation {
         Some(new_index)
     }
 
-    /// Merges plate `absorbed` into plate `into`. The crust of `absorbed` that is visible at the
-    /// surface moves into the frame of `into`. Where `into` already has crust below it, continental
-    /// crust is stacked; otherwise the visible crust replaces the hidden one. Returns the volume
-    /// (thickness × cells, m) of continental crust of `absorbed` that was hidden and is lost.
+    /// Merges plate `absorbed` into plate `into`: every crust sample of `absorbed`, visible or
+    /// hidden, moves by its position into the frame of `into`, to the nearest empty vertex
+    /// within [`MERGE_RINGS`] rings, or else is spread over the sample there and its
+    /// neighbours. No crust is lost or created. Returns the volume (thickness × cells, m) of
+    /// continental crust lost, which is zero.
     pub(super) fn merge_plates(&mut self, into: u32, absorbed: u32) -> f64 {
         let before = ledger::plates_mass(&self.plates);
-        let result = self.merge_plates_inner(into, absorbed);
+        self.merge_plates_inner(into, absorbed);
         let after = ledger::plates_mass(&self.plates);
         self.ledger.record(Term::Merges, after - before);
-        result
+        0.0
     }
 
-    fn merge_plates_inner(&mut self, into: u32, absorbed: u32) -> f64 {
+    fn merge_plates_inner(&mut self, into: u32, absorbed: u32) {
         assert_ne!(into, absorbed, "a plate cannot be merged into itself");
         let rotations = self.rotations();
         self.polarities.merge(into, absorbed, &rotations);
-        // The receiving plate gains crust at new cells.
+        // The receiving plate gains crust at new vertices.
         self.plates[into as usize].tracked = None;
-        let inverse_rotation = self.plates[into as usize].rotation.inverse();
-        let max_thickness = self.params.max_crust_thickness;
-        // Where each sample of `absorbed` went, for cells sharing a sample.
-        let mut destination: HashMap<u32, u32> = HashMap::default();
-
-        for cell in 0..self.mesh.len() as u32 {
-            let owner = self.owners[cell as usize];
-            if owner.plate != absorbed {
+        let to_into =
+            self.plates[into as usize].rotation.inverse() * self.plates[absorbed as usize].rotation;
+        let cell_count = self.mesh.len();
+        // Where each sample of `absorbed` went in `into`.
+        let mut destination = vec![u32::MAX; cell_count];
+        let mut target = 0u32;
+        for local in 0..cell_count as u32 {
+            let Some(crust) = self.plates[absorbed as usize].crust[local as usize].take() else {
                 continue;
-            }
-            let moved = self.plates[absorbed as usize].crust[owner.local as usize].take();
-            let target = &mut self.plates[into as usize];
-            let local = target.local_vertex(&self.mesh, inverse_rotation, cell);
-            let local = match moved {
-                Some(crust) => {
-                    match &mut target.crust[local as usize] {
-                        Some(existing) if existing.is_continental() && crust.is_continental() => {
-                            existing.add_crust(
-                                crust.thickness + crust.sediment,
-                                crust.density,
-                                max_thickness,
-                            );
-                        }
-                        slot => *slot = Some(crust),
-                    }
-                    target.consumed[local as usize] = false;
-                    destination.insert(owner.local, local);
-                    local
-                }
-                // The sample was already moved for another cell that shared it.
-                None if target.crust[local as usize].is_some() => local,
-                None => destination[&owner.local],
             };
-            self.owners[cell as usize] = Ownership { plate: into, local };
+            let position = to_into * self.mesh.vertex(local);
+            target = self.mesh.nearest_from(position, target);
+            let receiving = &mut self.plates[into as usize];
+            destination[local as usize] = match free_vertex(&self.mesh, receiving, target, position)
+            {
+                Some(vertex) => {
+                    receiving.crust[vertex as usize] = Some(crust);
+                    receiving.consumed[vertex as usize] = false;
+                    vertex
+                }
+                None => {
+                    spread_crust(&self.mesh, receiving, target, crust);
+                    target
+                }
+            };
         }
-        let lost = self.plates[absorbed as usize]
-            .crust
-            .iter()
-            .flatten()
-            .filter(|crust| crust.is_continental())
-            .map(|crust| crust.thickness)
-            .sum();
+        for owner in &mut self.owners {
+            if owner.plate == absorbed {
+                *owner = Ownership {
+                    plate: into,
+                    local: destination[owner.local as usize],
+                };
+            }
+        }
         self.remove_plate(absorbed);
-        lost
     }
 
     /// Removes a plate that owns no cells. The last plate takes its index.
@@ -332,6 +381,56 @@ mod tests {
         );
         assert!(simulation.owners.iter().any(|owner| owner.plate == plate));
         assert!((total_thickness(&simulation) - before).abs() < 1e-6 * before);
+        assert_consistent(&simulation);
+    }
+
+    #[test]
+    fn merging_after_motion_conserves_all_crust() {
+        let mut simulation = simulation();
+        for _ in 0..20 {
+            simulation.step(1.0);
+        }
+        // Two neighbouring plates, which have moved relative to each other.
+        let (a, b) = (0..simulation.mesh.len() as u32)
+            .find_map(|cell| {
+                let plate = simulation.owners[cell as usize].plate;
+                simulation
+                    .mesh
+                    .neighbors(cell)
+                    .iter()
+                    .find_map(|&neighbor| {
+                        let other = simulation.owners[neighbor as usize].plate;
+                        (other != plate).then_some((plate.min(other), plate.max(other)))
+                    })
+            })
+            .unwrap();
+        let mass = simulation.total_mass();
+        let cells = simulation
+            .owners
+            .iter()
+            .filter(|owner| owner.plate == a || owner.plate == b)
+            .count();
+        let max_thickness = |simulation: &Simulation| {
+            simulation
+                .plates
+                .iter()
+                .flat_map(|plate| plate.crust.iter().flatten())
+                .map(|crust| crust.thickness)
+                .fold(0.0, f64::max)
+        };
+        let thickest = max_thickness(&simulation);
+        simulation.merge_plates(a, b);
+        // Hidden samples included, nothing is lost or created.
+        assert!((simulation.total_mass() / mass - 1.0).abs() < 1e-12);
+        // The merged plate shows crust at all cells of both plates.
+        let merged = simulation
+            .owners
+            .iter()
+            .filter(|owner| owner.plate == a)
+            .count();
+        assert_eq!(merged, cells);
+        // Spreading samples that found no free vertex thickens crust only a little.
+        assert!(max_thickness(&simulation) < 1.25 * thickest);
         assert_consistent(&simulation);
     }
 
