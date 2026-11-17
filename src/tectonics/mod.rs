@@ -109,14 +109,16 @@ pub struct TectonicParams {
     pub collision_profile: Vec<f64>,
     /// Crust thicker than this is removed from below (delamination).
     pub max_crust_thickness: f64,
-    /// Crust thicker than this flows sideways under its own weight (lower crustal flow,
-    /// orogenic collapse), spreading thickened crust over a larger area.
+    /// Crust thicker than this flows sideways under its own weight (lower-crustal flow,
+    /// orogenic collapse), spreading thickened crust over a larger area; its mobility grows with
+    /// the cube of the thickness above it.
     pub crustal_flow_threshold: f64,
     /// Thickness range above the threshold over which crustal flow reaches full strength.
     pub crustal_flow_range: f64,
-    /// Fraction of the thickness difference between neighbouring cells that flows per Myr at full
-    /// strength.
-    pub crustal_flow_rate: f64,
+    /// Diffusivity (km²/Myr) of orogenic collapse at full mobility: lower-crustal channel flow
+    /// `ρ g h³ / (12 η)` times the isostatic response, ~3.7·10³ km²/Myr for a 15 km channel at
+    /// η = 10¹⁹ Pa·s and ~3.7·10⁴ at 10¹⁸ (Clark & Royden 2000).
+    pub collapse_diffusivity: f64,
     /// Planet radius in metres.
     pub planet_radius: f64,
     /// Effective slab pull per metre of trench at the reference slab age, in N/m. The gross
@@ -211,7 +213,7 @@ impl Default for TectonicParams {
             max_crust_thickness: 75_000.0,
             crustal_flow_threshold: 40_000.0,
             crustal_flow_range: 20_000.0,
-            crustal_flow_rate: 0.05,
+            collapse_diffusivity: 1e4,
             planet_radius: 6.371e6,
             slab_pull: 2e13,
             slab_pull_reference_age: 100.0,
@@ -252,6 +254,7 @@ impl TectonicParams {
             "basal_drag" => &mut self.basal_drag,
             "continental_drag_factor" => &mut self.continental_drag_factor,
             "collision_resistance" => &mut self.collision_resistance,
+            "collapse_diffusivity" => &mut self.collapse_diffusivity,
             "boundary_coupling_width" => &mut self.boundary_coupling_width,
             "slab_pull" => &mut self.slab_pull,
             "slab_sinking_speed" => &mut self.slab_sinking_speed,

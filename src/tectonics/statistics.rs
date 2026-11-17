@@ -76,6 +76,10 @@ pub struct Statistics {
     pub flooded_continental_fraction: f64,
     pub freeboard: f64,
     pub continental_origin_fraction: f64,
+    /// Thickness percentiles (10/50/90%, km) of the visible crust samples of continental origin,
+    /// and the fraction of them thicker than 50 km.
+    pub continental_thickness: [f64; 3],
+    pub thick_continental_fraction: f64,
     /// Relative speed of the plates across boundaries (per boundary cell, both sides): median
     /// (rad/Myr) and fraction slower than 2 cm/yr.
     pub median_relative_speed: f64,
@@ -430,6 +434,27 @@ impl Simulation {
         }
         let duplicated_cells: usize = cells_per_sample.values().filter(|&&count| count > 1).sum();
         let max_cells_per_sample = cells_per_sample.values().copied().max().unwrap_or(0);
+        let mut origin_thickness: Vec<f64> = cells_per_sample
+            .keys()
+            .filter_map(|owner| self.plates[owner.plate as usize].crust[owner.local as usize])
+            .filter(|crust| crust.is_continental_origin())
+            .map(|crust| crust.thickness / 1000.0)
+            .collect();
+        origin_thickness.sort_by(f64::total_cmp);
+        let thickness_percentile = |p: f64| {
+            origin_thickness
+                .get(((origin_thickness.len().max(1) - 1) as f64 * p).round() as usize)
+                .copied()
+                .unwrap_or(0.0)
+        };
+        let continental_thickness = [
+            thickness_percentile(0.1),
+            thickness_percentile(0.5),
+            thickness_percentile(0.9),
+        ];
+        let thick_continental_fraction = origin_thickness.iter().filter(|&&t| t > 50.0).count()
+            as f64
+            / origin_thickness.len().max(1) as f64;
         let continental_samples = cells_per_sample
             .keys()
             .filter(|owner| {
@@ -541,6 +566,8 @@ impl Simulation {
             flooded_continental_fraction: flooded_continental as f64 / origin_cells.max(1) as f64,
             freeboard: freeboard_sum / origin_cells.max(1) as f64,
             continental_origin_fraction: origin_cells as f64 / cell_count as f64,
+            continental_thickness,
+            thick_continental_fraction,
             median_relative_speed: motion.median_relative_speed,
             slow_boundary_fraction: motion.slow_fraction,
             mean_obliquity_cos: motion.mean_cos,

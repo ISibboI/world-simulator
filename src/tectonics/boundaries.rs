@@ -16,82 +16,134 @@ use super::*;
 const SPILL_RINGS: usize = 8;
 
 impl Simulation {
-    /// Thick crust spreads under its own weight towards thinner neighbouring crust of the same
-    /// plate, conserving its volume (lower crustal flow, gravitational collapse of orogens).
+    /// Orogenic collapse: the weak lower crust of thick, hot crust flows down the gradient of
+    /// surface elevation (lower-crustal channel flow; Clark & Royden 2000, Bird 1991), spreading
+    /// orogens over their surroundings at constant mass. See [`Self::crustal_flow_inner`].
     pub(super) fn crustal_flow(&mut self, dt: f64) {
         let change = self.crustal_flow_inner(dt);
         self.ledger.record(Term::CrustalFlow, change);
     }
 
-    /// Returns the change of mass.
+    /// Moves crystalline crust between neighbouring cells, driven by the difference of their dry
+    /// elevations: a thickness diffusion with [`TectonicParams::collapse_diffusivity`] times a
+    /// mobility that grows with the cube of the source's thickness above
+    /// [`TectonicParams::crustal_flow_threshold`] (full over
+    /// [`TectonicParams::crustal_flow_range`]). Receivers are crust of continental origin only
+    /// (never oceanic crust, which would carry it into a trench), on another plate only where
+    /// the plates do not converge. Explicit sub-cycles keep it stable; flows are summed per
+    /// sample (a sample may show at several cells) and each pair moves at most what equalises
+    /// it. Returns the change of mass (zero up to the thickness cap).
     fn crustal_flow_inner(&mut self, dt: f64) -> f64 {
         let params = &self.params;
-        let rate = (params.crustal_flow_rate * dt).min(0.15);
-        // Per crust sample: (outgoing thickness, incoming thickness, incoming mass per area,
-        // incoming felsic mass per area),
-        // with the position of each sample's entry in a dense per-sample index.
         let cell_count = self.mesh.len();
-        let mut delta: Vec<(Ownership, (f64, f64, f64, f64))> = Vec::new();
-        let mut index = vec![u32::MAX; self.plates.len() * cell_count];
-        let entry = |delta: &mut Vec<_>, index: &mut Vec<u32>, owner: Ownership| {
-            let slot = &mut index[sample_index(owner, cell_count)];
-            if *slot == u32::MAX {
-                *slot = delta.len() as u32;
-                delta.push((owner, (0.0, 0.0, 0.0, 0.0)));
-            }
-            *slot as usize
-        };
-        for cell in 0..self.mesh.len() as u32 {
-            let owner = self.owners[cell as usize];
-            let crust = self.surface_crust(cell);
-            for &neighbor in self.mesh.neighbors(cell) {
-                // Each pair once, and only within a plate.
-                let neighbor_owner = self.owners[neighbor as usize];
-                if neighbor < cell || neighbor_owner.plate != owner.plate || neighbor_owner == owner
-                {
-                    continue;
-                }
-                let other = self.surface_crust(neighbor);
-                let thickest = crust.thickness.max(other.thickness);
-                let strength = ((thickest - params.crustal_flow_threshold)
-                    / params.crustal_flow_range)
-                    .clamp(0.0, 1.0);
-                if strength <= 0.0 {
-                    continue;
-                }
-                let flow = rate * strength * (crust.thickness - other.thickness) / 2.0;
-                let (from, to, from_crust) = if flow > 0.0 {
-                    (owner, neighbor_owner, crust)
-                } else {
-                    (neighbor_owner, owner, other)
-                };
-                let amount = flow.abs();
-                let from = entry(&mut delta, &mut index, from);
-                let to = entry(&mut delta, &mut index, to);
-                delta[from].1.0 += amount;
-                let receiver = &mut delta[to].1;
-                receiver.1 += amount;
-                receiver.2 += amount * from_crust.density;
-                receiver.3 += amount * from_crust.density * from_crust.felsic;
-            }
-        }
+        let edge = params.planet_radius * self.mesh.mean_edge_angle();
+        let diffusivity = params.collapse_diffusivity * 1e6;
+        let ratio = diffusivity * dt / (edge * edge);
+        let cycles = (ratio / 0.2).ceil().max(1.0) as usize;
+        let dt_cycle = dt / cycles as f64;
+        // Laplacian weight on the hexagonal mesh: 2/(3 d²) per neighbour.
+        let weight = diffusivity * dt_cycle * 2.0 / (3.0 * edge * edge);
+        let min_convergence = params.min_trench_convergence / (params.planet_radius * 100.0 / 1e6);
         let mut change = 0.0;
-        for (owner, (outgoing, incoming, incoming_mass, incoming_felsic)) in delta {
-            let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
-                .as_mut()
-                .expect("owners always point to existing crust");
-            let before = crust.mass();
-            // Outgoing crust leaves the density unchanged; incoming crust is mixed in by mass.
-            crust.thickness = (crust.thickness - outgoing).max(0.0);
-            if incoming > 0.0 {
-                crust.add_crust(
-                    incoming,
-                    incoming_mass / incoming,
-                    incoming_felsic / incoming_mass.max(1e-9),
-                    params.max_crust_thickness,
-                );
+        // Per crust sample (dense index): total requested outflow, and the flows applied.
+        let mut outflow = vec![0.0; self.plates.len() * cell_count];
+        // Per crust sample: (outgoing thickness, incoming thickness, incoming mass, incoming
+        // felsic mass).
+        let mut flows = vec![(0.0, 0.0, 0.0, 0.0); self.plates.len() * cell_count];
+        // (source sample, receiver sample, thickness, density, felsic fraction)
+        let mut transfers: Vec<(usize, usize, f64, f64, f64)> = Vec::new();
+        let mut touched: Vec<usize> = Vec::new();
+        for _ in 0..cycles {
+            for cell in 0..cell_count as u32 {
+                let owner = self.owners[cell as usize];
+                let source = self.surface_crust(cell);
+                let excess = (source.thickness - params.crustal_flow_threshold).max(0.0);
+                if excess <= 0.0 || !source.is_continental_origin() {
+                    continue;
+                }
+                let mobility = (excess / params.crustal_flow_range).min(1.0).powi(3);
+                let source_elevation = source.dry_elevation(self.time);
+                let response = crate::isostasy::dry_response(source.density);
+                let r = self.mesh.vertex(cell);
+                for &neighbor in self.mesh.neighbors(cell) {
+                    let neighbor_owner = self.owners[neighbor as usize];
+                    if neighbor_owner == owner {
+                        continue;
+                    }
+                    let receiver = self.surface_crust(neighbor);
+                    if !receiver.is_continental_origin() {
+                        continue;
+                    }
+                    let drop = source_elevation - receiver.dry_elevation(self.time);
+                    if drop <= 0.0 {
+                        continue;
+                    }
+                    if neighbor_owner.plate != owner.plate {
+                        // Not across converging boundaries: crust moved onto the lower plate
+                        // would be consumed and stacked back.
+                        let normal = (self.mesh.vertex(neighbor) - r).normalize_or_zero();
+                        let convergence = (self.plates[owner.plate as usize].angular_velocity
+                            - self.plates[neighbor_owner.plate as usize].angular_velocity)
+                            .cross(r)
+                            .dot(normal);
+                        if convergence > -min_convergence {
+                            continue;
+                        }
+                    }
+                    let equalising =
+                        drop / (response + crate::isostasy::dry_response(receiver.density));
+                    let amount = (weight * mobility * drop / response).min(0.5 * equalising);
+                    let from = sample_index(owner, cell_count);
+                    let to = sample_index(neighbor_owner, cell_count);
+                    outflow[from] += amount;
+                    transfers.push((from, to, amount, source.density, source.felsic));
+                }
             }
-            change += crust.mass() - before;
+            // A sample (possibly shown at several cells) gives at most its crust above the
+            // threshold; its transfers are scaled down together.
+            for &(from, to, amount, density, felsic) in &transfers {
+                let (plate, local) = (from / cell_count, from % cell_count);
+                let thickness = self.plates[plate].crust[local].map_or(0.0, |c| c.thickness);
+                let available = (thickness - params.crustal_flow_threshold).max(0.0);
+                let scaled = amount * (available / outflow[from]).min(1.0);
+                for index in [from, to] {
+                    if flows[index] == (0.0, 0.0, 0.0, 0.0) {
+                        touched.push(index);
+                    }
+                }
+                flows[from].0 += scaled;
+                let flow = &mut flows[to];
+                flow.1 += scaled;
+                flow.2 += scaled * density;
+                flow.3 += scaled * density * felsic;
+            }
+            for &(from, ..) in &transfers {
+                outflow[from] = 0.0;
+            }
+            transfers.clear();
+            touched.sort_unstable();
+            touched.dedup();
+            for &index in &touched {
+                let (plate, local) = (index / cell_count, index % cell_count);
+                let (outgoing, incoming, incoming_mass, incoming_felsic) = flows[index];
+                flows[index] = (0.0, 0.0, 0.0, 0.0);
+                let crust = self.plates[plate].crust[local]
+                    .as_mut()
+                    .expect("flows only between existing samples");
+                let before = crust.mass();
+                // Outgoing crust leaves density and felsic fraction unchanged.
+                crust.thickness -= outgoing;
+                if incoming > 0.0 {
+                    crust.add_crust(
+                        incoming,
+                        incoming_mass / incoming,
+                        incoming_felsic / incoming_mass.max(1e-9),
+                        params.max_crust_thickness,
+                    );
+                }
+                change += crust.mass() - before;
+            }
+            touched.clear();
         }
         change
     }
@@ -1021,6 +1073,49 @@ mod tests {
         let now = neighbor.surface_elevation(time, 0.0);
         let later = neighbor.surface_elevation(time + 100.0, 0.0);
         assert!(later < now - 50.0, "{now} → {later}");
+    }
+
+    #[test]
+    fn thick_crust_collapses_onto_its_surroundings() {
+        let mut simulation = single_continent();
+        let cell = 100u32;
+        let local = simulation.owners[cell as usize].local as usize;
+        simulation.plates[0].crust[local]
+            .as_mut()
+            .unwrap()
+            .thickness = 70_000.0;
+        let mass = simulation.total_mass();
+        for _ in 0..10 {
+            simulation.crustal_flow(1.0);
+        }
+        assert!((simulation.total_mass() / mass - 1.0).abs() < 1e-12);
+        let peak = simulation.surface_crust(cell).thickness;
+        assert!(peak < 65_000.0, "{peak}");
+        let neighbor = simulation.surface_crust(simulation.mesh.neighbors(cell)[0]);
+        assert!(neighbor.thickness > 35_000.0);
+        assert!(
+            simulation.plates[0]
+                .crust
+                .iter()
+                .flatten()
+                .all(|c| c.thickness > 0.0)
+        );
+    }
+
+    #[test]
+    fn collapse_never_flows_onto_oceanic_crust() {
+        let mut simulation = single_plate();
+        let cell = 100u32;
+        let local = simulation.owners[cell as usize].local as usize;
+        simulation.plates[0].crust[local] = Some(Crust {
+            thickness: 70_000.0,
+            density: crate::isostasy::CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+        });
+        simulation.crustal_flow(5.0);
+        assert_eq!(simulation.surface_crust(cell).thickness, 70_000.0);
     }
 
     #[test]
