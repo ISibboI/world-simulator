@@ -122,8 +122,8 @@ components (climate, erosion, …) are expected to build on it.
   plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms + tuning), 5, 3,
   4 done, issue 2 (sea level) done, and the runtime optimisations. Since then: per-segment
   polarity, plate connectivity (1p), boundary shear coupling (1q; modest effect). Gap healing is
-  mass-conserving and the continental mass balance (issue 3) holds (felsic crust + sediment
-  within ~±10% per 500 Myr). **Next: continental thickening (1r) is back with the accreted
+  mass-conserving and the continental mass balance (issue 3) closes, but through a sediment
+  loop ~5× Earth (trench accretion 12–15 Gt/yr) and doubled collision churn (evaluation). **Next: continental thickening (1r) is back with the accreted
   material (mean land 1.4–1.6 km): orogenic collapse and rift stretching
   (`plans/issue-1r-thickening.md`, reviewed, needs rework per its review); relative plate speed
   tuning (1q) later.** 2–6% ancient (≥ 200 Myr) ocean

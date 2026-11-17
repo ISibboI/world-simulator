@@ -252,6 +252,23 @@ balance → collapse/stretching if needed** → 1q relative-speed tuning (later,
    resists subduction (one predicate; arcs accrete), trench fill above a 1 km subduction
    channel accretes (net sediment subduction 2.4–3.1 Gt/yr), no sediment deletion. Felsic crust
    + sediment change +11% per 500 Myr including a measurement artefact (real within ±10%).
+   **Independent evaluation (2026-11-17): bookkeeping correct, but the balance comes from the
+   wrong process.** A sediment loop ~5× Earth: erosion 21–24 Gt/yr [14–20] balanced by trench
+   accretion 12–15 Gt/yr [≲ 2.5] plus arcs 6–8 [7–8]; ~82% of trench sediment accreted [Earth
+   ≲ 30%]; net sediment subduction Earth-like only by cancellation. Root cause: nearly all
+   sediment lands on oceanic crust (shelves/fans) and reaches a trench within ~100 Myr (on Earth
+   most stays on passive margins). Channel 3 km instead of 1 km: felsic −16% per 500 Myr. The
+   accretion predicate doubled collision churn (stacking 20–30 → 46–63 Gt/yr), the main source
+   of the renewed thickening (crust > 50 km: 20% of continental samples); polarity reversals
+   5–12 → 3–7; ocean ≥ 200 Myr 5% → 6–8.5%. Metasediment at 2650 kg/m³ lightens continents
+   (+~260 m; metamorphosed wedges ~2700–2750). The felsic diagnostic is biased upward by 2–5
+   Gt/yr (non-linear unmixing, metasediment below the end-member); the buoyancy-based
+   continental mass is flat after a 200 Myr initial transient (1.80 → ~1.55e10 Gt). Next
+   (recommended): per-sample felsic tracer; issue 1r with reduced collision churn (stack only
+   while converging, partial continental subduction, higher predicate threshold or only
+   lower-plate crust for collisions); denser metasediment; keep sediment on margins so less
+   reaches trenches (conflicts with the plan review's advice not to restrict shelves — decide);
+   then a magmatic source (arcs ∝ convergence) for the balance.
    Originally: (−36% seed 0, −60% seed 3 [~steady]):
    - eroded bedrock → sediment 1:1 by volume despite 2750 vs 2300 kg/m³ (16% mass loss);
    - sediment beyond the shelf is deleted (~7% of flux) → deep-sea fans instead;
