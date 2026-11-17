@@ -73,3 +73,90 @@ boundary (McKenzie 1978).
 
 Collision resistance / convergence rates (1q tuning), delamination beyond the 75 km cap,
 erosion changes, plate splitting geometry (issue 10).
+
+---
+
+# Revised plan v2 (2026-11-17)
+
+_User: issue 1r before the sediment routing (margins need rift thinning and thermal subsidence
+for room; see `sediment-routing.md` and its review). Incorporates the v1 review above, the gap
+and mass-balance work since (gap copies removed, issue 3), and the felsic tracer
+(`Crust::felsic`)._
+
+## Current state (seeds 0–3, 500 Myr, `agent-scratch/t1/log-trc-*`)
+
+Mean land 1.24–1.36 km [0.84]; continental crust mean ~41 km at 500 Myr with ~20% > 50 km and
+~11% > 60 km [a few %]; flooded continental crust falls from ~27% to 7–19% [25–30%]; collision
+stacking 46–63 Gt/yr (doubled by the subduction-resistance predicate); passive margins are
+short-lived and have no room for sediment (no thinning, no thermal subsidence); continental
+crust never thins (10th percentile ~31 km).
+
+## A. Rift stretching with thermal subsidence (passive margins)
+
+- **Where:** a gap cell that opens (`opens_away`) next to (the fill parent) crust of continental
+  origin (`felsic > 0.5`) thicker than `breakup_thickness` (15 km): no new sea floor; instead
+  the plate's stretching zone fills it. Slow or oblique continental divergence (below
+  `min_spreading_rate`, currently shared gaps) is stretched the same way as long as the plates
+  open (not transforms), so rifts stretch before they break up.
+- **How (resolution independent, tapered):** donors = the plate's samples of continental origin
+  within `rift_width` W (200 km) of the gap cell in the plate frame (N samples). Uniform
+  stretching by β = (N+1)/N per opened cell: each donor gives 1/(N+1) of its crystalline crust
+  and sediment, the new sample receives the sum (mass, density and felsic tracer mixed by
+  mass). Cells nearest the rift take part in every opening, so the margin tapers over W.
+  When the parent is thinner than `breakup_thickness`, the gap gets new oceanic crust
+  (continental breakup).
+- **Thermal subsidence (McKenzie 1978):** stretching heats the lithosphere: with U the current
+  fraction of ridge uplift of a sample (from its age; 0 for old continents), after stretching by
+  β_step its fraction is U' = 1 − (1 − U)/β_step; its formation time is set to the age whose
+  GDH1 uplift is U' of the ridge uplift (inverse by bisection). It then subsides with the GDH1
+  curve as it ages: syn-rift uplift and post-rift thermal subsidence create the margin's room
+  for sediment. The new sample takes the mass-weighted U' of its donors. `thermal_weight`
+  already gives thin crust the full oceanic thermal behaviour.
+- **Classes:** stretched crust (15–20 km) is transitional by buoyancy but remains of
+  continental origin and resists subduction (≥ 2000 m). Passive-margin initiation looks for
+  oceanic crust next to crust of continental origin (not only `is_continental`); statistics
+  report continental area both by class and by origin.
+
+## B. Orogenic collapse (lower-crustal channel flow)
+
+- Flux driven by the **dry-elevation** difference between neighbours, converted to crystalline
+  thickness with the source's isostatic response; thickness diffusivity `collapse_diffusivity`
+  κ (km²/Myr; channel flow K·a with a ≈ 0.15: ~3.7·10³ at η = 10¹⁹ Pa·s, ~3.7·10⁴ at 10¹⁸ for a
+  15 km channel; Clark & Royden 2000; Bird 1991) with a **cubic** mobility in the source
+  thickness above `crustal_flow_threshold` (40 km) over `crustal_flow_range` (20 km); only
+  downhill; per pair capped at the amount that equalises the pair.
+- Discretisation: per neighbour pair Δh = κ·m·dt_sub·2/(3d²)·Δz/a_src, explicit sub-cycles with
+  κ_max dt_sub/d² ≤ 0.2 (real edge length), computed on the active set (cells above the
+  threshold and their neighbours) in dense arrays, written back once per step.
+- Receivers: crust of continental origin only, also on another plate (orogens spread over the
+  foreland across a collision); never onto oceanic crust (a trench would subduct it). Moves
+  crystalline crust only (density, felsic tracer mixed by mass); booked as crustal flow
+  (mass-conserving).
+- Replaces the current pairwise thickness diffusion (`crustal_flow_rate`).
+
+## C. Less collision stacking
+
+- Collisions subduct part of the lower plate's buoyant crust: at a stacking contact only the
+  upper `accreted_fraction` (0.5–0.6; about half of India's crust subducted, Ingalls et al.
+  2016, Capitanio et al. 2010; arcs lose their lower crust, Stern & Scholl 2010) is stacked,
+  the rest subducts (booked as subducted crust; felsic tracer gives the felsic loss). A physical
+  sink besides erosion and the 75 km cap.
+
+## Calibration and verification
+
+- `collapse_diffusivity` within 10³–3·10⁴ on the thickness distribution (> 50 km a few %,
+  90th percentile, plateau widths); `rift_width`, `breakup_thickness`, `accreted_fraction` from
+  the literature, not tuned.
+- Diagnostics: continental thickness percentiles (10/50/90%) and fraction > 50 km over samples
+  of continental origin; flooded continental fraction (by origin); stretched cells; collapse
+  flux; felsic budget (`--material-budget`); margin widths (cells of stretched crust).
+- Targets (seeds 0–3, 500 Myr): mean land → ~0.84 km, flooded continental crust → 25–30%,
+  > 50 km → a few %, felsic + sediment within ±10%, continental area not shrinking, sediment
+  on margins (re-measure trench sediment input), ocean ages/plates unchanged in range;
+  `--no-erosion` run once (collapse must not depend on erosion).
+- Tests: stretching conserves mass and felsic mass, tapers over W, stops below the breakup
+  thickness (then oceanic crust), raises the thermal uplift by (1 − 1/β) and lets it subside;
+  collapse conserves mass, spreads an isolated thick block (also across a collision), never
+  flows onto oceanic crust, is stable for large κ dt and resolution independent (s4 vs s5);
+  partial accretion subducts the expected fraction; ledger closes; incremental vs full matching
+  identical.
