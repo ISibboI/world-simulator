@@ -69,6 +69,7 @@ impl Simulation {
     /// Splits `plate` along the great circle with the given unit `normal`: the crust on the side
     /// the normal points to moves to a new plate with the same rotation and motion. Returns the
     /// new plate, or `None` if one side would be empty.
+    #[cfg(test)]
     pub(super) fn split_plate(&mut self, plate: u32, normal: DVec3) -> Option<u32> {
         let rotation = self.plates[plate as usize].rotation;
         let new_side: Vec<bool> = (0..self.mesh.len() as u32)

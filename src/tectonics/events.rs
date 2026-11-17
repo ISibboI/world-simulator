@@ -6,7 +6,9 @@
 //! (which plate would subduct, by buoyancy) exists from their first contact, and the boundary
 //! becomes a trench as soon as they converge (see [`super::dynamics`]).
 
-use glam::DVec3;
+use std::f64::consts::FRAC_PI_6;
+
+use glam::{DQuat, DVec3};
 use rand::RngExt;
 use tracing::debug;
 
@@ -163,6 +165,15 @@ pub struct EventCounts {
     pub initiation_far_contact_km: f64,
 }
 
+/// What a split of a plate is anchored to (see [`Simulation::split_locally`]).
+#[derive(Clone, Copy, Debug)]
+enum SplitAnchor {
+    /// Subduction initiation at the passive margin next to the oceanic `cell`.
+    Margin { cell: u32 },
+    /// A plume rift; `cut` is a cell of the continent the rift divides, if any.
+    Rift { cut: Option<u32> },
+}
+
 impl EventCounts {
     pub fn births(&self) -> usize {
         self.rifts + self.initiations + self.breakups
@@ -297,9 +308,10 @@ impl Simulation {
         area.iter().map(|a| a / cells).collect()
     }
 
-    /// Splits `plate` along the great circle with the given normal if both parts are large
-    /// enough. Returns the new plate on the side the normal points to.
-    fn split_if_large_enough(&mut self, plate: u32, normal: DVec3) -> Option<u32> {
+    /// Splits `plate` roughly along the great circle with the given normal without cutting
+    /// through crust that resists subduction (see [`Self::local_split_piece`]) if both parts are
+    /// large enough. Returns the new plate on the side the normal points to.
+    fn split_locally(&mut self, plate: u32, normal: DVec3, anchor: SplitAnchor) -> Option<u32> {
         if self.plates.len() >= self.params.events.max_plates {
             self.event_counts.blocked_splits += 1;
             debug!(
@@ -309,21 +321,186 @@ impl Simulation {
             );
             return None;
         }
-        let (mut positive, mut negative) = (0usize, 0usize);
-        for cell in 0..self.mesh.len() as u32 {
-            if self.owners[cell as usize].plate == plate {
-                if self.mesh.vertex(cell).dot(normal) > 0.0 {
-                    positive += 1;
-                } else {
-                    negative += 1;
-                }
-            }
-        }
+        let new_side = self.local_split_piece(plate, normal, anchor)?;
+        let piece: Vec<u32> = (0..self.mesh.len() as u32)
+            .filter(|&cell| new_side[cell as usize])
+            .collect();
+        let total = self
+            .owners
+            .iter()
+            .filter(|owner| owner.plate == plate)
+            .count();
         let min_cells = self.params.events.min_plate_area * self.mesh.len() as f64;
-        if (positive as f64) < min_cells || (negative as f64) < min_cells {
+        if (piece.len() as f64) < min_cells || ((total - piece.len()) as f64) < min_cells {
             return None;
         }
-        self.split_plate(plate, normal)
+        self.split_plate_cells(plate, &piece)
+    }
+
+    /// The world cells of `plate` that go to the new plate in [`Self::split_locally`]:
+    ///
+    /// * ocean (crust that does not resist subduction) goes to the side of the great circle it
+    ///   lies on;
+    /// * each connected component of crust that resists subduction goes wholly to the side
+    ///   holding most of its cells (splits never create continent–continent contacts), except
+    ///   the continent a rift cuts, which is divided by the circle;
+    /// * at a passive-margin initiation the margin's continent goes to the new side, the ocean
+    ///   within [`PlateEventParams::rift_continent_radius`] of the margin cell to the old
+    ///   (subducting) side, so the new boundary follows the coast there;
+    /// * pieces disconnected from their side's main piece (the one holding the margin cell or
+    ///   continent; for rifts the largest) move to the other side, so both parts are connected.
+    ///
+    /// Returns `None` if no consistent division is found.
+    fn local_split_piece(
+        &self,
+        plate: u32,
+        normal: DVec3,
+        anchor: SplitAnchor,
+    ) -> Option<Vec<bool>> {
+        let cell_count = self.mesh.len();
+        let in_plate = |cell: u32| self.owners[cell as usize].plate == plate;
+        // Connected components of crust that resists subduction.
+        let mut component = vec![u32::MAX; cell_count];
+        let mut majority: Vec<bool> = Vec::new();
+        let mut stack = Vec::new();
+        for start in 0..cell_count as u32 {
+            if !in_plate(start)
+                || component[start as usize] != u32::MAX
+                || !self.surface_crust(start).resists_subduction()
+            {
+                continue;
+            }
+            let id = majority.len() as u32;
+            let (mut positive, mut size) = (0usize, 0usize);
+            component[start as usize] = id;
+            stack.push(start);
+            while let Some(cell) = stack.pop() {
+                size += 1;
+                if self.mesh.vertex(cell).dot(normal) > 0.0 {
+                    positive += 1;
+                }
+                for &neighbor in self.mesh.neighbors(cell) {
+                    if in_plate(neighbor)
+                        && component[neighbor as usize] == u32::MAX
+                        && self.surface_crust(neighbor).resists_subduction()
+                    {
+                        component[neighbor as usize] = id;
+                        stack.push(neighbor);
+                    }
+                }
+            }
+            majority.push(2 * positive > size);
+        }
+        let cut = match anchor {
+            SplitAnchor::Rift { cut: Some(cell) } => component[cell as usize],
+            _ => u32::MAX,
+        };
+        let mut new_side = vec![false; cell_count];
+        for cell in 0..cell_count as u32 {
+            if !in_plate(cell) {
+                continue;
+            }
+            let id = component[cell as usize];
+            new_side[cell as usize] = if id == u32::MAX || id == cut {
+                self.mesh.vertex(cell).dot(normal) > 0.0
+            } else {
+                majority[id as usize]
+            };
+        }
+        // Anchors of the main pieces: (new side, old side).
+        let anchors = match anchor {
+            SplitAnchor::Margin { cell } => {
+                let margin: Vec<u32> = self
+                    .mesh
+                    .neighbors(cell)
+                    .iter()
+                    .map(|&neighbor| component[neighbor as usize])
+                    .filter(|&id| id != u32::MAX)
+                    .collect();
+                let first = (0..cell_count as u32)
+                    .find(|&other| margin.contains(&component[other as usize]))?;
+                for other in 0..cell_count {
+                    if margin.contains(&component[other]) {
+                        new_side[other] = true;
+                    }
+                }
+                // The trench follows the coast near the initiation: ocean there subducts.
+                let origin = self.mesh.vertex(cell);
+                let radius = self.params.events.rift_continent_radius;
+                for other in 0..cell_count as u32 {
+                    if in_plate(other)
+                        && component[other as usize] == u32::MAX
+                        && self.mesh.vertex(other).angle_between(origin) <= radius
+                    {
+                        new_side[other as usize] = false;
+                    }
+                }
+                new_side[cell as usize] = false;
+                Some((first, cell))
+            }
+            SplitAnchor::Rift { .. } => None,
+        };
+        // Move pieces disconnected from their side's main piece to the other side.
+        let mut piece = vec![u32::MAX; cell_count];
+        for _ in 0..8 {
+            piece.fill(u32::MAX);
+            let mut sizes: Vec<(bool, usize)> = Vec::new();
+            for start in 0..cell_count as u32 {
+                if !in_plate(start) || piece[start as usize] != u32::MAX {
+                    continue;
+                }
+                let id = sizes.len() as u32;
+                let side = new_side[start as usize];
+                let mut size = 0;
+                piece[start as usize] = id;
+                stack.push(start);
+                while let Some(cell) = stack.pop() {
+                    size += 1;
+                    for &neighbor in self.mesh.neighbors(cell) {
+                        if in_plate(neighbor)
+                            && piece[neighbor as usize] == u32::MAX
+                            && new_side[neighbor as usize] == side
+                        {
+                            piece[neighbor as usize] = id;
+                            stack.push(neighbor);
+                        }
+                    }
+                }
+                sizes.push((side, size));
+            }
+            let main_of = |side: bool| -> Option<u32> {
+                match anchors {
+                    Some((new, old)) => Some(piece[if side { new } else { old } as usize]),
+                    None => (0..sizes.len() as u32)
+                        .filter(|&id| sizes[id as usize].0 == side)
+                        .max_by_key(|&id| sizes[id as usize].1),
+                }
+            };
+            let mains = [main_of(false), main_of(true)];
+            if mains
+                .iter()
+                .enumerate()
+                .any(|(side, main)| main.is_some_and(|id| sizes[id as usize].0 != (side == 1)))
+            {
+                // An anchor ended up on the wrong side.
+                return None;
+            }
+            let mut flipped = false;
+            for cell in 0..cell_count {
+                if piece[cell] == u32::MAX {
+                    continue;
+                }
+                let side = new_side[cell];
+                if Some(piece[cell]) != mains[side as usize] {
+                    new_side[cell] = !side;
+                    flipped = true;
+                }
+            }
+            if !flipped {
+                return Some(new_side);
+            }
+        }
+        None
     }
 
     /// Length (km) of the contact between crust resisting subduction on `a` and on `b` (cells
@@ -375,23 +552,39 @@ impl Simulation {
         for (index, position) in candidates {
             let cell = self.mesh.nearest(position);
             let plate = self.owners[cell as usize].plate;
-            let continent_nearby = (0..self.mesh.len() as u32).any(|other| {
-                self.owners[other as usize].plate == plate
-                    && self.mesh.vertex(other).angle_between(position)
-                        < params.rift_continent_radius
-                    && self.surface_crust(other).is_continental_origin()
-            });
+            // The nearest continental crust of the plate within reach of the plume.
+            let continent = (0..self.mesh.len() as u32)
+                .filter(|&other| {
+                    self.owners[other as usize].plate == plate
+                        && self.surface_crust(other).is_continental_origin()
+                })
+                .map(|other| (other, self.mesh.vertex(other).angle_between(position)))
+                .filter(|&(_, angle)| angle < params.rift_continent_radius)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(other, _)| other);
             let large = self.plate_area_fractions()[plate as usize] >= params.min_oceanic_rift_area;
-            if !continent_nearby && !large {
+            if continent.is_none() && !large {
                 continue;
             }
-            // A random great circle through the plume.
+            // A great circle through the plume that crosses the nearest continent (within
+            // ±30° of the direction towards it), else a random one.
             let direction = random_unit_vector(&mut self.rng);
-            let normal = (direction - position * direction.dot(position)).normalize_or_zero();
+            let random_normal =
+                (direction - position * direction.dot(position)).normalize_or_zero();
+            let towards = continent.map_or(DVec3::ZERO, |other| {
+                position.cross(self.mesh.vertex(other)).normalize_or_zero()
+            });
+            let normal = if towards == DVec3::ZERO {
+                random_normal
+            } else {
+                let azimuth = self.rng.random_range(-FRAC_PI_6..FRAC_PI_6);
+                DQuat::from_axis_angle(position, azimuth) * towards
+            };
             if normal == DVec3::ZERO {
                 continue;
             }
-            if let Some(new_plate) = self.split_if_large_enough(plate, normal) {
+            let anchor = SplitAnchor::Rift { cut: continent };
+            if let Some(new_plate) = self.split_locally(plate, normal, anchor) {
                 self.event_counts.rifts += 1;
                 let (total, far) = self.split_contact_km(plate, new_plate, position);
                 self.event_counts.rift_contact_km += total;
@@ -479,7 +672,9 @@ impl Simulation {
             return;
         }
         // The new plate is the continental side; the oceanic side subducts below it.
-        if let Some(continental_plate) = self.split_if_large_enough(plate, normal) {
+        if let Some(continental_plate) =
+            self.split_locally(plate, normal, SplitAnchor::Margin { cell })
+        {
             self.event_counts.initiations += 1;
             let (total, far) = self.split_contact_km(plate, continental_plate, position);
             self.event_counts.initiation_contact_km += total;
@@ -503,6 +698,9 @@ impl Simulation {
         let (slab_length, min_age) = (params.initiation_slab_length, params.initiation_age);
         let rotations = self.rotations();
         let pair = (oceanic_plate, continental_plate);
+        // Only the stretch of the margin near the initiation, not every coast of the
+        // continental plate.
+        let origin = self.mesh.vertex(cell);
         let mut seeds = vec![cell];
         for candidate in 0..self.mesh.len() as u32 {
             if self.owners[candidate as usize].plate != oceanic_plate {
@@ -515,7 +713,9 @@ impl Simulation {
             if self.mesh.neighbors(candidate).iter().any(|&neighbor| {
                 self.owners[neighbor as usize].plate == continental_plate
                     && self.surface_crust(neighbor).is_continental_origin()
-            }) {
+            }) && self.mesh.vertex(candidate).angle_between(origin)
+                <= params.rift_continent_radius
+            {
                 seeds.push(candidate);
             }
         }
@@ -907,9 +1107,10 @@ mod tests {
         let mut simulation = passive_margin(params, 250.0);
         simulation.initiate_subduction(1.0, u32::MAX, &[]);
         assert_eq!(simulation.plates.len(), 2);
-        // The oceanic plate subducts below the continental one along the margin.
+        // The oceanic plate subducts below the continental one along the margin near the
+        // initiation (a nucleus; segments propagate along strike as the trench grows).
         let segments = simulation.polarities.pair_segments(0, 1);
-        assert!(segments.len() > 1, "{}", segments.len());
+        assert!(!segments.is_empty());
         assert!(
             segments
                 .iter()
@@ -920,6 +1121,77 @@ mod tests {
             .filter(|&cell| simulation.surface_crust(cell).is_continental())
             .count();
         assert!(continental_cells > 0);
+    }
+
+    /// One plate with two continents (caps around +x and +y) and old ocean elsewhere.
+    fn two_continents(params: TectonicParams, seed: u64) -> Simulation {
+        let mut simulation = Simulation::new(SphereMesh::icosphere(4), 1, params, seed);
+        for (local, crust) in simulation.plates[0].crust.iter_mut().enumerate() {
+            let r = simulation.mesh.vertex(local as u32);
+            *crust = Some(if r.x > 0.75 || r.y > 0.75 {
+                Crust {
+                    thickness: 35_000.0,
+                    density: CONTINENTAL_DENSITY,
+                    birth: -1000.0,
+                    sediment: 0.0,
+                    felsic: 1.0,
+                }
+            } else {
+                new_oceanic_crust(-250.0)
+            });
+        }
+        simulation
+    }
+
+    /// The plates showing the continent around the given axis.
+    fn plates_of_continent(simulation: &Simulation, axis: DVec3) -> HashSet<u32> {
+        (0..simulation.mesh.len() as u32)
+            .filter(|&cell| simulation.mesh.vertex(cell).dot(axis) > 0.75)
+            .map(|cell| simulation.owners[cell as usize].plate)
+            .collect()
+    }
+
+    #[test]
+    fn passive_margin_initiation_does_not_cut_other_continents() {
+        for seed in 0..8 {
+            let mut params = TectonicParams::default();
+            params.events.initiation_waiting_time = 1e-6;
+            let mut simulation = two_continents(params, seed);
+            let mass = simulation.total_mass();
+            simulation.initiate_subduction(1.0, u32::MAX, &[]);
+            assert_eq!(simulation.plates.len(), 2, "seed {seed}");
+            assert_eq!(simulation.event_counts.initiation_contact_km, 0.0);
+            assert_eq!(plates_of_continent(&simulation, DVec3::X).len(), 1);
+            assert_eq!(plates_of_continent(&simulation, DVec3::Y).len(), 1);
+            assert!((simulation.total_mass() / mass - 1.0).abs() < 1e-12);
+            // Subduction is seeded only near the initiation, not along every coast.
+            let segments = simulation.polarities.pair_segments(0, 1);
+            assert!(!segments.is_empty());
+            assert!(segments.iter().all(|s| s.overriding == 1));
+            // Both plates are connected.
+            simulation.separate_detached_pieces();
+            assert_eq!(simulation.plates.len(), 2, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn plume_rifts_cut_only_the_nearby_continent() {
+        for seed in 0..8 {
+            let mut simulation = two_continents(TectonicParams::default(), seed);
+            // A plume just inside the +x continent.
+            simulation.mantle.insert_plume(Plume {
+                position: DVec3::new(0.8, 0.0, 0.6).normalize(),
+                age: 50.0,
+                lifetime: 200.0,
+                peak_flux: 5e-3,
+                has_rifted: false,
+            });
+            simulation.rift_above_plumes();
+            assert_eq!(simulation.plates.len(), 2, "seed {seed}");
+            assert_eq!(plates_of_continent(&simulation, DVec3::X).len(), 2);
+            assert_eq!(plates_of_continent(&simulation, DVec3::Y).len(), 1);
+            assert!(simulation.event_counts.rift_contact_km > 0.0);
+        }
     }
 
     #[test]
