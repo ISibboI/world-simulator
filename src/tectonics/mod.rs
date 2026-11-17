@@ -287,6 +287,7 @@ impl TectonicParams {
             "events.terrane_accretion_time" => &mut self.events.terrane_accretion_time,
             "events.terrane_max_area" => &mut self.events.terrane_max_area,
             "events.terrane_size_ratio" => &mut self.events.terrane_size_ratio,
+            "events.terrane_cooldown" => &mut self.events.terrane_cooldown,
             "events.min_breakup_area" => &mut self.events.min_breakup_area,
             "mantle.plume_interval" => &mut self.mantle.plume_interval,
             _ => anyhow::bail!("unknown or untunable tectonic parameter {name}"),

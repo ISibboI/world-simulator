@@ -67,6 +67,8 @@ pub struct PlateEventParams {
     /// A terrane accretes only if it is at most this fraction of the largest colliding
     /// component of the other plate that it touches.
     pub terrane_size_ratio: f64,
+    /// A pair accretes terranes at most once per this many Myr (no back-and-forth).
+    pub terrane_cooldown: f64,
     /// Plates smaller than this fraction of the surface are captured by a neighbour.
     pub min_plate_area_before_capture: f64,
     /// Detached pieces of plates covering at least this fraction of the surface become plates
@@ -94,6 +96,7 @@ impl Default for PlateEventParams {
             terrane_accretion_time: 12.0,
             terrane_max_area: 0.01,
             terrane_size_ratio: 0.5,
+            terrane_cooldown: 30.0,
             min_plate_area_before_capture: 0.003,
             min_breakup_area: 0.01,
         }
@@ -930,34 +933,55 @@ impl Simulation {
     fn suture_colliding_plates(&mut self, dt: f64, boundaries: &[BoundaryCell]) {
         let min_convergence =
             self.params.min_trench_convergence / (self.params.planet_radius * 100.0 / 1e6);
-        // Per pair: colliding cells and trench cells.
-        let mut contacts: HashMap<(u32, u32), (usize, usize)> = HashMap::default();
-        for boundary in boundaries {
+        // Per pair: colliding cells (not clearly diverging), converging colliding cells and
+        // trench cells; collision motion along the smoothed boundary normals (like dynamics).
+        let mut contacts: HashMap<(u32, u32), (usize, usize, usize)> = HashMap::default();
+        // Colliding (cell, other plate) contacts that converge.
+        let mut converging: HashSet<(u32, u32)> = HashSet::default();
+        let normals = self.smoothed_normals(boundaries);
+        for (boundary, &normal) in boundaries.iter().zip(&normals) {
             let pair = pair_key(boundary.plate, boundary.other);
-            if boundary.kind == BoundaryKind::Collision && boundary.convergence > -min_convergence {
-                contacts.entry(pair).or_default().0 += 1;
+            if boundary.kind == BoundaryKind::Collision {
+                let r = self.mesh.vertex(boundary.cell);
+                let convergence = (self.plates[boundary.plate as usize].angular_velocity
+                    - self.plates[boundary.other as usize].angular_velocity)
+                    .cross(r)
+                    .dot(normal);
+                let entry = contacts.entry(pair).or_default();
+                if convergence > -min_convergence {
+                    entry.0 += 1;
+                }
+                if convergence > min_convergence {
+                    entry.1 += 1;
+                    converging.insert((boundary.cell, boundary.other));
+                }
             } else if matches!(boundary.kind, BoundaryKind::Trench { .. }) {
-                contacts.entry(pair).or_default().1 += 1;
+                contacts.entry(pair).or_default().2 += 1;
             }
         }
         let min_cells = self.params.events.suture_min_cells;
+        // Pairs on their way to a suture: no terrane accretion.
+        let mut suturing: HashSet<(u32, u32)> = HashSet::default();
         for (pair, state) in &mut self.polarities.pairs {
             // The continents collide, and collision dominates the convergent boundary: plates
             // that still subduct along long trenches keep moving independently.
-            let (colliding, trenches) = contacts.get(pair).copied().unwrap_or_default();
+            let (colliding, converging_cells, trenches) =
+                contacts.get(pair).copied().unwrap_or_default();
             if colliding >= min_cells
                 && colliding as f64 >= self.params.events.suture_trench_ratio * trenches as f64
             {
                 state.collision_time += dt;
+                suturing.insert(*pair);
             } else {
                 state.collision_time = (state.collision_time - dt).max(0.0);
             }
-            if colliding >= min_cells {
+            if converging_cells >= min_cells {
                 state.terrane_time += dt;
             } else {
                 state.terrane_time = (state.terrane_time - dt).max(0.0);
             }
         }
+        let sutures = self.event_counts.sutures;
 
         let suture_time = self.params.events.suture_time;
         // Merge one pair at a time, since merging renumbers plates.
@@ -980,38 +1004,53 @@ impl Simulation {
             self.event_counts.sutures += 1;
         }
 
-        // Pairs that collide but cannot suture end their collision locally.
-        let accretion_time = self.params.events.terrane_accretion_time;
+        // Pairs that converge but cannot suture end their collision locally (not in a step with
+        // sutures, which renumber plates; at most once per `terrane_cooldown`).
+        if self.event_counts.sutures != sutures {
+            return;
+        }
+        let params = &self.params.events;
+        let (accretion_time, cooldown) = (params.terrane_accretion_time, params.terrane_cooldown);
+        let time = self.time;
         let mut ready: Vec<(u32, u32)> = self
             .polarities
             .pairs
             .iter()
-            .filter(|(_, state)| state.terrane_time >= accretion_time)
+            .filter(|(pair, state)| {
+                state.terrane_time >= accretion_time
+                    && !suturing.contains(*pair)
+                    && state
+                        .last_accretion
+                        .is_none_or(|last| time - last >= cooldown)
+            })
             .map(|(&pair, _)| pair)
             .collect();
         ready.sort_unstable();
         for (a, b) in ready {
-            let accreted = self.accrete_terranes(a, b) + self.accrete_terranes(b, a);
+            let accreted =
+                self.accrete_terranes(a, b, &converging) + self.accrete_terranes(b, a, &converging);
             if let Some(state) = self.polarities.pairs.get_mut(&(a, b)) {
                 state.terrane_time = 0.0;
                 if accreted > 0 {
-                    state.collision_time = 0.0;
+                    state.last_accretion = Some(time);
                 }
             }
         }
     }
 
     /// Terrane accretion: the colliding components of `from` (connected crust that resists
-    /// subduction touching such crust of `to`) that are at most
+    /// subduction touching such crust of `to`, converging at most of their contact cells, see
+    /// `converging`) that are at most
     /// [`PlateEventParams::terrane_size_ratio`] of the largest component of `to` they touch
     /// and at most [`PlateEventParams::terrane_max_area`] of the surface move to `to` (arcs on
     /// an upper plate onto the lower plate's continent, after which the subduction polarity
     /// flips; terranes on a lower plate onto the upper plate, after which the trench steps back
-    /// behind them by inheriting the polarity). Pieces of `from` that would be cut off from its
-    /// largest part move along if small, else nothing moves. The slabs of the pair within a
+    /// behind them by inheriting the polarity). Pieces of `from` that the removal cuts off from
+    /// its largest part move along if small, else nothing moves (fragments that were already
+    /// detached stay). The slabs of the pair within a
     /// segment radius of the terrane break off. Returns the number of cells moved. Plate
     /// indices stay the same.
-    fn accrete_terranes(&mut self, from: u32, to: u32) -> usize {
+    fn accrete_terranes(&mut self, from: u32, to: u32, converging: &HashSet<(u32, u32)>) -> usize {
         let cell_count = self.mesh.len();
         let max_cells = (self.params.events.terrane_max_area * cell_count as f64) as usize;
         let ratio = self.params.events.terrane_size_ratio;
@@ -1049,22 +1088,33 @@ impl Simulation {
             }
             sizes.push(size);
         }
-        // Per component of `from`: the largest component of `to` it touches.
+        // Per component of `from`: the largest component of `to` it touches, and its contact
+        // cells (all, converging).
         let mut opposing = vec![0usize; sizes.len()];
+        let mut contact = vec![(0usize, 0usize); sizes.len()];
         for cell in 0..cell_count {
             if !resists[cell] || self.owners[cell].plate != from {
                 continue;
             }
+            let id = component[cell] as usize;
+            let mut touches = false;
             for &neighbor in self.mesh.neighbors(cell as u32) {
                 let neighbor = neighbor as usize;
                 if resists[neighbor] && self.owners[neighbor].plate == to {
-                    let id = component[cell] as usize;
                     opposing[id] = opposing[id].max(sizes[component[neighbor] as usize]);
+                    touches = true;
+                }
+            }
+            if touches {
+                contact[id].0 += 1;
+                if converging.contains(&(cell as u32, to)) {
+                    contact[id].1 += 1;
                 }
             }
         }
         let moving_component = |id: usize| {
             opposing[id] > 0
+                && 2 * contact[id].1 > contact[id].0
                 && sizes[id] <= max_cells
                 && sizes[id] as f64 <= ratio * opposing[id] as f64
         };
@@ -1075,8 +1125,27 @@ impl Simulation {
         if moved == 0 {
             return 0;
         }
-        // The rest of `from` must stay connected: pieces cut off from its largest part move
-        // along if small.
+        // The rest of `from` must stay connected: pieces the removal cuts off from its largest
+        // part move along if small. Connected parts of `from` before the removal:
+        let mut part = vec![u32::MAX; cell_count];
+        let mut parts = 0u32;
+        for start in 0..cell_count {
+            if self.owners[start].plate != from || part[start] != u32::MAX {
+                continue;
+            }
+            part[start] = parts;
+            stack.push(start as u32);
+            while let Some(cell) = stack.pop() {
+                for &neighbor in self.mesh.neighbors(cell) {
+                    let neighbor = neighbor as usize;
+                    if self.owners[neighbor].plate == from && part[neighbor] == u32::MAX {
+                        part[neighbor] = parts;
+                        stack.push(neighbor as u32);
+                    }
+                }
+            }
+            parts += 1;
+        }
         let mut piece = vec![u32::MAX; cell_count];
         let mut pieces: Vec<Vec<u32>> = Vec::new();
         for start in 0..cell_count {
@@ -1106,20 +1175,17 @@ impl Simulation {
             // The whole plate would move: that is a suture, not a terrane.
             return 0;
         };
-        let cut_off: usize = pieces
-            .iter()
-            .enumerate()
-            .filter(|&(id, _)| id != largest)
-            .map(|(_, cells)| cells.len())
-            .sum();
+        let main_part = part[pieces[largest][0] as usize];
+        let cut_off_pieces: Vec<usize> = (0..pieces.len())
+            .filter(|&id| id != largest && part[pieces[id][0] as usize] == main_part)
+            .collect();
+        let cut_off: usize = cut_off_pieces.iter().map(|&id| pieces[id].len()).sum();
         if cut_off > max_cells {
             return 0;
         }
-        for (id, cells) in pieces.iter().enumerate() {
-            if id != largest {
-                for &cell in cells {
-                    moving[cell as usize] = true;
-                }
+        for &id in &cut_off_pieces {
+            for &cell in &pieces[id] {
+                moving[cell as usize] = true;
             }
         }
         moved += cut_off;
@@ -1501,10 +1567,16 @@ mod tests {
 
     /// Two plates split at the equator: a large continent on plate 0 (x > 0.5, north), a small
     /// microcontinent on plate 1 just south of it, ocean elsewhere; plate 0 overrides plate 1
-    /// along the whole boundary with a 200 km slab. Sutures are blocked.
-    fn microcontinent_collision(terrane_max_area: f64) -> (Simulation, Vec<u32>) {
+    /// along the whole boundary with a 200 km slab; plate 1 moves north (towards plate 0 at the
+    /// microcontinent) with `speed` rad/Myr (negative: away). Sutures are blocked unless
+    /// `suture_trench_ratio` is 0.
+    fn microcontinent_collision(
+        terrane_max_area: f64,
+        speed: f64,
+        suture_trench_ratio: f64,
+    ) -> (Simulation, Vec<u32>) {
         let mut params = TectonicParams::default();
-        params.events.suture_trench_ratio = 1e9;
+        params.events.suture_trench_ratio = suture_trench_ratio;
         params.events.terrane_accretion_time = 3.0;
         params.events.terrane_max_area = terrane_max_area;
         let mut simulation = Simulation::new(SphereMesh::icosphere(5), 1, params, 4);
@@ -1530,6 +1602,7 @@ mod tests {
         simulation.split_plate_cells(0, &south).unwrap();
         simulation.polarities.clear();
         simulation.seed_subduction((0, 1), 0, 200e3);
+        simulation.plates[1].angular_velocity = -DVec3::Y * speed;
         let terrane: Vec<u32> = (0..simulation.mesh.len() as u32)
             .filter(|&cell| micro(simulation.mesh.vertex(cell)))
             .collect();
@@ -1538,7 +1611,7 @@ mod tests {
 
     #[test]
     fn colliding_microcontinents_accrete_to_the_larger_continent() {
-        let (mut simulation, terrane) = microcontinent_collision(0.05);
+        let (mut simulation, terrane) = microcontinent_collision(0.05, 0.004, 1e9);
         assert!(
             terrane
                 .iter()
@@ -1576,8 +1649,37 @@ mod tests {
     }
 
     #[test]
+    fn diverging_terranes_do_not_accrete() {
+        let (mut simulation, terrane) = microcontinent_collision(0.05, -0.004, 1e9);
+        for _ in 0..20 {
+            let boundaries = simulation.boundary_cells();
+            simulation.suture_colliding_plates(1.0, &boundaries);
+        }
+        assert_eq!(simulation.event_counts.terrane_accretions, 0);
+        assert!(
+            terrane
+                .iter()
+                .all(|&cell| simulation.owners[cell as usize].plate == 1)
+        );
+    }
+
+    #[test]
+    fn suturing_pairs_do_not_accrete_terranes() {
+        // With the trench-ratio rule off, the pair sutures after `suture_time` (default 30 Myr)
+        // instead of accreting after the terrane accretion time.
+        let (mut simulation, _) = microcontinent_collision(0.05, 0.004, 0.0);
+        for _ in 0..40 {
+            let boundaries = simulation.boundary_cells();
+            simulation.suture_colliding_plates(1.0, &boundaries);
+        }
+        assert_eq!(simulation.event_counts.terrane_accretions, 0);
+        assert_eq!(simulation.event_counts.sutures, 1);
+        assert_eq!(simulation.plates.len(), 1);
+    }
+
+    #[test]
     fn terranes_above_the_size_limit_do_not_accrete() {
-        let (mut simulation, terrane) = microcontinent_collision(0.001);
+        let (mut simulation, terrane) = microcontinent_collision(0.001, 0.004, 1e9);
         for _ in 0..5 {
             let boundaries = simulation.boundary_cells();
             simulation.suture_colliding_plates(1.0, &boundaries);

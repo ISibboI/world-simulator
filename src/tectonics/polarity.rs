@@ -83,6 +83,8 @@ pub(super) struct PairState {
     /// How long, in Myr, the pair has had colliding contacts, whatever its trenches (see
     /// [`PlateEventParams::terrane_accretion_time`]).
     pub(super) terrane_time: f64,
+    /// Time (Myr) of the pair's last terrane accretion, if any.
+    pub(super) last_accretion: Option<f64>,
     pub(super) segments: Vec<Segment>,
 }
 
@@ -493,6 +495,7 @@ impl Polarities {
                     last_contact: pair.last_contact,
                     collision_time: 0.0,
                     terrane_time: 0.0,
+                    last_accretion: None,
                     segments: moving,
                 },
             ));
@@ -538,6 +541,10 @@ impl Polarities {
             target.last_contact = target.last_contact.max(pair.last_contact);
             target.collision_time = target.collision_time.max(pair.collision_time);
             target.terrane_time = target.terrane_time.max(pair.terrane_time);
+            target.last_accretion = match (target.last_accretion, pair.last_accretion) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
             target.segments.append(&mut pair.segments);
         }
     }
