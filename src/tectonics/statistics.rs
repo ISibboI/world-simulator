@@ -90,6 +90,8 @@ pub struct Statistics {
     pub continental_origin_fraction: f64,
     /// Mass (Gt) carried into continental collisions by convergence so far.
     pub collision_inflow: f64,
+    /// Sediment turned into crust by metamorphism so far, in Gt.
+    pub metamorphosed: f64,
     /// Thickness percentiles (10/50/90%, km) of the visible crust samples of continental origin,
     /// and the fraction of them thicker than 50 km.
     pub continental_thickness: [f64; 3],
@@ -598,6 +600,7 @@ impl Simulation {
             freeboard: freeboard_sum / origin_cells.max(1) as f64,
             continental_origin_fraction: origin_cells as f64 / cell_count as f64,
             collision_inflow: self.collision_inflow,
+            metamorphosed: self.metamorphosed,
             continental_thickness,
             thick_continental_fraction,
             median_relative_speed: motion.median_relative_speed,

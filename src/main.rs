@@ -415,7 +415,8 @@ fn snapshot(
     );
     info!(
         "    crust mass (Gt): continental {:.3e}, transitional {:.3e}, oceanic {:.3e}, \
-         sediment {:.3e}, felsic {:.3e}, hidden {:.3e} | sediment overfill {:.0} km·cells",
+         sediment {:.3e}, felsic {:.3e}, hidden {:.3e} | sediment overfill {:.0} km·cells, \
+         metamorphosed {:.3e}",
         statistics.continental_mass,
         statistics.transitional_mass,
         statistics.oceanic_mass,
@@ -423,6 +424,7 @@ fn snapshot(
         statistics.felsic_mass,
         statistics.hidden_mass,
         planet_statistics.sediment_overfill / 1000.0,
+        statistics.metamorphosed,
     );
     info!(
         "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
@@ -541,6 +543,10 @@ fn log_material_budget(
         ("flow", rate(budget.flow, previous_budget.flow)),
         ("events", rate(budget.events, previous_budget.events)),
         ("surface", rate(budget.surface, previous_budget.surface)),
+        (
+            "metamorphism",
+            rate(budget.metamorphism, previous_budget.metamorphism),
+        ),
     ];
     let total = phases
         .iter()

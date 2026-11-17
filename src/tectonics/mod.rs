@@ -55,7 +55,7 @@ pub use mantle::{MantleParams, Plume};
 pub use matching::{MatchingParams, MatchingStatistics};
 pub use statistics::*;
 
-use boundaries::{ResolvedBoundaries, pair_key};
+use boundaries::{METASEDIMENT_DENSITY, ResolvedBoundaries, pair_key};
 use generation::*;
 
 /// Hash map with the hasher used throughout the tectonics (keys are small integers).
@@ -102,6 +102,10 @@ pub struct TectonicParams {
     /// Thickness of crust (and sediment) removed from the overriding plate at the trench per
     /// subducted crust sample (subduction erosion), as a thickness over one cell.
     pub subduction_erosion: f64,
+    /// Sediment buried deeper than this (bulk thickness, m) on crust of continental origin
+    /// metamorphoses into felsic crust (greenschist facies, ~250–300 °C at 10–12 km under
+    /// sediment-blanketed margins).
+    pub metamorphic_depth: f64,
     /// Relative amounts of new arc crust at distances of 0, 1, 2, … cells from the trench.
     pub arc_profile: Vec<f64>,
     /// Relative amounts of stacked crust at distances of 0, 1, 2, … cells from a continental
@@ -213,6 +217,7 @@ impl Default for TectonicParams {
             subduction_channel_thickness: 1000.0,
             arc_crust_per_subduction: 500.0,
             subduction_erosion: 300.0,
+            metamorphic_depth: 11_000.0,
             arc_profile: vec![0.25, 1.0, 1.0, 0.25],
             collision_profile: vec![1.0, 0.75, 0.5, 0.25],
             max_crust_thickness: 75_000.0,
@@ -273,6 +278,7 @@ impl TectonicParams {
             "ridge_push" => &mut self.ridge_push,
             "arc_crust_per_subduction" => &mut self.arc_crust_per_subduction,
             "subduction_erosion" => &mut self.subduction_erosion,
+            "metamorphic_depth" => &mut self.metamorphic_depth,
             "subduction_channel_thickness" => &mut self.subduction_channel_thickness,
             "events.initiation_age" => &mut self.events.initiation_age,
             "events.initiation_full_age" => &mut self.events.initiation_full_age,
@@ -351,6 +357,8 @@ pub struct MaterialBudget {
     pub events: (f64, f64),
     /// Surface processes (erosion, deposition).
     pub surface: (f64, f64),
+    /// Metamorphism of deeply buried sediment.
+    pub metamorphism: (f64, f64),
 }
 
 /// Ratio of the length of a straight boundary measured as boundary cells × mean edge length to
@@ -408,6 +416,8 @@ pub struct Simulation {
     /// Mass (Gt) of crust carried into continental collisions by the plates' convergence so
     /// far (kinematic expectation for collision stacking).
     collision_inflow: f64,
+    /// Sediment turned into crust by metamorphism so far, in Gt.
+    metamorphosed: f64,
     /// Changes of the felsic crust and sediment masses so far (areal mass summed over cells, see
     /// [`Simulation::felsic_and_sediment`]) per phase of the step.
     material_budget: MaterialBudget,
@@ -581,6 +591,7 @@ impl Simulation {
             opened_area: 0.0,
             continental_opened_area: 0.0,
             collision_inflow: 0.0,
+            metamorphosed: 0.0,
             material_budget: MaterialBudget::default(),
             sea_level: 0.0,
             sea_level_change: (0.0, 0.0),
@@ -813,8 +824,7 @@ impl Simulation {
             .map(|cell| {
                 let crust = self.surface_crust(cell);
                 crust.dry_elevation(self.time)
-                    - crust.sediment
-                        * crate::isostasy::dry_response(crate::isostasy::SEDIMENT_DENSITY)
+                    - crate::isostasy::sediment_dry_elevation(crust.sediment)
             })
             .collect();
         let cell_area =
@@ -841,7 +851,7 @@ impl Simulation {
             4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
         let pores: Vec<f64> = sediment
             .iter()
-            .map(|&s| s * crate::isostasy::SEDIMENT_POROSITY)
+            .map(|&s| crate::isostasy::sediment_pores(s))
             .collect();
         crate::isostasy::sea_level_for_volume_with_pores(
             &dry,
@@ -877,6 +887,43 @@ impl Simulation {
         (0..self.mesh.len() as u32)
             .map(|cell| self.surface_crust(cell).sediment)
             .collect()
+    }
+
+    /// Sediment buried deeper than [`TectonicParams::metamorphic_depth`] on crust of continental
+    /// origin becomes felsic crust (metasediment) at the same mass, as far as the crust stays
+    /// below [`TectonicParams::max_crust_thickness`]. Its pores close, so the column subsides a
+    /// little. Sediment on other crust stays until it is subducted or accreted.
+    fn metamorphose_sediment(&mut self) {
+        let before = self.felsic_and_sediment();
+        let keep = crate::isostasy::sediment_for_bulk_thickness(self.params.metamorphic_depth);
+        let max_thickness = self.params.max_crust_thickness;
+        let mut converted = 0.0;
+        for plate in &mut self.plates {
+            for crust in plate.crust.iter_mut().flatten() {
+                if crust.sediment <= keep || !crust.is_continental_origin() {
+                    continue;
+                }
+                let mass = ((crust.sediment - keep) * SEDIMENT_ROCK_DENSITY)
+                    .min((max_thickness - crust.thickness).max(0.0) * METASEDIMENT_DENSITY);
+                if mass <= 0.0 {
+                    continue;
+                }
+                crust.sediment -= mass / SEDIMENT_ROCK_DENSITY;
+                crust.add_crust(
+                    mass / METASEDIMENT_DENSITY,
+                    METASEDIMENT_DENSITY,
+                    1.0,
+                    max_thickness,
+                );
+                converted += mass;
+            }
+        }
+        let cell_area =
+            4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
+        self.metamorphosed += converted * cell_area / 1e12;
+        let after = self.felsic_and_sediment();
+        self.material_budget.metamorphism.0 += after.0 - before.0;
+        self.material_budget.metamorphism.1 += after.1 - before.1;
     }
 
     /// Applies per-cell changes of crust thickness and sediment thickness to the crust at the
@@ -919,6 +966,7 @@ impl Simulation {
         let after = self.felsic_and_sediment();
         self.material_budget.surface.0 += after.0 - before.0;
         self.material_budget.surface.1 += after.1 - before.1;
+        self.metamorphose_sediment();
 
         // Sediment displaces water and eroded land no longer holds it back.
         let sea_level = self.solve_sea_level();
@@ -937,6 +985,42 @@ mod tests {
     }
 
     #[test]
+    fn deeply_buried_sediment_on_continents_metamorphoses() {
+        let mut simulation = simulation(2);
+        let deep = 30_000.0;
+        let (mut continental, mut oceanic) = (None, None);
+        for (p, plate) in simulation.plates.iter_mut().enumerate() {
+            for (local, crust) in plate.crust.iter_mut().enumerate() {
+                let Some(crust) = crust else { continue };
+                if crust.is_continental_origin() && continental.is_none() {
+                    crust.sediment = deep;
+                    continental = Some((p, local));
+                } else if crust.is_oceanic() && oceanic.is_none() {
+                    crust.sediment = deep;
+                    oceanic = Some((p, local));
+                }
+            }
+        }
+        let (continental, oceanic) = (continental.unwrap(), oceanic.unwrap());
+        let crust = |s: &Simulation, (p, l): (usize, usize)| s.plates[p].crust[l].unwrap();
+        let before = crust(&simulation, continental);
+        let total = simulation.total_mass();
+        simulation.metamorphose_sediment();
+        let after = crust(&simulation, continental);
+        // The sediment below the metamorphic depth became felsic crust at the same mass.
+        let keep =
+            crate::isostasy::sediment_for_bulk_thickness(simulation.params.metamorphic_depth);
+        assert!((after.sediment - keep).abs() < 1e-6, "{}", after.sediment);
+        assert!(after.thickness > before.thickness);
+        assert!(after.felsic_mass() > before.felsic_mass());
+        assert!((after.mass() - before.mass()).abs() < 1e-6 * before.mass());
+        assert!((simulation.total_mass() - total).abs() < 1e-9 * total);
+        assert!(simulation.metamorphosed > 0.0);
+        // Oceanic crust keeps its sediment.
+        assert_eq!(crust(&simulation, oceanic).sediment, deep);
+    }
+
+    #[test]
     fn the_ocean_holds_its_volume() {
         let mut simulation = simulation(1);
         let cell_area = 4.0 * std::f64::consts::PI * simulation.params.planet_radius.powi(2)
@@ -945,14 +1029,27 @@ mod tests {
             // Open water plus the pore water of submerged sediment.
             let pores: f64 = (0..simulation.mesh.len() as u32)
                 .filter(|&cell| simulation.surface_elevation(cell) < 0.0)
-                .map(|cell| simulation.surface_crust(cell).sediment)
+                .map(|cell| {
+                    crate::isostasy::sediment_pores(simulation.surface_crust(cell).sediment)
+                })
                 .sum::<f64>()
-                * crate::isostasy::SEDIMENT_POROSITY
                 * cell_area;
             let volume =
                 crate::isostasy::ocean_volume(&simulation.surface_elevations(), cell_area) + pores;
             let target = simulation.params.ocean_volume;
-            assert!((volume / target - 1.0).abs() < 1e-9, "{volume} vs {target}");
+            // When the volume falls into the pores of a cell right at sea level, the sea level
+            // stays at that cell (the pores fill at once): allow the pores of shoreline cells.
+            let shoreline_pores = (0..simulation.mesh.len() as u32)
+                .filter(|&cell| simulation.surface_elevation(cell).abs() < 1e-6)
+                .map(|cell| {
+                    crate::isostasy::sediment_pores(simulation.surface_crust(cell).sediment)
+                })
+                .fold(0.0, f64::max)
+                * cell_area;
+            assert!(
+                (volume - target).abs() < 1e-9 * target + shoreline_pores,
+                "{volume} vs {target}"
+            );
         };
         check(&simulation);
         for _ in 0..5 {

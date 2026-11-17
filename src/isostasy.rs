@@ -12,15 +12,23 @@
 pub const MANTLE_DENSITY: f64 = 3300.0;
 /// Density of sea water in kg/m³.
 pub const WATER_DENSITY: f64 = 1030.0;
-/// Bulk density of (compacted, water-saturated) sediment in kg/m³, used for isostasy.
+/// Bulk density of water-saturated sediment with [`SEDIMENT_POROSITY`] in kg/m³.
+#[cfg(test)]
 pub const SEDIMENT_DENSITY: f64 = 2300.0;
-/// Rock (grain) mass per volume of sediment in kg/m³: 25% pores in 2700 kg/m³ grains. With
-/// water in the pores this gives the bulk density above. Mass conservation uses this density.
+/// Reference rock mass per volume of sediment in kg/m³: 24% pores in 2700 kg/m³ grains.
+/// Sediment amounts are stored as rock-equivalent thicknesses at this density (mass / 2050), so
+/// mass conservation uses it; the actual (bulk) thickness follows from compaction (see
+/// [`sediment_bulk_thickness`]).
 pub const SEDIMENT_ROCK_DENSITY: f64 = 2050.0;
 /// Density of sediment grains in kg/m³.
 pub const SEDIMENT_GRAIN_DENSITY: f64 = 2700.0;
-/// Pore fraction of sediment (filled with water below sea level).
+/// Pore fraction of the reference sediment (see [`SEDIMENT_ROCK_DENSITY`]).
 pub const SEDIMENT_POROSITY: f64 = 1.0 - SEDIMENT_ROCK_DENSITY / SEDIMENT_GRAIN_DENSITY;
+/// Porosity of sediment at the surface and its compaction length (m) after Athy's law
+/// `φ(z) = φ0 exp(−z/λ)` for a shale–sand mix (Sclater & Christie, 1980: φ0 0.49–0.63,
+/// λ 1.4–3.7 km).
+pub const SURFACE_POROSITY: f64 = 0.6;
+pub const COMPACTION_LENGTH: f64 = 2000.0;
 /// Density of oceanic crust (basalt, gabbro) in kg/m³.
 pub const OCEANIC_DENSITY: f64 = 2900.0;
 /// Mean density of continental crust in kg/m³ (~2830 after Christensen & Mooney, 1995).
@@ -61,8 +69,138 @@ pub fn add_layer(elevation: f64, thickness: f64, density: f64) -> f64 {
 }
 
 /// The thickness of material of `density` needed to raise a surface from `from` to `to`.
+#[cfg(test)]
 pub fn layer_for_rise(from: f64, to: f64, density: f64) -> f64 {
     (to_dry(to) - to_dry(from)) / dry_response(density)
+}
+
+/// Thickness of the grains in a sediment column of rock-equivalent thickness `sediment`.
+fn sediment_grains(sediment: f64) -> f64 {
+    sediment.max(0.0) * (1.0 - SEDIMENT_POROSITY)
+}
+
+/// Grain thickness of a compacted column of bulk thickness `bulk` (Athy's law integrated).
+fn grains_in_bulk(bulk: f64) -> f64 {
+    bulk - SURFACE_POROSITY * COMPACTION_LENGTH * (1.0 - (-bulk / COMPACTION_LENGTH).exp())
+}
+
+/// Exact bulk thickness of a compacted column with `grains` m of grains (Newton).
+fn bulk_for_grains(grains: f64) -> f64 {
+    if grains <= 0.0 {
+        return 0.0;
+    }
+    // Newton from an upper bound; the grain thickness is convex in the bulk thickness, so the
+    // iteration decreases monotonically.
+    let mut bulk = grains + SURFACE_POROSITY * COMPACTION_LENGTH;
+    for _ in 0..100 {
+        let slope = 1.0 - SURFACE_POROSITY * (-bulk / COMPACTION_LENGTH).exp();
+        let step = (grains_in_bulk(bulk) - grains) / slope;
+        bulk -= step;
+        if step < 1e-12 * (1.0 + bulk) {
+            break;
+        }
+    }
+    bulk
+}
+
+/// Dry elevation (see [`to_dry`]) contributed by a water-saturated sediment column of bulk
+/// thickness `bulk`.
+fn sediment_dry_elevation_of_bulk(bulk: f64) -> f64 {
+    let grains = grains_in_bulk(bulk);
+    bulk - (grains * SEDIMENT_GRAIN_DENSITY + (bulk - grains) * WATER_DENSITY) / MANTLE_DENSITY
+}
+
+/// Rock-equivalent sediment thickness between entries of [`compaction_table`] (m).
+const TABLE_STEP: f64 = 5.0;
+/// Number of entries of [`compaction_table`]; beyond it, columns are extrapolated linearly
+/// (the porosity at 60 km is negligible).
+const TABLE_LENGTH: usize = 12_001;
+
+/// Bulk thickness and dry elevation of compacted sediment columns at rock-equivalent
+/// thicknesses `0, TABLE_STEP, 2 TABLE_STEP, …`. All compaction functions interpolate this
+/// table linearly, so that they are fast and exact inverses of each other.
+fn compaction_table() -> &'static [(f64, f64)] {
+    static TABLE: std::sync::OnceLock<Vec<(f64, f64)>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        (0..TABLE_LENGTH)
+            .map(|i| {
+                let bulk = bulk_for_grains(sediment_grains(i as f64 * TABLE_STEP));
+                (bulk, sediment_dry_elevation_of_bulk(bulk))
+            })
+            .collect()
+    })
+}
+
+/// Linear interpolation of column `field` of [`compaction_table`] at rock-equivalent thickness
+/// `sediment`.
+fn interpolate(sediment: f64, field: fn(&(f64, f64)) -> f64) -> f64 {
+    let table = compaction_table();
+    let position = (sediment.max(0.0) / TABLE_STEP).min((TABLE_LENGTH - 1) as f64);
+    let index = (position as usize).min(TABLE_LENGTH - 2);
+    let (a, b) = (field(&table[index]), field(&table[index + 1]));
+    let fraction = sediment.max(0.0) / TABLE_STEP - index as f64;
+    a + (b - a) * fraction
+}
+
+/// The rock-equivalent thickness at which column `field` of [`compaction_table`] (increasing)
+/// reaches `value`: the inverse of [`interpolate`].
+fn invert(value: f64, field: fn(&(f64, f64)) -> f64) -> f64 {
+    let table = compaction_table();
+    if value <= 0.0 {
+        return 0.0;
+    }
+    let last = TABLE_LENGTH - 2;
+    let index = if value >= field(&table[last]) {
+        last
+    } else {
+        table.partition_point(|entry| field(entry) <= value) - 1
+    };
+    let (a, b) = (field(&table[index]), field(&table[index + 1]));
+    (index as f64 + (value - a) / (b - a)) * TABLE_STEP
+}
+
+/// Bulk thickness (m) of a compacted sediment column of rock-equivalent thickness `sediment`
+/// (see [`SEDIMENT_ROCK_DENSITY`]): pores make up [`SURFACE_POROSITY`] at its top and close
+/// with depth. Porosity is a function of the present burial, so removing sediment from the top
+/// decompacts the rest (no memory of the maximum burial).
+pub fn sediment_bulk_thickness(sediment: f64) -> f64 {
+    interpolate(sediment, |entry| entry.0)
+}
+
+/// Rock-equivalent thickness of a compacted sediment column of bulk thickness `bulk`: the
+/// inverse of [`sediment_bulk_thickness`].
+pub fn sediment_for_bulk_thickness(bulk: f64) -> f64 {
+    invert(bulk, |entry| entry.0)
+}
+
+/// Pore volume per area (m) of a sediment column of rock-equivalent thickness `sediment`.
+pub fn sediment_pores(sediment: f64) -> f64 {
+    sediment_bulk_thickness(sediment) - sediment_grains(sediment)
+}
+
+/// Dry elevation (see [`to_dry`]) contributed by a water-saturated, compacted sediment column
+/// of rock-equivalent thickness `sediment`.
+pub fn sediment_dry_elevation(sediment: f64) -> f64 {
+    interpolate(sediment, |entry| entry.1)
+}
+
+/// The rock-equivalent sediment thickness whose column contributes the dry elevation `dry`:
+/// the inverse of [`sediment_dry_elevation`].
+pub fn sediment_for_dry_elevation(dry: f64) -> f64 {
+    invert(dry, |entry| entry.1)
+}
+
+/// The surface elevation after changing the rock-equivalent sediment thickness of a column
+/// whose surface is at `elevation` from `from` to `to`.
+pub fn change_sediment(elevation: f64, from: f64, to: f64) -> f64 {
+    to_surface(to_dry(elevation) + sediment_dry_elevation(to) - sediment_dry_elevation(from))
+}
+
+/// The rock-equivalent sediment thickness to add to a column with `sediment` whose surface is
+/// at `from` to raise it to `to` (negative to lower it).
+pub fn sediment_for_rise(from: f64, to: f64, sediment: f64) -> f64 {
+    sediment_for_dry_elevation(sediment_dry_elevation(sediment) + to_dry(to) - to_dry(from))
+        - sediment
 }
 
 /// [`sea_level_for_volume_with_pores`] without pores.
@@ -210,5 +348,51 @@ mod tests {
         // thickness.
         let rise = add_layer(-4000.0, 1000.0, SEDIMENT_DENSITY) + 4000.0;
         assert!((rise - 440.5).abs() < 1.0, "{rise}");
+    }
+
+    #[test]
+    fn compaction_is_consistent() {
+        for sediment in [0.0, 10.0, 1000.0, 5000.0, 20_000.0, 70_000.0] {
+            let bulk = sediment_bulk_thickness(sediment);
+            assert!((sediment_for_bulk_thickness(bulk) - sediment).abs() < 1e-6);
+            let dry = sediment_dry_elevation(sediment);
+            assert!((sediment_for_dry_elevation(dry) - sediment).abs() < 1e-6);
+            let pores = sediment_pores(sediment);
+            assert!(pores >= 0.0 && pores <= bulk * SURFACE_POROSITY + 1e-9);
+        }
+        // The table matches the exact columns.
+        for sediment in [3.0, 777.0, 12_345.0] {
+            let exact = bulk_for_grains(sediment_grains(sediment));
+            assert!((sediment_bulk_thickness(sediment) - exact).abs() < 1e-2);
+            let dry = sediment_dry_elevation_of_bulk(exact);
+            assert!((sediment_dry_elevation(sediment) - dry).abs() < 1e-2);
+        }
+        assert!(sediment_bulk_thickness(80_000.0) > sediment_bulk_thickness(60_000.0));
+        // Thin sediment is porous, thick sediment is compacted: the mean porosity of a 1 km
+        // column is near the surface value, that of a 10 km column well below the reference.
+        let porosity = |s: f64| sediment_pores(s) / sediment_bulk_thickness(s);
+        assert!(porosity(10.0) > 0.59);
+        assert!(porosity(15_000.0) < SEDIMENT_POROSITY);
+        // At the reference porosity, the column has the reference bulk density.
+        let reference = sediment_for_bulk_thickness(4000.0);
+        let reference_porosity = porosity(reference);
+        let bulk_density = SEDIMENT_GRAIN_DENSITY * (1.0 - reference_porosity)
+            + WATER_DENSITY * reference_porosity;
+        let response = sediment_dry_elevation(reference) / 4000.0;
+        assert!((response - dry_response(bulk_density)).abs() < 1e-9);
+        // Rising by a given amount takes the sediment the inverse says.
+        for (from, to, sediment) in [
+            (-4000.0, -2000.0, 0.0),
+            (-3000.0, -120.0, 6000.0),
+            (-50.0, 2.0, 100.0),
+        ] {
+            let added = sediment_for_rise(from, to, sediment);
+            assert!(added > 0.0);
+            assert!((change_sediment(from, sediment, sediment + added) - to).abs() < 1e-6);
+        }
+        // A thick column takes much more sediment for the same rise than the porous surface.
+        let thin = sediment_for_rise(-5000.0, -4000.0, 0.0);
+        let thick = sediment_for_rise(-5000.0, -4000.0, 10_000.0);
+        assert!(thick > 1.5 * thin, "{thin} {thick}");
     }
 }

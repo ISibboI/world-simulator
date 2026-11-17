@@ -2,8 +2,8 @@
 //! follows from isostasy and thermal subsidence.
 
 use crate::isostasy::{
-    self, CONTINENTAL_DENSITY, MANTLE_DENSITY, OCEANIC_DENSITY, SEDIMENT_DENSITY,
-    SEDIMENT_ROCK_DENSITY, WATER_LOADING,
+    self, CONTINENTAL_DENSITY, MANTLE_DENSITY, OCEANIC_DENSITY, SEDIMENT_ROCK_DENSITY,
+    WATER_LOADING,
 };
 
 /// Oceanic crust is thinner than this (m); thicker crust is transitional or continental.
@@ -57,7 +57,9 @@ pub struct Crust {
     /// lithosphere older than the simulation). Its age is the time since then (see
     /// [`Crust::age`]); continental lithosphere is old and fully cooled.
     pub birth: f64,
-    /// Thickness of loose sediment on top of the bedrock in metres.
+    /// Sediment on top of the bedrock as a rock-equivalent thickness in metres (mass /
+    /// [`SEDIMENT_ROCK_DENSITY`]); its actual thickness depends on compaction (see
+    /// [`isostasy::sediment_bulk_thickness`]).
     pub sediment: f64,
     /// Mass fraction of the crystalline crust that is felsic material (continental, arc and
     /// metasedimentary crust) rather than mafic (oceanic) crust; a tracer for mass budgets.
@@ -81,7 +83,7 @@ impl Crust {
     /// Surface elevation at time `time` without the water load (see [`crate::isostasy`]).
     pub(super) fn dry_elevation(&self, time: f64) -> f64 {
         self.crustal_buoyancy()
-            + self.sediment * isostasy::dry_response(SEDIMENT_DENSITY)
+            + isostasy::sediment_dry_elevation(self.sediment)
             + self.thermal_weight() * thermal_uplift(self.age(time))
             - COMPENSATION
     }

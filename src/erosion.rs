@@ -23,7 +23,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
-use crate::isostasy::{self, SEDIMENT_DENSITY, SEDIMENT_ROCK_DENSITY};
+use crate::isostasy::{self, SEDIMENT_ROCK_DENSITY};
 use crate::sphere::SphereMesh;
 
 /// Parameters of erosion. Lengths in metres, times in years unless noted otherwise.
@@ -55,6 +55,10 @@ pub struct ErosionParams {
     pub fan_length: f64,
     /// Elevation of delta plains above sea level, built when the margin within reach is full.
     pub delta_top: f64,
+    /// Whether sediment that does not fit anywhere progrades the shelf over the slope and rise
+    /// within reach (filling them to the shelf depth, beyond their caps) before it piles up
+    /// on the shelf.
+    pub prograde: bool,
     /// Maximum number of shelf, slope and rise cells the sediment of one river mouth spreads
     /// over.
     pub max_margin_cells: usize,
@@ -79,6 +83,7 @@ impl Default for ErosionParams {
             max_fan_sediment: 1.5e3,
             fan_length: 500e3,
             delta_top: 2.0,
+            prograde: false,
             max_margin_cells: 256,
             max_fan_cells: 256,
         }
@@ -100,6 +105,10 @@ impl ErosionParams {
             "max_rise_sediment" => &mut self.max_rise_sediment,
             "max_fan_sediment" => &mut self.max_fan_sediment,
             "fan_length" => &mut self.fan_length,
+            "prograde" => {
+                self.prograde = value != 0.0;
+                return Ok(());
+            }
             "max_margin_cells" | "max_fan_cells" => {
                 anyhow::ensure!(value >= 1.0, "{name} must be at least 1");
                 let cells = value as usize;
@@ -242,8 +251,12 @@ pub fn erode(
         let target = (elevation[cell] + factor * receiver_elevation) / (1.0 + factor);
         let thickness = elevation[cell] - target;
 
-        let from_sediment = thickness.min(sediment[cell]);
-        let from_bedrock = thickness - from_sediment;
+        // The top `thickness` metres are removed: sediment (bulk, compacted) first.
+        let bulk = isostasy::sediment_bulk_thickness(sediment[cell]);
+        let from_bulk = thickness.min(bulk);
+        let left = isostasy::sediment_for_bulk_thickness(bulk - from_bulk);
+        let from_sediment = sediment[cell] - left;
+        let from_bedrock = thickness - from_bulk;
         sediment_delta[cell] -= from_sediment;
         bedrock_delta[cell] -= from_bedrock;
         // Eroded bedrock becomes sediment of the same rock mass.
@@ -251,8 +264,7 @@ pub fn erode(
             from_sediment + from_bedrock * bedrock_density[cell] / SEDIMENT_ROCK_DENSITY;
         // The column rebounds isostatically, so the surface drops less than the removed
         // thickness.
-        let without_sediment =
-            isostasy::add_layer(elevation[cell], -from_sediment, SEDIMENT_DENSITY);
+        let without_sediment = isostasy::change_sediment(elevation[cell], sediment[cell], left);
         new_elevation[cell] = isostasy::add_layer(
             without_sediment,
             -from_bedrock,
@@ -260,41 +272,6 @@ pub fn erode(
         );
     }
 
-    // Route sediment downstream, filling lakes on the way.
-    let mut flux = produced;
-    let mut delivered = vec![0.0; cell_count];
-    // The plate of the land the sediment comes from, per river mouth.
-    let mut source_plate = vec![0; cell_count];
-    for &cell in order.iter().rev() {
-        let cell = cell as usize;
-        if is_ocean(cell) {
-            continue;
-        }
-        let lake_room = if filled[cell] > elevation[cell] {
-            isostasy::layer_for_rise(new_elevation[cell], filled[cell], SEDIMENT_DENSITY).max(0.0)
-        } else {
-            0.0
-        };
-        let deposit = flux[cell].min(lake_room);
-        sediment_delta[cell] += deposit;
-        new_elevation[cell] = isostasy::add_layer(new_elevation[cell], deposit, SEDIMENT_DENSITY);
-        let remaining = flux[cell] - deposit;
-        match receiver[cell] {
-            Some(receiver) if is_ocean(receiver as usize) => {
-                delivered[receiver as usize] += remaining;
-                source_plate[receiver as usize] = plate[cell];
-            }
-            Some(receiver) => flux[receiver as usize] += remaining,
-            None => {
-                // A land cell without receiver only exists on planets without ocean.
-                sediment_delta[cell] += remaining;
-                new_elevation[cell] =
-                    isostasy::add_layer(new_elevation[cell], remaining, SEDIMENT_DENSITY);
-            }
-        }
-    }
-
-    let zones = zones(mesh, plate, class, params);
     let mut seabed = Seabed {
         sediment: sediment
             .iter()
@@ -304,6 +281,41 @@ pub fn erode(
         elevation: new_elevation,
         delta: sediment_delta,
     };
+
+    // Route sediment downstream, filling lakes on the way.
+    let mut flux = produced;
+    let mut delivered = vec![0.0; cell_count];
+    // The last land cell of a river reaching each mouth (u32::MAX for none).
+    let mut source = vec![u32::MAX; cell_count];
+    for &cell in order.iter().rev() {
+        let cell = cell as usize;
+        if is_ocean(cell) {
+            continue;
+        }
+        let lake_room = if filled[cell] > elevation[cell] {
+            seabed.room(cell, filled[cell], f64::INFINITY)
+        } else {
+            0.0
+        };
+        let deposit = flux[cell].min(lake_room);
+        if deposit > 0.0 {
+            seabed.deposit(cell, deposit);
+        }
+        let remaining = flux[cell] - deposit;
+        match receiver[cell] {
+            Some(receiver) if is_ocean(receiver as usize) => {
+                delivered[receiver as usize] += remaining;
+                source[receiver as usize] = cell as u32;
+            }
+            Some(receiver) => flux[receiver as usize] += remaining,
+            None => {
+                // A land cell without receiver only exists on planets without ocean.
+                seabed.deposit(cell, remaining);
+            }
+        }
+    }
+
+    let zones = zones(mesh, plate, class, params);
     let spacing = mesh.mean_edge_angle() * params.planet_radius;
 
     let mut sediment_to_ocean = 0.0;
@@ -315,13 +327,16 @@ pub fn erode(
     let mut fan_queue = VecDeque::new();
     let mut margin = Vec::new();
     let mut fan = Vec::new();
+    let mut water = Vec::new();
+    let mut shelf = Vec::new();
     for (mouth, &delivered) in delivered.iter().enumerate() {
         let mut remaining = delivered;
         if remaining <= 0.0 {
             continue;
         }
         sediment_to_ocean += remaining * cell_area;
-        let own_plate = source_plate[mouth];
+        let source_cell = source[mouth] as usize;
+        let own_plate = plate[source_cell];
 
         // The margin within reach: shelf, slope and rise cells connected to the mouth.
         queue.clear();
@@ -355,6 +370,11 @@ pub fn erode(
                     continue;
                 }
                 let (target, cap) = match zones[cell] {
+                    // Deeply buried sediment on continental crust metamorphoses (see
+                    // `Simulation::metamorphose_sediment`), so it needs no cap.
+                    Zone::Shelf if class[cell] == CrustClass::Continental => {
+                        (params.shelf_depth, f64::INFINITY)
+                    }
                     Zone::Shelf => (params.shelf_depth, params.max_shelf_sediment),
                     Zone::Slope => (params.slope_depth, params.max_slope_sediment),
                     Zone::Rise => (params.rise_depth, params.max_rise_sediment),
@@ -379,7 +399,12 @@ pub fn erode(
             fan_mark[mouth] = mouth;
             let mut rooms = Vec::new();
             let mut reached = 1;
+            // Whether the reach limit cut the search short, i.e. the mouth is not on a small
+            // enclosed water body.
+            let mut open = false;
+            water.clear();
             while let Some((cell, hops)) = fan_queue.pop_front() {
+                water.push(cell);
                 if zones[cell] == Zone::Fan {
                     let cap = params.max_fan_sediment
                         * (-f64::from(hops) * spacing / params.fan_length).exp();
@@ -391,10 +416,11 @@ pub fn erode(
                 }
                 for &neighbor in mesh.neighbors(cell as u32) {
                     let neighbor = neighbor as usize;
-                    if reached < params.max_fan_cells
-                        && is_ocean(neighbor)
-                        && fan_mark[neighbor] != mouth
-                    {
+                    if is_ocean(neighbor) && fan_mark[neighbor] != mouth {
+                        if reached >= params.max_fan_cells {
+                            open = true;
+                            continue;
+                        }
                         reached += 1;
                         fan_mark[neighbor] = mouth;
                         fan_queue.push_back((neighbor, hops + 1));
@@ -410,12 +436,27 @@ pub fn erode(
                 deposited[Zone::Fan as usize] += total_room * fraction;
                 remaining -= total_room * fraction;
             }
+            // A small enclosed sea or depression fills up completely, nearest cells first.
+            if !open {
+                for &cell in &water {
+                    if remaining <= 0.0 {
+                        break;
+                    }
+                    let thickness =
+                        remaining.min(seabed.room(cell, params.delta_top, f64::INFINITY));
+                    if thickness > 0.0 {
+                        seabed.deposit(cell, thickness);
+                        deposited[zones[cell] as usize] += thickness;
+                        remaining -= thickness;
+                    }
+                }
+            }
         }
 
         // When the fan is full too, deltas build up to a delta plain slightly above sea level
-        // on the margin crust, which also fills enclosed basins below sea level. Anything
-        // beyond that piles up evenly over the margin within reach (small enclosed seas
-        // overfill and become land; the next step's drainage carries the sediment on).
+        // on the margin crust. Anything beyond that piles up evenly on the shelf within reach,
+        // or at the river's last land cell if there is no shelf (it becomes land, and the next
+        // step's drainage carries it on); never on the slope or rise.
         for &cell in &margin {
             if remaining <= 0.0 {
                 break;
@@ -430,9 +471,35 @@ pub fn erode(
                 remaining -= thickness;
             }
         }
+        if params.prograde {
+            for own in [true, false] {
+                for &cell in &margin {
+                    if remaining <= 0.0 {
+                        break;
+                    }
+                    if (plate[cell] == own_plate) != own
+                        || !matches!(zones[cell], Zone::Slope | Zone::Rise)
+                    {
+                        continue;
+                    }
+                    let thickness =
+                        remaining.min(seabed.room(cell, params.shelf_depth, f64::INFINITY));
+                    if thickness > 0.0 {
+                        seabed.deposit(cell, thickness);
+                        deposited[zones[cell] as usize] += thickness;
+                        remaining -= thickness;
+                    }
+                }
+            }
+        }
         if remaining > 0.0 {
-            let share = remaining / margin.len() as f64;
-            for &cell in &margin {
+            shelf.clear();
+            shelf.extend(margin.iter().copied().filter(|&c| zones[c] == Zone::Shelf));
+            if shelf.is_empty() {
+                shelf.push(source_cell);
+            }
+            let share = remaining / shelf.len() as f64;
+            for &cell in &shelf {
                 seabed.deposit(cell, share);
             }
             sediment_overfill += remaining;
@@ -462,7 +529,7 @@ impl Seabed {
     /// Room (m) to fill a cell up to `target` without exceeding `cap` m of sediment.
     fn room(&self, cell: usize, target: f64, cap: f64) -> f64 {
         if self.elevation[cell] < target {
-            isostasy::layer_for_rise(self.elevation[cell], target, SEDIMENT_DENSITY)
+            isostasy::sediment_for_rise(self.elevation[cell], target, self.sediment[cell])
                 .min(cap - self.sediment[cell])
                 .max(0.0)
         } else {
@@ -471,10 +538,11 @@ impl Seabed {
     }
 
     fn deposit(&mut self, cell: usize, thickness: f64) {
+        let before = self.sediment[cell];
         self.delta[cell] += thickness;
         self.sediment[cell] += thickness;
         self.elevation[cell] =
-            isostasy::add_layer(self.elevation[cell], thickness, SEDIMENT_DENSITY);
+            isostasy::change_sediment(self.elevation[cell], before, self.sediment[cell]);
     }
 }
 
@@ -762,15 +830,30 @@ mod tests {
         );
         for cell in 0..mesh.len() {
             if class[cell] == CrustClass::Oceanic && result.sediment_delta[cell] > 0.0 {
-                let after = isostasy::add_layer(
-                    elevation[cell],
-                    result.sediment_delta[cell],
-                    SEDIMENT_DENSITY,
-                );
+                let after =
+                    isostasy::change_sediment(elevation[cell], 0.0, result.sediment_delta[cell]);
                 assert!(after <= params.slope_depth + 1e-6, "cell {cell}: {after}");
                 assert!(result.sediment_delta[cell] <= params.max_slope_sediment + 1e-6);
             }
         }
+    }
+
+    #[test]
+    fn enclosed_seas_fill_up() {
+        let mesh = SphereMesh::icosphere(4);
+        let mut elevation = island(&mesh);
+        // A small sea below sea level on the island's flank, on oceanic crust.
+        let pit = mesh.nearest(glam::DVec3::new(0.15, 0.0, 1.0).normalize()) as usize;
+        elevation[pit] = -1000.0;
+        let mut class = classes(&elevation, -1000.0);
+        class[pit] = CrustClass::Oceanic;
+        let result = run(&mesh, &elevation, 1.0, &vec![0; mesh.len()], &class);
+        // The sea fills up to the delta top (beyond the slope depth of oceanic crust); what
+        // does not fit stays on land, not piled on the sea.
+        let after = isostasy::change_sediment(elevation[pit], 0.0, result.sediment_delta[pit]);
+        let delta_top = ErosionParams::default().delta_top;
+        assert!(result.sediment_overfill > 0.0);
+        assert!((after - delta_top).abs() < 1e-6, "{after}");
     }
 
     #[test]

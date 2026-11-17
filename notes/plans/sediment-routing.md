@@ -177,3 +177,100 @@ too long), the user chose the full routing of step 2 over the minimal version. I
 - Diagnostics: deposition per zone (km³/yr) and sediment stock per crust class (Gt) in the log.
 - Tests: margins fill before oceanic crust; oceanic crust never above the slope depth and below
   its cap; own plate first; fans thin with distance and stay below their cap; mass conserved.
+
+## Plan v3: sediment sinks — compaction and conversion (2026-11-17)
+
+User: go ahead with compaction and conversion (plan steps 3–4), with a plan review first.
+
+### Measured (routing runs `agent-scratch/routing/`, overfill diagnostic `agent-scratch/diag-overfill/`, seeds 0/1, 300 Myr)
+
+- Overfill 36–67k km·cells per 500 Myr (~20% of the input). **45–55% of it comes from mouths
+  whose reachable margin has ≤ 3 cells and almost no fan room**: small enclosed seas and
+  depressions below sea level that the old code filled to the delta top over all visited cells,
+  but that the routing only fills on shelf cells. 26–44% comes from large margins (≥ 20 cells):
+  shelves there are depth-bound (at −120 m, ~99%); slope and rise cells are cap-bound and
+  depth-bound in about equal numbers.
+- Stock at 500 Myr 1.3–1.6e9 Gt: continental-origin 0.6–0.7e9, transitional 0.12–0.18e9,
+  oceanic 0.68–1.01e9 (own-plate slope/rise). Net growth ~1.5–2 Gt/yr at 300–500 Myr vs input
+  11.5–14 Gt/yr; trench input 4–8 Gt/yr, of which 60–75% is accreted.
+
+### Steps
+
+A. **Enclosed water bodies fill** (accounting fix, not a sink): when the fan search explores
+   the whole connected water body before its reach limit (an enclosed sea or depression), fill
+   all its cells up to the delta top in BFS order like the old code did, instead of booking
+   overfill. Expected: overfill roughly halves.
+
+B. **Compaction (Athy):** porosity φ(z) = φ0·exp(−z/λ) with φ0 ≈ 0.6, λ ≈ 2 km (shale/sand mix;
+   Sclater & Christie 1980: φ0 0.49–0.63, λ 1.4–3.7 km), grains 2700 kg/m³. Keep
+   `Crust::sediment` as the rock-mass-equivalent thickness (mass / 2050, unchanged semantics for
+   every mass budget) and derive the bulk thickness h(s) and pore volume from Athy in closed form
+   (or a precomputed table); `dry_elevation`, the pore volume in the sea-level solve and
+   `sediment_sea_level` use h(s). In `erode`, deposits change the elevation by the exact
+   difference E(s + ds) − E(s) (the marginal response of a deposit is the porosity at the base,
+   dh/ds = (1 − φref)/(1 − φ(h))): `Seabed` gets the per-cell sediment and computes room by
+   inverting it (bisection or Newton). Effects: thick wedges denser → more room per metre of
+   rise (review estimate +15–20% in a 10 km wedge), caps on rock-equivalent mass; no change of
+   sea level per rock mass (pores are ocean water already).
+
+C. **Conversion (metamorphism) of deeply buried sediment** on crust of continental origin and
+   transitional crust: sediment buried below `metamorphic_depth` (bulk, ~10 km: greenschist
+   facies, ~250–300 °C) becomes felsic crust at the same mass (`add_crust` with the existing
+   `METASEDIMENT_DENSITY` 2750 kg/m³, felsic 1), each tectonic step; book it in the ledger and the
+   material budget as a separate term. The column loses its remaining pores (it subsides a
+   little: room), the sediment caps free up, the stock levels off on long-lived margins, and
+   margins thicken back towards normal crust (they are 26 km at the COB now). Not on oceanic
+   crust (the review: would create unsubductable margins); thick wedges there stay sediment
+   until subducted or accreted. Note: conversion renames sediment as crust; its sea-level
+   effect is only the expelled pores (review: −5–10%).
+
+D. Measure after A–C (seeds 0–3, 500 Myr, `--material-budget`): overfill, stock by class and its
+   trend, sediment part of the sea level and its drift per 100 Myr, converted mass (Gt/yr; Earth:
+   metamorphism of margin wedges is part of the ~1–2 Gt/yr? to check), flooded, mean land,
+   felsic + sediment, COB thickness, trench sediment input/accretion.
+
+### Targets
+
+Stock trend ≲ +0.5 Gt/yr after 300 Myr; overfill ≲ 5% of the input; sediment part of the sea
+level stable after ~300 Myr; flooded 25–30%; felsic + sediment within ±10%.
+
+### Open questions for the review
+
+- Is a stock that levels off at ~1.3–1.5e9 Gt acceptable, given that the model's "sediment"
+  includes lithified margin wedges and flooded continental cover (Earth's sedimentary shell
+  2–3e9 Gt incl. continental cover; marine + margin 0.4–0.8e9)? Which Earth number is the right
+  comparison for each crust class?
+- Is compaction worth its complexity for +15–20% room, or should conversion at depth do the
+  job alone (it removes the pores anyway)?
+- Conversion depth and whether to convert under oceanic crust at all (Gulf of Mexico, Bengal:
+  wedges on oceanic/transitional crust up to 15–20 km).
+
+### Plan v3 review (independent agent, 2026-11-17): sound with changes — adopted
+
+Measured (`agent-scratch/review-sinks/`, seeds 0/1 to 500 Myr, sediment histograms by class):
+continental-origin 0.63–0.71e9 Gt, almost none above 10 km (≤ 48 cells); transitional
+0.14–0.18e9 at the 8–12 km cap; oceanic 0.68–0.96e9, of which **0.15–0.43e9 in 12–15 km
+columns above every cap — built by the overfill**, which is piled evenly over all margin cells
+incl. slope/rise (~2.4 Gt/yr ≈ the net stock growth). Sediment part of the sea level seed 1
+346 → 396 → 495 m (still rising), seed 0 ~330 m. Arithmetic: conversion at 10 km bulk never
+fires below a 10 km rock-equivalent cap (Athy: cap = 8.7 km bulk); compaction room is
+non-linear (Athy φ0 0.6, λ 2 km vs fixed 25%: rock-equivalent for a submerged rise of 0.9 km
+−40%, 2 km ±0, 3.5 km +46%, 5 km +70%); conversion under Athy at 10 km removes only ~2% volume
+(grains 2700 → 2750), under fixed porosity 0.26 m/m (artefact); transitional crust + 2–5 km
+metasediment crosses `resists_subduction` and continental origin. Earth comparison: sedimentary
+shell 2–3e9 Gt (~60–70% platform/orogen cover, ~20% margin wedges, ~10% deep ocean); model
+continental 0.6–0.7 (fine), transitional 0.14–0.18 (low: missing stretching), oceanic 0.7–1.0
+(~2× GlobSed 0.3–0.5). Target by sea level instead: sediment part ≲ 250 m and flat (Earth's
+marine sediment ~110–220 m). Greenschist at 10–12 km bulk; expect ≲ 0.5 Gt/yr conversion.
+
+Required (adopted): (1) on continental-origin crust replace the shelf cap by conversion at
+`metamorphic_depth` (~11 km bulk), keep caps elsewhere; (2) convert only continental-origin
+crust; (3) compaction (B) before conversion (C); (4) overfill must not pile onto slope/rise —
+put it on shelf cells or leave it on land; (5) expected effect corrected (large gains on deep
+slope/rise and thick shelves, less room for fresh shelf fill); (6) switch every sediment
+elevation/pore use to rock-equivalent thickness with E(s) (crust `dry_elevation`,
+`sediment_sea_level`, pores in the solve and its test, incision, lakes, `Seabed`, tests);
+(7) book `add_crust` truncation. Known artefact: porosity as a state function decompacts
+exhumed sediment and draws water into pores of submerged columns — document. Optional:
+permanent cap-/depth-bound/overfill diagnostics per zone; accreted share of trench input
+(60–75%, Earth mostly erosive margins) as the other residence lever.

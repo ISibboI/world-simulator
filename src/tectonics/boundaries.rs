@@ -943,7 +943,7 @@ pub(super) enum AdditionKind {
 }
 
 /// Density of crust formed from sediment (metasediment) in kg/m³.
-const METASEDIMENT_DENSITY: f64 = 2750.0;
+pub(super) const METASEDIMENT_DENSITY: f64 = 2750.0;
 
 pub(super) fn pair_key(a: u32, b: u32) -> (u32, u32) {
     (a.min(b), a.max(b))

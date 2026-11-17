@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-17 (terrane accretion, pore water, sediment routing; sediment sinks next)_
+_Last updated: 2026-11-17 (terrane accretion, pore water, sediment routing, compaction, metamorphism)_
 
 ## Goal
 
@@ -76,8 +76,10 @@ components (climate, erosion, …) are expected to build on it.
   base level**; eroding crust thins it (isostatic rebound via `isostasy`); sediment fills lakes,
   then is **routed onto margins** by zone (shelf on non-oceanic crust to −120 m, slope/rise on
   oceanic crust by distance from its plate's margin crust to −2000/−3500 m, with thickness caps),
-  the river's own plate first, then thinning deep-sea fans, delta plains to +2 m, overfill;
-  sediment loads the crust (rises ~0.44 of its thickness under water). `--set erosion.NAME=…`.
+  the river's own plate first, then thinning deep-sea fans, enclosed seas fill, delta plains to
+  +2 m, overfill on the shelf or land; `--set erosion.NAME=…`. Sediment is stored as
+  rock-equivalent thickness and **compacts** (Athy φ0 0.6, λ 2 km; tabulated in `isostasy`);
+  below 11 km on continental-origin crust it **metamorphoses** into felsic crust.
 - `src/temperature.rs`: energy balance model `C dT/dt = Q(1−α) − (A + BT) + transport` with a
   seasonal cycle. Earth orbit (e = 0.0167, obliquity 23.44°, perihelion early January, Kepler
   solved) → daily-mean insolation per latitude and season (24 seasons/yr). Runs on a coarse
@@ -140,11 +142,11 @@ components (climate, erosion, …) are expected to build on it.
   collision length 8–17k km, stacking 14–22 Gt/yr, ocean age 57–69 Myr; **pore water of submerged
   sediment counted in the ocean volume** (sediment's sea-level effect was 2.2× too large):
   sediment part of the sea level +311…+400 m at 500 Myr (still growing), flooded continental
-  crust 25–33%, mean land 0.62–0.87 km. Sediment routing (`plans/sediment-routing.md`)
-  done: flooded 21–25%, but the stock (1.3–1.6e9 Gt, ~2× Earth) and its sea-level part
-  (+363…+456 m) still grow and ~20% of the input overfills full margins — **next: a sediment
-  sink** (compaction, conversion of deeply buried margin sediment; input 11.5–14 Gt/yr is
-  Earth-like). 2–6% ancient (≥ 200 Myr) ocean
+  crust 25–33%, mean land 0.62–0.87 km. Sediment routing, enclosed-sea filling,
+  compaction and metamorphism done (`plans/sediment-routing.md`): sediment part of the sea level
+  +314…+383 m at 500 Myr, still rising 25–50 m/100 Myr (target ≲ 250 m, flat); oceanic stock
+  ~2× Earth; metamorphism ≲ 0.5 Gt/yr; overfill 26–67k km·cells. Remaining levers are tectonic
+  (accreted share at trenches 60–75%, margin lifetime). 2–6% ancient (≥ 200 Myr) ocean
   remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
