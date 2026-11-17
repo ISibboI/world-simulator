@@ -183,6 +183,22 @@ components (climate, erosion, …) are expected to build on it.
   packages needed). The repository is public, so CI status can be read via the GitHub REST API
   without the gh CLI.
 
+## Current plan (end of 2026-11-17; resume here)
+
+1. **Maturing intra-oceanic arcs** (next lever for the continental balance, from the review in
+   `plans/accretionary-margins.md`): first measure — thickness of arc crust on oceanic upper
+   plates vs Earth's 20–35 km, and where its mass goes (own forearc erosion, subduction of the
+   arc itself, terrane accretion/collision into continents). Then write a plan, have it
+   reviewed, implement, run seeds 0–3 × 500 Myr. Target: felsic + sediment 4-seed mean 0 to
+   −1.5 Gt/yr after 150 Myr; keep the sediment part of the sea level decelerating (≲ 20 m per
+   100 Myr after 300 Myr, 4-seed mean).
+2. Separately: seed 1's loss at the collision stacking cap (0.4 Gt/yr); the mafic-erosion
+   tracer artefact in the felsic budget (+0.3 Gt/yr; erosion of mafic crust becomes sediment).
+3. Then back to issue 1r/7: margin stretching covers < half of the continental opening (COB
+   crust ~26 km); flooded continental crust is 16–22% (Earth 25–30%); accretionary trench
+   length 4–21% (Earth ~43%).
+4. Afterwards an independent evaluation of the whole sediment/trench chain against the targets.
+
 ## Next steps (ideas)
 
 - Parallelise ownership resolution (rayon).
@@ -196,4 +212,5 @@ components (climate, erosion, …) are expected to build on it.
   major version tag.
 - Before each issue, have an independent agent review the plan; get independent evaluations
   of results; agents' temporary files go to `agent-scratch/` (never `/tmp`).
+- More than four simulation runs at once only if no video game is running on the machine.
 - Calibrate only as far as needed to confirm soundness; prefer fixing physics over tuning.

@@ -288,8 +288,14 @@ balance → collapse/stretching if needed** → 1q relative-speed tuning (later,
    displaces no water (~0.1 km low, with issue 3); deltas/shelves re-flood each step as sea
    level rises (acceptable). Not included:
    ice-sheet storage, thermal expansion, mantle water exchange.
-3. **Continental crust not conserved with erosion** — **balanced (2026-11-17, plan + review
-   `plans/issue-3-continental-mass-balance.md`):** sample-based merges (no loss), buoyant crust
+3. **Continental crust not conserved with erosion** — **Update (2026-11-17, late): sediment
+   routing, compaction, metamorphism and the trench side done** (`plans/sediment-routing.md`,
+   `plans/trench-sediment.md`, `plans/accretionary-margins.md`): accreted share of trench sediment
+   21–32%, felsic + sediment 4-seed mean −1.56 Gt/yr after 150 Myr (target 0 to −1.5; Earth 0 to
+   −2); the deficit is in the continental-margin system (continental arcs + accretion < sediment
+   subduction + forearc erosion), the missing process is maturation of intra-oceanic arcs into
+   continents (**next**, see "Current plan" in `SUMMARY.md`). Earlier: **balanced (2026-11-17,
+   plan + review `plans/issue-3-continental-mass-balance.md`):** sample-based merges (no loss), buoyant crust
    resists subduction (one predicate; arcs accrete), trench fill above a 1 km subduction
    channel accretes (net sediment subduction 2.4–3.1 Gt/yr), no sediment deletion. Felsic crust
    + sediment change +11% per 500 Myr including a measurement artefact (real within ±10%).
@@ -362,7 +368,9 @@ balance → collapse/stretching if needed** → 1q relative-speed tuning (later,
      little; use `e = F(z − z_r) / (1 + F·f)`;
    - runoff = precipitation although 50% of land rain is recycled [runoff ~35–40%];
    - no endorheic basins [~20% of land drains internally].
-7. **Shelves are sediment piles on oceanic crust.** 94% of cells between −200 and 0 m carry
+7. **Shelves are sediment piles on oceanic crust.** **Largely addressed (2026-11-17):**
+   routing fills oceanic crust only to slope/rise depths with caps (`plans/sediment-routing.md`);
+   margin stretching still covers < half of the continental opening (issue 1r). 94% of cells between −200 and 0 m carry
    > 500 m of sediment (mean 11 km, 2761 of 3111 cells > 6 km), only 364 are continental crust;
    bare they would lie at ~−5900 m [shelves: thinned continental crust + 1–5 km sediment]. Cause:
    each river mouth fills up to 256 cells to −120 m at once; no rifted (stretched) continental
