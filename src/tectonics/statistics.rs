@@ -76,6 +76,8 @@ pub struct Statistics {
     pub flooded_continental_fraction: f64,
     pub freeboard: f64,
     pub continental_origin_fraction: f64,
+    /// Mass (Gt) carried into continental collisions by convergence so far.
+    pub collision_inflow: f64,
     /// Thickness percentiles (10/50/90%, km) of the visible crust samples of continental origin,
     /// and the fraction of them thicker than 50 km.
     pub continental_thickness: [f64; 3],
@@ -566,6 +568,7 @@ impl Simulation {
             flooded_continental_fraction: flooded_continental as f64 / origin_cells.max(1) as f64,
             freeboard: freeboard_sum / origin_cells.max(1) as f64,
             continental_origin_fraction: origin_cells as f64 / cell_count as f64,
+            collision_inflow: self.collision_inflow,
             continental_thickness,
             thick_continental_fraction,
             median_relative_speed: motion.median_relative_speed,

@@ -393,6 +393,9 @@ pub struct Simulation {
     configuration_changes: u64,
     /// Area of sea floor opened by diverging plates so far (one flank), in km².
     opened_area: f64,
+    /// Mass (Gt) of crust carried into continental collisions by the plates' convergence so
+    /// far (kinematic expectation for collision stacking).
+    collision_inflow: f64,
     /// Changes of the felsic crust and sediment masses so far (areal mass summed over cells, see
     /// [`Simulation::felsic_and_sediment`]) per phase of the step.
     material_budget: MaterialBudget,
@@ -564,6 +567,7 @@ impl Simulation {
             rng: owned_rng,
             configuration_changes: 0,
             opened_area: 0.0,
+            collision_inflow: 0.0,
             material_budget: MaterialBudget::default(),
             sea_level: 0.0,
             sea_level_change: (0.0, 0.0),
@@ -721,6 +725,21 @@ impl Simulation {
             * self.params.planet_radius
             / 1000.0
             * dt;
+
+        // Crust carried into collisions: convergence × boundary length × areal mass, half from
+        // each side's boundary cells.
+        let inflow: f64 = boundaries
+            .iter()
+            .filter(|boundary| {
+                boundary.kind == dynamics::BoundaryKind::Collision && boundary.convergence > 0.0
+            })
+            .map(|boundary| {
+                boundary.convergence
+                    * self.params.planet_radius
+                    * self.surface_crust(boundary.cell).mass()
+            })
+            .sum();
+        self.collision_inflow += 0.5 * inflow * self.boundary_length_per_cell() * dt / 1e12;
 
         let subduction = self.subduction_rates(&boundaries);
         self.mantle.step(dt, &subduction, &mut self.rng);

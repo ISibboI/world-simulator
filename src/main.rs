@@ -192,7 +192,7 @@ fn simulate(mut planet: Planet, cli: &Cli, mut on_step: impl FnMut(&Planet)) -> 
     let steps = (cli.duration / cli.dt).round() as u64;
     let snapshot_every = ((cli.snapshot_interval / cli.dt).round() as u64).max(1);
     let start = Instant::now();
-    let mut previous_ledger: Option<(f64, MassLedger, usize, f64, Option<MaterialBudget>)> = None;
+    let mut previous_ledger: Option<PreviousSnapshot> = None;
     snapshot(&planet, cli, &mut previous_ledger)?;
     on_step(&planet);
     for step in 1..=steps {
@@ -209,7 +209,7 @@ fn simulate(mut planet: Planet, cli: &Cli, mut on_step: impl FnMut(&Planet)) -> 
 fn snapshot(
     planet: &Planet,
     cli: &Cli,
-    previous_ledger: &mut Option<(f64, MassLedger, usize, f64, Option<MaterialBudget>)>,
+    previous_ledger: &mut Option<PreviousSnapshot>,
 ) -> anyhow::Result<()> {
     let simulation = planet.tectonics();
     let planet_statistics = planet.statistics();
@@ -327,10 +327,23 @@ fn snapshot(
         4.0 * std::f64::consts::PI * EARTH_RADIUS * EARTH_RADIUS / simulation.mesh().len() as f64;
     let new_crust_cells = statistics.gaps.new_crust_cells;
     let budget = simulation.material_budget();
-    if let Some((previous_time, previous, previous_cells, previous_opened, previous_budget)) =
-        previous_ledger.as_ref()
+    if let Some(PreviousSnapshot {
+        time: previous_time,
+        ledger: previous,
+        new_crust_cells: previous_cells,
+        opened_area: previous_opened,
+        budget: previous_budget,
+        collision_inflow: previous_inflow,
+    }) = previous_ledger.as_ref()
     {
         let years = (statistics.time - previous_time) * 1e6;
+        info!(
+            "    collision stacking (Gt/yr): {:.1} stacked, {:.1} carried in by convergence",
+            (statistics.ledger.collision_stacked - previous.collision_stacked) * cell_area
+                / 1e12
+                / years,
+            (statistics.collision_inflow - previous_inflow) / years,
+        );
         if let (Some(budget), Some(previous_budget)) = (budget, previous_budget) {
             log_material_budget(&budget, previous_budget, cell_area, years);
         }
@@ -351,13 +364,14 @@ fn snapshot(
             .collect();
         info!("    crust mass budget (Gt/yr): {}", rates.join(", "));
     }
-    *previous_ledger = Some((
-        statistics.time,
-        statistics.ledger.clone(),
+    *previous_ledger = Some(PreviousSnapshot {
+        time: statistics.time,
+        ledger: statistics.ledger.clone(),
         new_crust_cells,
-        statistics.opened_area,
+        opened_area: statistics.opened_area,
         budget,
-    ));
+        collision_inflow: statistics.collision_inflow,
+    });
     let segments = &statistics.segment_events;
     info!(
         "    segments {} ({} with slab; slab at trenches {:.0} km) | created {}, merged {}, expired {}, \
@@ -510,4 +524,14 @@ fn log_material_budget(
         total.1,
         total.0 + total.1,
     );
+}
+
+/// Cumulative values at the previous snapshot, for rates over the interval since.
+struct PreviousSnapshot {
+    time: f64,
+    ledger: MassLedger,
+    new_crust_cells: usize,
+    opened_area: f64,
+    budget: Option<MaterialBudget>,
+    collision_inflow: f64,
 }
