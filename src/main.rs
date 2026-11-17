@@ -301,11 +301,12 @@ fn snapshot(
         statistics.induced_rate,
     );
     info!(
-        "    trenches {:.0} km, ridges {:.0} km | slab pull {:.2e} N, ridge push {:.2e} N | \
+        "    trenches {:.0} km, ridges {:.0} km, collisions {:.0} km | slab pull {:.2e} N, ridge push {:.2e} N | \
          rifts {}, initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
          blocked splits {}",
         statistics.trench_length,
         statistics.ridge_length,
+        statistics.collision_length,
         statistics.slab_pull,
         statistics.ridge_push,
         statistics.events.rifts,

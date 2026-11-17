@@ -52,6 +52,8 @@ pub struct Statistics {
     /// the mesh; a ridge has two flanks, a trench one subducting side).
     pub trench_length: f64,
     pub ridge_length: f64,
+    /// Length of continental collision boundaries in km (half of both sides' cells).
+    pub collision_length: f64,
     /// Area of sea floor opened by diverging plates so far (one flank), from the plate motions,
     /// in km². Earth: ~3.4 km²/yr.
     pub opened_area: f64,
@@ -367,6 +369,7 @@ impl Simulation {
             (0.0, 0.0, 0.0, 0.0);
         let boundaries = self.boundary_cells();
         let (mut trench_cells, mut trench_slab) = (0usize, 0.0);
+        let mut collision_length = 0.0;
         for boundary in &boundaries {
             let force = self.boundary_force(boundary).length();
             match boundary.kind {
@@ -382,6 +385,9 @@ impl Simulation {
                 super::dynamics::BoundaryKind::Ridge => {
                     ridge_flank_length += boundary_length;
                     ridge_push += force;
+                }
+                super::dynamics::BoundaryKind::Collision => {
+                    collision_length += boundary_length;
                 }
                 _ => {}
             }
@@ -548,6 +554,7 @@ impl Simulation {
             hidden_mass: (total_mass - visible_mass) * to_gigatonnes,
             trench_length,
             ridge_length: ridge_flank_length / 2.0,
+            collision_length: collision_length / 2.0,
             opened_area: self.opened_area,
             segments: self.polarities.segments().count(),
             slab_segments: slabs.len(),
