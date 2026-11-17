@@ -21,7 +21,7 @@ use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
 use crate::planet::Planet;
 use crate::sphere::SphereMesh;
-use crate::tectonics::{MassLedger, MaterialBudget, Simulation, TectonicParams};
+use crate::tectonics::{MassLedger, MaterialBudget, Simulation, TectonicParams, TrenchSediment};
 use crate::temperature::TemperatureParams;
 
 /// The planet radius in metres; used for erosion, climate and to report linear speeds.
@@ -353,6 +353,7 @@ fn snapshot(
         stretched_cells: previous_stretched,
         budget: previous_budget,
         collision_inflow: previous_inflow,
+        trench_sediment: previous_trench,
     }) = previous_ledger.as_ref()
     {
         let years = (statistics.time - previous_time) * 1e6;
@@ -385,6 +386,24 @@ fn snapshot(
             .map(|(name, rate)| format!("{name} {rate:+.2}"))
             .collect();
         info!("    crust mass budget (Gt/yr): {}", rates.join(", "));
+        let trench = &statistics.trench_sediment;
+        let arrived: f64 = trench.by_thickness.iter().sum::<f64>()
+            - previous_trench.by_thickness.iter().sum::<f64>();
+        let shares: Vec<String> = trench
+            .by_thickness
+            .iter()
+            .zip(&previous_trench.by_thickness)
+            .map(|(now, before)| format!("{:.0}%", 100.0 * (now - before) / arrived.max(1e-9)))
+            .collect();
+        info!(
+            "    trench sediment {:.1} Gt/yr, {:.0}% accreted, {:.0}% on continental margins | by \
+             column (≤ 1, 1–3, 3–5, 5–8, > 8 km): {}",
+            arrived / years,
+            100.0 * (trench.accreted - previous_trench.accreted) / arrived.max(1e-9),
+            100.0 * (trench.on_continental_margins - previous_trench.on_continental_margins)
+                / arrived.max(1e-9),
+            shares.join(" "),
+        );
     }
     *previous_ledger = Some(PreviousSnapshot {
         time: statistics.time,
@@ -395,6 +414,7 @@ fn snapshot(
         stretched_cells: statistics.gaps.stretched_cells,
         budget,
         collision_inflow: statistics.collision_inflow,
+        trench_sediment: statistics.trench_sediment.clone(),
     });
     let segments = &statistics.segment_events;
     info!(
@@ -574,4 +594,5 @@ struct PreviousSnapshot {
     stretched_cells: usize,
     budget: Option<MaterialBudget>,
     collision_inflow: f64,
+    trench_sediment: TrenchSediment,
 }

@@ -173,6 +173,7 @@ impl Simulation {
             ledger,
             matching_scratch,
             matching_statistics,
+            trench_sediment,
             ..
         } = self;
         let time = *time;
@@ -289,12 +290,15 @@ impl Simulation {
                     felsic: 1.0,
                     kind: AdditionKind::Arc,
                 });
-                // Sediment beyond what the subduction channel carries down is scraped off at the
-                // trench into an accretionary wedge on the overriding plate, which becomes crust
-                // (metasediment) at the same mass.
+                // Of the sediment beyond what the subduction channel carries down, a fraction is
+                // scraped off at the trench into an accretionary wedge on the overriding plate,
+                // which becomes crust (metasediment) at the same mass; the rest is dragged down
+                // below the forearc.
                 let accreted_mass = (loser_crust.sediment - params.subduction_channel_thickness)
                     .max(0.0)
+                    * params.frontal_accretion_fraction
                     * SEDIMENT_ROCK_DENSITY;
+                trench_sediment.record(&loser_crust, accreted_mass);
                 if accreted_mass > 0.0 {
                     // Booked as accretion when added; all sediment left with the slab above.
                     additions.push(CrustAddition {
@@ -621,6 +625,33 @@ struct LostContact {
     winner: Ownership,
     loser: Ownership,
     loser_crust: Crust,
+}
+
+/// Sediment arriving at trenches so far, in kg/m² summed over subducted samples (multiply by the
+/// cell area for kg).
+#[derive(Clone, Debug, Default)]
+pub struct TrenchSediment {
+    /// By the rock-equivalent thickness of the arriving column: ≤ 1 km, 1–3, 3–5, 5–8, > 8 km.
+    pub by_thickness: [f64; 5],
+    /// Part arriving on thinned continental crust (felsic fraction > 0.2).
+    pub on_continental_margins: f64,
+    /// Part accreted to the overriding plate.
+    pub accreted: f64,
+}
+
+impl TrenchSediment {
+    fn record(&mut self, crust: &Crust, accreted_mass: f64) {
+        let mass = crust.sediment * SEDIMENT_ROCK_DENSITY;
+        let bin = [1000.0, 3000.0, 5000.0, 8000.0]
+            .iter()
+            .filter(|&&limit| crust.sediment > limit)
+            .count();
+        self.by_thickness[bin] += mass;
+        if crust.felsic > 0.2 {
+            self.on_continental_margins += mass;
+        }
+        self.accreted += accreted_mass;
+    }
 }
 
 /// Counts of how uncovered cells were filled, accumulated over the simulation.
@@ -1044,6 +1075,47 @@ mod tests {
             simulation.substep(1.0);
         }
         simulation.ledger.clone()
+    }
+
+    /// Plate 0 (south), oceanic with `sediment` m of sediment, subducts below plate 1 (north)
+    /// for 20 Myr with the given frontal accretion fraction.
+    fn sediment_arriving_at_a_trench(sediment: f64, fraction: f64) -> Simulation {
+        let mut simulation = single_plate();
+        simulation.params.frontal_accretion_fraction = fraction;
+        simulation.split_plate(0, DVec3::Z).unwrap();
+        simulation.polarities.clear();
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            crust.sediment = sediment;
+        }
+        simulation.seed_subduction((0, 1), 1, 600e3);
+        simulation.plates[0].angular_velocity = -DVec3::Y * 0.004;
+        simulation.plates[1].angular_velocity = DVec3::ZERO;
+        for _ in 0..20 {
+            simulation.substep(1.0);
+        }
+        simulation
+    }
+
+    #[test]
+    fn a_fraction_of_thick_trench_sediment_is_accreted() {
+        for fraction in [0.3, 1.0] {
+            let simulation = sediment_arriving_at_a_trench(6000.0, fraction);
+            let trench = &simulation.trench_sediment;
+            let arrived: f64 = trench.by_thickness.iter().sum();
+            assert!(arrived > 0.0);
+            assert_eq!(arrived, trench.by_thickness[3], "all columns are 5–8 km");
+            // The fraction of the sediment above the 1 km channel is accreted.
+            let expected = fraction * 5000.0 / 6000.0;
+            assert!((trench.accreted / arrived - expected).abs() < 1e-9);
+            // The ledger books the whole column as subducted and the wedge as accretion.
+            let ledger = &simulation.ledger;
+            assert!((ledger.accretion - trench.accreted).abs() < 1e-6 * arrived);
+            assert!((-ledger.subducted_sediment - arrived).abs() < 1e-6 * arrived);
+        }
+        // Thin cover is subducted entirely.
+        let simulation = sediment_arriving_at_a_trench(500.0, 0.3);
+        assert!(simulation.trench_sediment.by_thickness[0] > 0.0);
+        assert_eq!(simulation.trench_sediment.accreted, 0.0);
     }
 
     #[test]

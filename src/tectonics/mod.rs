@@ -47,7 +47,7 @@ mod polarity;
 mod statistics;
 mod topology;
 
-pub use boundaries::GapStatistics;
+pub use boundaries::{GapStatistics, TrenchSediment};
 pub use crust::*;
 pub use events::{EventCounts, PlateEventParams};
 pub use ledger::MassLedger;
@@ -94,6 +94,11 @@ pub struct TectonicParams {
     /// thinner fill is subducted (von Huene & Scholl 1991, Clift & Vannucchi 2004). Sediment
     /// recycled through arc magmas is part of the arc crust.
     pub subduction_channel_thickness: f64,
+    /// Fraction of the sediment above the subduction channel scraped off into the
+    /// accretionary wedge; the rest is subducted below the forearc. A global calibration: even
+    /// at accretionary margins ~70% of the incoming column is subducted in the long term
+    /// (Clift & Vannucchi 2004), and globally ≲ 20–30% of trench sediment is accreted.
+    pub frontal_accretion_fraction: f64,
     /// Volume of new arc crust per subducted crust sample, as a thickness over one cell.
     ///
     /// Arcs grow by roughly 30–90 km³ per km of arc and Myr on Earth; at 50 km/Myr convergence
@@ -215,6 +220,7 @@ impl Default for TectonicParams {
             continental_interior_thickness: 35_000.0,
             continental_margin_width: 1000e3,
             subduction_channel_thickness: 1000.0,
+            frontal_accretion_fraction: 0.3,
             arc_crust_per_subduction: 500.0,
             subduction_erosion: 300.0,
             metamorphic_depth: 11_000.0,
@@ -280,6 +286,7 @@ impl TectonicParams {
             "subduction_erosion" => &mut self.subduction_erosion,
             "metamorphic_depth" => &mut self.metamorphic_depth,
             "subduction_channel_thickness" => &mut self.subduction_channel_thickness,
+            "frontal_accretion_fraction" => &mut self.frontal_accretion_fraction,
             "events.initiation_age" => &mut self.events.initiation_age,
             "events.initiation_full_age" => &mut self.events.initiation_full_age,
             "events.initiation_waiting_time" => &mut self.events.initiation_waiting_time,
@@ -398,6 +405,7 @@ pub struct Simulation {
     mantle: mantle::MantleFlow,
     /// How uncovered cells were filled so far.
     gap_statistics: GapStatistics,
+    trench_sediment: TrenchSediment,
     /// Plate births and deaths so far.
     event_counts: EventCounts,
     /// Where crust mass came from and went to.
@@ -582,6 +590,7 @@ impl Simulation {
             polarities,
             mantle,
             gap_statistics: GapStatistics::default(),
+            trench_sediment: TrenchSediment::default(),
             event_counts: EventCounts::default(),
             ledger: MassLedger::default(),
             matching_statistics: MatchingStatistics::default(),

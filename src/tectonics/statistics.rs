@@ -90,6 +90,8 @@ pub struct Statistics {
     pub continental_origin_fraction: f64,
     /// Mass (Gt) carried into continental collisions by convergence so far.
     pub collision_inflow: f64,
+    /// Sediment arriving at trenches so far (Gt).
+    pub trench_sediment: TrenchSediment,
     /// Sediment turned into crust by metamorphism so far, in Gt.
     pub metamorphosed: f64,
     /// Thickness percentiles (10/50/90%, km) of the visible crust samples of continental origin,
@@ -601,6 +603,14 @@ impl Simulation {
             continental_origin_fraction: origin_cells as f64 / cell_count as f64,
             collision_inflow: self.collision_inflow,
             metamorphosed: self.metamorphosed,
+            trench_sediment: {
+                let mut t = self.trench_sediment.clone();
+                let to_gt = cell_area / 1e12;
+                t.by_thickness.iter_mut().for_each(|m| *m *= to_gt);
+                t.on_continental_margins *= to_gt;
+                t.accreted *= to_gt;
+                t
+            },
             continental_thickness,
             thick_continental_fraction,
             median_relative_speed: motion.median_relative_speed,
