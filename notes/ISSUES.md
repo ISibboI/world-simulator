@@ -247,7 +247,12 @@ balance → collapse/stretching if needed** → 1q relative-speed tuning (later,
    displaces no water (~0.1 km low, with issue 3); deltas/shelves re-flood each step as sea
    level rises (acceptable). Not included:
    ice-sheet storage, thermal expansion, mantle water exchange.
-3. **Continental crust not conserved with erosion** (−36% seed 0, −60% seed 3 [~steady]):
+3. **Continental crust not conserved with erosion** — **balanced (2026-11-17, plan + review
+   `plans/issue-3-continental-mass-balance.md`):** sample-based merges (no loss), buoyant crust
+   resists subduction (one predicate; arcs accrete), trench fill above a 1 km subduction
+   channel accretes (net sediment subduction 2.4–3.1 Gt/yr), no sediment deletion. Felsic crust
+   + sediment change +11% per 500 Myr including a measurement artefact (real within ±10%).
+   Originally: (−36% seed 0, −60% seed 3 [~steady]):
    - eroded bedrock → sediment 1:1 by volume despite 2750 vs 2300 kg/m³ (16% mass loss);
    - sediment beyond the shelf is deleted (~7% of flux) → deep-sea fans instead;
    - sediment subduction 3.3 km³/yr [1–1.6] with no accretion → accrete/recycle 50–70%;

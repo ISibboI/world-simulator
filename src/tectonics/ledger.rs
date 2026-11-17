@@ -46,7 +46,7 @@ pub struct MassLedger {
     pub splits: f64,
     /// Hidden crust of plates removed because they no longer cover any cell (−).
     pub removed_plates: f64,
-    /// Net change caused by erosion and sedimentation (− for sediment lost from the model).
+    /// Net change caused by erosion and sedimentation (should be ~0: erosion conserves mass).
     pub surface_processes: f64,
     /// Total change not accounted for by the terms above.
     pub residual: f64,

@@ -65,9 +65,9 @@ pub struct ErosionResult {
     pub discharge: Vec<f64>,
     /// Total sediment delivered to the ocean, in m³.
     pub sediment_to_ocean: f64,
-    /// Sediment that found no place to settle (thickness over one cell, summed), lost from the
-    /// model.
-    pub sediment_lost: f64,
+    /// Sediment piled above the delta top because the ocean within reach was full (thickness
+    /// over one cell, summed); it becomes land and is eroded again.
+    pub sediment_overfill: f64,
 }
 
 /// Performs one erosion step of `dt_years` years.
@@ -191,7 +191,7 @@ pub fn erode(
     // Build shelves at river mouths: fill the ocean outwards from the mouth up to the shelf
     // depth, so that shelves prograde into the ocean.
     let mut sediment_to_ocean = 0.0;
-    let mut sediment_lost = 0.0;
+    let mut sediment_overfill = 0.0;
     let mut visited_from = vec![usize::MAX; cell_count];
     let mut queue = VecDeque::new();
     let mut visited = Vec::new();
@@ -272,7 +272,9 @@ pub fn erode(
             }
         }
         // When even the fan is full, the delta builds up to a delta plain slightly above sea
-        // level, which also fills enclosed basins below sea level. Anything beyond that is lost.
+        // level, which also fills enclosed basins below sea level. Anything beyond that piles up
+        // evenly over the reached cells (small enclosed seas overfill and become land; the next
+        // step's drainage carries the sediment on).
         for &cell in &visited {
             if remaining <= 0.0 {
                 break;
@@ -288,7 +290,15 @@ pub fn erode(
                 isostasy::add_layer(new_elevation[cell], deposit, SEDIMENT_DENSITY);
             remaining -= deposit;
         }
-        sediment_lost += remaining.max(0.0);
+        if remaining > 0.0 {
+            let share = remaining / visited.len() as f64;
+            for &cell in &visited {
+                sediment_delta[cell] += share;
+                new_elevation[cell] =
+                    isostasy::add_layer(new_elevation[cell], share, SEDIMENT_DENSITY);
+            }
+            sediment_overfill += remaining;
+        }
     }
 
     ErosionResult {
@@ -296,7 +306,7 @@ pub fn erode(
         sediment_delta,
         discharge,
         sediment_to_ocean,
-        sediment_lost,
+        sediment_overfill,
     }
 }
 
@@ -483,10 +493,10 @@ mod tests {
             .sum();
         let eroded: f64 = result.bedrock_delta.iter().map(|d| -d * 2800.0).sum();
         assert!(eroded > 0.0);
-        let lost = result.sediment_lost * SEDIMENT_ROCK_DENSITY;
+        // Nothing is lost: eroded bedrock becomes sediment at equal mass.
         assert!(
-            (change + lost).abs() < 1e-9 * eroded,
-            "change {change}, lost {lost}, eroded {eroded}"
+            change.abs() < 1e-9 * eroded,
+            "change {change}, eroded {eroded}"
         );
     }
 }

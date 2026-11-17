@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-17 (mass-conserving gap healing)_
+_Last updated: 2026-11-17 (continental mass balance)_
 
 ## Goal
 
@@ -114,18 +114,19 @@ components (climate, erosion, …) are expected to build on it.
 - Continental shelves are too wide (sediment spreads over up to 256 cells per river mouth).
 - Land fragmentation largely fixed by the thickness model (at 200 Myr: land masses 105 → ~30,
   continental crust masses 146 → ~17–25); still 15–20 single-cell specks.
-- **Continental crust is not conserved:** −48% of its mass in 500 Myr (erosion → sediment →
-  subduction; issue 3). Thickening through gap copies is fixed (1r).
+- **Continents thicken** again since crust is conserved: accreted wedges and collisions raise
+  mean land to 1.4–1.6 km in 500 Myr (issue 1r; collapse and stretching missing).
 - Collision churn is high (≈ the whole initial continental volume passes through collisions in
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
 - **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
   plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms + tuning), 5, 3,
   4 done, issue 2 (sea level) done, and the runtime optimisations. Since then: per-segment
   polarity, plate connectivity (1p), boundary shear coupling (1q; modest effect). Gap healing is
-  mass-conserving now (mean land 0.70–0.91 km). **Next (user): the continental mass balance
-  (issue 3: continental crust mass −48% in 500 Myr; sediment subduction 4–6× Earth, merge
-  leak), then collapse/stretching only if still needed (`plans/issue-1r-thickening.md`,
-  reviewed, needs rework); relative plate speed tuning (1q) later.** 2–6% ancient (≥ 200 Myr) ocean
+  mass-conserving and the continental mass balance (issue 3) holds (felsic crust + sediment
+  within ~±10% per 500 Myr). **Next: continental thickening (1r) is back with the accreted
+  material (mean land 1.4–1.6 km): orogenic collapse and rift stretching
+  (`plans/issue-1r-thickening.md`, reviewed, needs rework per its review); relative plate speed
+  tuning (1q) later.** 2–6% ancient (≥ 200 Myr) ocean
   remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
