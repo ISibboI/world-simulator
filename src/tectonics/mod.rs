@@ -179,7 +179,8 @@ pub struct TectonicParams {
     /// Whether to measure the material budget per step phase (see [`MaterialBudget`]); costs
     /// several passes over all crust samples per step.
     pub track_material_budget: bool,
-    /// Volume of the ocean water in m³ (Earth: 1.335e18), which sets the sea level.
+    /// Volume of the water in the ocean in m³ (Earth: 1.335e18), which sets the sea level: open
+    /// water plus the pore water of submerged sediment (which comes out of the ocean).
     pub ocean_volume: f64,
     /// Mantle flow below the plates.
     pub mantle: MantleParams,
@@ -805,14 +806,49 @@ impl Simulation {
             .surface_elevation(self.time, self.sea_level)
     }
 
-    /// The sea level at which the ocean holds [`TectonicParams::ocean_volume`].
-    fn solve_sea_level(&self) -> f64 {
+    /// The part of the sea level due to sediment: the sea level minus the one without any
+    /// sediment (m).
+    pub(super) fn sediment_sea_level(&self) -> f64 {
         let dry: Vec<f64> = (0..self.mesh.len() as u32)
-            .map(|cell| self.surface_crust(cell).dry_elevation(self.time))
+            .map(|cell| {
+                let crust = self.surface_crust(cell);
+                crust.dry_elevation(self.time)
+                    - crust.sediment
+                        * crate::isostasy::dry_response(crate::isostasy::SEDIMENT_DENSITY)
+            })
             .collect();
         let cell_area =
             4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
-        crate::isostasy::sea_level_for_volume(&dry, cell_area, self.params.ocean_volume)
+        let without = crate::isostasy::sea_level_for_volume_with_pores(
+            &dry,
+            &vec![0.0; dry.len()],
+            cell_area,
+            self.params.ocean_volume,
+        );
+        self.sea_level - without
+    }
+
+    /// The sea level at which the ocean holds [`TectonicParams::ocean_volume`], of which the
+    /// pores of submerged sediment hold a part.
+    fn solve_sea_level(&self) -> f64 {
+        let (dry, sediment): (Vec<f64>, Vec<f64>) = (0..self.mesh.len() as u32)
+            .map(|cell| {
+                let crust = self.surface_crust(cell);
+                (crust.dry_elevation(self.time), crust.sediment)
+            })
+            .unzip();
+        let cell_area =
+            4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
+        let pores: Vec<f64> = sediment
+            .iter()
+            .map(|&s| s * crate::isostasy::SEDIMENT_POROSITY)
+            .collect();
+        crate::isostasy::sea_level_for_volume_with_pores(
+            &dry,
+            &pores,
+            cell_area,
+            self.params.ocean_volume,
+        )
     }
 
     /// Surface elevation (bedrock plus sediment) of every world cell.
@@ -906,7 +942,15 @@ mod tests {
         let cell_area = 4.0 * std::f64::consts::PI * simulation.params.planet_radius.powi(2)
             / simulation.mesh.len() as f64;
         let check = |simulation: &Simulation| {
-            let volume = crate::isostasy::ocean_volume(&simulation.surface_elevations(), cell_area);
+            // Open water plus the pore water of submerged sediment.
+            let pores: f64 = (0..simulation.mesh.len() as u32)
+                .filter(|&cell| simulation.surface_elevation(cell) < 0.0)
+                .map(|cell| simulation.surface_crust(cell).sediment)
+                .sum::<f64>()
+                * crate::isostasy::SEDIMENT_POROSITY
+                * cell_area;
+            let volume =
+                crate::isostasy::ocean_volume(&simulation.surface_elevations(), cell_area) + pores;
             let target = simulation.params.ocean_volume;
             assert!((volume / target - 1.0).abs() < 1e-9, "{volume} vs {target}");
         };

@@ -79,6 +79,8 @@ pub struct Statistics {
     /// changes so far by tectonics and by surface processes.
     pub sea_level: f64,
     pub sea_level_change: (f64, f64),
+    /// The part of the sea level due to sediment (m; see [`Simulation::sediment_sea_level`]).
+    pub sediment_sea_level: f64,
     /// Volume of the ocean (km³) from the surface elevations.
     pub ocean_volume: f64,
     /// Fraction of the crust of continental origin (see [`Crust::is_continental_origin`]) below
@@ -590,6 +592,7 @@ impl Simulation {
             continental_sample_fraction: continental_samples as f64 / cell_count as f64,
             sea_level: self.sea_level,
             sea_level_change: self.sea_level_change,
+            sediment_sea_level: self.sediment_sea_level(),
             ocean_volume: water_depth_sum * cell_area / 1e9,
             flooded_continental_fraction: flooded_continental as f64 / origin_cells.max(1) as f64,
             freeboard: freeboard_sum / origin_cells.max(1) as f64,

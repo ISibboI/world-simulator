@@ -17,6 +17,10 @@ pub const SEDIMENT_DENSITY: f64 = 2300.0;
 /// Rock (grain) mass per volume of sediment in kg/m³: 25% pores in 2700 kg/m³ grains. With
 /// water in the pores this gives the bulk density above. Mass conservation uses this density.
 pub const SEDIMENT_ROCK_DENSITY: f64 = 2050.0;
+/// Density of sediment grains in kg/m³.
+pub const SEDIMENT_GRAIN_DENSITY: f64 = 2700.0;
+/// Pore fraction of sediment (filled with water below sea level).
+pub const SEDIMENT_POROSITY: f64 = 1.0 - SEDIMENT_ROCK_DENSITY / SEDIMENT_GRAIN_DENSITY;
 /// Density of oceanic crust (basalt, gabbro) in kg/m³.
 pub const OCEANIC_DENSITY: f64 = 2900.0;
 /// Mean density of continental crust in kg/m³ (~2830 after Christensen & Mooney, 1995).
@@ -61,29 +65,58 @@ pub fn layer_for_rise(from: f64, to: f64, density: f64) -> f64 {
     (to_dry(to) - to_dry(from)) / dry_response(density)
 }
 
+/// [`sea_level_for_volume_with_pores`] without pores.
+#[cfg(test)]
+pub fn sea_level_for_volume(dry_elevations: &[f64], cell_area: f64, volume: f64) -> f64 {
+    sea_level_for_volume_with_pores(
+        dry_elevations,
+        &vec![0.0; dry_elevations.len()],
+        cell_area,
+        volume,
+    )
+}
+
 /// The sea level (as an offset of dry elevations, m) at which the ocean holds `volume` (m³) of
 /// water, for cells of equal `cell_area` (m²) with the given dry elevations (m, relative to the
-/// same datum). The water depth over a cell with dry elevation `d` below sea level `S` is
-/// `(S − d) · ρm / (ρm − ρw)` (the water load depresses the floor), so the volume is piecewise
-/// linear and increasing in `S`; it is solved exactly. A volume of zero gives the lowest dry
-/// elevation; a volume beyond all cells floods the planet.
-pub fn sea_level_for_volume(dry_elevations: &[f64], cell_area: f64, volume: f64) -> f64 {
-    let mut dry = dry_elevations.to_vec();
-    dry.sort_unstable_by(f64::total_cmp);
-    let Some(&lowest) = dry.first() else {
+/// same datum), where each submerged cell also holds `pores` (m of water, e.g. sediment
+/// thickness times porosity) in its sediment. The water depth over a cell with dry elevation `d`
+/// below sea level `S` is `(S − d) · ρm / (ρm − ρw)` (the water load depresses the floor), so the
+/// volume is piecewise linear and increasing in `S`, with a jump where a cell's pores fill; it
+/// is solved exactly. If the volume falls into such a jump, the sea level is that cell's dry
+/// elevation (its pores partly filled). A volume of zero gives the lowest dry elevation; a
+/// volume beyond all cells floods the planet.
+pub fn sea_level_for_volume_with_pores(
+    dry_elevations: &[f64],
+    pores: &[f64],
+    cell_area: f64,
+    volume: f64,
+) -> f64 {
+    let mut cells: Vec<(f64, f64)> = dry_elevations
+        .iter()
+        .copied()
+        .zip(pores.iter().copied())
+        .collect();
+    cells.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let Some(&(lowest, _)) = cells.first() else {
         return 0.0;
     };
-    // Σ max(0, S − dᵢ) that holds the volume.
+    // Σ over submerged cells of (S − dᵢ) + pᵢ / W that holds the volume.
     let target = volume / (cell_area * WATER_LOADING);
     if target <= 0.0 {
         return lowest;
     }
-    let mut prefix = 0.0;
-    for k in 1..=dry.len() {
-        prefix += dry[k - 1];
-        // With the k lowest cells below sea level: k S − Σ dᵢ = target.
-        let level = (target + prefix) / k as f64;
-        if k == dry.len() || level <= dry[k] {
+    let (mut prefix, mut pore_prefix) = (0.0, 0.0);
+    for k in 1..=cells.len() {
+        let (dry, pore) = cells[k - 1];
+        prefix += dry;
+        pore_prefix += pore / WATER_LOADING;
+        // With the k lowest cells below sea level: k S − Σ dᵢ + Σ pᵢ / W = target.
+        let level = (target + prefix - pore_prefix) / k as f64;
+        if level < dry {
+            // The volume runs out while the pores of cell k fill.
+            return dry;
+        }
+        if k == cells.len() || level <= cells[k].0 {
             return level;
         }
     }
@@ -104,6 +137,23 @@ pub fn ocean_volume(surface_elevations: &[f64], cell_area: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submerged_pores_hold_part_of_the_volume() {
+        let dry = [-100.0, -50.0, 0.0];
+        // Without pores, 2 m³ per m² fill the lowest cell up to −100 + 2 / W.
+        let without = sea_level_for_volume_with_pores(&dry, &[0.0; 3], 1.0, 2.0 * WATER_LOADING);
+        assert!((without + 98.0).abs() < 1e-9);
+        // With 1 m of pores in the lowest cell, the level is lower by 1 / W.
+        let with =
+            sea_level_for_volume_with_pores(&dry, &[1.0, 0.0, 0.0], 1.0, 2.0 * WATER_LOADING);
+        assert!((with + 98.0 + 1.0 / WATER_LOADING).abs() < 1e-9, "{with}");
+        // A volume that runs out while the second cell's pores fill: the level stays at its
+        // dry elevation.
+        let volume = (50.0 + 5.0 / WATER_LOADING) * WATER_LOADING;
+        let level = sea_level_for_volume_with_pores(&dry, &[0.0, 10.0, 0.0], 1.0, volume);
+        assert_eq!(level, -50.0);
+    }
 
     #[test]
     fn sea_level_holds_the_volume_exactly() {

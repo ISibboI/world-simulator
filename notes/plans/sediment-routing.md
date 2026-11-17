@@ -122,3 +122,35 @@ first ocean ring ≲ 2–3 km of sediment, margin wedges up to 10–15 km on thi
 sediment at trenches 3.5–6 Gt/yr, accretion ≲ 3 Gt/yr; erosion 14–20 Gt/yr; flooded continental
 crust 25–30% including shelves at a stable sea level; mean land against an ice-free Earth
 (~0.7 km? check); felsic + sediment within ±10% per 500 Myr.
+
+### Plan v2 review (independent agent, 2026-11-17): sound with changes — adopted
+
+Measured (`agent-scratch/review-sediment2/`): the sediment part of the sea level at 500 Myr is
++552…+703 m (everything else nets ~0…−100 m), still growing 50–90 m per 100 Myr; stock mostly on
+oceanic crust (0.9–1.2e9 Gt vs 0.4–0.6e9 on continental-origin and 0.1–0.15e9 on transitional).
+**Missed error: pore water.** The ocean volume is fixed and sediment displaces water with its
+bulk volume incl. 25% pores; on Earth the pore water comes out of the ocean, so the water
+displaced per metre of solids is (ρm−ρg)/(ρm−ρw) = 0.264, not 0.587 — the model overstates the
+sediment's sea-level effect ~2.2×. Fix first: ocean volume = open water + pores of submerged
+sediment. After that, compaction does not change sea level per rock mass (only accommodation).
+Earth: sedimentary shell ~2–3e9 Gt (mostly lithified continental cover; Garrels & Mackenzie
+1971, Ronov 1982); marine + margin sediment ~0.4–0.8e9 Gt (GlobSed, factor ~2 uncertain),
+in steady state by sea-floor recycling; river load ~14 Gt/yr pre-human (Syvitski et al. 2005);
+the model's 1.4–1.8e9 Gt is 2–3× and not levelled.
+Required: (0b) pore-water fix + attribution metrics (sediment part of the sea level; residence
+time = stock / input) — raw sea-level drift is confounded by ridge volume (thermal part varies
+~340 m); (2) initial sediment cover (pelagic by age + margin wedges) or targets relative to an
+equilibrium after spin-up; (3) routing is a residence-time question, not a sea-level fix
+(stock = input × residence; moving sediment onto unsubducted margins grows the stock unless
+margins are consumed) — add the input lever (erosion 21–24 vs 14–20 Gt/yr); (4) target flat
+crystalline felsic mass (falls ~13%, continents thin, 30–35 km crust 43–49% flooded); (5) step 1
+(stretching) is tectonics — move it to issue 1r/7, use integrated margin subsidence over rings
+0–2 as target (a 35→<10 km taper spans 1–3 cells), check the kinematic-opening count;
+(6) first ocean ring ≲ 6–8 km (continental rises hold 5–10+ km), rings ≥ 3 ≲ 1–2 km, open basin
+≲ 0.5 km; (7) conversion only renames sediment as crust (−5–10% sea-level effect); restrict to
+continental-origin crust (else more unsubductable margins). Optional: Athy compaction low
+priority (+15–20% accommodation in a 10 km wedge; store solid thickness); routing needs only
+plate id + crust class per cell in `erode`, one multi-source BFS for rings, two-phase BFS per
+mouth, ~250-cell reach. Simpler order: pore water → metrics → initial sediment → erosion input
+→ re-measure → minimal routing (no oceanic crust filled to shelf depth, depth targets by ring)
+→ compaction/conversion only if needed.

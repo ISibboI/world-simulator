@@ -255,12 +255,13 @@ fn snapshot(
     );
     info!(
         "    sea level {:+.0} m (dry offset; changes by tectonics {:+.0} m, surface processes \
-         {:+.0} m) | ocean volume {:.3e} km³ | crust of continental origin {:.1}% of the surface, \
+         {:+.0} m; sediment part {:+.0} m) | ocean volume {:.3e} km³ | crust of continental origin {:.1}% of the surface, \
          {:.0}% flooded, freeboard {:.0} m, thickness {:.0}/{:.0}/{:.0} km (10/50/90%), \
          {:.0}% > 50 km",
         statistics.sea_level,
         statistics.sea_level_change.0,
         statistics.sea_level_change.1,
+        statistics.sediment_sea_level,
         statistics.ocean_volume,
         100.0 * statistics.continental_origin_fraction,
         100.0 * statistics.flooded_continental_fraction,
