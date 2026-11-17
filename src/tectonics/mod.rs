@@ -107,6 +107,11 @@ pub struct TectonicParams {
     /// Thickness of crust (and sediment) removed from the overriding plate at the trench per
     /// subducted crust sample (subduction erosion), as a thickness over one cell.
     pub subduction_erosion: f64,
+    /// Felsic fraction (see [`Crust::felsic`]) of arc crust built on normal oceanic crust:
+    /// young intra-oceanic arcs are basaltic to andesitic (Izu–Bonin–Mariana, Tonga). Arcs on
+    /// thickened arc or continental crust are fully felsic, so intra-oceanic arcs mature into
+    /// continental crust once they have thickened.
+    pub oceanic_arc_felsic: f64,
     /// Sediment buried deeper than this (bulk thickness, m) on crust of continental origin
     /// metamorphoses into felsic crust (greenschist facies, ~250–300 °C at 10–12 km under
     /// sediment-blanketed margins).
@@ -223,6 +228,7 @@ impl Default for TectonicParams {
             frontal_accretion_fraction: 0.3,
             arc_crust_per_subduction: 500.0,
             subduction_erosion: 300.0,
+            oceanic_arc_felsic: 0.4,
             metamorphic_depth: 11_000.0,
             arc_profile: vec![0.25, 1.0, 1.0, 0.25],
             collision_profile: vec![1.0, 0.75, 0.5, 0.25],
@@ -284,6 +290,7 @@ impl TectonicParams {
             "ridge_push" => &mut self.ridge_push,
             "arc_crust_per_subduction" => &mut self.arc_crust_per_subduction,
             "subduction_erosion" => &mut self.subduction_erosion,
+            "oceanic_arc_felsic" => &mut self.oceanic_arc_felsic,
             "metamorphic_depth" => &mut self.metamorphic_depth,
             "subduction_channel_thickness" => &mut self.subduction_channel_thickness,
             "frontal_accretion_fraction" => &mut self.frontal_accretion_fraction,
@@ -1222,6 +1229,16 @@ mod tests {
         assert!((18_000.0..28_000.0).contains(&thickness), "{thickness}");
         // A mature arc emerges above sea level.
         assert!(crust.surface_elevation(0.0, 0.0) > 0.0);
+
+        // Intra-oceanic arcs start basaltic to andesitic and become of continental origin once
+        // the arc crust has thickened.
+        let felsic = TectonicParams::default().oceanic_arc_felsic;
+        let mut crust = new_oceanic_crust(-80.0);
+        for _ in 0..100 {
+            let added = if crust.is_oceanic() { felsic } else { 1.0 };
+            crust.add_crust(500.0, ARC_DENSITY, added, 75_000.0);
+        }
+        assert!(crust.is_continental_origin(), "{crust:?}");
     }
 
     #[test]

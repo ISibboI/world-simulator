@@ -61,8 +61,9 @@ pub struct Crust {
     /// [`SEDIMENT_ROCK_DENSITY`]); its actual thickness depends on compaction (see
     /// [`isostasy::sediment_bulk_thickness`]).
     pub sediment: f64,
-    /// Mass fraction of the crystalline crust that is felsic material (continental, arc and
-    /// metasedimentary crust) rather than mafic (oceanic) crust; a tracer for mass budgets.
+    /// Mass fraction of the crystalline crust that is felsic material (continental, mature arc
+    /// and metasedimentary crust) rather than mafic (oceanic crust, partly young intra-oceanic
+    /// arcs); a tracer for mass budgets.
     pub felsic: f64,
 }
 

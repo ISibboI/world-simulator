@@ -282,12 +282,18 @@ impl Simulation {
                 };
                 ledger.record(term, -crust_mass);
                 ledger.record(Term::SubductedSediment, -sediment_mass);
+                let upper_is_oceanic = plates[winner.plate as usize].crust[winner.local as usize]
+                    .is_some_and(|crust| crust.is_oceanic());
                 additions.push(CrustAddition {
                     cell: contact.cell,
                     plate: winner.plate,
                     thickness: params.arc_crust_per_subduction,
                     density: ARC_DENSITY,
-                    felsic: 1.0,
+                    felsic: if upper_is_oceanic {
+                        params.oceanic_arc_felsic
+                    } else {
+                        1.0
+                    },
                     kind: AdditionKind::Arc,
                 });
                 // Of the sediment beyond what the subduction channel carries down, a fraction is

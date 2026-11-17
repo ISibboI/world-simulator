@@ -155,3 +155,13 @@ seeds (arc bookkeeping). Trench sediment 2.4–6.9 Gt/yr, 18–22% accreted, 13�
 margins at 500 Myr (was 13–30%). Sediment part of the sea level 300 → 500 Myr +228…+274 →
 +310…+351 m: still rising ~40 m per 100 Myr (not improved; seed spread is large). Collision
 length 8–12k km, flooded 14–27%, mean land 0.50–0.68 km, ocean age 59–76 Myr.
+
+### Intra-oceanic arc felsic fraction (user choice; `agent-scratch/arcs/`)
+
+`oceanic_arc_felsic` 0.4 for arc crust added to normal oceanic upper-plate crust (arcs on
+thickened/continental crust stay 1.0, so intra-oceanic arcs still mature). Result: felsic +
+sediment after 150 Myr −0.6…−2.8 Gt/yr (before −0.7…−2.2) — **no change, as it must be in
+hindsight**: arcs that are later recycled add and remove the same felsic mass, so lowering their
+felsic fraction lowers gain and loss equally (the review's "3 Gt/yr bookkeeping" argument was
+wrong; I did not catch it). Kept as the more realistic tracer. The remaining ~1–2 Gt/yr loss is
+real continental material (continental-origin share of the surface 40% → 34–39% at 500 Myr).
