@@ -743,14 +743,16 @@ impl RingScratch {
 
 /// Fills the empty local vertex `local` of `plate` at an opening rift by stretching the
 /// plate's crust of continental origin within `rings` rings (its frame) that is thicker than
-/// `breakup_thickness`. With N donors, a donor in ring k gives 1/((N + 1) k) of its crust and
-/// sediment, but never thins below `breakup_thickness`: thinning is strongest next to the rift,
-/// so margins taper towards the ocean. Mass is conserved. Stretching heats the lithosphere
-/// (McKenzie 1978): a donor stretched by β whose thermal uplift is the fraction U of a ridge's
-/// gets U' = 1 − (1 − U)/β, after which it subsides with the GDH1 curve. Returns false if there
-/// is no donor or the donors cannot fill the vertex with at least `breakup_thickness` of crust:
-/// the continent breaks up and the gap becomes sea floor (no felsic slivers thin enough to be
-/// subducted).
+/// `breakup_thickness`. The N donors give N/(N + 1) of one donor's crust and sediment in total
+/// (uniform stretching would give each 1/(N + 1)), weighted by 1/k for a donor in ring k, but
+/// none thins below `breakup_thickness`: thinning is strongest next to the rift, so margins
+/// taper towards the ocean. Mass is conserved. Stretching heats the lithosphere (McKenzie
+/// 1978): crust stretched by β whose thermal uplift is the fraction U of a ridge's gets
+/// U' = 1 − (1 − U)/β, after which it subsides with the GDH1 curve; the new sample has its
+/// donors' mean state, further stretched by their mean thickness over its own (if thinner).
+/// Returns false if there is no donor or the donors cannot fill the vertex with at least
+/// `breakup_thickness` of crust: the continent breaks up and the gap becomes sea floor (no
+/// felsic slivers thin enough to be subducted).
 fn stretch_rift(
     mesh: &SphereMesh,
     plate: &mut Plate,
@@ -784,7 +786,9 @@ fn stretch_rift(
     if donors.is_empty() {
         return false;
     }
-    let base = 1.0 / (donors.len() + 1) as f64;
+    let count = donors.len() as f64;
+    let weights: f64 = donors.iter().map(|&(_, ring)| 1.0 / ring as f64).sum();
+    let base = count / (count + 1.0) / weights;
     // Fraction of its crust each donor gives.
     let shares: Vec<f64> = donors
         .iter()
@@ -803,7 +807,10 @@ fn stretch_rift(
     if given < breakup_thickness {
         return false;
     }
-    let (mut thickness, mut mass, mut felsic, mut sediment, mut heat) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let (mut thickness, mut mass, mut felsic, mut sediment) = (0.0, 0.0, 0.0, 0.0);
+    // Mass-weighted thickness and thermal fraction of the donors after stretching (repeated
+    // stretching compounds in the donors).
+    let (mut donor_thickness, mut donor_heat) = (0.0, 0.0);
     for (&(donor, _), &share) in donors.iter().zip(&shares) {
         let crust = plate.crust[donor as usize]
             .as_mut()
@@ -817,13 +824,15 @@ fn stretch_rift(
         thickness += given;
         mass += given * crust.density;
         felsic += given * crust.density * crust.felsic;
-        heat += given * crust.density * fraction;
+        donor_thickness += given * crust.density * (crust.thickness - given);
+        donor_heat += given * crust.density * fraction;
         sediment += crust.sediment * share;
         crust.thickness -= given;
         crust.sediment -= crust.sediment * share;
     }
-    let birth =
-        age_for_thermal_fraction(heat / mass.max(1e-9)).map_or(time - 1000.0, |age| time - age);
+    let beta = (donor_thickness / mass.max(1e-9)) / thickness.max(1e-9);
+    let fraction = 1.0 - (1.0 - donor_heat / mass.max(1e-9)) / beta.max(1.0);
+    let birth = age_for_thermal_fraction(fraction).map_or(time - 1000.0, |age| time - age);
     plate.crust[local as usize] = Some(Crust {
         thickness,
         density: mass / thickness.max(1e-9),
@@ -1190,7 +1199,7 @@ mod tests {
         simulation.plates[0].crust[local as usize] = None;
         let mass = simulation.total_mass();
         // Repeated opening at the same spot thins the rift zone down to the breakup thickness.
-        let (mut stretched, mut removed) = (0, 0.0);
+        let (mut stretched, mut removed, mut last_heat) = (0, 0.0, 0.0);
         while stretch_rift(
             &simulation.mesh,
             &mut simulation.plates[0],
@@ -1203,10 +1212,9 @@ mod tests {
             assert!(new.thickness >= 15e3, "{}", new.thickness);
             assert!(((simulation.total_mass() + removed) / mass - 1.0).abs() < 1e-12);
             // Take the new sample away, so the next opening happens at the same spot again.
-            removed += simulation.plates[0].crust[local as usize]
-                .take()
-                .unwrap()
-                .mass();
+            let new = simulation.plates[0].crust[local as usize].take().unwrap();
+            last_heat = thermal_fraction(new.age(0.0));
+            removed += new.mass();
             stretched += 1;
             assert!(stretched < 100);
         }
@@ -1225,6 +1233,10 @@ mod tests {
             .find(|&v| v != local && !simulation.mesh.neighbors(local).contains(&v))
             .unwrap();
         assert!(thickness(ring1) >= 15e3 - 1e-6);
+        // Breakup comes when the rift zone is thinned close to the breakup thickness (β ≈ 2 for
+        // 30 km crust), and the last rift crust carries the heat of that stretching.
+        assert!(thickness(ring1) < 16e3, "{}", thickness(ring1));
+        assert!(last_heat > 0.3, "{last_heat}");
         assert!(
             thickness(ring1) < thickness(ring2),
             "{} {}",
