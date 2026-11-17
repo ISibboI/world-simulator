@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-16 (sea level from a fixed water volume)_
+_Last updated: 2026-11-17 (summary corrected; next: mass-conserving gap healing)_
 
 ## Goal
 
@@ -42,8 +42,8 @@ components (climate, erosion, …) are expected to build on it.
     (`src/isostasy.rs`: mantle 3300, water 1030, sediment 2300, oceanic 2900, continental 2800,
     arc 2800 kg/m³) plus thermal uplift from the GDH1 depth–age curve (ridge −2600 m, old ocean
     −5651 m; 35 km continent ≈ +570 m). "Continental" = crustal buoyancy ≥ 3000 m.
-  - `boundaries.rs`: ownership resolution per substep (most buoyant crust wins; subduction
-    polarity per plate pair), deferred consumption of overridden samples (only once invisible),
+  - `boundaries.rs`: ownership resolution per substep (the overriding plate of the boundary
+    segment wins, see `polarity.rs`), deferred consumption of overridden samples (only once invisible),
     arcs (500 m·cell per subducted sample in a band behind the trench), subduction erosion
     (300 m·cell at the trench), continental collisions stack the loser's crust onto the winner
     (spilling outward above 75 km), crustal flow of crust > 40 km, gap filling (new sea floor
@@ -114,26 +114,30 @@ components (climate, erosion, …) are expected to build on it.
 - Continental shelves are too wide (sediment spreads over up to 256 cells per river mouth).
 - Land fragmentation largely fixed by the thickness model (at 200 Myr: land masses 105 → ~30,
   continental crust masses 146 → ~17–25); still 15–20 single-cell specks.
-- **Continental area declines** 30% → ~20% in 500 Myr because collisions thicken crust (area
-  shrinks at conserved volume) and nothing thins it again: no continental rifting/extension,
-  no plate splitting. Continents end up too high mid-run (mean land 1.1–1.4 km vs Earth 0.84).
+- **Continents thicken** (mean continental crust 35 → 45 km in 500 Myr, mean land 1.3–1.9 km
+  vs Earth 0.84), mostly through gap-healing copies (issue 1r); without them the continental
+  area falls 40% → 27–30% (issue 3 mass balance).
 - Collision churn is high (≈ the whole initial continental volume passes through collisions in
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
 - **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
   plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms + tuning), 5, 3,
-  4 done and the runtime optimisations. **Next (user): issue 1o — fragmentation fixed (1p);
-  boundary shear coupling added (1q; modest effect); production still ~2× Earth (median ocean
-  age ~35 Myr) — the lever is the magnitude of relative plate speeds; thickening (mean land 1.2–1.9 km) needs orogenic collapse and rift
-  stretching (1r); then issue 2 (sea level).** 2–6% ancient (≥ 200 Myr) ocean remains (issue 10).
+  4 done, issue 2 (sea level) done, and the runtime optimisations. Since then: per-segment
+  polarity, plate connectivity (1p), boundary shear coupling (1q; modest effect). **Next (user):
+  continental thickening (1r) is mostly a numerical crust pump (gap healing copies, +35–44
+  Gt/yr): implement mass-conserving gap healing (`plans/mass-conserving-gaps.md`, reviewed —
+  adopt its required changes), then the continental mass balance (issue 3: sediment
+  subduction 4–6× Earth, merge leak), then collapse/stretching only if still needed
+  (`plans/issue-1r-thickening.md`, reviewed, needs rework); relative plate speed tuning (1q)
+  later. See "Resume here" in `sessions/2026-11-16.md`.** 2–6% ancient (≥ 200 Myr) ocean
+  remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal
   uplift on young-aged continental crust inflates mountains; new crust created at convergent
   gaps; implicit erosion ignores isostasy; shelves are 10+ km sediment piles on oceanic crust;
   mid-latitude precipitation too low; poles too warm.
-- Subduction model gaps: no trenches, slabs/slab pull, back-arc extension, accretionary
-  wedges, obduction, subduction initiation; polarity is per plate pair, not per boundary
-  segment; transform boundaries are not distinguished (overlap noise is treated as convergence).
+- Subduction model gaps: no back-arc extension, accretionary wedges or obduction; induced
+  subduction at transform-type boundaries (not reversals) practically never fires (1l).
 - Climate has no ocean currents, glaciers don't erode, precipitation does not fall as snow; the
   precipitation map shows slight striping from the discrete upwind neighbour.
 - Temperature is computed from the climatological seasonal cycle per Myr step (no Milankovitch
