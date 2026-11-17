@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-17 (issue 1r follow-up: local splits, evaluation)_
+_Last updated: 2026-11-17 (terrane accretion, pore water; sediment routing next)_
 
 ## Goal
 
@@ -133,7 +133,13 @@ components (climate, erosion, …) are expected to build on it.
   contacts, collision resistance 100 (interim), tapered stretching. Its evaluation found a split
   bug (detached cells, 23% of splits fail), too-early breakup (β ≈ 1.5), raw normals in the
   collision term, and that most remaining collision length is in pairs blocked by the
-  trench-ratio suture rule; margins are still unthinned with 8–9 km sediment on old ocean. 2–6% ancient (≥ 200 Myr) ocean
+  trench-ratio suture rule; margins are still unthinned with 8–9 km sediment on old ocean. Since then: split bug fixed, normalised taper, smoothed collision normals,
+  **terrane accretion** (converging contacts; sutures first) and collision resistance 50 →
+  collision length 8–17k km, stacking 14–22 Gt/yr, ocean age 57–69 Myr; **pore water of submerged
+  sediment counted in the ocean volume** (sediment's sea-level effect was 2.2× too large):
+  sediment part of the sea level +311…+400 m at 500 Myr (still growing), flooded continental
+  crust 25–33%, mean land 0.62–0.87 km. Next: sediment routing (`plans/sediment-routing.md` v2
+  with review; input 11.5–14 Gt/yr is Earth-like, residence ~2× too long). 2–6% ancient (≥ 200 Myr) ocean
   remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
