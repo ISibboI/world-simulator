@@ -238,6 +238,14 @@ balance → collapse/stretching if needed** → 1q relative-speed tuning (later,
        resistance (force capped by orogen buoyancy, weak shear at strike-slip/diverging
        contacts; expect 50–100) → margin taper + sediment routing. Lower-crust subduction (C2)
        not needed now (felsic crust already −14–17% per 500 Myr into the sediment stock).
+       **Follow-up (2026-11-17, see session log):** collapse cap fixed; diagnostics; local splits
+       (`plans/local-splits.md`: no continent cut by initiations, collision length 30–40k →
+       17–21k km); weak shear at continental contacts; resistance 100; tapered stretching.
+       **Evaluation:** split bug (detached cells: 23% of splits fail), taper breaks up at
+       β ≈ 1.5, collision term with raw normals still resists strike-slip ~12× nominal, remaining
+       collision length mostly pairs blocked by the trench-ratio suture rule; margins still
+       unthinned (COB ~32 km, emergent) with 8–9 km sediment on adjacent old ocean. Next: fixes
+       1–3, local suture, then sediment routing.
    **1q: boundary shear coupling done (2026-11-16, plan + review `plans/boundary-friction.md`):**
    strike-slip along plate boundaries resisted in the torque balance (smoothed 3-ring normals,
    per boundary cell, symmetric); oceanic/mixed boundaries `boundary_coupling_width` 200 km
