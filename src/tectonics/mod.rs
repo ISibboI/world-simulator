@@ -167,8 +167,9 @@ pub struct TectonicParams {
     /// Resistance to converging continental crust per collision boundary cell, as a multiple of
     /// the basal drag under one cell (normal motion only; strike-slip is resisted like at
     /// other boundaries, see [`Self::boundary_coupling_width`]). Calibrated (2026-11-17, after
-    /// local splits) on continental thickness, mean land and flooded continental crust: 100
-    /// (50: mean land 1.0–1.5 km, 8–17% > 50 km; 150: 0.6–0.8 km, 33–48% flooded).
+    /// local splits and terrane accretion) on continental thickness, mean land and collision
+    /// stacking: 50 (~2–3e12 N/m at 1–2 cm/yr, below Tibet's ~5–8e12; mean land 0.6–0.8 km,
+    /// 2–6% > 50 km, stacking 13–23 Gt/yr; 30–100 give similar land within seed scatter).
     pub collision_resistance: f64,
     /// Resistance of plate boundaries to strike-slip motion along them: each
     /// metre of boundary resists like the basal drag under this many metres times a metre.
@@ -234,7 +235,7 @@ impl Default for TectonicParams {
             ridge_age: 20.0,
             basal_drag: 1e15,
             continental_drag_factor: 4.0,
-            collision_resistance: 100.0,
+            collision_resistance: 50.0,
             boundary_coupling_width: 200e3,
             track_material_budget: false,
             ocean_volume: 1.335e18,
