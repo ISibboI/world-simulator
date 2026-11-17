@@ -230,9 +230,13 @@ impl Simulation {
         // torque −k R² m mᵀ (ω_p − ω_q) with m = r × n. Per boundary cell, it is as strong as the
         // basal drag under `collision_resistance` cells.
         let coupling = params.collision_resistance * params.basal_drag * cell_area;
-        let collisions: Vec<&BoundaryCell> = boundaries
+        // With the smoothed normals: the raw ones scatter by ~20°, which made strike-slip
+        // contacts look half converging and resisted along strike.
+        let collisions: Vec<(&BoundaryCell, DVec3)> = boundaries
             .iter()
-            .filter(|boundary| boundary.kind == BoundaryKind::Collision)
+            .zip(&normals)
+            .filter(|(boundary, _)| boundary.kind == BoundaryKind::Collision)
+            .map(|(boundary, &normal)| (boundary, normal))
             .collect();
         let mut active = vec![true; collisions.len()];
 
@@ -240,13 +244,13 @@ impl Simulation {
         let mut converged = false;
         for _ in 0..MAX_ACTIVE_SET_ITERATIONS {
             let mut matrix = base.clone();
-            for (boundary, _) in collisions
+            for ((boundary, normal), _) in collisions
                 .iter()
                 .zip(&active)
                 .filter(|(_, active)| **active)
             {
                 let r = self.mesh.vertex(boundary.cell);
-                let m = r.cross(boundary.normal);
+                let m = r.cross(*normal);
                 let block = outer(m, m) * (coupling * radius * radius);
                 add_block(
                     &mut matrix,
@@ -275,11 +279,11 @@ impl Simulation {
 
             // Collision resistance only acts where the continents converge.
             let mut changed = false;
-            for (boundary, active) in collisions.iter().zip(active.iter_mut()) {
+            for ((boundary, normal), active) in collisions.iter().zip(active.iter_mut()) {
                 let r = self.mesh.vertex(boundary.cell);
                 let relative = (omega[boundary.plate as usize] - omega[boundary.other as usize])
                     .cross(r)
-                    .dot(boundary.normal);
+                    .dot(*normal);
                 let converging = relative > 0.0;
                 if converging != *active {
                     *active = converging;
@@ -774,6 +778,43 @@ mod tests {
         }
         let count = boundaries.len() as f64;
         (strike / count, opening / count)
+    }
+
+    /// Two continental hemispheres split at the equator, at rest, with the given collision
+    /// resistance.
+    fn continental_hemispheres(collision_resistance: f64) -> Simulation {
+        let params = TectonicParams {
+            collision_resistance,
+            ..TectonicParams::default()
+        };
+        let mut simulation = Simulation::new(SphereMesh::icosphere(4), 1, params, 1);
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            *crust = Crust {
+                thickness: 35_000.0,
+                density: crate::isostasy::CONTINENTAL_DENSITY,
+                birth: -1000.0,
+                sediment: 0.0,
+                felsic: 1.0,
+            };
+        }
+        simulation.split_plate(0, DVec3::Z).unwrap();
+        simulation.polarities.clear();
+        simulation
+    }
+
+    #[test]
+    fn collisions_resist_convergence_but_not_strike_slip() {
+        // Strike-slip along a continental contact is resisted only by the boundary coupling.
+        let strike_slip = DVec3::Z * 1e-15;
+        let (free, _) = relative_boundary_motion(&mut continental_hemispheres(0.0), strike_slip);
+        let (resisted, _) =
+            relative_boundary_motion(&mut continental_hemispheres(1000.0), strike_slip);
+        assert!(resisted > 0.9 * free, "{resisted} vs {free}");
+        // Convergence across it is resisted.
+        let closing = DVec3::X * 1e-15;
+        let (_, free) = relative_boundary_motion(&mut continental_hemispheres(0.0), closing);
+        let (_, resisted) = relative_boundary_motion(&mut continental_hemispheres(1000.0), closing);
+        assert!(resisted < 0.8 * free, "{resisted} vs {free}");
     }
 
     #[test]
