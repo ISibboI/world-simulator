@@ -160,3 +160,39 @@ crust never thins (10th percentile ~31 km).
   flows onto oceanic crust, is stable for large κ dt and resolution independent (s4 vs s5);
   partial accretion subducts the expected fraction; ledger closes; incremental vs full matching
   identical.
+
+## Review of plan v2 (independent agent, 2026-11-17): sound with changes — adopted
+
+Physics: U' = 1 − (1 − U)/β with the GDH1 inverse is a fair stand-in for McKenzie (35 → 17.5 km:
++570 m → ≈ −1.5 km syn-rift → ≈ −3.0 km; GDH1's time constant ~36 Myr vs McKenzie's 62.8 Myr,
+so margins subside ~2× too fast — accepted, noted). Uniform stretching over a disc of radius W
+is resolution independent (β ≈ 1.5 per opened row at s6, margins ~400 km, mean ~25 km).
+Collapse only redistributes (lowers the > 50 km share, not the mean). Flooded 25–30% by origin
+is uncertain (~20 rifts per 500 Myr, short-lived margins) — do not tune for it. With this
+isostasy, mean land 0.84 km corresponds to ~36–37 km mean continental crust.
+
+Required:
+1. C as written removes 16–28 Gt/yr of felsic crust at today's churn (Earth ~0.4–1 km³/yr):
+   first measure the collision churn split by real normal convergence vs strike-slip/resampling
+   overlaps, add "stack only while converging", do C last with a felsic budget prediction;
+   prefer accreting the upper ~15–20 km plus sediment and subducting the rest; own ledger term.
+2. Stretching below `min_spreading_rate` only above a small positive threshold (0.1–0.2 cm/yr)
+   plus the obliquity test; diagnostic stretched area vs kinematic continental opening.
+3. A hidden sample in the gap's slot is revealed, not stretched; consumed slots not stretched.
+4. Donors: same plate, continental origin, thicker than `breakup_thickness`; deterministic ring
+   order (hidden samples may donate).
+5. Collapse per sample (duplicated samples), outflow limited per sample, active set growing
+   between sub-cycles.
+6. No cross-plate collapse at converging contacts (spread onto the upper plate's own side).
+7. Replace every class check by "continental origin" = felsic > 0.5 and resists subduction:
+   events (split normal, `seed_margin_subduction`, candidates, rift `continent_nearby`),
+   statistics (flooded, freeboard, old passive margins).
+8. Closed-form GDH1 inverse (both branches meet at 20 Myr); U' → 0 keeps the old birth; U from
+   age alone; stretched cells not in production; stretching booked as zero change; felsic
+   budget in the substeps phase.
+Optional: stretched young crust gets ridge push and loses the continental drag (check opening
+rates); stage A → measure → B → measure → C; `felsic` in the matching state comparison; test
+margin profile shape rather than strict halving. Tests: rigid rotation/transform/convergence
+do not stretch; hidden slot revealed; donors same plate above breakup; β = 2 profile ≈ −1.5 km
+syn-rift then ≈ −3 km after 100 Myr; GDH1 inverse round trip; collapse conserves mass with
+duplicated samples, no cross-plate flow at converging contacts.
