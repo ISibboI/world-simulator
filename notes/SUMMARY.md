@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-17 (continental mass balance)_
+_Last updated: 2026-11-17 (issue 1r: rift stretching, collapse, collision resistance)_
 
 ## Goal
 
@@ -114,8 +114,8 @@ components (climate, erosion, …) are expected to build on it.
 - Continental shelves are too wide (sediment spreads over up to 256 cells per river mouth).
 - Land fragmentation largely fixed by the thickness model (at 200 Myr: land masses 105 → ~30,
   continental crust masses 146 → ~17–25); still 15–20 single-cell specks.
-- **Continents thicken** again since crust is conserved: accreted wedges and collisions raise
-  mean land to 1.4–1.6 km in 500 Myr (issue 1r; collapse and stretching missing).
+- **Collision boundaries are 6–8× Earth's length** (30–40k km): collisions persist; continental
+  thickness is held near Earth-like only by strong collision resistance (1r).
 - Collision churn is high (≈ the whole initial continental volume passes through collisions in
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
 - **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
@@ -123,10 +123,12 @@ components (climate, erosion, …) are expected to build on it.
   4 done, issue 2 (sea level) done, and the runtime optimisations. Since then: per-segment
   polarity, plate connectivity (1p), boundary shear coupling (1q; modest effect). Gap healing is
   mass-conserving and the continental mass balance (issue 3) closes, but through a sediment
-  loop ~5× Earth (trench accretion 12–15 Gt/yr) and doubled collision churn (evaluation). **Next: continental thickening (1r) is back with the accreted
-  material (mean land 1.4–1.6 km): orogenic collapse and rift stretching
-  (`plans/issue-1r-thickening.md`, reviewed, needs rework per its review); relative plate speed
-  tuning (1q) later.** 2–6% ancient (≥ 200 Myr) ocean
+  loop ~5× Earth (trench accretion 12–15 Gt/yr) and doubled collision churn (evaluation). Issue 1r (plan v2 in `plans/issue-1r-thickening.md`): rift
+  stretching with thermal subsidence, elevation-driven orogenic collapse and stronger
+  collision resistance (150) give mean land 0.7–1.1 km, 3–6% of continental crust > 50 km,
+  29–37% flooded. **Open: collision boundaries 30–40k km long (Earth ~5000), lower-crust
+  subduction at collisions (C2, undecided), sediment routing (`plans/sediment-routing.md`),
+  relative plate speed tuning (1q).** 2–6% ancient (≥ 200 Myr) ocean
   remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
