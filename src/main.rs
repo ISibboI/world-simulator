@@ -95,8 +95,9 @@ struct Cli {
     #[arg(long)]
     material_budget: bool,
 
-    /// Overrides a tectonic parameter for calibration, e.g. `--set basal_drag=8e14`; can be
-    /// repeated. See `TectonicParams::set` for the names.
+    /// Overrides a tectonic parameter for calibration, e.g. `--set basal_drag=8e14`, or an
+    /// erosion parameter with the prefix `erosion.`; can be repeated. See `TectonicParams::set`
+    /// and `ErosionParams::set` for the names.
     #[arg(long = "set", value_name = "NAME=VALUE")]
     overrides: Vec<String>,
 }
@@ -136,6 +137,10 @@ fn main() -> anyhow::Result<()> {
     };
     params.matching.verify = cli.verify_matching;
     params.track_material_budget = cli.material_budget;
+    let mut erosion = ErosionParams {
+        planet_radius: EARTH_RADIUS,
+        ..ErosionParams::default()
+    };
     for assignment in &cli.overrides {
         let (name, value) = assignment
             .split_once('=')
@@ -143,14 +148,15 @@ fn main() -> anyhow::Result<()> {
         let value: f64 = value
             .parse()
             .with_context(|| format!("parsing the value of {name}"))?;
-        params.set(name, value)?;
-        info!(name, value, "Overrode tectonic parameter");
+        if let Some(name) = name.strip_prefix("erosion.") {
+            erosion.set(name, value)?;
+        } else {
+            params.set(name, value)?;
+        }
+        info!(name, value, "Overrode parameter");
     }
     let simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
-    let erosion = (!cli.no_erosion).then(|| ErosionParams {
-        planet_radius: EARTH_RADIUS,
-        ..ErosionParams::default()
-    });
+    let erosion = (!cli.no_erosion).then_some(erosion);
     let planet = Planet::new(
         simulation,
         ClimateParams::default(),
@@ -461,10 +467,18 @@ fn snapshot(
     );
     info!(
         "    land precipitation {:4.2} m/yr | largest river {:8.0} m³/s | \
-         sediment to ocean {:5.1} km³/yr",
+         sediment to ocean {:5.1} km³/yr (shelf {:.1}, slope {:.1}, rise {:.1}, fan {:.1}) | \
+         sediment stock (Gt) continental {:.3e}, transitional {:.3e}, oceanic {:.3e}",
         planet_statistics.mean_land_precipitation,
         planet_statistics.largest_river / SECONDS_PER_YEAR,
         planet_statistics.sediment_flux / 1e9,
+        planet_statistics.sediment_deposition[0] / 1e9,
+        planet_statistics.sediment_deposition[1] / 1e9,
+        planet_statistics.sediment_deposition[2] / 1e9,
+        planet_statistics.sediment_deposition[3] / 1e9,
+        planet_statistics.sediment_stock[0],
+        planet_statistics.sediment_stock[1],
+        planet_statistics.sediment_stock[2],
     );
     info!(
         "    temperature global {:5.1} °C, equator {:5.1} °C, poles {:6.1} °C | \

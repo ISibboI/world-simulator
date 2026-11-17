@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-17 (terrane accretion, pore water; sediment routing next)_
+_Last updated: 2026-11-17 (terrane accretion, pore water, sediment routing; sediment sinks next)_
 
 ## Goal
 
@@ -73,9 +73,11 @@ components (climate, erosion, …) are expected to build on it.
   (evapotranspiration). Upwind neighbour per cell precomputed; 150 transport iterations.
 - `src/erosion.rs`: priority-flood drainage from the ocean (lakes spill), discharge accumulation,
   implicit stream-power incision (Braun & Willett; `K = 1.5e-7`, `m = 0.5`) with **sea level as
-  base level**; eroding crust thins it (isostatic rebound via `isostasy`); sediment fills lakes
-  and builds shelves outward from river mouths to −120 m, then delta plains to +2 m; sediment
-  loads the crust (rises ~0.44 of its thickness under water); any rest is lost to the deep ocean.
+  base level**; eroding crust thins it (isostatic rebound via `isostasy`); sediment fills lakes,
+  then is **routed onto margins** by zone (shelf on non-oceanic crust to −120 m, slope/rise on
+  oceanic crust by distance from its plate's margin crust to −2000/−3500 m, with thickness caps),
+  the river's own plate first, then thinning deep-sea fans, delta plains to +2 m, overfill;
+  sediment loads the crust (rises ~0.44 of its thickness under water). `--set erosion.NAME=…`.
 - `src/temperature.rs`: energy balance model `C dT/dt = Q(1−α) − (A + BT) + transport` with a
   seasonal cycle. Earth orbit (e = 0.0167, obliquity 23.44°, perihelion early January, Kepler
   solved) → daily-mean insolation per latitude and season (24 seasons/yr). Runs on a coarse
@@ -138,8 +140,11 @@ components (climate, erosion, …) are expected to build on it.
   collision length 8–17k km, stacking 14–22 Gt/yr, ocean age 57–69 Myr; **pore water of submerged
   sediment counted in the ocean volume** (sediment's sea-level effect was 2.2× too large):
   sediment part of the sea level +311…+400 m at 500 Myr (still growing), flooded continental
-  crust 25–33%, mean land 0.62–0.87 km. Next: sediment routing (`plans/sediment-routing.md` v2
-  with review; input 11.5–14 Gt/yr is Earth-like, residence ~2× too long). 2–6% ancient (≥ 200 Myr) ocean
+  crust 25–33%, mean land 0.62–0.87 km. Sediment routing (`plans/sediment-routing.md`)
+  done: flooded 21–25%, but the stock (1.3–1.6e9 Gt, ~2× Earth) and its sea-level part
+  (+363…+456 m) still grow and ~20% of the input overfills full margins — **next: a sediment
+  sink** (compaction, conversion of deeply buried margin sediment; input 11.5–14 Gt/yr is
+  Earth-like). 2–6% ancient (≥ 200 Myr) ocean
   remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water

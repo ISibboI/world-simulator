@@ -5,8 +5,8 @@ use std::time::Instant;
 use tracing::{debug, debug_span};
 
 use crate::climate::{Climate, ClimateParams};
-use crate::erosion::{ErosionParams, erode};
-use crate::tectonics::{Simulation, Statistics};
+use crate::erosion::{CrustClass, ErosionParams, Surface, erode};
+use crate::tectonics::{Crust, Simulation, Statistics};
 use crate::temperature::{TemperatureFields, TemperatureModel, TemperatureParams};
 
 pub struct Planet {
@@ -25,6 +25,8 @@ pub struct Planet {
     /// Sediment piled above the delta top in overfilled basins so far (thickness over one cell,
     /// summed).
     sediment_overfill: f64,
+    /// Sediment deposited in the ocean per zone in the last step, in m³/yr.
+    sediment_deposition: [f64; 4],
 }
 
 /// Statistics of the planet, extending the tectonic statistics.
@@ -39,6 +41,12 @@ pub struct PlanetStatistics {
     /// Sediment piled above the delta top in overfilled basins so far (thickness over one cell,
     /// summed).
     pub sediment_overfill: f64,
+    /// Sediment deposited in the ocean in the last step per [`crate::erosion::Zone`] (shelf,
+    /// slope, rise, fan) in m³/yr.
+    pub sediment_deposition: [f64; 4],
+    /// Sediment mass (Gt) on crust of continental origin, transitional and oceanic crust (by
+    /// [`CrustClass`], counting each visible cell).
+    pub sediment_stock: [f64; 3],
     /// Area-weighted global annual mean surface temperature in °C.
     pub global_temperature: f64,
     /// Annual mean surface temperature between 10°S and 10°N in °C.
@@ -73,6 +81,7 @@ impl Planet {
             discharge: vec![0.0; cell_count],
             sediment_flux: 0.0,
             sediment_overfill: 0.0,
+            sediment_deposition: [0.0; 4],
         };
         planet.precipitation = planet.compute_precipitation(&planet.tectonics.surface_elevations());
         planet
@@ -111,13 +120,18 @@ impl Planet {
 
         if let Some(params) = &self.erosion {
             let dt_years = dt * 1e6;
+            let (plate, class) = self.plates_and_classes();
             let result = erode(
                 self.tectonics.mesh(),
-                &elevation,
-                &self.tectonics.sediment_thicknesses(),
-                &self.tectonics.bedrock_densities(),
-                &self.tectonics.bedrock_isostatic_densities(),
-                &self.precipitation,
+                &Surface {
+                    elevation: &elevation,
+                    sediment: &self.tectonics.sediment_thicknesses(),
+                    bedrock_density: &self.tectonics.bedrock_densities(),
+                    bedrock_isostatic_density: &self.tectonics.bedrock_isostatic_densities(),
+                    precipitation: &self.precipitation,
+                    plate: &plate,
+                    class: &class,
+                },
                 params,
                 dt_years,
             );
@@ -126,6 +140,8 @@ impl Planet {
             self.discharge = result.discharge;
             self.sediment_flux = result.sediment_to_ocean / dt_years;
             self.sediment_overfill += result.sediment_overfill;
+            let cell_area = self.cell_area();
+            self.sediment_deposition = result.deposited.map(|d| d * cell_area / dt_years);
         }
         debug!(
             ?tectonics_time,
@@ -133,6 +149,22 @@ impl Planet {
             erosion_time = ?start.elapsed() - climate_time,
             "Step finished"
         );
+    }
+
+    /// The plate and the [`CrustClass`] of every cell.
+    fn plates_and_classes(&self) -> (Vec<u32>, Vec<CrustClass>) {
+        (0..self.tectonics.mesh().len() as u32)
+            .map(|cell| {
+                (
+                    self.tectonics.owner(cell).plate,
+                    crust_class(&self.tectonics.surface_crust(cell)),
+                )
+            })
+            .unzip()
+    }
+
+    fn cell_area(&self) -> f64 {
+        4.0 * std::f64::consts::PI * self.planet_radius.powi(2) / self.tectonics.mesh().len() as f64
     }
 
     fn compute_precipitation(&self, elevation: &[f64]) -> Vec<f64> {
@@ -170,6 +202,14 @@ impl Planet {
         let all = || 0..elevation.len();
         let annual = |c: usize| fields.annual_mean[c];
 
+        let mut sediment_stock = [0.0; 3];
+        let cell_area = self.cell_area();
+        for cell in 0..elevation.len() as u32 {
+            let crust = self.tectonics.surface_crust(cell);
+            sediment_stock[crust_class(&crust) as usize] +=
+                crust.sediment * cell_area * crate::isostasy::SEDIMENT_ROCK_DENSITY / 1e12;
+        }
+
         PlanetStatistics {
             // Mesh cells have nearly equal areas, so plain means are area-weighted.
             global_temperature: mean(&mut all(), &annual),
@@ -183,6 +223,19 @@ impl Planet {
             largest_river,
             sediment_flux: self.sediment_flux,
             sediment_overfill: self.sediment_overfill,
+            sediment_deposition: self.sediment_deposition,
+            sediment_stock,
         }
+    }
+}
+
+/// The [`CrustClass`] of a crust sample.
+fn crust_class(crust: &Crust) -> CrustClass {
+    if crust.is_continental_origin() {
+        CrustClass::Continental
+    } else if crust.is_oceanic() {
+        CrustClass::Oceanic
+    } else {
+        CrustClass::Transitional
     }
 }

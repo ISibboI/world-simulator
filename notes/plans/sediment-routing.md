@@ -154,3 +154,26 @@ plate id + crust class per cell in `erode`, one multi-source BFS for rings, two-
 mouth, ~250-cell reach. Simpler order: pore water → metrics → initial sediment → erosion input
 → re-measure → minimal routing (no oceanic crust filled to shelf depth, depth targets by ring)
 → compaction/conversion only if needed.
+
+## Full routing (2026-11-17, user: "rather do full routing right away")
+
+After the pore-water fix and the input check (input 11.5–14 Gt/yr, Earth-like; residence ~2×
+too long), the user chose the full routing of step 2 over the minimal version. Implemented in
+`src/erosion.rs`:
+
+- `erode` gets per cell the plate and a `CrustClass` (continental origin / transitional /
+  oceanic, `planet.rs::crust_class`). Zones: non-oceanic crust = **shelf**; oceanic crust by
+  rings within its own plate from the nearest non-oceanic crust: ring 1 or ≤ 150 km = **slope**,
+  ≤ 500 km = **rise**, else **fan** (also oceanic plates without margin crust).
+- Per river mouth: BFS over shelf/slope/rise ocean cells (≤ 256 cells); fill nearest first to
+  the zone's target (shelf −120 m / slope −2000 m / rise −3500 m) with sediment caps (10 / 8 /
+  5 km); **the plate of the land the river drains comes first**, other plates' margins only when
+  it is full.
+- Rest: deep-sea fan over fan-zone cells within 256 ocean cells of the mouth, in proportion to
+  room below the slope depth (not the rise depth: young sea floor near ridges at −2600 m would
+  otherwise overfill), cap 1.5 km × exp(−distance / 500 km).
+- Then delta plains (+2 m) on shelf cells only, then overfill piled over the margin reached
+  (counted as before).
+- Diagnostics: deposition per zone (km³/yr) and sediment stock per crust class (Gt) in the log.
+- Tests: margins fill before oceanic crust; oceanic crust never above the slope depth and below
+  its cap; own plate first; fans thin with distance and stay below their cap; mass conserved.
