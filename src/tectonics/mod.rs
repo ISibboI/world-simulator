@@ -88,11 +88,12 @@ pub struct TectonicParams {
     pub continental_margin_width: f64,
     /// Crust thickness in the interior of the initial continents in metres.
     pub continental_interior_thickness: f64,
-    /// Fraction of the sediment on a subducting plate that is scraped off at the trench into an
-    /// accretionary wedge of the overriding plate (frontal accretion). Sediment recycled
-    /// through arc magmas is part of the arc crust. Erosive margins accrete almost nothing, so
-    /// the global fraction is low.
-    pub frontal_accretion: f64,
+    /// Thickness (m) of sediment that the subduction channel carries down with the slab; the
+    /// trench fill above it is scraped off into an accretionary wedge of the overriding plate
+    /// (frontal accretion). Margins with more than ~1 km of trench fill are accretionary,
+    /// thinner fill is subducted (von Huene & Scholl 1991, Clift & Vannucchi 2004). Sediment
+    /// recycled through arc magmas is part of the arc crust.
+    pub subduction_channel_thickness: f64,
     /// Volume of new arc crust per subducted crust sample, as a thickness over one cell.
     ///
     /// Arcs grow by roughly 30–90 km³ per km of arc and Myr on Earth; at 50 km/Myr convergence
@@ -194,7 +195,7 @@ impl Default for TectonicParams {
             continental_coast_thickness: 22_000.0,
             continental_interior_thickness: 35_000.0,
             continental_margin_width: 1000e3,
-            frontal_accretion: 0.2,
+            subduction_channel_thickness: 1000.0,
             arc_crust_per_subduction: 500.0,
             subduction_erosion: 300.0,
             arc_profile: vec![0.25, 1.0, 1.0, 0.25],
@@ -250,6 +251,7 @@ impl TectonicParams {
             "ridge_push" => &mut self.ridge_push,
             "arc_crust_per_subduction" => &mut self.arc_crust_per_subduction,
             "subduction_erosion" => &mut self.subduction_erosion,
+            "subduction_channel_thickness" => &mut self.subduction_channel_thickness,
             "events.initiation_age" => &mut self.events.initiation_age,
             "events.initiation_full_age" => &mut self.events.initiation_full_age,
             "events.initiation_waiting_time" => &mut self.events.initiation_waiting_time,

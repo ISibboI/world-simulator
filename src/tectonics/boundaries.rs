@@ -219,9 +219,12 @@ impl Simulation {
                     density: ARC_DENSITY,
                     kind: AdditionKind::Arc,
                 });
-                // Part of the sediment is scraped off at the trench into an accretionary wedge
-                // on the overriding plate, which becomes crust (metasediment) at the same mass.
-                let accreted_mass = sediment_mass * params.frontal_accretion;
+                // Sediment beyond what the subduction channel carries down is scraped off at the
+                // trench into an accretionary wedge on the overriding plate, which becomes crust
+                // (metasediment) at the same mass.
+                let accreted_mass = (loser_crust.sediment - params.subduction_channel_thickness)
+                    .max(0.0)
+                    * SEDIMENT_ROCK_DENSITY;
                 if accreted_mass > 0.0 {
                     // Booked as accretion when added; all sediment left with the slab above.
                     additions.push(CrustAddition {
