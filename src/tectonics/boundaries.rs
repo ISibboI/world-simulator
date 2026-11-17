@@ -27,16 +27,17 @@ impl Simulation {
     fn crustal_flow_inner(&mut self, dt: f64) -> f64 {
         let params = &self.params;
         let rate = (params.crustal_flow_rate * dt).min(0.15);
-        // Per crust sample: (outgoing thickness, incoming thickness, incoming mass per area),
+        // Per crust sample: (outgoing thickness, incoming thickness, incoming mass per area,
+        // incoming felsic mass per area),
         // with the position of each sample's entry in a dense per-sample index.
         let cell_count = self.mesh.len();
-        let mut delta: Vec<(Ownership, (f64, f64, f64))> = Vec::new();
+        let mut delta: Vec<(Ownership, (f64, f64, f64, f64))> = Vec::new();
         let mut index = vec![u32::MAX; self.plates.len() * cell_count];
         let entry = |delta: &mut Vec<_>, index: &mut Vec<u32>, owner: Ownership| {
             let slot = &mut index[sample_index(owner, cell_count)];
             if *slot == u32::MAX {
                 *slot = delta.len() as u32;
-                delta.push((owner, (0.0, 0.0, 0.0)));
+                delta.push((owner, (0.0, 0.0, 0.0, 0.0)));
             }
             *slot as usize
         };
@@ -71,10 +72,11 @@ impl Simulation {
                 let receiver = &mut delta[to].1;
                 receiver.1 += amount;
                 receiver.2 += amount * from_crust.density;
+                receiver.3 += amount * from_crust.density * from_crust.felsic;
             }
         }
         let mut change = 0.0;
-        for (owner, (outgoing, incoming, incoming_mass)) in delta {
+        for (owner, (outgoing, incoming, incoming_mass, incoming_felsic)) in delta {
             let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
                 .as_mut()
                 .expect("owners always point to existing crust");
@@ -85,6 +87,7 @@ impl Simulation {
                 crust.add_crust(
                     incoming,
                     incoming_mass / incoming,
+                    incoming_felsic / incoming_mass.max(1e-9),
                     params.max_crust_thickness,
                 );
             }
@@ -199,6 +202,9 @@ impl Simulation {
                     plate: winner.plate,
                     thickness,
                     density: loser_crust.mass() / thickness.max(1e-9),
+                    // Sediment is eroded continental (felsic) material.
+                    felsic: (loser_crust.felsic_mass() + sediment_mass)
+                        / loser_crust.mass().max(1e-9),
                     kind: AdditionKind::Collision,
                 });
             } else {
@@ -217,6 +223,7 @@ impl Simulation {
                     plate: winner.plate,
                     thickness: params.arc_crust_per_subduction,
                     density: ARC_DENSITY,
+                    felsic: 1.0,
                     kind: AdditionKind::Arc,
                 });
                 // Sediment beyond what the subduction channel carries down is scraped off at the
@@ -232,6 +239,7 @@ impl Simulation {
                         plate: winner.plate,
                         thickness: accreted_mass / METASEDIMENT_DENSITY,
                         density: METASEDIMENT_DENSITY,
+                        felsic: 1.0,
                         kind: AdditionKind::Accretion,
                     });
                 }
@@ -470,7 +478,7 @@ impl Simulation {
                 let share = addition.thickness * weight / total_weight;
                 let fitting = share.min((max_thickness - crust.thickness).max(0.0));
                 let before = crust.mass();
-                crust.add_crust(fitting, addition.density, max_thickness);
+                crust.add_crust(fitting, addition.density, addition.felsic, max_thickness);
                 change += crust.mass() - before;
                 leftover += share - fitting;
             }
@@ -483,7 +491,7 @@ impl Simulation {
                     .expect("owners always point to existing crust");
                 let fitting = leftover.min((max_thickness - crust.thickness).max(0.0));
                 let before = crust.mass();
-                crust.add_crust(fitting, addition.density, max_thickness);
+                crust.add_crust(fitting, addition.density, addition.felsic, max_thickness);
                 change += crust.mass() - before;
                 leftover -= fitting;
             }
@@ -671,7 +679,7 @@ fn heal_gap(
     // young as the youngest neighbour's (an average with old continental lithosphere would make
     // oceanic crust ancient).
     let share = 1.0 / (neighbors.len() + 1) as f64;
-    let (mut thickness, mut mass, mut sediment) = (0.0, 0.0, 0.0);
+    let (mut thickness, mut mass, mut sediment, mut felsic) = (0.0, 0.0, 0.0, 0.0);
     let mut birth = f64::NEG_INFINITY;
     for &neighbor in &neighbors {
         let crust = plate.crust[neighbor as usize]
@@ -680,6 +688,7 @@ fn heal_gap(
         let given = crust.thickness * share;
         thickness += given;
         mass += given * crust.density;
+        felsic += given * crust.density * crust.felsic;
         birth = birth.max(crust.birth);
         sediment += crust.sediment * share;
         crust.thickness -= given;
@@ -690,6 +699,7 @@ fn heal_gap(
         density: mass / thickness.max(1e-9),
         birth,
         sediment,
+        felsic: felsic / mass.max(1e-9),
     });
     plate.consumed[local as usize] = false;
     statistics.enclosed_fills += 1;
@@ -703,6 +713,8 @@ pub(super) struct CrustAddition {
     /// Total volume as a thickness over one cell.
     thickness: f64,
     density: f64,
+    /// Felsic mass fraction (see [`Crust::felsic`]).
+    felsic: f64,
     kind: AdditionKind,
 }
 
@@ -718,7 +730,7 @@ pub(super) enum AdditionKind {
 }
 
 /// Density of crust formed from sediment (metasediment) in kg/m³.
-const METASEDIMENT_DENSITY: f64 = 2650.0;
+const METASEDIMENT_DENSITY: f64 = 2750.0;
 
 pub(super) fn pair_key(a: u32, b: u32) -> (u32, u32) {
     (a.min(b), a.max(b))
@@ -796,6 +808,7 @@ mod tests {
                             density: crate::isostasy::ARC_DENSITY,
                             birth: -50.0,
                             sediment: 0.0,
+                            felsic: 1.0,
                         };
                         assert!(crust.resists_subduction() && !crust.is_continental());
                     } else if plate == 1 && continental_upper_plate && z < 0.3 {
@@ -804,6 +817,7 @@ mod tests {
                             density: crate::isostasy::CONTINENTAL_DENSITY,
                             birth: -1000.0,
                             sediment: 0.0,
+                            felsic: 1.0,
                         };
                     }
                 }

@@ -59,6 +59,9 @@ pub struct Crust {
     pub birth: f64,
     /// Thickness of loose sediment on top of the bedrock in metres.
     pub sediment: f64,
+    /// Mass fraction of the crystalline crust that is felsic material (continental, arc and
+    /// metasedimentary crust) rather than mafic (oceanic) crust; a tracer for mass budgets.
+    pub felsic: f64,
 }
 
 impl Crust {
@@ -144,14 +147,29 @@ impl Crust {
         self.dry_elevation(time)
     }
 
-    /// Adds crust of the given thickness and density, mixing the densities by mass. Crust beyond
-    /// `max_thickness` is removed from below.
-    pub(super) fn add_crust(&mut self, thickness: f64, density: f64, max_thickness: f64) {
+    /// Adds crust of the given thickness, density and felsic mass fraction, mixing densities
+    /// and felsic fractions by mass. Crust beyond `max_thickness` is removed from below.
+    pub(super) fn add_crust(
+        &mut self,
+        thickness: f64,
+        density: f64,
+        felsic: f64,
+        max_thickness: f64,
+    ) {
         let total = self.thickness + thickness;
+        let (mass, added) = (self.thickness * self.density, thickness * density);
+        if mass + added > 0.0 {
+            self.felsic = (mass * self.felsic + added * felsic) / (mass + added);
+        }
         if total > 0.0 {
-            self.density = (self.density * self.thickness + density * thickness) / total;
+            self.density = (mass + added) / total;
         }
         self.thickness = total.min(max_thickness);
+    }
+
+    /// Areal mass (kg/m²) of the felsic part of the crystalline crust.
+    pub fn felsic_mass(&self) -> f64 {
+        self.thickness * self.density * self.felsic
     }
 }
 
@@ -179,5 +197,21 @@ pub(super) fn new_oceanic_crust(time: f64) -> Crust {
         density: OCEANIC_DENSITY,
         birth: time,
         sediment: 0.0,
+        felsic: 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn felsic_mass_is_conserved_when_mixing() {
+        let mut crust = new_oceanic_crust(0.0);
+        let before = crust.felsic_mass();
+        crust.add_crust(2000.0, CONTINENTAL_DENSITY, 1.0, 75_000.0);
+        let added = 2000.0 * CONTINENTAL_DENSITY;
+        assert!((crust.felsic_mass() - (before + added)).abs() < 1e-6 * added);
+        assert!((0.0..1.0).contains(&crust.felsic));
     }
 }

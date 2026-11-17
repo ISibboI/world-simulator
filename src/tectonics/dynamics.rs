@@ -597,6 +597,7 @@ mod tests {
                             density: crate::isostasy::CONTINENTAL_DENSITY,
                             birth: -1000.0,
                             sediment: 0.0,
+                            felsic: 1.0,
                         }
                     } else {
                         new_oceanic_crust(-100.0)
@@ -693,6 +694,7 @@ mod tests {
                     density: crate::isostasy::CONTINENTAL_DENSITY,
                     birth: -1000.0,
                     sediment: 0.0,
+                    felsic: 1.0,
                 };
             }
         }

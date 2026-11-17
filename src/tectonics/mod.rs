@@ -68,7 +68,7 @@ use glam::{DQuat, DVec3};
 use rand::rngs::ChaCha8Rng;
 use rand::{RngExt, SeedableRng};
 
-use crate::isostasy::{CONTINENTAL_DENSITY, OCEANIC_DENSITY, SEDIMENT_ROCK_DENSITY};
+use crate::isostasy::{CONTINENTAL_DENSITY, SEDIMENT_ROCK_DENSITY};
 use crate::sphere::SphereMesh;
 
 /// Physical parameters of the simulation. Times are in Myr, elevations in metres.
@@ -468,6 +468,7 @@ impl Simulation {
                     density: CONTINENTAL_DENSITY,
                     birth: -1000.0,
                     sediment: 0.0,
+                    felsic: 1.0,
                 }
             } else {
                 new_oceanic_crust(-ocean_age[cell])
@@ -568,9 +569,7 @@ impl Simulation {
     }
 
     /// Areal masses (kg/m², summed over all samples including hidden ones) of the felsic part of
-    /// the crystalline crust and of sediment. Crust density mixes felsic (≤ 2800 kg/m³) and
-    /// mafic (2900 kg/m³) material by volume, so the felsic volume fraction is
-    /// `(2900 − ρ) / 100`, clamped to [0, 1].
+    /// the crystalline crust (see [`Crust::felsic`]) and of sediment.
     pub(super) fn felsic_and_sediment(&self) -> (f64, f64) {
         let (mut felsic, mut sediment) = (0.0, 0.0);
         if !self.params.track_material_budget {
@@ -578,8 +577,7 @@ impl Simulation {
         }
         for plate in &self.plates {
             for crust in plate.crust.iter().flatten() {
-                let fraction = ((OCEANIC_DENSITY - crust.density) / 100.0).clamp(0.0, 1.0);
-                felsic += crust.thickness * crust.density * fraction;
+                felsic += crust.felsic_mass();
                 sediment += crust.sediment * SEDIMENT_ROCK_DENSITY;
             }
         }
@@ -891,6 +889,7 @@ mod tests {
             density: CONTINENTAL_DENSITY,
             birth: -1000.0,
             sediment: 0.0,
+            felsic: 1.0,
         };
         // Normal continental crust stands a few hundred metres above sea level, doubly
         // thickened crust forms high plateaus like Tibet, thinned crust forms shelves.
@@ -912,6 +911,7 @@ mod tests {
                         density,
                         birth: -age,
                         sediment: 0.0,
+                        felsic: 1.0,
                     };
                     let elevation = crust.dry_elevation(0.0);
                     // At least 0.5 m per 100 m of crust (the thermal uplift fading out over the
@@ -937,6 +937,7 @@ mod tests {
                     density: ARC_DENSITY,
                     birth: -age,
                     sediment: 0.0,
+                    felsic: 1.0,
                 };
                 assert!(arc.buoyancy(0.0) > new_oceanic_crust(0.0).buoyancy(0.0));
             }
@@ -950,6 +951,7 @@ mod tests {
             density: CONTINENTAL_DENSITY,
             birth: -age,
             sediment: 0.0,
+            felsic: 1.0,
         };
         assert!(
             (continent(0.0).surface_elevation(0.0, 0.0)
@@ -967,6 +969,7 @@ mod tests {
                 density: CONTINENTAL_DENSITY,
                 birth: -1000.0,
                 sediment: 0.0,
+                felsic: 1.0,
             };
             let removed = 10.0;
             let thinner = Crust {
@@ -993,6 +996,7 @@ mod tests {
             density: CONTINENTAL_DENSITY,
             birth: -1000.0,
             sediment: 0.0,
+            felsic: 1.0,
         };
         assert!(!eroded.is_oceanic());
         assert!(!eroded.is_continental());
@@ -1004,7 +1008,7 @@ mod tests {
         let mut crust = new_oceanic_crust(-80.0);
         let mut became_continental_at = None;
         for _ in 0..100 {
-            crust.add_crust(500.0, ARC_DENSITY, 75_000.0);
+            crust.add_crust(500.0, ARC_DENSITY, 1.0, 75_000.0);
             if crust.is_continental() && became_continental_at.is_none() {
                 became_continental_at = Some(crust.thickness);
             }
