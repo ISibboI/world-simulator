@@ -24,8 +24,6 @@ pub struct MassLedger {
     pub subducted_oceanic: f64,
     /// Subducted transitional crust: thickened arc crust or thinned continental crust (−).
     pub subducted_transitional: f64,
-    /// Subducted continental crust (−; only where buoyancy decides in unusual cases).
-    pub subducted_continental: f64,
     /// Subducted sediment, after frontal accretion (−).
     pub subducted_sediment: f64,
     /// Sediment scraped off at trenches and added to the overriding plate (+; also counted as
@@ -65,7 +63,6 @@ pub(super) enum Term {
     Arcs,
     SubductedOceanic,
     SubductedTransitional,
-    SubductedContinental,
     SubductedSediment,
     Accretion,
     CollisionConsumed,
@@ -94,7 +91,6 @@ impl MassLedger {
             Term::Arcs => &mut self.arcs,
             Term::SubductedOceanic => &mut self.subducted_oceanic,
             Term::SubductedTransitional => &mut self.subducted_transitional,
-            Term::SubductedContinental => &mut self.subducted_continental,
             Term::SubductedSediment => &mut self.subducted_sediment,
             Term::Accretion => &mut self.accretion,
             Term::CollisionConsumed => &mut self.collision_consumed,
@@ -127,13 +123,12 @@ impl MassLedger {
     }
 
     /// The terms with their names, for reporting.
-    pub fn terms(&self) -> [(&'static str, f64); 18] {
+    pub fn terms(&self) -> [(&'static str, f64); 17] {
         [
             ("new sea floor", self.new_sea_floor),
             ("arcs", self.arcs),
             ("subducted oceanic", self.subducted_oceanic),
             ("subducted transitional", self.subducted_transitional),
-            ("subducted continental", self.subducted_continental),
             ("subducted sediment", self.subducted_sediment),
             ("accretion", self.accretion),
             ("collision consumed", self.collision_consumed),

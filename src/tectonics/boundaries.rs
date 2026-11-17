@@ -147,7 +147,7 @@ impl Simulation {
                 candidates.push((Ownership { plate, local }, crust));
             }
 
-            let Some((winner, winner_crust)) =
+            let Some((winner, _)) =
                 choose_overriding(&candidates, polarities, mesh.vertex(cell), &rotations, time)
             else {
                 continue;
@@ -159,7 +159,6 @@ impl Simulation {
                     lost_contacts.push(LostContact {
                         cell,
                         winner,
-                        winner_crust,
                         loser,
                         loser_crust,
                     });
@@ -186,10 +185,10 @@ impl Simulation {
             loser_plate.consumed[contact.loser.local as usize] = true;
             let (winner, loser_crust) = (contact.winner, contact.loser_crust);
             let sediment_mass = loser_crust.sediment * SEDIMENT_ROCK_DENSITY;
-            if contact.winner_crust.is_continental() && loser_crust.is_continental() {
-                // Continental collision: the crust of the lower plate is stacked onto the
-                // overriding plate instead of subducting; its sediment becomes metasediment at
-                // the same mass.
+            if loser_crust.resists_subduction() {
+                // Collision or terrane accretion: buoyant crust of the lower plate (continents,
+                // thick arcs, plateaus) is stacked onto the overriding plate instead of
+                // subducting; its sediment becomes metasediment at the same mass.
                 *collisions
                     .entry(pair_key(winner.plate, contact.loser.plate))
                     .or_default() += 1;
@@ -208,8 +207,6 @@ impl Simulation {
                 let crust_mass = loser_crust.thickness * loser_crust.density;
                 let term = if loser_crust.is_oceanic() {
                     Term::SubductedOceanic
-                } else if loser_crust.is_continental() {
-                    Term::SubductedContinental
                 } else {
                     Term::SubductedTransitional
                 };
@@ -502,7 +499,6 @@ pub(super) struct ResolvedBoundaries {
 struct LostContact {
     cell: u32,
     winner: Ownership,
-    winner_crust: Crust,
     loser: Ownership,
     loser_crust: Crust,
 }
@@ -778,6 +774,58 @@ mod tests {
             *crust = new_oceanic_crust(-50.0);
         }
         simulation
+    }
+
+    /// Plate 0 (south) carries a thick arc next to the equator and moves north into plate 1
+    /// (north), below which it would subduct; plate 1 is oceanic or continental near the
+    /// boundary.
+    fn arc_arriving_at_a_trench(continental_upper_plate: bool) -> MassLedger {
+        let mut simulation = single_plate();
+        simulation.split_plate(0, DVec3::Z).unwrap();
+        simulation.polarities.clear();
+        for plate in 0..2 {
+            for (local, crust) in simulation.plates[plate].crust.iter_mut().enumerate() {
+                let z = simulation.mesh.vertex(local as u32).z;
+                if let Some(crust) = crust {
+                    if plate == 0 && z > -0.3 {
+                        *crust = Crust {
+                            thickness: 18_000.0,
+                            density: crate::isostasy::ARC_DENSITY,
+                            birth: -50.0,
+                            sediment: 0.0,
+                        };
+                        assert!(crust.resists_subduction() && !crust.is_continental());
+                    } else if plate == 1 && continental_upper_plate && z < 0.3 {
+                        *crust = Crust {
+                            thickness: 35_000.0,
+                            density: crate::isostasy::CONTINENTAL_DENSITY,
+                            birth: -1000.0,
+                            sediment: 0.0,
+                        };
+                    }
+                }
+            }
+        }
+        simulation.seed_subduction((0, 1), 1, 600e3);
+        // Rotating plate 0 about the y axis moves its side at x > 0 northwards.
+        simulation.plates[0].angular_velocity = -DVec3::Y * 0.004;
+        simulation.plates[1].angular_velocity = DVec3::ZERO;
+        for _ in 0..20 {
+            simulation.substep(1.0);
+        }
+        simulation.ledger.clone()
+    }
+
+    #[test]
+    fn buoyant_arcs_are_not_subducted() {
+        // Below an oceanic upper plate the arc stays on top; the forearc is consumed.
+        let ledger = arc_arriving_at_a_trench(false);
+        assert_eq!(ledger.subducted_transitional, 0.0, "{ledger:?}");
+        assert!(ledger.subducted_oceanic < 0.0, "{ledger:?}");
+        // Against a continent, the arc is accreted (stacked onto the overriding plate).
+        let ledger = arc_arriving_at_a_trench(true);
+        assert_eq!(ledger.subducted_transitional, 0.0, "{ledger:?}");
+        assert!(ledger.collision_stacked > 0.0, "{ledger:?}");
     }
 
     #[test]

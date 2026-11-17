@@ -119,9 +119,9 @@ impl Simulation {
                             || (segment.slab_length > 0.0 && convergence > -min_convergence))
                 });
 
-                let kind = if crust.is_continental() && other_crust.is_continental() {
+                let kind = if crust.resists_subduction() && other_crust.resists_subduction() {
                     BoundaryKind::Collision
-                } else if subducts_here && !crust.is_continental() {
+                } else if subducts_here && !crust.resists_subduction() {
                     BoundaryKind::Trench {
                         slab_age: crust.age(self.time),
                     }

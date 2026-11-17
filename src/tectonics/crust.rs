@@ -20,6 +20,11 @@ pub const OCEANIC_THICKNESS: f64 = 7000.0;
 /// reaches ~850 m, continental crust ~5800 m, and arc crust becomes continental at ~22 km.
 pub const CONTINENTAL_BUOYANCY: f64 = 3000.0;
 
+/// Crust whose crystalline layer alone would stand at least this high (dry, in metres) resists
+/// subduction: arc and continental crust thicker than ~13–15 km, basaltic plateaus thicker than
+/// ~17 km (Cloos 1993). At trenches it is accreted to the overriding plate instead.
+pub const SUBDUCTION_RESISTANCE_BUOYANCY: f64 = 2000.0;
+
 /// Crust deeper than this (m) densifies in thick orogens (granulite, partial eclogitisation).
 const DENSE_LOWER_CRUST_DEPTH: f64 = 50_000.0;
 
@@ -115,9 +120,15 @@ impl Crust {
         self.thickness * self.density + self.sediment * SEDIMENT_ROCK_DENSITY
     }
 
-    /// Whether the crust is thick and light enough to resist subduction.
+    /// Whether the crust is continental: thick and light (see [`CONTINENTAL_BUOYANCY`]).
     pub fn is_continental(&self) -> bool {
         self.crustal_buoyancy() >= CONTINENTAL_BUOYANCY
+    }
+
+    /// Whether the crust is too buoyant to subduct (see [`SUBDUCTION_RESISTANCE_BUOYANCY`]):
+    /// continental crust, thick arcs and plateaus.
+    pub fn resists_subduction(&self) -> bool {
+        self.crustal_buoyancy() >= SUBDUCTION_RESISTANCE_BUOYANCY
     }
 
     /// Whether this is normal oceanic crust: thin and dense. Crust that is neither oceanic nor

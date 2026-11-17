@@ -235,7 +235,7 @@ impl Polarities {
                 } else {
                     (b_crust, a_crust)
                 };
-                if bottom_crust.is_continental() && !top_crust.is_continental() {
+                if bottom_crust.resists_subduction() && !top_crust.resists_subduction() {
                     overriding = other_of(key, overriding);
                 }
                 let segment = self.new_segment(r, overriding, 0.0, time, rotations);
@@ -255,13 +255,13 @@ impl Polarities {
         } else {
             (b, b_crust, a, a_crust)
         };
-        if bottom_crust.is_continental() && !top_crust.is_continental() {
-            // Buoyant continental crust does not subduct: it stays on top here.
+        if bottom_crust.resists_subduction() && !top_crust.resists_subduction() {
+            // Buoyant crust does not subduct: it stays on top here.
             segment.arrivals += 1;
             self.statistics.continental_overrides += 1;
             bottom
         } else {
-            if top_crust.is_continental() && !bottom_crust.is_continental() {
+            if top_crust.resists_subduction() && !bottom_crust.resists_subduction() {
                 segment.reverse_arrivals += 1;
             }
             top
