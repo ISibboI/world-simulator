@@ -51,3 +51,24 @@ In `suture_colliding_plates`, per pair whose collision clock reaches `suture_tim
   converging share, stacked mass (Earth ~10–15 Gt/yr), plates, initiations/reversals, speeds,
   ocean age and ancient ocean, mean land, > 50 km, flooded, felsic + sediment. Then re-tune
   `collision_resistance`.
+
+## Plan review (independent agent, 2026-11-17): sound with changes — adopted
+
+Diagnostic (`agent-scratch/review-terranes/`): blocked collision length 2.5–11k km per snapshot;
+typical blocked pair: a fragment (1–10% of its plate: microcontinent, arc, sliver) against a
+large continent (50–80% of its plate); 30–50% of the pair's trench lies within 1000 km of the
+collision. Required: (1) a separate clock (`terrane_accretion_time` ~10–15 Myr, slab break-off
+~10 Myr after collision onset) running whenever the pair has ≥ `suture_min_cells` colliding
+cells, whatever its trenches (the suture clock never runs for blocked pairs); (2) not polarity:
+the **smaller colliding component moves to the plate of the larger one it touches** (≤ ½ of it,
+≤ ~1% of the sphere; arcs on the upper plate accrete to the lower plate's continent and the
+polarity then flips via arrivals; terranes on the lower plate accrete to the upper plate and
+the trench jumps behind them via inheritance); no cap relative to its own plate; (3) **slab
+break-off**: segments of the pair copied by the split keep their slab length, so the boundary
+behind the terrane would at once be a trench with the old slab pull — zero the slab length of
+the pair's segments within the terrane footprint + segment radius (count break-offs); a jump
+then grows from zero by inheritance; (4) move pieces of the source plate that the removal
+disconnects from its largest piece together with the terrane if small, else skip. Optional:
+decide per component (done), only resistant crust moves, watch the largest plate area,
+`configuration_changes`, count accretions/cells/break-offs; Earth's active collisions total
+~7–10k km — aim below 10k, do not tune to 5000.

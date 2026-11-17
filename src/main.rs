@@ -303,7 +303,7 @@ fn snapshot(
     info!(
         "    trenches {:.0} km, ridges {:.0} km, collisions {:.0} km ({:.0} converging, {:.0} diverging) | slab pull {:.2e} N, ridge push {:.2e} N | \
          rifts {}, initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
-         blocked splits {} | continental contacts made by rifts {:.0} km ({:.0} far), by initiations {:.0} km ({:.0} far)",
+         blocked splits {}, terranes {} ({} cells, {} slab break-offs) | continental contacts made by rifts {:.0} km ({:.0} far), by initiations {:.0} km ({:.0} far)",
         statistics.trench_length,
         statistics.ridge_length,
         statistics.collision_length,
@@ -324,6 +324,9 @@ fn snapshot(
         statistics.events.consumed,
         statistics.events.merge_lost_continental_volume / 1000.0,
         statistics.events.blocked_splits,
+        statistics.events.terrane_accretions,
+        statistics.events.accreted_terrane_cells,
+        statistics.events.slab_breakoffs,
         statistics.events.rift_contact_km,
         statistics.events.rift_far_contact_km,
         statistics.events.initiation_contact_km,

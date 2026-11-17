@@ -26,7 +26,7 @@ pub(super) struct Segment {
     /// Identifier, unique among all segments ever created.
     pub(super) id: u32,
     /// Position (unit vector) in the local frame of the overriding plate.
-    anchor: DVec3,
+    pub(super) anchor: DVec3,
     /// The plate that stays at the surface.
     pub(super) overriding: u32,
     /// Length of slab (m) that has subducted below the overriding plate here.
@@ -80,6 +80,9 @@ pub(super) struct PairState {
     pub(super) last_contact: f64,
     /// How long, in Myr, the continents of the two plates have been colliding without pause.
     pub(super) collision_time: f64,
+    /// How long, in Myr, the pair has had colliding contacts, whatever its trenches (see
+    /// [`PlateEventParams::terrane_accretion_time`]).
+    pub(super) terrane_time: f64,
     pub(super) segments: Vec<Segment>,
 }
 
@@ -489,6 +492,7 @@ impl Polarities {
                 PairState {
                     last_contact: pair.last_contact,
                     collision_time: 0.0,
+                    terrane_time: 0.0,
                     segments: moving,
                 },
             ));
@@ -533,8 +537,34 @@ impl Polarities {
             let target = self.pairs.entry(pair_key(into, other)).or_default();
             target.last_contact = target.last_contact.max(pair.last_contact);
             target.collision_time = target.collision_time.max(pair.collision_time);
+            target.terrane_time = target.terrane_time.max(pair.terrane_time);
             target.segments.append(&mut pair.segments);
         }
+    }
+
+    /// Slab break-off: the slabs of the segments of the pair `(a, b)` within `max_angle` of any
+    /// of the world `positions` detach (slab length 0). Returns the number of segments whose
+    /// slab broke off.
+    pub(super) fn break_off(
+        &mut self,
+        (a, b): (u32, u32),
+        positions: &[DVec3],
+        max_angle: f64,
+        rotations: &[DQuat],
+    ) -> usize {
+        let min_dot = max_angle.cos();
+        let Some(pair) = self.pairs.get_mut(&pair_key(a, b)) else {
+            return 0;
+        };
+        let mut count = 0;
+        for segment in &mut pair.segments {
+            let r = world(segment, rotations);
+            if segment.slab_length > 0.0 && positions.iter().any(|p| p.dot(r) >= min_dot) {
+                segment.slab_length = 0.0;
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Plate `plate` was removed and plate `last` took its index.

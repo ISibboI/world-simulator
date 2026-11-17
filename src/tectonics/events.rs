@@ -57,6 +57,16 @@ pub struct PlateEventParams {
     /// A colliding pair only sutures while its colliding cells are at least this fraction of
     /// its trench cells: plates still subducting along long trenches keep moving independently.
     pub suture_trench_ratio: f64,
+    /// Colliding pairs that cannot suture end their collision locally after this many Myr of
+    /// contact (slab break-off follows collision onset by ~10 Myr): smaller colliding terranes
+    /// (arcs, microcontinents, slivers) move to the plate of the larger continent they collide
+    /// with (see [`Simulation::accrete_terranes`]).
+    pub terrane_accretion_time: f64,
+    /// Largest terrane that accretes, as a fraction of the surface (~1%: India-sized).
+    pub terrane_max_area: f64,
+    /// A terrane accretes only if it is at most this fraction of the largest colliding
+    /// component of the other plate that it touches.
+    pub terrane_size_ratio: f64,
     /// Plates smaller than this fraction of the surface are captured by a neighbour.
     pub min_plate_area_before_capture: f64,
     /// Detached pieces of plates covering at least this fraction of the surface become plates
@@ -81,6 +91,9 @@ impl Default for PlateEventParams {
             suture_time: 30.0,
             suture_min_cells: 10,
             suture_trench_ratio: 1.0,
+            terrane_accretion_time: 12.0,
+            terrane_max_area: 0.01,
+            terrane_size_ratio: 0.5,
             min_plate_area_before_capture: 0.003,
             min_breakup_area: 0.01,
         }
@@ -159,6 +172,11 @@ pub struct EventCounts {
     /// Length (km) of contacts between crust resisting subduction on both sides created by
     /// plume rifts and passive-margin initiations, in total and farther than
     /// [`PlateEventParams::rift_continent_radius`] from the plume or margin cell.
+    /// Terranes accreted to another plate, their cells, and slab segments that broke off
+    /// behind them.
+    pub terrane_accretions: usize,
+    pub accreted_terrane_cells: usize,
+    pub slab_breakoffs: usize,
     pub rift_contact_km: f64,
     pub rift_far_contact_km: f64,
     pub initiation_contact_km: f64,
@@ -934,6 +952,11 @@ impl Simulation {
             } else {
                 state.collision_time = (state.collision_time - dt).max(0.0);
             }
+            if colliding >= min_cells {
+                state.terrane_time += dt;
+            } else {
+                state.terrane_time = (state.terrane_time - dt).max(0.0);
+            }
         }
 
         let suture_time = self.params.events.suture_time;
@@ -956,6 +979,173 @@ impl Simulation {
             self.merge_and_record(into, absorbed);
             self.event_counts.sutures += 1;
         }
+
+        // Pairs that collide but cannot suture end their collision locally.
+        let accretion_time = self.params.events.terrane_accretion_time;
+        let mut ready: Vec<(u32, u32)> = self
+            .polarities
+            .pairs
+            .iter()
+            .filter(|(_, state)| state.terrane_time >= accretion_time)
+            .map(|(&pair, _)| pair)
+            .collect();
+        ready.sort_unstable();
+        for (a, b) in ready {
+            let accreted = self.accrete_terranes(a, b) + self.accrete_terranes(b, a);
+            if let Some(state) = self.polarities.pairs.get_mut(&(a, b)) {
+                state.terrane_time = 0.0;
+                if accreted > 0 {
+                    state.collision_time = 0.0;
+                }
+            }
+        }
+    }
+
+    /// Terrane accretion: the colliding components of `from` (connected crust that resists
+    /// subduction touching such crust of `to`) that are at most
+    /// [`PlateEventParams::terrane_size_ratio`] of the largest component of `to` they touch
+    /// and at most [`PlateEventParams::terrane_max_area`] of the surface move to `to` (arcs on
+    /// an upper plate onto the lower plate's continent, after which the subduction polarity
+    /// flips; terranes on a lower plate onto the upper plate, after which the trench steps back
+    /// behind them by inheriting the polarity). Pieces of `from` that would be cut off from its
+    /// largest part move along if small, else nothing moves. The slabs of the pair within a
+    /// segment radius of the terrane break off. Returns the number of cells moved. Plate
+    /// indices stay the same.
+    fn accrete_terranes(&mut self, from: u32, to: u32) -> usize {
+        let cell_count = self.mesh.len();
+        let max_cells = (self.params.events.terrane_max_area * cell_count as f64) as usize;
+        let ratio = self.params.events.terrane_size_ratio;
+        let resists: Vec<bool> = (0..cell_count as u32)
+            .map(|cell| {
+                let plate = self.owners[cell as usize].plate;
+                (plate == from || plate == to) && self.surface_crust(cell).resists_subduction()
+            })
+            .collect();
+        // Components of subduction-resisting crust of both plates.
+        let mut component = vec![u32::MAX; cell_count];
+        let mut sizes: Vec<usize> = Vec::new();
+        let mut stack = Vec::new();
+        for start in 0..cell_count {
+            if !resists[start] || component[start] != u32::MAX {
+                continue;
+            }
+            let id = sizes.len() as u32;
+            let plate = self.owners[start].plate;
+            let mut size = 0;
+            component[start] = id;
+            stack.push(start as u32);
+            while let Some(cell) = stack.pop() {
+                size += 1;
+                for &neighbor in self.mesh.neighbors(cell) {
+                    let neighbor = neighbor as usize;
+                    if resists[neighbor]
+                        && component[neighbor] == u32::MAX
+                        && self.owners[neighbor].plate == plate
+                    {
+                        component[neighbor] = id;
+                        stack.push(neighbor as u32);
+                    }
+                }
+            }
+            sizes.push(size);
+        }
+        // Per component of `from`: the largest component of `to` it touches.
+        let mut opposing = vec![0usize; sizes.len()];
+        for cell in 0..cell_count {
+            if !resists[cell] || self.owners[cell].plate != from {
+                continue;
+            }
+            for &neighbor in self.mesh.neighbors(cell as u32) {
+                let neighbor = neighbor as usize;
+                if resists[neighbor] && self.owners[neighbor].plate == to {
+                    let id = component[cell] as usize;
+                    opposing[id] = opposing[id].max(sizes[component[neighbor] as usize]);
+                }
+            }
+        }
+        let moving_component = |id: usize| {
+            opposing[id] > 0
+                && sizes[id] <= max_cells
+                && sizes[id] as f64 <= ratio * opposing[id] as f64
+        };
+        let mut moving: Vec<bool> = (0..cell_count)
+            .map(|cell| resists[cell] && moving_component(component[cell] as usize))
+            .collect();
+        let mut moved = moving.iter().filter(|&&m| m).count();
+        if moved == 0 {
+            return 0;
+        }
+        // The rest of `from` must stay connected: pieces cut off from its largest part move
+        // along if small.
+        let mut piece = vec![u32::MAX; cell_count];
+        let mut pieces: Vec<Vec<u32>> = Vec::new();
+        for start in 0..cell_count {
+            if self.owners[start].plate != from || moving[start] || piece[start] != u32::MAX {
+                continue;
+            }
+            let id = pieces.len() as u32;
+            let mut cells = Vec::new();
+            piece[start] = id;
+            stack.push(start as u32);
+            while let Some(cell) = stack.pop() {
+                cells.push(cell);
+                for &neighbor in self.mesh.neighbors(cell) {
+                    let neighbor = neighbor as usize;
+                    if self.owners[neighbor].plate == from
+                        && !moving[neighbor]
+                        && piece[neighbor] == u32::MAX
+                    {
+                        piece[neighbor] = id;
+                        stack.push(neighbor as u32);
+                    }
+                }
+            }
+            pieces.push(cells);
+        }
+        let Some(largest) = (0..pieces.len()).max_by_key(|&id| pieces[id].len()) else {
+            // The whole plate would move: that is a suture, not a terrane.
+            return 0;
+        };
+        let cut_off: usize = pieces
+            .iter()
+            .enumerate()
+            .filter(|&(id, _)| id != largest)
+            .map(|(_, cells)| cells.len())
+            .sum();
+        if cut_off > max_cells {
+            return 0;
+        }
+        for (id, cells) in pieces.iter().enumerate() {
+            if id != largest {
+                for &cell in cells {
+                    moving[cell as usize] = true;
+                }
+            }
+        }
+        moved += cut_off;
+        let terrane: Vec<u32> = (0..cell_count as u32)
+            .filter(|&cell| moving[cell as usize])
+            .collect();
+        let positions: Vec<DVec3> = terrane.iter().map(|&cell| self.mesh.vertex(cell)).collect();
+        let Some(new_plate) = self.split_plate_cells(from, &terrane) else {
+            return 0;
+        };
+        self.merge_and_record(to, new_plate);
+        let rotations = self.rotations();
+        let radius = self.polarities.radius();
+        self.event_counts.slab_breakoffs +=
+            self.polarities
+                .break_off((from, to), &positions, radius, &rotations);
+        self.event_counts.terrane_accretions += 1;
+        self.event_counts.accreted_terrane_cells += moved;
+        debug!(
+            from,
+            to,
+            cells = moved,
+            time = self.time,
+            "Terrane accreted"
+        );
+        moved
     }
 
     /// Tiny plates are captured by the neighbour they move most similarly to (like fragments of
@@ -1307,6 +1497,97 @@ mod tests {
         assert!(simulation.event_counts.breakups >= 1);
         assert!(simulation.event_counts.piece_captures >= 1);
         assert!(simulation.plates.len() > plates_before);
+    }
+
+    /// Two plates split at the equator: a large continent on plate 0 (x > 0.5, north), a small
+    /// microcontinent on plate 1 just south of it, ocean elsewhere; plate 0 overrides plate 1
+    /// along the whole boundary with a 200 km slab. Sutures are blocked.
+    fn microcontinent_collision(terrane_max_area: f64) -> (Simulation, Vec<u32>) {
+        let mut params = TectonicParams::default();
+        params.events.suture_trench_ratio = 1e9;
+        params.events.terrane_accretion_time = 3.0;
+        params.events.terrane_max_area = terrane_max_area;
+        let mut simulation = Simulation::new(SphereMesh::icosphere(5), 1, params, 4);
+        let continental = Crust {
+            thickness: 35_000.0,
+            density: CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+        };
+        let micro = |r: DVec3| r.x > 0.8 && r.z < 0.0 && r.z > -0.12;
+        for (local, crust) in simulation.plates[0].crust.iter_mut().enumerate() {
+            let r = simulation.mesh.vertex(local as u32);
+            *crust = Some(if (r.x > 0.5 && r.z >= 0.0) || micro(r) {
+                continental
+            } else {
+                new_oceanic_crust(-100.0)
+            });
+        }
+        let south: Vec<u32> = (0..simulation.mesh.len() as u32)
+            .filter(|&cell| simulation.mesh.vertex(cell).z < 0.0)
+            .collect();
+        simulation.split_plate_cells(0, &south).unwrap();
+        simulation.polarities.clear();
+        simulation.seed_subduction((0, 1), 0, 200e3);
+        let terrane: Vec<u32> = (0..simulation.mesh.len() as u32)
+            .filter(|&cell| micro(simulation.mesh.vertex(cell)))
+            .collect();
+        (simulation, terrane)
+    }
+
+    #[test]
+    fn colliding_microcontinents_accrete_to_the_larger_continent() {
+        let (mut simulation, terrane) = microcontinent_collision(0.05);
+        assert!(
+            terrane
+                .iter()
+                .all(|&cell| simulation.owners[cell as usize].plate == 1)
+        );
+        let mass = simulation.total_mass();
+        let changes = simulation.configuration_changes;
+        for _ in 0..5 {
+            let boundaries = simulation.boundary_cells();
+            simulation.suture_colliding_plates(1.0, &boundaries);
+        }
+        assert_eq!(simulation.event_counts.sutures, 0);
+        assert_eq!(simulation.event_counts.terrane_accretions, 1);
+        assert_eq!(simulation.plates.len(), 2);
+        assert!(
+            terrane
+                .iter()
+                .all(|&cell| simulation.owners[cell as usize].plate == 0)
+        );
+        assert!((simulation.total_mass() / mass - 1.0).abs() < 1e-12);
+        assert!(simulation.configuration_changes > changes);
+        // The slab broke off near the terrane but not far from it.
+        let rotations = simulation.rotations();
+        let near = simulation.mesh.vertex(terrane[0]);
+        let far = -near;
+        assert!(simulation.event_counts.slab_breakoffs > 0);
+        let segments = simulation.polarities.pair_segments(0, 1);
+        for segment in segments {
+            let r = rotations[segment.overriding as usize] * segment.anchor;
+            if r.dot(far) > 0.9 {
+                assert!(segment.slab_length > 0.0);
+            }
+        }
+        assert!(segments.iter().any(|segment| segment.slab_length > 0.0));
+    }
+
+    #[test]
+    fn terranes_above_the_size_limit_do_not_accrete() {
+        let (mut simulation, terrane) = microcontinent_collision(0.001);
+        for _ in 0..5 {
+            let boundaries = simulation.boundary_cells();
+            simulation.suture_colliding_plates(1.0, &boundaries);
+        }
+        assert_eq!(simulation.event_counts.terrane_accretions, 0);
+        assert!(
+            terrane
+                .iter()
+                .all(|&cell| simulation.owners[cell as usize].plate == 1)
+        );
     }
 
     #[test]
