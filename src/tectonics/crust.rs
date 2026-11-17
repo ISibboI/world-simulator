@@ -131,16 +131,34 @@ impl Crust {
     }
 
     /// Whether the crust is too buoyant to subduct (see [`SUBDUCTION_RESISTANCE_BUOYANCY`]):
-    /// continental crust, thick arcs and plateaus.
+    /// continental crust, thick arcs and plateaus, and stretched continental margins whose
+    /// sediment wedge makes up for the thinning. A margin arriving at a trench with a thick
+    /// wedge jams it and is stacked into the orogen (Banda/Timor, Taiwan). Sediment counts only
+    /// on continental (felsic, not oceanic) crust: thick fill on oceanic crust subducts below
+    /// its accretionary wedge, pulled by the old mantle lithosphere (Makran, Cascadia), which
+    /// this crustal criterion does not see. The sediment counts at its compacted grain density
+    /// (metamorphosed at depth), not as porous bulk.
     pub fn resists_subduction(&self) -> bool {
+        self.crust_resists_subduction()
+            || (self.felsic > 0.5
+                && !self.is_oceanic()
+                && self.crustal_buoyancy()
+                    + self.sediment
+                        * (1.0 - isostasy::SEDIMENT_POROSITY)
+                        * isostasy::dry_response(isostasy::SEDIMENT_GRAIN_DENSITY)
+                    >= SUBDUCTION_RESISTANCE_BUOYANCY)
+    }
+
+    /// Whether the crystalline crust alone is too buoyant to subduct.
+    fn crust_resists_subduction(&self) -> bool {
         self.crustal_buoyancy() >= SUBDUCTION_RESISTANCE_BUOYANCY
     }
 
-    /// Whether the crust is of continental origin: mostly felsic (see [`Crust::felsic`]) and too
-    /// buoyant to subduct. Unlike [`Crust::is_continental`] this includes stretched continental
-    /// margins, and it excludes thin intra-oceanic arcs.
+    /// Whether the crust is of continental origin: mostly felsic (see [`Crust::felsic`]) and its
+    /// crystalline crust too buoyant to subduct. Unlike [`Crust::is_continental`] this includes
+    /// stretched continental margins, and it excludes thin intra-oceanic arcs.
     pub fn is_continental_origin(&self) -> bool {
-        self.felsic > 0.5 && self.resists_subduction()
+        self.felsic > 0.5 && self.crust_resists_subduction()
     }
 
     /// Whether this is normal oceanic crust: thin and dense. Crust that is neither oceanic nor
@@ -254,5 +272,30 @@ mod tests {
         let added = 2000.0 * CONTINENTAL_DENSITY;
         assert!((crust.felsic_mass() - (before + added)).abs() < 1e-6 * added);
         assert!((0.0..1.0).contains(&crust.felsic));
+    }
+
+    #[test]
+    fn sediment_wedges_on_stretched_margins_resist_subduction() {
+        let margin = Crust {
+            thickness: 11_000.0,
+            density: CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+        };
+        assert!(!margin.resists_subduction() && !margin.is_continental_origin());
+        let wedged = Crust {
+            sediment: 8000.0,
+            ..margin
+        };
+        assert!(wedged.resists_subduction());
+        // Its crust stays what it is: not of continental origin.
+        assert!(!wedged.is_continental_origin());
+        // Thick fill on oceanic crust still subducts.
+        let ocean = Crust {
+            sediment: 8000.0,
+            ..new_oceanic_crust(-100.0)
+        };
+        assert!(!ocean.resists_subduction());
     }
 }

@@ -1118,6 +1118,49 @@ mod tests {
         assert_eq!(simulation.trench_sediment.accreted, 0.0);
     }
 
+    /// Plate 0 (south), a stretched continental margin with a thick sediment wedge, moves north
+    /// into plate 1 (oceanic or continental), below which it would subduct.
+    fn wedged_margin_arriving_at_a_trench(continental_upper_plate: bool) -> MassLedger {
+        let mut simulation = single_plate();
+        simulation.split_plate(0, DVec3::Z).unwrap();
+        simulation.polarities.clear();
+        for (plate, thickness, sediment) in [(0, 11_000.0, 8000.0), (1, 35_000.0, 0.0)] {
+            if plate == 1 && !continental_upper_plate {
+                continue;
+            }
+            for crust in simulation.plates[plate].crust.iter_mut().flatten() {
+                *crust = Crust {
+                    thickness,
+                    density: crate::isostasy::CONTINENTAL_DENSITY,
+                    birth: -1000.0,
+                    sediment,
+                    felsic: 1.0,
+                };
+            }
+        }
+        simulation.seed_subduction((0, 1), 1, 600e3);
+        simulation.plates[0].angular_velocity = -DVec3::Y * 0.004;
+        simulation.plates[1].angular_velocity = DVec3::ZERO;
+        for _ in 0..20 {
+            simulation.substep(1.0);
+        }
+        simulation.ledger.clone()
+    }
+
+    #[test]
+    fn wedged_continental_margins_jam_the_trench() {
+        // Against an ocean, the margin stays on top and the ocean subducts below it.
+        let ledger = wedged_margin_arriving_at_a_trench(false);
+        assert_eq!(ledger.subducted_transitional, 0.0, "{ledger:?}");
+        assert_eq!(ledger.subducted_sediment, 0.0, "{ledger:?}");
+        assert!(ledger.subducted_oceanic < 0.0, "{ledger:?}");
+        // Against a continent, it is stacked onto it with its sediment.
+        let ledger = wedged_margin_arriving_at_a_trench(true);
+        assert_eq!(ledger.subducted_transitional, 0.0, "{ledger:?}");
+        assert_eq!(ledger.subducted_sediment, 0.0, "{ledger:?}");
+        assert!(ledger.collision_stacked > 0.0, "{ledger:?}");
+    }
+
     #[test]
     fn buoyant_arcs_are_not_subducted() {
         // Below an oceanic upper plate the arc stays on top; the forearc is consumed.

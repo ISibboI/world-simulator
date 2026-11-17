@@ -145,8 +145,12 @@ components (climate, erosion, …) are expected to build on it.
   crust 25–33%, mean land 0.62–0.87 km. Sediment routing, enclosed-sea filling,
   compaction and metamorphism done (`plans/sediment-routing.md`): sediment part of the sea level
   +314…+383 m at 500 Myr, still rising 25–50 m/100 Myr (target ≲ 250 m, flat); oceanic stock
-  ~2× Earth; metamorphism ≲ 0.5 Gt/yr; overfill 26–67k km·cells. Remaining levers are tectonic
-  (accreted share at trenches 60–75%, margin lifetime). 2–6% ancient (≥ 200 Myr) ocean
+  ~2× Earth; metamorphism ≲ 0.5 Gt/yr; overfill 26–67k km·cells. Trench side: only 30% of the
+  sediment above the subduction channel is accreted (accreted share 60–75% → ~20%), and
+  stretched continental margins with thick wedges resist subduction (`plans/trench-sediment.md`):
+  felsic + sediment −0.7…−2.2 Gt/yr after 150 Myr, sediment part of the sea level +310…+351 m at
+  500 Myr, still rising ~40 m/100 Myr. Most of the felsic deficit is intra-oceanic arc crust
+  booked fully felsic and recycled (open decision). 2–6% ancient (≥ 200 Myr) ocean
   remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
