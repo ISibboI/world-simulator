@@ -51,6 +51,8 @@ pub struct Statistics {
     /// Length of trenches and of ridge axes in km (corrected for the zig-zag of boundaries on
     /// the mesh; a ridge has two flanks, a trench one subducting side).
     pub trench_length: f64,
+    /// Part of [`Self::trench_length`] at accretionary margins (km).
+    pub accretionary_trench_length: f64,
     pub ridge_length: f64,
     /// Length of continental collision boundaries in km (half of both sides' cells): contacts
     /// where both sides resist subduction, whatever their motion.
@@ -383,6 +385,7 @@ impl Simulation {
             (0.0, 0.0, 0.0, 0.0);
         let boundaries = self.boundary_cells();
         let (mut trench_cells, mut trench_slab) = (0usize, 0.0);
+        let mut accretionary_trench_length = 0.0;
         let (mut collision_length, mut collision_converging, mut collision_diverging) =
             (0.0, 0.0, 0.0);
         let min_convergence =
@@ -394,10 +397,13 @@ impl Simulation {
                     trench_length += boundary_length;
                     slab_pull += force;
                     trench_cells += 1;
-                    trench_slab += boundary
+                    let segment = boundary
                         .segment
-                        .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id))
-                        .map_or(0.0, |segment| segment.slab_length);
+                        .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id));
+                    trench_slab += segment.map_or(0.0, |segment| segment.slab_length);
+                    if segment.is_some_and(|segment| segment.accretionary) {
+                        accretionary_trench_length += boundary_length;
+                    }
                 }
                 super::dynamics::BoundaryKind::Ridge => {
                     ridge_flank_length += boundary_length;
@@ -575,6 +581,7 @@ impl Simulation {
             felsic_mass: masses[4] * to_gigatonnes,
             hidden_mass: (total_mass - visible_mass) * to_gigatonnes,
             trench_length,
+            accretionary_trench_length,
             ridge_length: ridge_flank_length / 2.0,
             collision_length: collision_length / 2.0,
             collision_converging_length: collision_converging / 2.0,
@@ -609,6 +616,7 @@ impl Simulation {
                 t.by_thickness.iter_mut().for_each(|m| *m *= to_gt);
                 t.on_continental_margins *= to_gt;
                 t.accreted *= to_gt;
+                t.at_accretionary_margins *= to_gt;
                 t
             },
             continental_thickness,

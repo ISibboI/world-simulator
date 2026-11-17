@@ -296,15 +296,33 @@ impl Simulation {
                     },
                     kind: AdditionKind::Arc,
                 });
-                // Of the sediment beyond what the subduction channel carries down, a fraction is
-                // scraped off at the trench into an accretionary wedge on the overriding plate,
-                // which becomes crust (metasediment) at the same mass; the rest is dragged down
-                // below the forearc.
-                let accreted_mass = (loser_crust.sediment - params.subduction_channel_thickness)
-                    .max(0.0)
-                    * params.frontal_accretion_fraction
-                    * SEDIMENT_ROCK_DENSITY;
-                trench_sediment.record(&loser_crust, accreted_mass);
+                // At accretionary margins (thick trench fill, slow convergence; see
+                // `Simulation::update_slab_lengths`) the sediment above a décollement is scraped
+                // off into an accretionary wedge on the overriding plate, which becomes crust
+                // (metasediment) at the same mass; the subduction channel and the rest are dragged
+                // down. At erosive margins all sediment subducts and the forearc is eroded.
+                let accretionary = polarities
+                    .segment_at_mut(
+                        winner.plate,
+                        contact.loser.plate,
+                        mesh.vertex(contact.cell),
+                        &rotations,
+                    )
+                    .is_some_and(|segment| {
+                        let sediment = loser_crust.sediment;
+                        segment.incoming.0 += sediment;
+                        segment.incoming.1 += sediment * sediment;
+                        segment.accretionary
+                    });
+                let accreted_mass = if accretionary {
+                    (loser_crust.sediment * params.decollement_fraction)
+                        .min(loser_crust.sediment - params.subduction_channel_thickness)
+                        .max(0.0)
+                        * SEDIMENT_ROCK_DENSITY
+                } else {
+                    0.0
+                };
+                trench_sediment.record(&loser_crust, accreted_mass, accretionary);
                 if accreted_mass > 0.0 {
                     // Booked as accretion when added; all sediment left with the slab above.
                     additions.push(CrustAddition {
@@ -316,7 +334,9 @@ impl Simulation {
                         kind: AdditionKind::Accretion,
                     });
                 }
-                eroded.push(winner);
+                if !accretionary {
+                    eroded.push(winner);
+                }
             }
         }
 
@@ -643,10 +663,12 @@ pub struct TrenchSediment {
     pub on_continental_margins: f64,
     /// Part accreted to the overriding plate.
     pub accreted: f64,
+    /// Part arriving at accretionary margins.
+    pub at_accretionary_margins: f64,
 }
 
 impl TrenchSediment {
-    fn record(&mut self, crust: &Crust, accreted_mass: f64) {
+    fn record(&mut self, crust: &Crust, accreted_mass: f64, accretionary: bool) {
         let mass = crust.sediment * SEDIMENT_ROCK_DENSITY;
         let bin = [1000.0, 3000.0, 5000.0, 8000.0]
             .iter()
@@ -657,6 +679,9 @@ impl TrenchSediment {
             self.on_continental_margins += mass;
         }
         self.accreted += accreted_mass;
+        if accretionary {
+            self.at_accretionary_margins += mass;
+        }
     }
 }
 
@@ -1084,44 +1109,62 @@ mod tests {
     }
 
     /// Plate 0 (south), oceanic with `sediment` m of sediment, subducts below plate 1 (north)
-    /// for 20 Myr with the given frontal accretion fraction.
-    fn sediment_arriving_at_a_trench(sediment: f64, fraction: f64) -> Simulation {
+    /// for 20 Myr, converging at `speed` (rad/Myr).
+    fn sediment_arriving_at_a_trench(sediment: f64, speed: f64) -> Simulation {
         let mut simulation = single_plate();
-        simulation.params.frontal_accretion_fraction = fraction;
         simulation.split_plate(0, DVec3::Z).unwrap();
         simulation.polarities.clear();
         for crust in simulation.plates[0].crust.iter_mut().flatten() {
             crust.sediment = sediment;
         }
+        // An arc on the upper plate, thick enough to be eroded by the slab.
+        for crust in simulation.plates[1].crust.iter_mut().flatten() {
+            crust.thickness = 20_000.0;
+            crust.density = crate::isostasy::ARC_DENSITY;
+        }
         simulation.seed_subduction((0, 1), 1, 600e3);
-        simulation.plates[0].angular_velocity = -DVec3::Y * 0.004;
+        simulation.plates[0].angular_velocity = -DVec3::Y * speed;
         simulation.plates[1].angular_velocity = DVec3::ZERO;
-        for _ in 0..20 {
-            simulation.substep(1.0);
+        for _ in 0..80 {
+            simulation.substep(0.25);
+            let boundaries = simulation.boundary_cells();
+            simulation.update_slab_lengths(0.25, &boundaries);
         }
         simulation
     }
 
     #[test]
-    fn a_fraction_of_thick_trench_sediment_is_accreted() {
-        for fraction in [0.3, 1.0] {
-            let simulation = sediment_arriving_at_a_trench(6000.0, fraction);
-            let trench = &simulation.trench_sediment;
-            let arrived: f64 = trench.by_thickness.iter().sum();
-            assert!(arrived > 0.0);
-            assert_eq!(arrived, trench.by_thickness[3], "all columns are 5–8 km");
-            // The fraction of the sediment above the 1 km channel is accreted.
-            let expected = fraction * 5000.0 / 6000.0;
-            assert!((trench.accreted / arrived - expected).abs() < 1e-9);
-            // The ledger books the whole column as subducted and the wedge as accretion.
-            let ledger = &simulation.ledger;
-            assert!((ledger.accretion - trench.accreted).abs() < 1e-6 * arrived);
-            assert!((-ledger.subducted_sediment - arrived).abs() < 1e-6 * arrived);
-        }
-        // Thin cover is subducted entirely.
-        let simulation = sediment_arriving_at_a_trench(500.0, 0.3);
-        assert!(simulation.trench_sediment.by_thickness[0] > 0.0);
-        assert_eq!(simulation.trench_sediment.accreted, 0.0);
+    fn thick_fill_at_slow_trenches_is_partly_accreted() {
+        // 0.004 rad/Myr is 2.5 cm/yr, 0.03 rad/Myr 19 cm/yr.
+        let slow_thick = sediment_arriving_at_a_trench(6000.0, 0.004);
+        let trench = &slow_thick.trench_sediment;
+        let arrived: f64 = trench.by_thickness.iter().sum();
+        assert_eq!(arrived, trench.by_thickness[3], "all columns are 5–8 km");
+        // Once the averaged fill exceeds the channel, the margin is accretionary and the top of
+        // the column above the décollement is accreted.
+        assert!(trench.at_accretionary_margins > 0.5 * arrived, "{trench:?}");
+        let share = trench.accreted / arrived;
+        let fraction = slow_thick.params.decollement_fraction;
+        assert!(
+            share > 0.5 * fraction && share <= fraction + 1e-9,
+            "{share}"
+        );
+        // The ledger books the whole column as subducted and the wedge as accretion.
+        let ledger = &slow_thick.ledger;
+        assert!((ledger.accretion - trench.accreted).abs() < 1e-6 * arrived);
+        assert!((-ledger.subducted_sediment - arrived).abs() < 1e-6 * arrived);
+
+        // Thin fill: an erosive margin, all sediment subducts and the forearc is eroded more.
+        let slow_thin = sediment_arriving_at_a_trench(500.0, 0.004);
+        assert_eq!(slow_thin.trench_sediment.accreted, 0.0);
+        assert!(slow_thin.ledger.subduction_erosion < ledger.subduction_erosion);
+        // Fast convergence: erosive despite thick fill, except near the ends of the trench, where
+        // the rotation about the y axis converges slowly.
+        let fast_thick = sediment_arriving_at_a_trench(6000.0, 0.03);
+        let fast = &fast_thick.trench_sediment;
+        let fast_arrived: f64 = fast.by_thickness.iter().sum();
+        assert!(fast_arrived > arrived);
+        assert!(fast.accreted / fast_arrived < 0.5 * share, "{fast:?}");
     }
 
     /// Plate 0 (south), a stretched continental margin with a thick sediment wedge, moves north

@@ -396,12 +396,16 @@ fn snapshot(
             .map(|(now, before)| format!("{:.0}%", 100.0 * (now - before) / arrived.max(1e-9)))
             .collect();
         info!(
-            "    trench sediment {:.1} Gt/yr, {:.0}% accreted, {:.0}% on continental margins | by \
-             column (≤ 1, 1–3, 3–5, 5–8, > 8 km): {}",
+            "    trench sediment {:.1} Gt/yr, {:.0}% accreted, {:.0}% on continental margins, {:.0}% \
+             at accretionary margins ({:.0}% of the trench length) | by column (≤ 1, 1–3, 3–5, \
+             5–8, > 8 km): {}",
             arrived / years,
             100.0 * (trench.accreted - previous_trench.accreted) / arrived.max(1e-9),
             100.0 * (trench.on_continental_margins - previous_trench.on_continental_margins)
                 / arrived.max(1e-9),
+            100.0 * (trench.at_accretionary_margins - previous_trench.at_accretionary_margins)
+                / arrived.max(1e-9),
+            100.0 * statistics.accretionary_trench_length / statistics.trench_length.max(1e-9),
             shares.join(" "),
         );
     }

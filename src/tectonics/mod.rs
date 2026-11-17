@@ -94,11 +94,20 @@ pub struct TectonicParams {
     /// thinner fill is subducted (von Huene & Scholl 1991, Clift & Vannucchi 2004). Sediment
     /// recycled through arc magmas is part of the arc crust.
     pub subduction_channel_thickness: f64,
-    /// Fraction of the sediment above the subduction channel scraped off into the
-    /// accretionary wedge; the rest is subducted below the forearc. A global calibration: even
-    /// at accretionary margins ~70% of the incoming column is subducted in the long term
-    /// (Clift & Vannucchi 2004), and globally ≲ 20–30% of trench sediment is accreted.
-    pub frontal_accretion_fraction: f64,
+    /// At accretionary margins, the fraction of the incoming sediment column above the
+    /// décollement, scraped off into the accretionary wedge (the subduction channel always
+    /// subducts). Thick-fill margins accrete about half of the column frontally (Nankai,
+    /// Makran, Cascadia, Barbados).
+    pub decollement_fraction: f64,
+    /// A trench segment becomes accretionary when its time-averaged fill exceeds the
+    /// subduction channel and its trench-normal convergence is below
+    /// `accretionary_convergence` (cm/yr), and erosive again when the fill drops or the
+    /// convergence exceeds `erosive_convergence` (Clift & Vannucchi 2004: accretion below
+    /// ~7.6 cm/yr with > 1 km fill, erosion above ~6 cm/yr or with < 1 km fill).
+    pub accretionary_convergence: f64,
+    pub erosive_convergence: f64,
+    /// Time (Myr) over which the trench fill of a segment is averaged.
+    pub trench_fill_time: f64,
     /// Volume of new arc crust per subducted crust sample, as a thickness over one cell.
     ///
     /// Arcs grow by roughly 30–90 km³ per km of arc and Myr on Earth; at 50 km/Myr convergence
@@ -225,7 +234,10 @@ impl Default for TectonicParams {
             continental_interior_thickness: 35_000.0,
             continental_margin_width: 1000e3,
             subduction_channel_thickness: 1000.0,
-            frontal_accretion_fraction: 0.3,
+            decollement_fraction: 0.45,
+            accretionary_convergence: 6.0,
+            erosive_convergence: 7.6,
+            trench_fill_time: 10.0,
             arc_crust_per_subduction: 500.0,
             subduction_erosion: 300.0,
             oceanic_arc_felsic: 0.4,
@@ -293,7 +305,10 @@ impl TectonicParams {
             "oceanic_arc_felsic" => &mut self.oceanic_arc_felsic,
             "metamorphic_depth" => &mut self.metamorphic_depth,
             "subduction_channel_thickness" => &mut self.subduction_channel_thickness,
-            "frontal_accretion_fraction" => &mut self.frontal_accretion_fraction,
+            "decollement_fraction" => &mut self.decollement_fraction,
+            "accretionary_convergence" => &mut self.accretionary_convergence,
+            "erosive_convergence" => &mut self.erosive_convergence,
+            "trench_fill_time" => &mut self.trench_fill_time,
             "events.initiation_age" => &mut self.events.initiation_age,
             "events.initiation_full_age" => &mut self.events.initiation_full_age,
             "events.initiation_waiting_time" => &mut self.events.initiation_waiting_time,

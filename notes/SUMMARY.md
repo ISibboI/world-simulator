@@ -149,8 +149,12 @@ components (climate, erosion, …) are expected to build on it.
   sediment above the subduction channel is accreted (accreted share 60–75% → ~20%), and
   stretched continental margins with thick wedges resist subduction (`plans/trench-sediment.md`):
   felsic + sediment −0.7…−2.2 Gt/yr after 150 Myr, sediment part of the sea level +310…+351 m at
-  500 Myr, still rising ~40 m/100 Myr. Most of the felsic deficit is intra-oceanic arc crust
-  booked fully felsic and recycled (open decision). 2–6% ancient (≥ 200 Myr) ocean
+  500 Myr, still rising ~40 m/100 Myr. Accretionary vs erosive margins per
+  trench segment (fill > 1 km and convergence < 6–7.6 cm/yr: décollement at 0.45 of the column,
+  no forearc erosion; `plans/accretionary-margins.md`): accreted share 21–32%, felsic + sediment
+  4-seed mean −1.56 Gt/yr after 150 Myr (Earth 0 to −2), sediment part of the sea level
+  decelerating (+25 m per 100 Myr at 400–500 Myr). Intra-oceanic arc crust is 0.4 felsic. Next
+  lever: maturing intra-oceanic arcs into continents. 2–6% ancient (≥ 200 Myr) ocean
   remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water

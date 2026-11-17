@@ -422,8 +422,27 @@ impl Simulation {
         for pair in pairs.values_mut() {
             for segment in &mut pair.segments {
                 let had_slab = segment.slab_length > 0.0;
+                // Trench fill: the mass-weighted mean sediment thickness subducted here,
+                // averaged over time (samples are consumed here only now and then).
+                let (sediment, squares) = std::mem::take(&mut segment.incoming);
+                if sediment > 0.0 {
+                    let elapsed = self.time - segment.fill_time;
+                    let rate = 1.0 - (-elapsed.max(dt) / params.trench_fill_time).exp();
+                    segment.fill += (squares / sediment - segment.fill) * rate;
+                    segment.fill_time = self.time;
+                }
                 match convergence.get(&segment.id) {
                     Some(&(sum, count)) if count > 0 => {
+                        // Accretionary or erosive margin, with hysteresis between the two
+                        // convergence thresholds (m/Myr → cm/yr).
+                        let rate = sum / count as f64 * 1e-4;
+                        if segment.fill <= params.subduction_channel_thickness
+                            || rate > params.erosive_convergence
+                        {
+                            segment.accretionary = false;
+                        } else if rate < params.accretionary_convergence {
+                            segment.accretionary = true;
+                        }
                         // A trench keeps the segment in contact, also without overlap.
                         segment.last_contact = segment.last_contact.max(self.time);
                         segment.slab_length = (segment.slab_length + sum / count as f64 * dt)

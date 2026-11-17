@@ -35,6 +35,16 @@ pub(super) struct Segment {
     pub(super) last_contact: f64,
     /// How long (Myr) continental crust has been arriving along most of the segment.
     arrival_time: f64,
+    /// Time-averaged trench fill (m, rock-equivalent): the mass-weighted mean sediment
+    /// thickness of the crust subducted here.
+    pub(super) fill: f64,
+    /// Whether the margin is accretionary (thick fill, slow convergence) rather than erosive.
+    pub(super) accretionary: bool,
+    /// Sediment of the crust subducted here in the current step: Σ thickness and Σ thickness²
+    /// (for the mass-weighted mean).
+    pub(super) incoming: (f64, f64),
+    /// Time (Myr) of the last update of [`Self::fill`].
+    pub(super) fill_time: f64,
     /// For segments seeded by subduction initiation: whether the slab grew to
     /// [`SUCCESSFUL_SLAB_LENGTH`].
     initiation: Option<bool>,
@@ -164,6 +174,19 @@ impl Polarities {
         nearest(&pair.segments, r, self.radius, rotations).map(|index| &pair.segments[index])
     }
 
+    /// The segment of the pair `(a, b)` covering the world position `r`, if any, for changes.
+    pub(super) fn segment_at_mut(
+        &mut self,
+        a: u32,
+        b: u32,
+        r: DVec3,
+        rotations: &[DQuat],
+    ) -> Option<&mut Segment> {
+        let radius = self.radius;
+        let pair = self.pairs.get_mut(&pair_key(a, b))?;
+        nearest(&pair.segments, r, radius, rotations).map(|index| &mut pair.segments[index])
+    }
+
     /// The segment with the given id of the pair `(a, b)`.
     pub(super) fn segment(&self, a: u32, b: u32, id: u32) -> Option<&Segment> {
         self.pairs
@@ -196,6 +219,10 @@ impl Polarities {
             slab_length,
             last_contact: time,
             arrival_time: 0.0,
+            fill: 0.0,
+            accretionary: false,
+            incoming: (0.0, 0.0),
+            fill_time: time,
             initiation: None,
             contact_sum: DVec3::ZERO,
             overlaps: 0,
