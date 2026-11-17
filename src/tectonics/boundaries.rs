@@ -269,7 +269,7 @@ impl Simulation {
         }
 
         // Single-cell holes inside a plate are resampling artifacts rather than rifts, so they are
-        // filled with a copy of the neighbouring crust.
+        // healed without new crust (see `heal_gap`).
         let holes: Vec<(u32, Ownership)> = (0..cell_count as u32)
             .filter(|&cell| new_owners[cell as usize].is_none())
             .filter_map(|cell| {
@@ -281,36 +281,25 @@ impl Simulation {
             })
             .collect();
         gap_statistics.hole_cells += holes.len();
-        // Holes are healed with a copy of the neighbouring crust, unless the crust there was
-        // consumed; then the hole shows the neighbouring sample.
+        // Holes show the neighbouring sample where the plate's crust there was consumed, else
+        // they are healed without creating crust (see `heal_gap`).
         for (cell, template) in holes {
             filled.push((template.plate, cell));
             let plate_index = template.plate as usize;
             let plate = &mut plates[plate_index];
             let local = plate.local_vertex(mesh, inverse_rotations[plate_index], cell);
-            if plate.consumed[local as usize] {
+            new_owners[cell as usize] = Some(if plate.consumed[local as usize] {
                 gap_statistics.shared_cells += 1;
-                new_owners[cell as usize] = Some(template);
+                template
             } else {
-                let crust =
-                    plate.crust[template.local as usize].expect("owners point to existing crust");
-                if plate.crust[local as usize].is_none() {
-                    ledger.record(Term::GapFilling, crust.mass());
-                }
-                plate.crust[local as usize].get_or_insert(crust);
-                gap_statistics.copied_cells += 1;
-                gap_statistics.copied_volume += crust.thickness;
-                new_owners[cell as usize] = Some(Ownership {
-                    plate: template.plate,
-                    local,
-                });
-            }
+                heal_gap(mesh, plate, template, local, gap_statistics)
+            });
         }
 
         // Fill the remaining gaps, growing the adjacent plates layer by layer. Where the plate
         // moves away from a neighbouring plate, the gap is new sea floor (spreading ridge);
         // otherwise it is an artifact of resampling the rigid plates onto the cells (at trenches
-        // and transform faults), and the gap gets a copy of the adjacent crust.
+        // and transform faults), healed without creating crust (see `heal_gap`).
         let angular_velocities: Vec<DVec3> = plates.iter().map(|p| p.angular_velocity).collect();
         let min_opening = params.min_spreading_rate / (params.planet_radius * 100.0 / 1e6);
         let mut rings = RingScratch::new(cell_count);
@@ -380,19 +369,9 @@ impl Simulation {
                         });
                     }
                 } else {
-                    // A resampling gap: heal it with a copy of the adjacent crust.
-                    let crust =
-                        plate.crust[parent.local as usize].expect("owners point to existing crust");
-                    if plate.crust[local as usize].is_none() {
-                        ledger.record(Term::GapFilling, crust.mass());
-                    }
-                    plate.crust[local as usize].get_or_insert(crust);
-                    gap_statistics.copied_cells += 1;
-                    gap_statistics.copied_volume += crust.thickness;
-                    new_owners[neighbor as usize] = Some(Ownership {
-                        plate: plate_index,
-                        local,
-                    });
+                    // A resampling gap: healed without creating crust.
+                    new_owners[neighbor as usize] =
+                        Some(heal_gap(mesh, plate, parent, local, gap_statistics));
                 }
                 queue.push_back(neighbor);
             }
@@ -522,11 +501,12 @@ struct LostContact {
 pub struct GapStatistics {
     /// Cells filled with new oceanic crust where plates spread apart.
     pub new_crust_cells: usize,
-    /// Resampling gaps healed with a copy of the adjacent crust.
-    pub copied_cells: usize,
-    /// Crust thickness (m · cells) created by copies.
-    pub copied_volume: f64,
-    /// Gaps where the plate's crust was consumed, showing the adjacent sample instead.
+    /// Resampling gaps showing a hidden sample of the plate again.
+    pub revealed_cells: usize,
+    /// Enclosed empty spots of a plate filled with a share of the surrounding crust.
+    pub enclosed_fills: usize,
+    /// Gaps showing the adjacent sample (resampling gaps at plate edges, and slivers where the
+    /// plate's crust was consumed).
     pub shared_cells: usize,
     /// Single-cell holes inside a plate (healed or shared, also counted there).
     pub hole_cells: usize,
@@ -630,6 +610,66 @@ impl RingScratch {
     }
 }
 
+/// Heals a resampling gap of `plate` at a cell whose local vertex `local` was not consumed,
+/// next to the plate's sample `parent`, without creating crust; returns the sample to show.
+///
+/// Rigid plates resampled onto the cells leave gaps that are not real openings. A hidden sample
+/// at the local vertex is shown again. An empty local vertex enclosed by crust of the plate (in
+/// its own frame; e.g. spots that new sea floor never sampled) gets a sample made of a share of
+/// its neighbours' crust, which conserves mass. Elsewhere (plate edges, boundaries) the gap
+/// shows the adjacent sample: copying it would create crust from nothing.
+fn heal_gap(
+    mesh: &SphereMesh,
+    plate: &mut Plate,
+    parent: Ownership,
+    local: u32,
+    statistics: &mut GapStatistics,
+) -> Ownership {
+    let own = Ownership {
+        plate: parent.plate,
+        local,
+    };
+    if plate.crust[local as usize].is_some() {
+        statistics.revealed_cells += 1;
+        return own;
+    }
+    let neighbors = mesh.neighbors(local);
+    if !neighbors
+        .iter()
+        .all(|&neighbor| plate.crust[neighbor as usize].is_some())
+    {
+        statistics.shared_cells += 1;
+        return parent;
+    }
+    // Each of the k neighbours gives 1/(k + 1) of its crust and sediment. The lithosphere is as
+    // young as the youngest neighbour's (an average with old continental lithosphere would make
+    // oceanic crust ancient).
+    let share = 1.0 / (neighbors.len() + 1) as f64;
+    let (mut thickness, mut mass, mut sediment) = (0.0, 0.0, 0.0);
+    let mut birth = f64::NEG_INFINITY;
+    for &neighbor in neighbors {
+        let crust = plate.crust[neighbor as usize]
+            .as_mut()
+            .expect("enclosed by crust");
+        let given = crust.thickness * share;
+        thickness += given;
+        mass += given * crust.density;
+        birth = birth.max(crust.birth);
+        sediment += crust.sediment * share;
+        crust.thickness -= given;
+        crust.sediment -= crust.sediment * share;
+    }
+    plate.crust[local as usize] = Some(Crust {
+        thickness,
+        density: mass / thickness.max(1e-9),
+        birth,
+        sediment,
+    });
+    plate.consumed[local as usize] = false;
+    statistics.enclosed_fills += 1;
+    own
+}
+
 /// New crust added to a plate around a cell.
 pub(super) struct CrustAddition {
     cell: u32,
@@ -702,6 +742,121 @@ pub(super) fn choose_overriding(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One oceanic plate covering the sphere.
+    fn single_plate() -> Simulation {
+        let mut simulation =
+            Simulation::new(SphereMesh::icosphere(4), 1, TectonicParams::default(), 3);
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            *crust = new_oceanic_crust(-50.0);
+        }
+        simulation
+    }
+
+    #[test]
+    fn enclosed_holes_are_filled_from_their_neighbours() {
+        let mut simulation = single_plate();
+        let local = 100;
+        let removed = simulation.plates[0].crust[local].take().unwrap();
+        let before = simulation.total_mass();
+        let mut statistics = GapStatistics::default();
+        let parent = Ownership {
+            plate: 0,
+            local: 101,
+        };
+        let shown = heal_gap(
+            &simulation.mesh,
+            &mut simulation.plates[0],
+            parent,
+            local as u32,
+            &mut statistics,
+        );
+        assert_eq!(
+            shown,
+            Ownership {
+                plate: 0,
+                local: local as u32
+            }
+        );
+        assert_eq!(statistics.enclosed_fills, 1);
+        let filled = simulation.plates[0].crust[local].unwrap();
+        assert!((filled.density - removed.density).abs() < 1e-9);
+        assert!(filled.thickness > 0.0);
+        // No crust was created.
+        assert!((simulation.total_mass() / before - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn edge_gaps_show_the_adjacent_sample() {
+        let mut simulation = single_plate();
+        // An empty spot with an empty neighbour: at the edge of the plate's crust.
+        let local = 100u32;
+        let neighbor = simulation.mesh.neighbors(local)[0];
+        simulation.plates[0].crust[local as usize] = None;
+        simulation.plates[0].crust[neighbor as usize] = None;
+        let before = simulation.total_mass();
+        let mut statistics = GapStatistics::default();
+        let parent = Ownership { plate: 0, local: 0 };
+        let shown = heal_gap(
+            &simulation.mesh,
+            &mut simulation.plates[0],
+            parent,
+            local,
+            &mut statistics,
+        );
+        assert_eq!(shown, parent);
+        assert_eq!(statistics.shared_cells, 1);
+        assert!(simulation.plates[0].crust[local as usize].is_none());
+        assert_eq!(simulation.total_mass(), before);
+    }
+
+    #[test]
+    fn rigid_rotation_creates_no_crust() {
+        let mut simulation = single_plate();
+        let before = simulation.total_mass();
+        simulation.plates[0].angular_velocity = DVec3::new(0.3, 0.5, 0.8).normalize() * 0.004;
+        for _ in 0..40 {
+            simulation.substep(1.0);
+        }
+        let after = simulation.total_mass();
+        assert!((after / before - 1.0).abs() < 1e-12, "{after} vs {before}");
+        assert_eq!(simulation.gap_statistics.new_crust_cells, 0);
+    }
+
+    #[test]
+    fn plates_sliding_past_each_other_keep_their_crust() {
+        // Two oceanic hemispheres rotating in opposite senses about the pole: a transform
+        // boundary along the equator.
+        let mut simulation = single_plate();
+        simulation.split_plate(0, DVec3::Z).unwrap();
+        simulation.polarities.clear();
+        let samples = |simulation: &Simulation| -> Vec<usize> {
+            simulation
+                .plates
+                .iter()
+                .map(|plate| plate.crust.iter().flatten().count())
+                .collect()
+        };
+        let before = samples(&simulation);
+        simulation.plates[0].angular_velocity = DVec3::Z * 0.004;
+        simulation.plates[1].angular_velocity = -DVec3::Z * 0.004;
+        for _ in 0..40 {
+            simulation.substep(1.0);
+        }
+        let after = samples(&simulation);
+        for (b, a) in before.iter().zip(&after) {
+            // Nothing is created at the boundary (at most a few enclosed fills); overlaps of
+            // the resampled plates along the transform are subducted as noise (known), which
+            // loses a little crust.
+            assert!(*a <= *b + 10, "{before:?} → {after:?}");
+            assert!(*a as f64 >= 0.97 * *b as f64, "{before:?} → {after:?}");
+        }
+        let shared_per_substep = simulation.gap_statistics.shared_cells as f64 / 40.0;
+        assert!(
+            shared_per_substep < 0.05 * simulation.mesh.len() as f64,
+            "{shared_per_substep}"
+        );
+    }
 
     /// Plate 0 covers x < -0.02, plate 1 covers x > 0.02, the band between is uncovered. Returns
     /// whether plate 1 opens away from plate 0 at the uncovered cell nearest to +z.

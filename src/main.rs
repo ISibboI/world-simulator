@@ -380,14 +380,23 @@ fn snapshot(
         statistics.matching.mismatches,
     );
     info!(
-        "    gaps filled: {} new sea floor, {} copies ({:.0} km·cells), {} shared, {} holes, \
+        "    gaps filled: {} new sea floor, {} revealed, {} enclosed fills, {} shared, {} holes, \
          {} freed",
         statistics.gaps.new_crust_cells,
-        statistics.gaps.copied_cells,
-        statistics.gaps.copied_volume / 1000.0,
+        statistics.gaps.revealed_cells,
+        statistics.gaps.enclosed_fills,
         statistics.gaps.shared_cells,
         statistics.gaps.hole_cells,
         statistics.gaps.freed_cells,
+    );
+    info!(
+        "    resampling: {:.1}% of cells show a duplicated sample (at most {} cells), {} enclosed \
+         empty spots | continental {:.1}% of cells, {:.1}% by samples",
+        100.0 * statistics.duplicated_cell_fraction,
+        statistics.max_cells_per_sample,
+        statistics.enclosed_empty,
+        100.0 * statistics.continental_fraction,
+        100.0 * statistics.continental_sample_fraction,
     );
     info!(
         "    land masses {} ({} specks, largest {:.0}%) | continental crust masses {} ({} specks, \

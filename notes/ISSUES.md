@@ -194,6 +194,15 @@ balance → collapse/stretching if needed** → 1q relative-speed tuning (later,
        fill enclosed holes mass-conservingly, share elsewhere) → issue 3 mass balance →
        collapse/stretching (`plans/issue-1r-thickening.md`, reviewed, needs rework per its
        review) only if still needed.
+       **Gap healing done (2026-11-17):** resampling gaps show a hidden sample again, or the
+       adjacent sample; empty spots enclosed by the plate's crust (plate frame) get a sample made
+       of 1/(k+1) of each neighbour (mass-conserving, youngest neighbour's age). Ledger term
+       "gap filling" removed. Seeds 0–3, 500 Myr (means 200–500 Myr, vs current-code baseline):
+       mean land 1.33–1.90 → 0.70–0.91 km [0.84]; continental area (cells) 31–37% → 27–29%;
+       production 126–143 Gt/yr, ages, plates unchanged. **Continental mass falls 47–49% in
+       500 Myr** (1.80 → 0.93–1.01e10 Gt; continental area at 500 Myr 22–24% of cells, 19–21% by
+       samples) — issue 3, next. Duplicated cells saturate at 17–20% (baseline ~8%), so ~15% of
+       the continental area at 500 Myr is shared (phantom) area.
    **1q: boundary shear coupling done (2026-11-16, plan + review `plans/boundary-friction.md`):**
    strike-slip along plate boundaries resisted in the torque balance (smoothed 3-ring normals,
    per boundary cell, symmetric); oceanic/mixed boundaries `boundary_coupling_width` 200 km

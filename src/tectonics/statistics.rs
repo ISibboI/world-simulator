@@ -55,6 +55,16 @@ pub struct Statistics {
     /// Area of sea floor opened by diverging plates so far (one flank), from the plate motions,
     /// in km². Earth: ~3.4 km²/yr.
     pub opened_area: f64,
+    /// Cells showing a crust sample that is also shown at another cell (fraction of all
+    /// cells), and the most cells showing one sample.
+    pub duplicated_cell_fraction: f64,
+    pub max_cells_per_sample: usize,
+    /// Empty, unconsumed local vertices of plates enclosed by the plate's crust (should be
+    /// filled at once, see gap healing).
+    pub enclosed_empty: usize,
+    /// Continental crust as a fraction of the surface counted by distinct samples instead of
+    /// cells (shared samples count once).
+    pub continental_sample_fraction: f64,
     /// Sea level (m, an offset of dry elevations relative to the isostatic datum) and its
     /// changes so far by tectonics and by surface processes.
     pub sea_level: f64,
@@ -411,6 +421,36 @@ impl Simulation {
             .map(|(_, hazard)| hazard)
             .sum();
         let boundary_ratio = self.boundary_ratio(&plate_areas);
+        let mut cells_per_sample: HashMap<Ownership, usize> = HashMap::default();
+        for owner in &self.owners {
+            *cells_per_sample.entry(*owner).or_default() += 1;
+        }
+        let duplicated_cells: usize = cells_per_sample.values().filter(|&&count| count > 1).sum();
+        let max_cells_per_sample = cells_per_sample.values().copied().max().unwrap_or(0);
+        let continental_samples = cells_per_sample
+            .keys()
+            .filter(|owner| {
+                self.plates[owner.plate as usize].crust[owner.local as usize]
+                    .is_some_and(|crust| crust.is_continental())
+            })
+            .count();
+        let enclosed_empty = self
+            .plates
+            .iter()
+            .map(|plate| {
+                (0..cell_count)
+                    .filter(|&local| {
+                        plate.crust[local].is_none()
+                            && !plate.consumed[local]
+                            && self
+                                .mesh
+                                .neighbors(local as u32)
+                                .iter()
+                                .all(|&neighbor| plate.crust[neighbor as usize].is_some())
+                    })
+                    .count()
+            })
+            .sum();
         let motion = self.boundary_motion(&boundaries);
         let mut age_histogram = [0.0; 11];
         for &age in &oceanic_ages {
@@ -488,6 +528,10 @@ impl Simulation {
             rms_plate_speed,
             plates_above_one_percent,
             boundary_ratio,
+            duplicated_cell_fraction: duplicated_cells as f64 / cell_count as f64,
+            max_cells_per_sample,
+            enclosed_empty,
+            continental_sample_fraction: continental_samples as f64 / cell_count as f64,
             sea_level: self.sea_level,
             sea_level_change: self.sea_level_change,
             ocean_volume: water_depth_sum * cell_area / 1e9,

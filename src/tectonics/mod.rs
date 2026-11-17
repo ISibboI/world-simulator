@@ -276,7 +276,7 @@ pub struct Plate {
     /// For each world cell, the local vertex that was closest to it in the previous substep.
     lookup_cache: Vec<u32>,
     /// Local vertices whose crust was consumed (subducted or stacked onto another plate). Gaps
-    /// there are never refilled with copies, which would recreate consumed crust.
+    /// there are never refilled, which would recreate consumed crust.
     consumed: Vec<bool>,
     /// Where the plate's crust was after the last matching, or `None` if unknown (new, split or
     /// merged plates). See [`matching`].

@@ -1,5 +1,8 @@
 # Plan: mass-conserving healing of resampling gaps (issue 1r, part of 3/5)
 
+_Status: implemented 2026-11-17 with the review's required changes; see
+`../sessions/2026-11-17.md`._
+
 _2026-11-16. User decision: fix the gaps first, then the continental mass balance (issue 3);
 collapse and rift stretching (`issue-1r-thickening.md`) afterwards only if still needed._
 

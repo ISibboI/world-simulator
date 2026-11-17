@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-17 (summary corrected; next: mass-conserving gap healing)_
+_Last updated: 2026-11-17 (mass-conserving gap healing)_
 
 ## Goal
 
@@ -47,8 +47,8 @@ components (climate, erosion, …) are expected to build on it.
     arcs (500 m·cell per subducted sample in a band behind the trench), subduction erosion
     (300 m·cell at the trench), continental collisions stack the loser's crust onto the winner
     (spilling outward above 75 km), crustal flow of crust > 40 km, gap filling (new sea floor
-    only where plates diverge, healed copies for resampling gaps, shared samples at boundary
-    slivers where crust was consumed).
+    only where plates diverge; resampling gaps show a hidden or the adjacent sample, enclosed
+    empty spots get a mass-conserving share of their neighbours — no crust is created).
   - `dynamics.rs`: boundary classification (trench, ridge, collision) and a quasi-static
     torque balance per plate (slab pull ∝ √age, ridge push, basal drag against the mantle flow,
     ×4 under continents, slab resistance at trenches (terminal speed 10 cm/yr), collision
@@ -114,21 +114,18 @@ components (climate, erosion, …) are expected to build on it.
 - Continental shelves are too wide (sediment spreads over up to 256 cells per river mouth).
 - Land fragmentation largely fixed by the thickness model (at 200 Myr: land masses 105 → ~30,
   continental crust masses 146 → ~17–25); still 15–20 single-cell specks.
-- **Continents thicken** (mean continental crust 35 → 45 km in 500 Myr, mean land 1.3–1.9 km
-  vs Earth 0.84), mostly through gap-healing copies (issue 1r); without them the continental
-  area falls 40% → 27–30% (issue 3 mass balance).
+- **Continental crust is not conserved:** −48% of its mass in 500 Myr (erosion → sediment →
+  subduction; issue 3). Thickening through gap copies is fixed (1r).
 - Collision churn is high (≈ the whole initial continental volume passes through collisions in
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
 - **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
   plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms + tuning), 5, 3,
   4 done, issue 2 (sea level) done, and the runtime optimisations. Since then: per-segment
-  polarity, plate connectivity (1p), boundary shear coupling (1q; modest effect). **Next (user):
-  continental thickening (1r) is mostly a numerical crust pump (gap healing copies, +35–44
-  Gt/yr): implement mass-conserving gap healing (`plans/mass-conserving-gaps.md`, reviewed —
-  adopt its required changes), then the continental mass balance (issue 3: sediment
-  subduction 4–6× Earth, merge leak), then collapse/stretching only if still needed
-  (`plans/issue-1r-thickening.md`, reviewed, needs rework); relative plate speed tuning (1q)
-  later. See "Resume here" in `sessions/2026-11-16.md`.** 2–6% ancient (≥ 200 Myr) ocean
+  polarity, plate connectivity (1p), boundary shear coupling (1q; modest effect). Gap healing is
+  mass-conserving now (mean land 0.70–0.91 km). **Next (user): the continental mass balance
+  (issue 3: continental crust mass −48% in 500 Myr; sediment subduction 4–6× Earth, merge
+  leak), then collapse/stretching only if still needed (`plans/issue-1r-thickening.md`,
+  reviewed, needs rework); relative plate speed tuning (1q) later.** 2–6% ancient (≥ 200 Myr) ocean
   remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water

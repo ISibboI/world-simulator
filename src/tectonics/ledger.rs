@@ -20,8 +20,6 @@ pub struct MassLedger {
     pub new_sea_floor: f64,
     /// New arc crust above subducting slabs (+).
     pub arcs: f64,
-    /// Copies healing resampling gaps (+).
-    pub gap_filling: f64,
     /// Subducted oceanic crust (−).
     pub subducted_oceanic: f64,
     /// Subducted transitional crust: thickened arc crust or thinned continental crust (−).
@@ -65,7 +63,6 @@ pub struct MassLedger {
 pub(super) enum Term {
     NewSeaFloor,
     Arcs,
-    GapFilling,
     SubductedOceanic,
     SubductedTransitional,
     SubductedContinental,
@@ -95,7 +92,6 @@ impl MassLedger {
         let field = match term {
             Term::NewSeaFloor => &mut self.new_sea_floor,
             Term::Arcs => &mut self.arcs,
-            Term::GapFilling => &mut self.gap_filling,
             Term::SubductedOceanic => &mut self.subducted_oceanic,
             Term::SubductedTransitional => &mut self.subducted_transitional,
             Term::SubductedContinental => &mut self.subducted_continental,
@@ -131,11 +127,10 @@ impl MassLedger {
     }
 
     /// The terms with their names, for reporting.
-    pub fn terms(&self) -> [(&'static str, f64); 19] {
+    pub fn terms(&self) -> [(&'static str, f64); 18] {
         [
             ("new sea floor", self.new_sea_floor),
             ("arcs", self.arcs),
-            ("gap filling", self.gap_filling),
             ("subducted oceanic", self.subducted_oceanic),
             ("subducted transitional", self.subducted_transitional),
             ("subducted continental", self.subducted_continental),
