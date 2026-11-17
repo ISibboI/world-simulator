@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-17 (issue 1r: rift stretching, collapse, collision resistance)_
+_Last updated: 2026-11-17 (issue 1r follow-up: local splits, evaluation)_
 
 ## Goal
 
@@ -128,9 +128,12 @@ components (climate, erosion, …) are expected to build on it.
   collision resistance (150) give mean land 0.7–1.1 km, 3–6% of continental crust > 50 km,
   29–37% flooded. **Open: collision boundaries 30–40k km long (Earth ~5000), lower-crust
   subduction at collisions (C2, undecided), sediment routing (`plans/sediment-routing.md`),
-  relative plate speed tuning (1q).** Evaluation of 1r: collapse loses crust at the 75 km cap
-  (fix first); the collision length counts diverging contacts too; likely cause of the length:
-  plate splits along full great circles through continents; C2 not needed now. 2–6% ancient (≥ 200 Myr) ocean
+  relative plate speed tuning (1q).** Follow-up: collapse cap fixed, local splits (no
+  continent cut by initiations; collision length 30–40k → 17–21k km), weak shear at continental
+  contacts, collision resistance 100 (interim), tapered stretching. Its evaluation found a split
+  bug (detached cells, 23% of splits fail), too-early breakup (β ≈ 1.5), raw normals in the
+  collision term, and that most remaining collision length is in pairs blocked by the
+  trench-ratio suture rule; margins are still unthinned with 8–9 km sediment on old ocean. 2–6% ancient (≥ 200 Myr) ocean
   remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
