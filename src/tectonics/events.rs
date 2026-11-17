@@ -348,7 +348,8 @@ impl Simulation {
     ///   within [`PlateEventParams::rift_continent_radius`] of the margin cell to the old
     ///   (subducting) side, so the new boundary follows the coast there;
     /// * pieces disconnected from their side's main piece (the one holding the margin cell or
-    ///   continent; for rifts the largest) move to the other side, so both parts are connected.
+    ///   continent; for rifts the largest) move to the other side, so both parts are connected
+    ///   (fragments of the plate that touch no other part of it stay where they are).
     ///
     /// Returns `None` if no consistent division is found.
     fn local_split_piece(
@@ -445,28 +446,33 @@ impl Simulation {
         for _ in 0..8 {
             piece.fill(u32::MAX);
             let mut sizes: Vec<(bool, usize)> = Vec::new();
+            // Whether each piece has a neighbour of the plate on the other side.
+            let mut touches: Vec<bool> = Vec::new();
             for start in 0..cell_count as u32 {
                 if !in_plate(start) || piece[start as usize] != u32::MAX {
                     continue;
                 }
                 let id = sizes.len() as u32;
                 let side = new_side[start as usize];
-                let mut size = 0;
+                let (mut size, mut touching) = (0, false);
                 piece[start as usize] = id;
                 stack.push(start);
                 while let Some(cell) = stack.pop() {
                     size += 1;
                     for &neighbor in self.mesh.neighbors(cell) {
-                        if in_plate(neighbor)
-                            && piece[neighbor as usize] == u32::MAX
-                            && new_side[neighbor as usize] == side
-                        {
+                        if !in_plate(neighbor) {
+                            continue;
+                        }
+                        if new_side[neighbor as usize] != side {
+                            touching = true;
+                        } else if piece[neighbor as usize] == u32::MAX {
                             piece[neighbor as usize] = id;
                             stack.push(neighbor);
                         }
                     }
                 }
                 sizes.push((side, size));
+                touches.push(touching);
             }
             let main_of = |side: bool| -> Option<u32> {
                 match anchors {
@@ -491,7 +497,9 @@ impl Simulation {
                     continue;
                 }
                 let side = new_side[cell];
-                if Some(piece[cell]) != mains[side as usize] {
+                // Pieces already detached from the rest of the plate (fragments surrounded by
+                // other plates) stay; the connectivity rule handles them.
+                if Some(piece[cell]) != mains[side as usize] && touches[piece[cell] as usize] {
                     new_side[cell] = !side;
                     flipped = true;
                 }
@@ -501,6 +509,44 @@ impl Simulation {
             }
         }
         None
+    }
+
+    /// Connected regions (mesh neighbours of the same plate) of cells whose crust does not
+    /// resist subduction: the region of each cell (`u32::MAX` for other cells) and the number
+    /// of cells of each region.
+    fn ocean_regions(&self) -> (Vec<u32>, Vec<usize>) {
+        let cell_count = self.mesh.len();
+        let ocean: Vec<bool> = (0..cell_count as u32)
+            .map(|cell| !self.surface_crust(cell).resists_subduction())
+            .collect();
+        let mut region = vec![u32::MAX; cell_count];
+        let mut sizes = Vec::new();
+        let mut stack = Vec::new();
+        for start in 0..cell_count {
+            if !ocean[start] || region[start] != u32::MAX {
+                continue;
+            }
+            let id = sizes.len() as u32;
+            let plate = self.owners[start].plate;
+            let mut size = 0;
+            region[start] = id;
+            stack.push(start as u32);
+            while let Some(cell) = stack.pop() {
+                size += 1;
+                for &neighbor in self.mesh.neighbors(cell) {
+                    let neighbor = neighbor as usize;
+                    if ocean[neighbor]
+                        && region[neighbor] == u32::MAX
+                        && self.owners[neighbor].plate == plate
+                    {
+                        region[neighbor] = id;
+                        stack.push(neighbor as u32);
+                    }
+                }
+            }
+            sizes.push(size);
+        }
+        (region, sizes)
     }
 
     /// Length (km) of the contact between crust resisting subduction on `a` and on `b` (cells
@@ -751,7 +797,10 @@ impl Simulation {
             self.params.min_trench_convergence / (self.params.planet_radius * 100.0 / 1e6);
         // Candidate places with their hazard (per Myr).
         let mut candidates: Vec<(Initiation, f64)> = Vec::new();
-        // Old oceanic cells next to continental crust of the same plate.
+        // Old oceanic cells next to continental crust of the same plate, in a connected ocean
+        // region of the plate large enough to become a plate of its own.
+        let (ocean_region, ocean_region_cells) = self.ocean_regions();
+        let min_cells = params.min_plate_area * self.mesh.len() as f64;
         for cell in 0..self.mesh.len() as u32 {
             let owner = self.owners[cell as usize];
             if owner.plate >= first_new_plate {
@@ -759,7 +808,12 @@ impl Simulation {
             }
             let crust = self.surface_crust(cell);
             let age = crust.age(self.time);
-            if !crust.is_oceanic() || age < params.initiation_age {
+            if !crust.is_oceanic()
+                || age < params.initiation_age
+                || ocean_region_cells
+                    .get(ocean_region[cell as usize] as usize)
+                    .is_none_or(|&cells| (cells as f64) < min_cells)
+            {
                 continue;
             }
             let at_margin = self.mesh.neighbors(cell).iter().any(|&neighbor| {
@@ -1172,6 +1226,26 @@ mod tests {
             simulation.separate_detached_pieces();
             assert_eq!(simulation.plates.len(), 2, "seed {seed}");
         }
+    }
+
+    #[test]
+    fn plates_with_detached_cells_can_still_split() {
+        let mut params = TectonicParams::default();
+        params.events.initiation_waiting_time = 1e-6;
+        let mut simulation = two_continents(params, 0);
+        // An ocean cap around −z becomes another plate, except one cell in its middle, which
+        // stays a detached fragment of plate 0.
+        let fragment = simulation.mesh.nearest(-DVec3::Z);
+        let cap: Vec<u32> = (0..simulation.mesh.len() as u32)
+            .filter(|&cell| simulation.mesh.vertex(cell).z < -0.7 && cell != fragment)
+            .collect();
+        simulation.split_plate_cells(0, &cap).unwrap();
+        simulation.polarities.clear();
+        assert_eq!(simulation.owners[fragment as usize].plate, 0);
+        simulation.initiate_subduction(1.0, u32::MAX, &[]);
+        assert_eq!(simulation.event_counts.initiations, 1);
+        assert_eq!(simulation.event_counts.failed_initiations, 0);
+        assert_eq!(simulation.plates.len(), 3);
     }
 
     #[test]
