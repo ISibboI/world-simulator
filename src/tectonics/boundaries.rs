@@ -292,7 +292,8 @@ impl Simulation {
                 gap_statistics.shared_cells += 1;
                 template
             } else {
-                heal_gap(mesh, plate, template, local, gap_statistics)
+                // A single-cell hole is surrounded by the plate.
+                heal_gap(mesh, plate, template, local, true, gap_statistics)
             });
         }
 
@@ -370,8 +371,18 @@ impl Simulation {
                     }
                 } else {
                     // A resampling gap: healed without creating crust.
-                    new_owners[neighbor as usize] =
-                        Some(heal_gap(mesh, plate, parent, local, gap_statistics));
+                    let interior = !mesh.neighbors(neighbor).iter().any(|&n| {
+                        new_owners[n as usize].is_some_and(|owner| owner.plate != plate_index)
+                    });
+                    let plate = &mut plates[plate_index as usize];
+                    new_owners[neighbor as usize] = Some(heal_gap(
+                        mesh,
+                        plate,
+                        parent,
+                        local,
+                        interior,
+                        gap_statistics,
+                    ));
                 }
                 queue.push_back(neighbor);
             }
@@ -508,6 +519,8 @@ pub struct GapStatistics {
     /// Gaps showing the adjacent sample (resampling gaps at plate edges, and slivers where the
     /// plate's crust was consumed).
     pub shared_cells: usize,
+    /// Of those, resampling gaps away from other plates (holes too empty to fill).
+    pub interior_shared_cells: usize,
     /// Single-cell holes inside a plate (healed or shared, also counted there).
     pub hole_cells: usize,
     /// Cells whose surface crust was consumed while visible (should stay zero).
@@ -610,19 +623,27 @@ impl RingScratch {
     }
 }
 
+/// Minimum number of neighbours with crust (in the plate's frame) for an empty spot inside a
+/// plate to be filled.
+const MIN_FILL_NEIGHBOURS: usize = 3;
+
 /// Heals a resampling gap of `plate` at a cell whose local vertex `local` was not consumed,
 /// next to the plate's sample `parent`, without creating crust; returns the sample to show.
+/// `interior` tells whether no other plate is next to the cell.
 ///
 /// Rigid plates resampled onto the cells leave gaps that are not real openings. A hidden sample
 /// at the local vertex is shown again. An empty local vertex enclosed by crust of the plate (in
-/// its own frame; e.g. spots that new sea floor never sampled) gets a sample made of a share of
-/// its neighbours' crust, which conserves mass. Elsewhere (plate edges, boundaries) the gap
-/// shows the adjacent sample: copying it would create crust from nothing.
+/// its own frame; e.g. spots that new sea floor never sampled, or holes left by merges), or one
+/// inside the plate with at least [`MIN_FILL_NEIGHBOURS`] neighbours with crust (holes of a few
+/// vertices fill from their rim), gets a sample made of a share of its neighbours' crust, which
+/// conserves mass. Elsewhere (plate edges, boundaries) the gap shows the adjacent sample:
+/// copying it would create crust from nothing.
 fn heal_gap(
     mesh: &SphereMesh,
     plate: &mut Plate,
     parent: Ownership,
     local: u32,
+    interior: bool,
     statistics: &mut GapStatistics,
 ) -> Ownership {
     let own = Ownership {
@@ -633,12 +654,18 @@ fn heal_gap(
         statistics.revealed_cells += 1;
         return own;
     }
-    let neighbors = mesh.neighbors(local);
-    if !neighbors
+    let neighbors: Vec<u32> = mesh
+        .neighbors(local)
         .iter()
-        .all(|&neighbor| plate.crust[neighbor as usize].is_some())
-    {
+        .copied()
+        .filter(|&neighbor| plate.crust[neighbor as usize].is_some())
+        .collect();
+    let enclosed = neighbors.len() == mesh.neighbors(local).len();
+    if !enclosed && !(interior && neighbors.len() >= MIN_FILL_NEIGHBOURS) {
         statistics.shared_cells += 1;
+        if interior {
+            statistics.interior_shared_cells += 1;
+        }
         return parent;
     }
     // Each of the k neighbours gives 1/(k + 1) of its crust and sediment. The lithosphere is as
@@ -647,7 +674,7 @@ fn heal_gap(
     let share = 1.0 / (neighbors.len() + 1) as f64;
     let (mut thickness, mut mass, mut sediment) = (0.0, 0.0, 0.0);
     let mut birth = f64::NEG_INFINITY;
-    for &neighbor in neighbors {
+    for &neighbor in &neighbors {
         let crust = plate.crust[neighbor as usize]
             .as_mut()
             .expect("enclosed by crust");
@@ -769,6 +796,7 @@ mod tests {
             &mut simulation.plates[0],
             parent,
             local as u32,
+            true,
             &mut statistics,
         );
         assert_eq!(
@@ -783,6 +811,38 @@ mod tests {
         assert!((filled.density - removed.density).abs() < 1e-9);
         assert!(filled.thickness > 0.0);
         // No crust was created.
+        assert!((simulation.total_mass() / before - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn holes_of_a_few_vertices_inside_a_plate_are_filled_from_their_rim() {
+        let mut simulation = single_plate();
+        // Two neighbouring empty vertices: neither is fully enclosed.
+        let local = 100u32;
+        let other = simulation.mesh.neighbors(local)[0];
+        simulation.plates[0].crust[local as usize] = None;
+        simulation.plates[0].crust[other as usize] = None;
+        let before = simulation.total_mass();
+        let mut statistics = GapStatistics::default();
+        let parent = Ownership { plate: 0, local: 0 };
+        for vertex in [local, other] {
+            let shown = heal_gap(
+                &simulation.mesh,
+                &mut simulation.plates[0],
+                parent,
+                vertex,
+                true,
+                &mut statistics,
+            );
+            assert_eq!(
+                shown,
+                Ownership {
+                    plate: 0,
+                    local: vertex
+                }
+            );
+        }
+        assert_eq!(statistics.enclosed_fills, 2);
         assert!((simulation.total_mass() / before - 1.0).abs() < 1e-12);
     }
 
@@ -802,6 +862,7 @@ mod tests {
             &mut simulation.plates[0],
             parent,
             local,
+            false,
             &mut statistics,
         );
         assert_eq!(shown, parent);

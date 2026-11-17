@@ -21,7 +21,7 @@ use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
 use crate::planet::Planet;
 use crate::sphere::SphereMesh;
-use crate::tectonics::{MassLedger, Simulation, TectonicParams};
+use crate::tectonics::{MassLedger, MaterialBudget, Simulation, TectonicParams};
 use crate::temperature::TemperatureParams;
 
 /// The planet radius in metres; used for erosion, climate and to report linear speeds.
@@ -91,6 +91,10 @@ struct Cli {
     #[arg(long, default_value_t = 40.0)]
     exaggeration: f64,
 
+    /// Measure the budget of felsic crust and sediment per step phase (slower).
+    #[arg(long)]
+    material_budget: bool,
+
     /// Overrides a tectonic parameter for calibration, e.g. `--set basal_drag=8e14`; can be
     /// repeated. See `TectonicParams::set` for the names.
     #[arg(long = "set", value_name = "NAME=VALUE")]
@@ -131,6 +135,7 @@ fn main() -> anyhow::Result<()> {
         ..TectonicParams::default()
     };
     params.matching.verify = cli.verify_matching;
+    params.track_material_budget = cli.material_budget;
     for assignment in &cli.overrides {
         let (name, value) = assignment
             .split_once('=')
@@ -187,7 +192,7 @@ fn simulate(mut planet: Planet, cli: &Cli, mut on_step: impl FnMut(&Planet)) -> 
     let steps = (cli.duration / cli.dt).round() as u64;
     let snapshot_every = ((cli.snapshot_interval / cli.dt).round() as u64).max(1);
     let start = Instant::now();
-    let mut previous_ledger: Option<(f64, MassLedger, usize, f64)> = None;
+    let mut previous_ledger: Option<(f64, MassLedger, usize, f64, Option<MaterialBudget>)> = None;
     snapshot(&planet, cli, &mut previous_ledger)?;
     on_step(&planet);
     for step in 1..=steps {
@@ -204,7 +209,7 @@ fn simulate(mut planet: Planet, cli: &Cli, mut on_step: impl FnMut(&Planet)) -> 
 fn snapshot(
     planet: &Planet,
     cli: &Cli,
-    previous_ledger: &mut Option<(f64, MassLedger, usize, f64)>,
+    previous_ledger: &mut Option<(f64, MassLedger, usize, f64, Option<MaterialBudget>)>,
 ) -> anyhow::Result<()> {
     let simulation = planet.tectonics();
     let planet_statistics = planet.statistics();
@@ -314,10 +319,14 @@ fn snapshot(
     let cell_area =
         4.0 * std::f64::consts::PI * EARTH_RADIUS * EARTH_RADIUS / simulation.mesh().len() as f64;
     let new_crust_cells = statistics.gaps.new_crust_cells;
-    if let Some((previous_time, previous, previous_cells, previous_opened)) =
+    let budget = simulation.material_budget();
+    if let Some((previous_time, previous, previous_cells, previous_opened, previous_budget)) =
         previous_ledger.as_ref()
     {
         let years = (statistics.time - previous_time) * 1e6;
+        if let (Some(budget), Some(previous_budget)) = (budget, previous_budget) {
+            log_material_budget(&budget, previous_budget, cell_area, years);
+        }
         info!(
             "    sea floor production (km²/yr): kinematic {:.2}, created {:.2}",
             (statistics.opened_area - previous_opened) / years,
@@ -340,6 +349,7 @@ fn snapshot(
         statistics.ledger.clone(),
         new_crust_cells,
         statistics.opened_area,
+        budget,
     ));
     let segments = &statistics.segment_events;
     info!(
@@ -380,12 +390,13 @@ fn snapshot(
         statistics.matching.mismatches,
     );
     info!(
-        "    gaps filled: {} new sea floor, {} revealed, {} enclosed fills, {} shared, {} holes, \
-         {} freed",
+        "    gaps filled: {} new sea floor, {} revealed, {} filled holes, {} shared ({} inside \
+         plates), {} holes, {} freed",
         statistics.gaps.new_crust_cells,
         statistics.gaps.revealed_cells,
         statistics.gaps.enclosed_fills,
         statistics.gaps.shared_cells,
+        statistics.gaps.interior_shared_cells,
         statistics.gaps.hole_cells,
         statistics.gaps.freed_cells,
     );
@@ -456,4 +467,39 @@ fn snapshot(
         debug!(path = %path.display(), "Wrote snapshot");
     }
     Ok(())
+}
+
+/// Logs the rates of change of felsic crust and sediment per step phase since the last snapshot.
+fn log_material_budget(
+    budget: &MaterialBudget,
+    previous_budget: &MaterialBudget,
+    cell_area: f64,
+    years: f64,
+) {
+    let rate = |now: (f64, f64), before: (f64, f64)| {
+        (
+            (now.0 - before.0) * cell_area / 1e12 / years,
+            (now.1 - before.1) * cell_area / 1e12 / years,
+        )
+    };
+    let phases = [
+        ("substeps", rate(budget.substeps, previous_budget.substeps)),
+        ("flow", rate(budget.flow, previous_budget.flow)),
+        ("events", rate(budget.events, previous_budget.events)),
+        ("surface", rate(budget.surface, previous_budget.surface)),
+    ];
+    let total = phases
+        .iter()
+        .fold((0.0, 0.0), |sum, (_, (f, s))| (sum.0 + f, sum.1 + s));
+    let parts: Vec<String> = phases
+        .iter()
+        .map(|(name, (f, s))| format!("{name} {f:+.1}/{s:+.1}"))
+        .collect();
+    info!(
+        "    felsic crust/sediment (Gt/yr): {} | net {:+.1}/{:+.1}, together {:+.1}",
+        parts.join(", "),
+        total.0,
+        total.1,
+        total.0 + total.1,
+    );
 }

@@ -201,8 +201,15 @@ balance → collapse/stretching if needed** → 1q relative-speed tuning (later,
        mean land 1.33–1.90 → 0.70–0.91 km [0.84]; continental area (cells) 31–37% → 27–29%;
        production 126–143 Gt/yr, ages, plates unchanged. **Continental mass falls 47–49% in
        500 Myr** (1.80 → 0.93–1.01e10 Gt; continental area at 500 Myr 22–24% of cells, 19–21% by
-       samples) — issue 3, next. Duplicated cells saturate at 17–20% (baseline ~8%), so ~15% of
-       the continental area at 500 Myr is shared (phantom) area.
+       samples) — issue 3, next. **Correction (independent evaluation):** the parent commit
+       already had 16–17% of cells showing a duplicated sample (nearest-vertex resampling,
+       balanced by ~3000 hidden samples); the real increase was ~2.5 points (gap shares). Net,
+       the cell count overstated continental area by ~8% (seed 0: 20.6% instead of 22.5%).
+       Thickness and land-elevation statistics agree over cells and samples to ~1%. Holes of
+       2–10 empty vertices inside plates were never filled (450–780 interior cells shared,
+       some for tens of Myr) — fixed: gaps away from other plates fill from their rim when ≥ 3
+       plate-frame neighbours have crust (interior shares 450–780 → 113–155, total shares
+       ~1.0–1.2M → 0.34–0.42M per run).
    **1q: boundary shear coupling done (2026-11-16, plan + review `plans/boundary-friction.md`):**
    strike-slip along plate boundaries resisted in the torque balance (smoothed 3-ring normals,
    per boundary cell, symmetric); oceanic/mixed boundaries `boundary_coupling_width` 200 km

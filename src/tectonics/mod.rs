@@ -68,7 +68,7 @@ use glam::{DQuat, DVec3};
 use rand::rngs::ChaCha8Rng;
 use rand::{RngExt, SeedableRng};
 
-use crate::isostasy::{CONTINENTAL_DENSITY, SEDIMENT_ROCK_DENSITY};
+use crate::isostasy::{CONTINENTAL_DENSITY, OCEANIC_DENSITY, SEDIMENT_ROCK_DENSITY};
 use crate::sphere::SphereMesh;
 
 /// Physical parameters of the simulation. Times are in Myr, elevations in metres.
@@ -161,6 +161,9 @@ pub struct TectonicParams {
     /// Transform faults are weak (≈ 20 MPa over ≈ 15 km brittle depth at 5 cm/yr: ≈ 200 km;
     /// Forsyth & Uyeda 1975 found transform resistance small).
     pub boundary_coupling_width: f64,
+    /// Whether to measure the material budget per step phase (see [`MaterialBudget`]); costs
+    /// several passes over all crust samples per step.
+    pub track_material_budget: bool,
     /// Volume of the ocean water in m³ (Earth: 1.335e18), which sets the sea level.
     pub ocean_volume: f64,
     /// Mantle flow below the plates.
@@ -216,6 +219,7 @@ impl Default for TectonicParams {
             continental_drag_factor: 4.0,
             collision_resistance: 50.0,
             boundary_coupling_width: 200e3,
+            track_material_budget: false,
             ocean_volume: 1.335e18,
             mantle: MantleParams::default(),
             matching: MatchingParams::default(),
@@ -307,6 +311,20 @@ fn triangular_ages(distance: &[u32], jitter: &[f64], is_continental: &[bool]) ->
     ages
 }
 
+/// Changes of the felsic crust and sediment masses per phase of the step (areal masses summed
+/// over cells, kg/m²·cells): `(felsic, sediment)` each.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MaterialBudget {
+    /// Substeps: subduction, collision stacking, arcs, accretion, subduction erosion, gaps.
+    pub substeps: (f64, f64),
+    /// Crustal flow and removal of dead plates.
+    pub flow: (f64, f64),
+    /// Plate events: sutures, captures, rifts, initiations, breakups.
+    pub events: (f64, f64),
+    /// Surface processes (erosion, deposition).
+    pub surface: (f64, f64),
+}
+
 /// Ratio of the length of a straight boundary measured as boundary cells × mean edge length to
 /// its true length: boundaries on the mesh zig-zag (see the test in [`statistics`]).
 const BOUNDARY_ZIGZAG: f64 = 1.1;
@@ -356,6 +374,9 @@ pub struct Simulation {
     configuration_changes: u64,
     /// Area of sea floor opened by diverging plates so far (one flank), in km².
     opened_area: f64,
+    /// Changes of the felsic crust and sediment masses so far (areal mass summed over cells, see
+    /// [`Simulation::felsic_and_sediment`]) per phase of the step.
+    material_budget: MaterialBudget,
     /// Sea level as an offset of dry elevations (m) relative to the datum of the isostasy, set
     /// so that the ocean holds [`TectonicParams::ocean_volume`].
     sea_level: f64,
@@ -523,6 +544,7 @@ impl Simulation {
             rng: owned_rng,
             configuration_changes: 0,
             opened_area: 0.0,
+            material_budget: MaterialBudget::default(),
             sea_level: 0.0,
             sea_level_change: (0.0, 0.0),
             time: 0.0,
@@ -541,6 +563,32 @@ impl Simulation {
     /// zig-zag of boundaries on the mesh.
     pub(super) fn boundary_length_per_cell(&self) -> f64 {
         self.params.planet_radius * self.mesh.mean_edge_angle() / BOUNDARY_ZIGZAG
+    }
+
+    /// Areal masses (kg/m², summed over all samples including hidden ones) of the felsic part of
+    /// the crystalline crust and of sediment. Crust density mixes felsic (≤ 2800 kg/m³) and
+    /// mafic (2900 kg/m³) material by volume, so the felsic volume fraction is
+    /// `(2900 − ρ) / 100`, clamped to [0, 1].
+    pub(super) fn felsic_and_sediment(&self) -> (f64, f64) {
+        let (mut felsic, mut sediment) = (0.0, 0.0);
+        if !self.params.track_material_budget {
+            return (felsic, sediment);
+        }
+        for plate in &self.plates {
+            for crust in plate.crust.iter().flatten() {
+                let fraction = ((OCEANIC_DENSITY - crust.density) / 100.0).clamp(0.0, 1.0);
+                felsic += crust.thickness * crust.density * fraction;
+                sediment += crust.sediment * SEDIMENT_ROCK_DENSITY;
+            }
+        }
+        (felsic, sediment)
+    }
+
+    /// The material budget so far, if it is tracked.
+    pub fn material_budget(&self) -> Option<MaterialBudget> {
+        self.params
+            .track_material_budget
+            .then_some(self.material_budget)
     }
 
     /// Current rotations of all plates.
@@ -607,14 +655,17 @@ impl Simulation {
         let max_substep_angle = self.params.max_substep_movement * self.mesh.mean_edge_angle();
         let substeps = (max_angle / max_substep_angle).ceil().max(1.0) as usize;
         tracing::trace!(substeps, "Tectonic step");
+        let start = self.felsic_and_sediment();
         for _ in 0..substeps {
             self.substep(dt / substeps as f64);
         }
+        let after_substeps = self.felsic_and_sediment();
         let rotations = self.rotations();
         self.polarities
             .end_step(self.time, self.params.polarity_memory, &rotations);
         self.crustal_flow(dt);
         self.remove_dead_plates();
+        let after_flow = self.felsic_and_sediment();
         let boundaries = self.boundary_cells();
         let slabs_changed = self.update_slab_lengths(dt, &boundaries);
         // Trenches whose slab broke off are no trenches any more.
@@ -625,6 +676,16 @@ impl Simulation {
         };
         let topology = self.configuration_changes;
         self.plate_events(dt, &boundaries);
+        let after_events = self.felsic_and_sediment();
+        let budget = &mut self.material_budget;
+        for (phase, (before, after)) in [
+            (&mut budget.substeps, (start, after_substeps)),
+            (&mut budget.flow, (after_substeps, after_flow)),
+            (&mut budget.events, (after_flow, after_events)),
+        ] {
+            phase.0 += after.0 - before.0;
+            phase.1 += after.1 - before.1;
+        }
         // The boundaries only change if plates were split, merged or removed, or subduction was
         // induced.
         let boundaries = if self.configuration_changes == topology {
@@ -732,6 +793,7 @@ impl Simulation {
     /// works per cell, and about as many samples are hidden by resampling as are shown twice.
     /// Sediment removal beyond the available sediment comes from the bedrock at the same mass.
     pub fn apply_surface_changes(&mut self, thickness_delta: &[f64], sediment_delta: &[f64]) {
+        let before = self.felsic_and_sediment();
         let mut changes: Vec<(Ownership, f64, f64)> = Vec::new();
         let cell_count = self.mesh.len();
         // Per crust sample: its position in `changes`, or `u32::MAX`.
@@ -763,6 +825,9 @@ impl Simulation {
             change += crust.mass() - before;
         }
         self.ledger.record(ledger::Term::SurfaceProcesses, change);
+        let after = self.felsic_and_sediment();
+        self.material_budget.surface.0 += after.0 - before.0;
+        self.material_budget.surface.1 += after.1 - before.1;
 
         // Sediment displaces water and eroded land no longer holds it back.
         let sea_level = self.solve_sea_level();

@@ -61,3 +61,39 @@ budget (permanent diagnostic: felsic and sediment budget per process in the log)
 - Runs (seeds 0–3, 500 Myr): felsic and continental mass trend (target: within ±10% per
   500 Myr), continental area (cells and samples), the budget table above vs Earth, sea level,
   mean land, production, plates; runtime.
+
+## Plan review (independent agent, 2026-11-17): sound with changes — adopted
+
+1. Budget: erosion is a transfer; conserve **felsic crust + sediment**. Net ≈ −12 Gt/yr; the
+   largest real sink is net sediment subduction (5.6 average, 9.4 at the end; Earth 2.6–4.5),
+   then merges (~5), felsic subduction (~3), subduction erosion (~1.8), deleted sediment (2–4,
+   ledger "surface processes" −4.1 at the end). The density cutoff (< 2850) is biased (arc crust
+   on oceanic samples invisible until the whole sample crosses it): use a linear unmixing,
+   felsic volume fraction ≈ clamp((2900 − ρ)/100, 0, 1). Report interval rates too.
+2. Merges lose visible crust as well (two absorbed samples mapping to one target vertex
+   overwrite or stack: 0.5–3% of visible mass per merge, +28–36 samples > 60 km per merge —
+   part of issue 1r), the stacking path turns sediment into crust (+37% mass) and overwrites
+   the receiving plate's hidden samples. Rule: map every absorbed sample (visible or hidden)
+   by world position; nearest free vertex within 1–2 rings; else spread its mass over the
+   target and its neighbours; never stack same-plate samples; clear `consumed`. Test after
+   motion: mass conserved incl. hidden, max thickness not increased, visible cells unchanged.
+3. Accretion by one buoyancy predicate `resists_subduction()` (dry crustal buoyancy ≥ X <
+   `CONTINENTAL_BUOYANCY`; Cloos 1993) applied at the stacking test (also under an oceanic
+   winner), in the polarity arrival/flip logic and in the `Collision` boundary kind (else slab
+   pull drives arcs into the trench). Main case: arcs on the old upper plate when a continent
+   arrives. Consider partial accretion (upper ~60%). First measure where thin felsic crust
+   comes from (arcs on ocean, thinned margins, subduction erosion floor at 7 km).
+4. Sediment: losses are probably in small isolated basins (every cell below sea level is
+   "ocean"); diagnose first; simplest fix: deposit the rest above `delta_top` (becomes land,
+   next step's flood moves it). No budget gain expected (deep-sea sediment subducts).
+5. Sediment at trenches is the main lever, not optional: accrete trench fill above a
+   subduction-channel thickness (~0.5–1 km; Clift & Vannucchi 2004, von Huene & Scholl 1991)
+   instead of a flat 20%. Do not restrict shelves to continental crust.
+6. Earth values in km³/yr: arcs 2.5–3 (7–8 Gt), subduction erosion 1.3–1.4 (3.5–4 Gt),
+   sediment subduction 1.0–1.65 (2.6–4.5 Gt), felsic crust lost in collisions ~0.4 (~1 Gt),
+   erosion to the oceans ~14 Gt/yr pre-human (Syvitski et al. 2005).
+7. Success metric: felsic + sediment within ±10% per 500 Myr; per-flux targets above; tests:
+   merge after motion, arc–continent collision accretes the arc, buoyant sample under an
+   oceanic winner is stacked, sediment into an isolated basin is not lost.
+Order: diagnostic → 1 (merges) → measure → 2 (accretion predicate) → 3 (sediment, after
+diagnosis) → 4 (trench accretion).
