@@ -252,10 +252,30 @@ impl Simulation {
             loser_plate.consumed[contact.loser.local as usize] = true;
             let (winner, loser_crust) = (contact.winner, contact.loser_crust);
             let sediment_mass = loser_crust.sediment * SEDIMENT_ROCK_DENSITY;
-            if loser_crust.resists_subduction() {
+            // Where the segment's overriding plate lost the cell because buoyant crust of the
+            // lower plate arrived and stays on top (see `Polarities::contact`), the upper
+            // plate's arc crust is not subducted below it: it is accreted onto the arriving
+            // crust (arc–continent collision: Taiwan, Banda, Kohistan) until the segment flips.
+            // Normal oceanic crust of the upper plate still subducts (obduction of ophiolites is
+            // minor).
+            let overridden_upper_plate = !loser_crust.resists_subduction()
+                && !loser_crust.is_oceanic()
+                && polarities
+                    .segment_at(
+                        winner.plate,
+                        contact.loser.plate,
+                        mesh.vertex(contact.cell),
+                        &rotations,
+                    )
+                    .is_some_and(|segment| segment.overriding == contact.loser.plate);
+            if overridden_upper_plate {
+                trench_sediment.upper_plate_accreted += loser_crust.mass();
+            }
+            if loser_crust.resists_subduction() || overridden_upper_plate {
                 // Collision or terrane accretion: buoyant crust of the lower plate (continents,
                 // thick arcs, plateaus) is stacked onto the overriding plate instead of
-                // subducting; its sediment becomes metasediment at the same mass.
+                // subducting, and so is the upper plate's crust overridden by it; sediment
+                // becomes metasediment at the same mass.
                 *collisions
                     .entry(pair_key(winner.plate, contact.loser.plate))
                     .or_default() += 1;
@@ -264,6 +284,7 @@ impl Simulation {
                 additions.push(CrustAddition {
                     cell: contact.cell,
                     plate: winner.plate,
+                    partner: contact.loser.plate,
                     thickness,
                     density: loser_crust.mass() / thickness.max(1e-9),
                     // Sediment is eroded continental (felsic) material.
@@ -287,6 +308,7 @@ impl Simulation {
                 additions.push(CrustAddition {
                     cell: contact.cell,
                     plate: winner.plate,
+                    partner: contact.loser.plate,
                     thickness: params.arc_crust_per_subduction,
                     density: ARC_DENSITY,
                     felsic: if upper_is_oceanic {
@@ -328,6 +350,7 @@ impl Simulation {
                     additions.push(CrustAddition {
                         cell: contact.cell,
                         plate: winner.plate,
+                        partner: contact.loser.plate,
                         thickness: accreted_mass / METASEDIMENT_DENSITY,
                         density: METASEDIMENT_DENSITY,
                         felsic: 1.0,
@@ -565,8 +588,32 @@ impl Simulation {
         self.ledger.record(Term::AdditionsLost, actual - nominal);
     }
 
+    /// Whether `cell` borders the partner plate of `addition` along a segment where the
+    /// partner overrides.
+    fn borders_reversed_segment(
+        &self,
+        cell: u32,
+        addition: &CrustAddition,
+        rotations: &[DQuat],
+    ) -> bool {
+        self.mesh
+            .neighbors(cell)
+            .iter()
+            .any(|&neighbor| self.owners[neighbor as usize].plate == addition.partner)
+            && self
+                .polarities
+                .segment_at(
+                    addition.plate,
+                    addition.partner,
+                    self.mesh.vertex(cell),
+                    rotations,
+                )
+                .is_some_and(|segment| segment.overriding == addition.partner)
+    }
+
     /// Returns the change of mass.
     fn apply_additions_inner(&mut self, additions: &[CrustAddition]) -> f64 {
+        let rotations = self.rotations();
         let mut change = 0.0;
         let mut visited_in_event = vec![usize::MAX; self.mesh.len()];
         let mut frontier = Vec::new();
@@ -578,7 +625,8 @@ impl Simulation {
         for (event_index, addition) in additions.iter().enumerate() {
             let profile = match addition.kind {
                 AdditionKind::Collision => &self.params.collision_profile,
-                AdditionKind::Arc | AdditionKind::Accretion => &self.params.arc_profile,
+                AdditionKind::Arc => &self.params.arc_profile,
+                AdditionKind::Accretion => &self.params.accretion_profile,
             };
             frontier.clear();
             frontier.push(addition.cell);
@@ -593,6 +641,15 @@ impl Simulation {
                     if owner.plate != addition.plate {
                         continue;
                     }
+                    // Arc magmas rise only behind the trench of their own slab, not across a
+                    // neighbouring segment of the pair where the partner plate overrides.
+                    let weight = if addition.kind == AdditionKind::Arc
+                        && self.borders_reversed_segment(cell, addition, &rotations)
+                    {
+                        0.0
+                    } else {
+                        weight
+                    };
                     reached.push((owner, weight));
                     for &neighbor in self.mesh.neighbors(cell) {
                         if visited_in_event[neighbor as usize] != event_index {
@@ -665,6 +722,10 @@ pub struct TrenchSediment {
     pub accreted: f64,
     /// Part arriving at accretionary margins.
     pub at_accretionary_margins: f64,
+    /// Crust and sediment of upper plates overridden by buoyant arriving crust and accreted to
+    /// it instead of subducting (not sediment arriving at a trench; kept here as a trench
+    /// statistic).
+    pub upper_plate_accreted: f64,
 }
 
 impl TrenchSediment {
@@ -985,6 +1046,8 @@ fn heal_gap(
 pub(super) struct CrustAddition {
     cell: u32,
     plate: u32,
+    /// The other plate of the boundary (the subducting plate for arcs).
+    partner: u32,
     /// Total volume as a thickness over one cell.
     thickness: f64,
     density: f64,
@@ -1168,23 +1231,24 @@ mod tests {
     }
 
     /// Plate 0 (south), a stretched continental margin with a thick sediment wedge, moves north
-    /// into plate 1 (oceanic or continental), below which it would subduct.
-    fn wedged_margin_arriving_at_a_trench(continental_upper_plate: bool) -> MassLedger {
+    /// into plate 1, below which it would subduct; plate 1's crust is `upper` (oceanic if
+    /// `None`).
+    fn wedged_margin_arriving_at_a_trench(upper: Option<Crust>) -> MassLedger {
         let mut simulation = single_plate();
         simulation.split_plate(0, DVec3::Z).unwrap();
         simulation.polarities.clear();
-        for (plate, thickness, sediment) in [(0, 11_000.0, 8000.0), (1, 35_000.0, 0.0)] {
-            if plate == 1 && !continental_upper_plate {
-                continue;
-            }
-            for crust in simulation.plates[plate].crust.iter_mut().flatten() {
-                *crust = Crust {
-                    thickness,
-                    density: crate::isostasy::CONTINENTAL_DENSITY,
-                    birth: -1000.0,
-                    sediment,
-                    felsic: 1.0,
-                };
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            *crust = Crust {
+                thickness: 11_000.0,
+                density: crate::isostasy::CONTINENTAL_DENSITY,
+                birth: -1000.0,
+                sediment: 8000.0,
+                felsic: 1.0,
+            };
+        }
+        if let Some(upper) = upper {
+            for crust in simulation.plates[1].crust.iter_mut().flatten() {
+                *crust = upper;
             }
         }
         simulation.seed_subduction((0, 1), 1, 600e3);
@@ -1199,15 +1263,80 @@ mod tests {
     #[test]
     fn wedged_continental_margins_jam_the_trench() {
         // Against an ocean, the margin stays on top and the ocean subducts below it.
-        let ledger = wedged_margin_arriving_at_a_trench(false);
+        let ledger = wedged_margin_arriving_at_a_trench(None);
         assert_eq!(ledger.subducted_transitional, 0.0, "{ledger:?}");
         assert_eq!(ledger.subducted_sediment, 0.0, "{ledger:?}");
         assert!(ledger.subducted_oceanic < 0.0, "{ledger:?}");
-        // Against a continent, it is stacked onto it with its sediment.
-        let ledger = wedged_margin_arriving_at_a_trench(true);
+        assert_eq!(ledger.collision_stacked, 0.0, "{ledger:?}");
+        // Against an intra-oceanic arc too thin to resist subduction on its own, the arc rides
+        // over the margin and is accreted onto it instead of subducting below it.
+        let arc = Crust {
+            thickness: 13_000.0,
+            density: crate::isostasy::ARC_DENSITY,
+            birth: -50.0,
+            sediment: 0.0,
+            felsic: 0.4,
+        };
+        assert!(!arc.is_oceanic() && !arc.resists_subduction());
+        // Most of it: after the segment flips (sustained arrival), the arc plate subducts.
+        let ledger = wedged_margin_arriving_at_a_trench(Some(arc));
+        assert!(
+            ledger.collision_stacked > -4.0 * ledger.subducted_transitional,
+            "{ledger:?}"
+        );
+        // Against a continent, the margin is stacked onto it with its sediment.
+        let continent = Crust {
+            thickness: 35_000.0,
+            density: crate::isostasy::CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+        };
+        let ledger = wedged_margin_arriving_at_a_trench(Some(continent));
         assert_eq!(ledger.subducted_transitional, 0.0, "{ledger:?}");
         assert_eq!(ledger.subducted_sediment, 0.0, "{ledger:?}");
         assert!(ledger.collision_stacked > 0.0, "{ledger:?}");
+    }
+
+    #[test]
+    fn arc_crust_grows_behind_the_trench() {
+        let mut simulation = single_plate();
+        simulation.split_plate(0, DVec3::Z).unwrap();
+        simulation.polarities.clear();
+        simulation.seed_subduction((0, 1), 1, 600e3);
+        // A cell of the upper plate (1) at the boundary.
+        let cell = (0..simulation.mesh.len() as u32)
+            .find(|&cell| {
+                simulation.owners[cell as usize].plate == 1
+                    && simulation
+                        .mesh
+                        .neighbors(cell)
+                        .iter()
+                        .any(|&n| simulation.owners[n as usize].plate == 0)
+            })
+            .unwrap();
+        let thickness = |s: &Simulation, cell: u32| s.surface_crust(cell).thickness;
+        let before: Vec<f64> = (0..simulation.mesh.len() as u32)
+            .map(|c| thickness(&simulation, c))
+            .collect();
+        simulation.apply_additions(&[CrustAddition {
+            cell,
+            plate: 1,
+            partner: 0,
+            thickness: 500.0,
+            density: crate::isostasy::ARC_DENSITY,
+            felsic: 0.4,
+            kind: AdditionKind::Arc,
+        }]);
+        // Nothing on the trench cell (amagmatic forearc), most one ring behind it.
+        assert_eq!(thickness(&simulation, cell), before[cell as usize]);
+        let behind = simulation
+            .mesh
+            .neighbors(cell)
+            .iter()
+            .filter(|&&n| simulation.owners[n as usize].plate == 1)
+            .any(|&n| thickness(&simulation, n) > before[n as usize]);
+        assert!(behind);
     }
 
     #[test]

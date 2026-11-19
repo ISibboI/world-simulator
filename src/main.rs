@@ -398,7 +398,7 @@ fn snapshot(
         info!(
             "    trench sediment {:.1} Gt/yr, {:.0}% accreted, {:.0}% on continental margins, {:.0}% \
              at accretionary margins ({:.0}% of the trench length) | by column (≤ 1, 1–3, 3–5, \
-             5–8, > 8 km): {}",
+             5–8, > 8 km): {} | upper plates accreted to buoyant arrivals {:.2} Gt/yr",
             arrived / years,
             100.0 * (trench.accreted - previous_trench.accreted) / arrived.max(1e-9),
             100.0 * (trench.on_continental_margins - previous_trench.on_continental_margins)
@@ -407,6 +407,7 @@ fn snapshot(
                 / arrived.max(1e-9),
             100.0 * statistics.accretionary_trench_length / statistics.trench_length.max(1e-9),
             shares.join(" "),
+            (trench.upper_plate_accreted - previous_trench.upper_plate_accreted) / years,
         );
     }
     *previous_ledger = Some(PreviousSnapshot {

@@ -617,6 +617,7 @@ impl Simulation {
                 t.on_continental_margins *= to_gt;
                 t.accreted *= to_gt;
                 t.at_accretionary_margins *= to_gt;
+                t.upper_plate_accreted *= to_gt;
                 t
             },
             continental_thickness,

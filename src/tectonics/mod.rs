@@ -125,8 +125,12 @@ pub struct TectonicParams {
     /// metamorphoses into felsic crust (greenschist facies, ~250–300 °C at 10–12 km under
     /// sediment-blanketed margins).
     pub metamorphic_depth: f64,
-    /// Relative amounts of new arc crust at distances of 0, 1, 2, … cells from the trench.
+    /// Relative amounts of new arc crust at distances of 0, 1, 2, … cells from the trench:
+    /// none in the amagmatic forearc, most at the volcanic front ~100–150 km behind the trench.
     pub arc_profile: Vec<f64>,
+    /// Relative amounts of accreted sediment (accretionary wedge) at distances of 0, 1, …
+    /// cells from the trench.
+    pub accretion_profile: Vec<f64>,
     /// Relative amounts of stacked crust at distances of 0, 1, 2, … cells from a continental
     /// collision.
     pub collision_profile: Vec<f64>,
@@ -242,7 +246,8 @@ impl Default for TectonicParams {
             subduction_erosion: 300.0,
             oceanic_arc_felsic: 0.4,
             metamorphic_depth: 11_000.0,
-            arc_profile: vec![0.25, 1.0, 1.0, 0.25],
+            arc_profile: vec![0.0, 1.0, 0.5],
+            accretion_profile: vec![1.0, 0.5],
             collision_profile: vec![1.0, 0.75, 0.5, 0.25],
             max_crust_thickness: 75_000.0,
             crustal_flow_threshold: 40_000.0,

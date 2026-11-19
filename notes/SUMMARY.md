@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-17 (terrane accretion, pore water, sediment routing, compaction, metamorphism)_
+_Last updated: 2026-11-19 (intra-oceanic arcs: arc accretion at buoyant arrivals, concentrated arc profile)_
 
 ## Goal
 
@@ -153,8 +153,11 @@ components (climate, erosion, …) are expected to build on it.
   trench segment (fill > 1 km and convergence < 6–7.6 cm/yr: décollement at 0.45 of the column,
   no forearc erosion; `plans/accretionary-margins.md`): accreted share 21–32%, felsic + sediment
   4-seed mean −1.56 Gt/yr after 150 Myr (Earth 0 to −2), sediment part of the sea level
-  decelerating (+25 m per 100 Myr at 400–500 Myr). Intra-oceanic arc crust is 0.4 felsic. Next
-  lever: maturing intra-oceanic arcs into continents. 2–6% ancient (≥ 200 Myr) ocean
+  decelerating (+25 m per 100 Myr at 400–500 Myr). Intra-oceanic arc crust is 0.4 felsic. Arcs
+  (`plans/intra-oceanic-arcs.md`): arc crust concentrated 1–2 rings behind the trench (none on
+  the trench cell, not across reversed segments); upper-plate arc crust overridden by arriving
+  buoyant crust is accreted onto it: felsic + sediment 4-seed mean −0.97 Gt/yr (target met),
+  collision length 12–17k km; the sediment part of the sea level still rises ~60 m/100 Myr. 2–6% ancient (≥ 200 Myr) ocean
   remains (issue 10).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
@@ -183,15 +186,13 @@ components (climate, erosion, …) are expected to build on it.
   packages needed). The repository is public, so CI status can be read via the GitHub REST API
   without the gh CLI.
 
-## Current plan (end of 2026-11-17; resume here)
+## Current plan (updated 2026-11-19; resume here)
 
-1. **Maturing intra-oceanic arcs** (next lever for the continental balance, from the review in
-   `plans/accretionary-margins.md`): first measure — thickness of arc crust on oceanic upper
-   plates vs Earth's 20–35 km, and where its mass goes (own forearc erosion, subduction of the
-   arc itself, terrane accretion/collision into continents). Then write a plan, have it
-   reviewed, implement, run seeds 0–3 × 500 Myr. Target: felsic + sediment 4-seed mean 0 to
-   −1.5 Gt/yr after 150 Myr; keep the sediment part of the sea level decelerating (≲ 20 m per
-   100 Myr after 300 Myr, 4-seed mean).
+1. ~~Maturing intra-oceanic arcs~~ done 2026-11-19 (continental balance target met). Open from
+   it: arcs are still thin (re-measure the thickness distribution; arc growth less dependent on
+   convergence, within Earth's 30–95 km³/km/Myr); the sediment part of the sea level is not
+   decelerating (+58 m per 100 Myr at 400–500 Myr, 4-seed mean) — more seeds or longer runs to
+   separate trend from seed noise before acting.
 2. Separately: seed 1's loss at the collision stacking cap (0.4 Gt/yr); the mafic-erosion
    tracer artefact in the felsic budget (+0.3 Gt/yr; erosion of mafic crust becomes sediment).
 3. Then back to issue 1r/7: margin stretching covers < half of the continental opening (COB
