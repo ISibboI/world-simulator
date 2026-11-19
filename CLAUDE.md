@@ -35,3 +35,11 @@ short; move detail into the session logs.
 - Run CI checks locally with `CARGO_BUILD_WARNINGS=deny` set.
 - Run the simulation: `cargo run --release -- --help`; snapshots go to `output/` (ignored by
   git).
+- **Experiments (simulation runs, seed sweeps, diagnostic builds) run on the server `tktie`**
+  (`ssh tktie`, 8 cores, NixOS), not on this machine, so that this machine stays free for
+  gaming. Leave 2 cores free on the server (at most 6 runs at once). Keep the server's files in
+  `~/agent-scratch/world-simulator/` there. Builds, tests and short checks stay local. Build the
+  release binary locally, copy it with `scp`, and start it through the wrapper
+  `~/agent-scratch/world-simulator/run.sh BINARY ARGS…` (NixOS cannot run generic Linux binaries
+  directly; the wrapper calls the Nix glibc loader). The login shell there is fish: wrap
+  commands in `bash -c '…'`.

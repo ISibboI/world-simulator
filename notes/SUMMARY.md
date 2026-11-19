@@ -219,5 +219,5 @@ components (climate, erosion, …) are expected to build on it.
   major version tag.
 - Before each issue, have an independent agent review the plan; get independent evaluations
   of results; agents' temporary files go to `agent-scratch/` (never `/tmp`).
-- More than four simulation runs at once only if no video game is running on the machine.
+- Simulation experiments run on the server `tktie` (2 cores left free); this machine is for gaming.
 - Calibrate only as far as needed to confirm soundness; prefer fixing physics over tuning.
