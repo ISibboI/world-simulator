@@ -143,6 +143,12 @@ pub struct Statistics {
     /// next to continental crust of any plate.
     pub ancient_ocean_fraction: f64,
     pub ancient_ocean_at_continents: f64,
+    /// The same for the sea floor only (oceanic crust below sea level, like Earth's ocean-age
+    /// grids): its mean age (Myr) and the fraction at least 200 Myr old; and oceanic crust at
+    /// least 200 Myr old above sea level (filled basins), as a fraction of the surface.
+    pub sea_floor_mean_age: f64,
+    pub ancient_sea_floor_fraction: f64,
+    pub ancient_filled_fraction: f64,
     /// Total magnitude of slab pull and ridge push in N.
     pub slab_pull: f64,
     pub ridge_push: f64,
@@ -307,6 +313,10 @@ impl Simulation {
         let (mut freeboard_sum, mut flooded_continental, mut water_depth_sum) = (0.0, 0usize, 0.0);
         let mut origin_cells = 0usize;
         let mut plate_speed_sums = vec![0.0; self.plates.len()];
+        // Oceanic crust below sea level: cells, summed age, cells at least 200 Myr old; and
+        // oceanic crust at least 200 Myr old above sea level (filled basins).
+        let mut sea_floor = (0usize, 0.0, 0usize);
+        let mut ancient_land = 0usize;
 
         for cell in 0..cell_count as u32 {
             let plate = self.owner(cell).plate as usize;
@@ -330,6 +340,18 @@ impl Simulation {
                 oceanic_speed += speed;
             }
             let elevation = crust.surface_elevation(self.time, self.sea_level);
+            if crust.is_oceanic() {
+                let age = crust.age(self.time);
+                if elevation < 0.0 {
+                    sea_floor.0 += 1;
+                    sea_floor.1 += age;
+                    if age >= 200.0 {
+                        sea_floor.2 += 1;
+                    }
+                } else if age >= 200.0 {
+                    ancient_land += 1;
+                }
+            }
             if crust.is_continental_origin() {
                 origin_cells += 1;
                 freeboard_sum += elevation;
@@ -638,6 +660,9 @@ impl Simulation {
             initiation_rate,
             induced_rate,
             ancient_ocean_fraction: ancient as f64 / oceanic.max(1) as f64,
+            sea_floor_mean_age: sea_floor.1 / sea_floor.0.max(1) as f64,
+            ancient_sea_floor_fraction: sea_floor.2 as f64 / sea_floor.0.max(1) as f64,
+            ancient_filled_fraction: ancient_land as f64 / cell_count as f64,
             ancient_ocean_at_continents: ancient_at_continents as f64 / ancient.max(1) as f64,
             slab_pull,
             ridge_push,

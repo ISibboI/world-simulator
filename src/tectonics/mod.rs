@@ -47,6 +47,7 @@ mod matching;
 mod polarity;
 mod statistics;
 mod topology;
+mod weak_zones;
 
 pub use boundaries::{GapStatistics, TrenchSediment};
 pub use crust::*;
@@ -355,6 +356,9 @@ impl TectonicParams {
             "erosive_convergence" => &mut self.erosive_convergence,
             "trench_fill_time" => &mut self.trench_fill_time,
             "events.initiation_age" => &mut self.events.initiation_age,
+            "events.min_subducting_area" => &mut self.events.min_subducting_area,
+            "events.fracture_zone_initiation" => &mut self.events.fracture_zone_initiation,
+            "events.weak_zone_splits" => &mut self.events.weak_zone_splits,
             "events.invasion_waiting_time" => &mut self.events.invasion_waiting_time,
             "events.invasion_reach" => &mut self.events.invasion_reach,
             "events.initiation_full_age" => &mut self.events.initiation_full_age,
@@ -397,6 +401,9 @@ pub struct Plate {
     tracked: Option<matching::TrackedCrust>,
     /// The rotation at the last matching.
     matched_rotation: DQuat,
+    /// When a subduction initiation inside a plate split this plate from its partner (both
+    /// parts carry it), for tracking initiations that are undone by merging the parts again.
+    initiated_at: Option<f64>,
 }
 
 /// Initial ocean ages with Earth's roughly triangular age–area distribution: the oceanic cells
@@ -585,6 +592,7 @@ impl Simulation {
                 consumed: vec![false; cell_count],
                 tracked: None,
                 matched_rotation: DQuat::IDENTITY,
+                initiated_at: None,
             })
             .collect();
 

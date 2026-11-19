@@ -221,6 +221,7 @@ impl Simulation {
             consumed: self.plates[plate as usize].consumed.clone(),
             tracked: None,
             matched_rotation: self.plates[plate as usize].matched_rotation,
+            initiated_at: None,
         };
         // The tracked crust of the remaining part is no longer accurate.
         self.plates[plate as usize].tracked = None;
