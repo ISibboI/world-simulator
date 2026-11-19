@@ -1,6 +1,6 @@
 # Project summary
 
-_Last updated: 2026-11-19 (intra-oceanic arcs: arc accretion at buoyant arrivals, concentrated arc profile)_
+_Last updated: 2026-11-19 (issue list moved to GitHub issues)_
 
 ## Goal
 
@@ -123,8 +123,9 @@ components (climate, erosion, …) are expected to build on it.
   thickness is held near Earth-like only by strong collision resistance (1r).
 - Collision churn is high (≈ the whole initial continental volume passes through collisions in
   300 Myr); partly real collisions driven by random reorganisations, partly boundary noise.
-- **Open physical-accuracy issues are tracked in `notes/ISSUES.md` (with order of work);
-  plans in `notes/plans/`, research in `notes/research/`. Issues 1 (mechanisms + tuning), 5, 3,
+- **Open physical-accuracy issues are tracked as GitHub issues** (moved from `notes/ISSUES.md`
+  on 2026-11-19, which now maps old notes numbers N to GitHub #M; cite as "issue 13 (#14)");
+  plans in `notes/plans/` (also posted on their issues), research in `notes/research/`. Issues 1 (mechanisms + tuning), 5, 3,
   4 done, issue 2 (sea level) done, and the runtime optimisations. Since then: per-segment
   polarity, plate connectivity (1p), boundary shear coupling (1q; modest effect). Gap healing is
   mass-conserving and the continental mass balance (issue 3) closes, but through a sediment
@@ -159,7 +160,7 @@ components (climate, erosion, …) are expected to build on it.
   the trench cell, not across reversed segments); upper-plate arc crust overridden by arriving
   buoyant crust is accreted onto it: felsic + sediment 4-seed mean −0.97 Gt/yr (target met),
   collision length 12–17k km; the sediment part of the sea level still rises ~60 m/100 Myr. 2–6% ancient (≥ 200 Myr) ocean
-  remains (issue 13).
+  remains (issue 13 (#14)).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal
@@ -190,25 +191,25 @@ components (climate, erosion, …) are expected to build on it.
 ## Current plan (end of 2026-11-19; resume here)
 
 State: main at the sediment-process commit (a933ec2) plus notes. Done today: intra-oceanic arcs
-(continental balance target met), issue 13 partly (burial metamorphism on any crust, subduction
-invasion), rifts stretch into consumed slots, issue 14 (noise-shaped initial conditions, merged),
+(continental balance target met), issue 13 (#14) partly (burial metamorphism on any crust, subduction
+invasion), rifts stretch into consumed slots, issue 14 (#15) (noise-shaped initial conditions, merged),
 sediment erodes 2× faster than bedrock and spreads by diffusion. Experiments run on the server
 tktie (see `CLAUDE.md`); the latest reference runs are `agent-scratch/base14/` (processes off) and
 `agent-scratch/sedproc/` (current defaults), 1000 Myr, evaluated with `agent-scratch/eval_sed.py`
 and `agent-scratch/trend/trend.py`.
 
-1. **Why the issue-14 initial conditions make continental sediment grow faster** (new): sediment
+1. **Why the issue-14 (#15) initial conditions make continental sediment grow faster** (new): sediment
    part of the sea level over 500–1000 Myr +17 m per 100 Myr with the old initial conditions, +26
    with the new ones (continental sediment growth +0.72 → +1.05 Gt/yr; current defaults +25 ± 2,
    8 seeds). Check margin length/geometry, fragment count, flooded share, overfill and where the
    continental sediment sits (land vs flooded, crust thickness) for old vs new initial conditions.
 2. **Continental sediment growth** (~+0.9 Gt/yr, mostly on land on thinned crust): overfill is
-   halved by diffusion; remaining options: wave erosion of coasts to wave base (issue 11),
+   halved by diffusion; remaining options: wave erosion of coasts to wave base (issue 11 (#12)),
    accommodation of margins (thinner margins were tested and cost ~2 Gt/yr felsic crust —
    `plans/margin-stretching.md`), sediment → crust in orogens. Target: sediment-part slope ≤ 10 m
    per 100 Myr after 500 Myr (Earth's stock is near steady state by recycling).
-3. **Issue 13 remainder**: ocean ≥ 200 Myr 4.5% (target ≤ 1%; re-measure where it sits now,
-   with the new initial conditions); induced/transform initiation (issue 1l).
+3. **Issue 13 (#14) remainder**: ocean ≥ 200 Myr 4.5% (target ≤ 1%; re-measure where it sits now,
+   with the new initial conditions); induced/transform initiation (issue 1l, #2).
 4. Small leaks: seed 1's loss at the collision stacking cap (0.4 Gt/yr); the mafic-erosion tracer
    artefact in the felsic budget (+0.3 Gt/yr).
 5. Open from earlier: intra-oceanic arcs stay thin (arc growth less dependent on convergence,

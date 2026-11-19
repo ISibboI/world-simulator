@@ -13,8 +13,11 @@ Notes on every chat session live in [notes/](notes/) and are checked into git.
   user asked for, what was done, decisions and their reasons, and open questions. If several
   sessions happen on one day, append a new `## Session N` section.
 
-- `notes/ISSUES.md` is the numbered list of known physical-accuracy issues and their order of
-  work. Keep it up to date when issues are fixed or found.
+- Known physical-accuracy issues are tracked as **GitHub issues**
+  (https://github.com/ISibboI/world-simulator/issues); record new issues and progress there.
+  `notes/ISSUES.md` only maps the old notes numbers (used in older notes, plan file names and
+  session logs) to GitHub numbers; cite issues as "issue 13 (#14)" while the old number is in
+  use, or just "#N" for new issues. The order of work is the "Current plan" in `SUMMARY.md`.
 
 Before ending a session (or after any significant piece of work), update the session log and
 `notes/SUMMARY.md`, and commit the notes together with the work they describe. Keep the summary
