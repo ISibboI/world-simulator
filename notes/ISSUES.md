@@ -418,3 +418,12 @@ balance without ocean currents, Budyko annual-mean ice criterion, 50 m mixed lay
     initiation at old, sediment-loaded passive margins and in plate interiors (age hazard far from
     trenches), splitting geometry (issue 10). The remaining ~0.6 Gt/yr on continental and
     transitional crust needs a sediment → crust path (orogenic metamorphism) independently.
+
+14. **Initial continents and plates are hexagonal** (user, 2026-11-19): `generation.rs` grows
+    continents and plates from seed cells with independent random edge costs (first-passage
+    percolation), whose limit shape is a convex, mesh-symmetric (hexagonal) region; some
+    continents stay hexagonal for a long time, and derived fields (margin thinning, ocean age)
+    carry the same imprint. Research and options in `research/initial-conditions.md`:
+    correlated (fBm, domain-warped) noise for continents and crust thickness with an exact
+    continental fraction, noise-warped weighted Voronoi plates with power-law sizes,
+    great-circle instead of graph distances, and an optional supercontinent start.
