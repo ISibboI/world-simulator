@@ -162,10 +162,11 @@ pub struct TemperatureParams {
     pub land_albedo: f64,
     /// Planetary albedo over snow and ice.
     pub ice_albedo: f64,
-    /// Scaled optical depth `(1 − g) τ` of clouds. The ocean and land albedos rise as the sun
-    /// gets lower, like the two-stream reflectance `τ' / (τ' + 2 μ)` of a cloud layer (μ: the
-    /// insolation-weighted cosine of the solar zenith angle); the ocean and land albedos hold at
-    /// the planet's mean μ. Zero disables the zenith-angle dependence.
+    /// Scaled optical depth `(1 − g) τ` of clouds. The ocean albedo rises as the sun gets lower
+    /// (reflection of the water surface and of the marine clouds), like the two-stream reflectance
+    /// `τ' / (τ' + 2 μ)` of a cloud layer (μ: the insolation-weighted cosine of the solar zenith
+    /// angle); [`Self::ocean_albedo`] holds at the planet's mean μ. Zero disables the zenith-angle
+    /// dependence.
     pub cloud_optical_depth: f64,
     /// Permanent sea ice forms below this annual mean sea surface temperature; the albedo changes
     /// linearly over ±5 K around it.
@@ -385,31 +386,26 @@ impl TemperatureModel {
         let params = &self.params;
         let coarse_count = self.coarse.len();
 
-        // Land fraction and mean land elevation of every coarse cell.
+        // Land fraction of every coarse cell.
         let mut cells = vec![0usize; coarse_count];
         let mut land_cells = vec![0usize; coarse_count];
-        let mut land_elevation = vec![0.0; coarse_count];
-        let mut land_precipitation = vec![0.0; coarse_count];
         for (fine, &coarse) in self.fine_to_coarse.iter().enumerate() {
             cells[coarse as usize] += 1;
             if elevation[fine] >= 0.0 {
                 land_cells[coarse as usize] += 1;
-                land_elevation[coarse as usize] += elevation[fine];
-                land_precipitation[coarse as usize] += precipitation.map_or(1.0, |p| p[fine]);
             }
         }
-        // Summer temperature below which the snow of a year survives on land.
-        let equilibrium_line: Vec<f64> = (0..coarse_count)
-            .map(|c| {
-                equilibrium_line_temperature(land_precipitation[c] / land_cells[c].max(1) as f64)
-            })
+        // Summer temperature below which the snow of a year survives, for every land cell.
+        let land_cells_list: Vec<usize> = (0..elevation.len())
+            .filter(|&fine| elevation[fine] >= 0.0)
+            .collect();
+        let equilibrium_line: Vec<f64> = land_cells_list
+            .iter()
+            .map(|&fine| equilibrium_line_temperature(precipitation.map_or(1.0, |p| p[fine])))
             .collect();
         let land_fraction: Vec<f64> = (0..coarse_count)
             .map(|c| land_cells[c] as f64 / cells[c].max(1) as f64)
             .collect();
-        for c in 0..coarse_count {
-            land_elevation[c] /= land_cells[c].max(1) as f64;
-        }
         let heat_capacity: Vec<f64> = land_fraction
             .iter()
             .map(|&f| f * params.land_heat_capacity + (1.0 - f) * params.ocean_heat_capacity)
@@ -505,22 +501,27 @@ impl TemperatureModel {
             transport_sum.fill(0.0);
             // Planetary albedo from the ice cover, which depends on last year's temperatures: the
             // part of ice-free surfaces, which depends on the zenith angle, and the part of ice.
+            // Ice-sheet cover of the land of every coarse cell: the mean over its fine land
+            // cells, each with its own elevation and snowfall.
+            let mut land_ice = vec![0.0; coarse_count];
+            for (&fine, &line) in land_cells_list.iter().zip(&equilibrium_line) {
+                let summer = self.interpolate(&self.previous_summer_mean, fine)
+                    - params.lapse_rate * elevation[fine];
+                land_ice[self.fine_to_coarse[fine] as usize] +=
+                    ice_sheet_cover(summer, line, params.ice_sheet_transition);
+            }
+            // The zenith-angle dependent part (ocean, through the reflection of the water surface
+            // and of marine clouds) and the fixed part (land, ice).
             let albedo: Vec<(f64, f64)> = (0..coarse_count)
                 .map(|cell| {
                     let t = self.previous_annual_mean[cell];
-                    let summer =
-                        self.previous_summer_mean[cell] - params.lapse_rate * land_elevation[cell];
                     let f = land_fraction[cell];
-                    let ice = ice_sheet_cover(
-                        summer,
-                        equilibrium_line[cell],
-                        params.ice_sheet_transition,
-                    );
+                    let ice = land_ice[cell] / land_cells[cell].max(1) as f64;
                     let sea_ice = blend(0.0, 1.0, t, params.sea_ice_temperature);
                     (
+                        (1.0 - f) * (1.0 - sea_ice) * params.ocean_albedo,
                         f * (1.0 - ice) * params.land_albedo
-                            + (1.0 - f) * (1.0 - sea_ice) * params.ocean_albedo,
-                        (f * ice + (1.0 - f) * sea_ice) * params.ice_albedo,
+                            + (f * ice + (1.0 - f) * sea_ice) * params.ice_albedo,
                     )
                 })
                 .collect();
@@ -559,8 +560,8 @@ impl TemperatureModel {
 
                     for cell in 0..coarse_count {
                         let t = self.temperature[cell];
-                        let (surface, ice) = albedo[cell];
-                        let albedo = (surface * zenith_factor[cell] + ice).min(0.9);
+                        let (ocean, fixed) = albedo[cell];
+                        let albedo = (ocean * zenith_factor[cell] + fixed).min(0.9);
 
                         // Implicit in the cell's own temperature, explicit in its neighbours;
                         // stable for any time step.

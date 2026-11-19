@@ -49,6 +49,8 @@ pub struct PlanetStatistics {
     pub land_runoff: f64,
     /// Latitude of the ITCZ in the solved months, in degrees.
     pub itcz: Vec<f64>,
+    /// Negative precipitation of unconverged solves that was set to zero, relative to the total.
+    pub clipped_precipitation: f64,
     /// Discharge of the largest river mouth in m³/yr.
     pub largest_river: f64,
     /// Sediment delivered to the oceans in m³/yr.
@@ -291,8 +293,8 @@ impl Planet {
             &precipitation,
         );
         let cycle = self.climate.water_cycle();
-        let global_precipitation = mean(&mut (0..elevation.len()), &precipitation);
-        let global_evaporation = mean(&mut (0..elevation.len()), &|c| cycle.evaporation[c]);
+        let global_precipitation = cycle.global_precipitation;
+        let global_evaporation = cycle.global_evaporation;
         let land_runoff = mean(&mut land.iter().copied(), &|c| {
             self.precipitation[c] - cycle.evaporation[c]
         });
@@ -348,6 +350,7 @@ impl Planet {
             global_evaporation,
             land_runoff,
             itcz: cycle.itcz.clone(),
+            clipped_precipitation: cycle.clipped,
             largest_river,
             sediment_flux: self.sediment_flux,
             sediment_overfill: self.sediment_overfill,

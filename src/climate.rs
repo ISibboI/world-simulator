@@ -90,6 +90,9 @@ pub struct ClimateParams {
     /// rather than eddies carries the moisture; the eddy diffusivity is reduced there by the
     /// factor `1 − exp(−(φ/width)²)`.
     pub hadley_width: f64,
+    /// Width (degrees from the pole) of the polar cap where the eddy diffusivity fades out in the
+    /// same way.
+    pub polar_width: f64,
     /// Temperature decrease with height in K/m, for the scale height of water vapour and to
     /// reduce surface temperatures to sea level.
     pub lapse_rate: f64,
@@ -121,10 +124,11 @@ impl Default for ClimateParams {
             rain_humidity_sensitivity: 14.0,
             eddy_diffusivity: 1.06e6,
             hadley_width: 15.0,
+            polar_width: 15.0,
             lapse_rate: 0.0065,
             months: 4,
             spin_up_iterations: 40,
-            update_iterations: 3,
+            update_iterations: 6,
             months_per_update: 1,
             tolerance: 1e-3,
         }
@@ -146,6 +150,7 @@ impl ClimateParams {
             "rain_humidity_sensitivity" => &mut self.rain_humidity_sensitivity,
             "eddy_diffusivity" => &mut self.eddy_diffusivity,
             "hadley_width" => &mut self.hadley_width,
+            "polar_width" => &mut self.polar_width,
             "lapse_rate" => &mut self.lapse_rate,
             "tolerance" => &mut self.tolerance,
             "months" | "spin_up_iterations" | "update_iterations" | "months_per_update" => {
@@ -183,6 +188,9 @@ pub struct WaterCycle {
     /// Precipitation that came out negative where the solve had not converged and was set to
     /// zero, relative to the total precipitation.
     pub clipped: f64,
+    /// Area-weighted global means of precipitation and evaporation in m/yr.
+    pub global_precipitation: f64,
+    pub global_evaporation: f64,
 }
 
 /// An edge between two neighbouring Voronoi cells.
@@ -368,7 +376,7 @@ impl Climate {
             .map(|(p, a)| p * a)
             .sum();
         let clipped: f64 = self.solved.iter().map(|m| m.clipped).sum::<f64>() / month_count as f64;
-        self.cycle = WaterCycle {
+        let mut cycle = WaterCycle {
             precipitation: self
                 .annual_precipitation
                 .iter()
@@ -384,7 +392,20 @@ impl Climate {
             itcz: self.solved.iter().map(|m| m.itcz).collect(),
             iterations,
             clipped: clipped / total.max(1e-30),
+            ..WaterCycle::default()
         };
+        let total_area: f64 = self.area.iter().sum();
+        let area_mean = |field: &[f64]| {
+            field
+                .iter()
+                .zip(&self.area)
+                .map(|(v, a)| v * a)
+                .sum::<f64>()
+                / total_area
+        };
+        cycle.global_precipitation = area_mean(&cycle.precipitation);
+        cycle.global_evaporation = area_mean(&cycle.evaporation);
+        self.cycle = cycle;
     }
 
     /// Evaporation, saturation and winds of one month. The evapotranspiration of land is left at
@@ -431,8 +452,11 @@ impl Climate {
                 evaporation[cell] = transfer * (saturated - air).max(0.0);
             } else {
                 // The specific humidity of the surface air follows from the column vapour.
-                let air = vapour[cell] / vapour_per_humidity[cell];
-                potential[cell] = transfer * (saturated - air).max(0.0);
+                // The specific humidity of the surface air follows from the column vapour, but
+                // the air over a wet surface is no more humid than over the ocean.
+                let air = (vapour[cell] / vapour_per_humidity[cell])
+                    .min(params.surface_humidity * saturated);
+                potential[cell] = transfer * (saturated - air);
             }
         }
 
@@ -443,7 +467,12 @@ impl Climate {
                 let latitude = position.z.clamp(-1.0, 1.0).asin().to_degrees();
                 let distance =
                     circulation_latitude(latitude, thermal_equator) / params.hadley_width;
-                params.eddy_diffusivity * (1.0 - (-distance * distance).exp())
+                // Weather systems also fade towards the poles, beyond the storm tracks.
+                let polar = (90.0 - circulation_latitude(latitude, thermal_equator).abs())
+                    / params.polar_width;
+                params.eddy_diffusivity
+                    * (1.0 - (-distance * distance).exp())
+                    * (1.0 - (-polar * polar).exp())
             })
             .collect();
         Month {

@@ -592,7 +592,7 @@ fn snapshot(
     );
     info!(
         "    land precipitation {:4.2} m/yr (20–60° {:4.2} m/yr, {:.0}% of land below 0.25 m/yr), \
-         runoff {:4.2} m/yr | global precipitation {:4.2}, evaporation {:4.2} m/yr | ITCZ {:?}° | \
+         runoff {:4.2} m/yr | global precipitation {:4.2}, evaporation {:4.2} m/yr (clipped {:.2}%) | ITCZ {:?}° | \
          largest river {:8.0} m³/s | \
          sediment to ocean {:5.1} km³/yr (shelf {:.1}, slope {:.1}, rise {:.1}, fan {:.1}) | \
          sediment stock (Gt) continental {:.3e}, transitional {:.3e}, oceanic {:.3e}",
@@ -602,6 +602,7 @@ fn snapshot(
         planet_statistics.land_runoff,
         planet_statistics.global_precipitation,
         planet_statistics.global_evaporation,
+        100.0 * planet_statistics.clipped_precipitation,
         planet_statistics
             .itcz
             .iter()
