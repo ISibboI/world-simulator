@@ -29,7 +29,11 @@
 //! linear law `A + B T`, fitted to Earth's mid and low latitudes, would underestimate the outgoing
 //! radiation there (by about 10 W/m² over the Arctic Ocean, 20 W/m² over Antarctica). Below the
 //! inversion temperature `T_i`, the emitting air is taken to be warmer than the surface by
-//! `k (T_i − T)`, so the outgoing radiation is `A + B (T + k (T_i − T))`.
+//! `k (T_i − T)`, so the outgoing radiation is `A + B (T + k (T_i − T))`. This is off by default
+//! (`k = 0`): with k ≈ 1/3, as fitted to the observed outgoing radiation, the weaker radiative
+//! damping of cold climates lets the ice-albedo feedback run away into a snowball for some
+//! continental configurations. Sea-ice thermodynamics (thin, insulating ice that holds the summer
+//! surface at the melting point) would be needed first.
 //!
 //! The model evolves the sea-level temperature on a coarse icosphere, since temperature varies
 //! smoothly. Surface temperatures on the fine mesh are interpolated and lowered with elevation
@@ -92,27 +96,6 @@ impl OrbitParams {
         }
     }
 
-    /// Insolation-weighted daily mean of the cosine of the solar zenith angle at `latitude`
-    /// (radians); 0 during the polar night.
-    pub fn mean_cos_zenith(&self, latitude: f64, position: OrbitalPosition) -> f64 {
-        let declination = position.declination;
-        let cos_sunset = -latitude.tan() * declination.tan();
-        let h = if cos_sunset >= 1.0 {
-            return 0.0;
-        } else if cos_sunset <= -1.0 {
-            PI
-        } else {
-            cos_sunset.acos()
-        };
-        // μ = a + b cos(hour angle); integrate μ and μ² over the day.
-        let a = latitude.sin() * declination.sin();
-        let b = latitude.cos() * declination.cos();
-        let mu = a * h + b * h.sin();
-        let mu_squared =
-            a * a * h + 2.0 * a * b * h.sin() + b * b * (h / 2.0 + (2.0 * h).sin() / 4.0);
-        if mu <= 0.0 { 0.0 } else { mu_squared / mu }
-    }
-
     /// Daily mean insolation at the top of the atmosphere in W/m² at `latitude` (radians).
     pub fn daily_insolation(&self, latitude: f64, position: OrbitalPosition) -> f64 {
         let declination = position.declination;
@@ -143,15 +126,12 @@ pub struct TemperatureParams {
     /// space stays warmer than the surface.
     pub inversion_temperature: f64,
     /// Strength of the surface inversion: kelvin of inversion per kelvin of surface cooling below
-    /// [`Self::inversion_temperature`].
+    /// [`Self::inversion_temperature`]. About 1/3 fits Earth's polar outgoing radiation; 0 (the
+    /// default) disables it, see the module documentation.
     pub inversion_strength: f64,
     /// Coefficient of meridional heat transport between latitude bands, for the Laplacian on the
-    /// unit sphere, in W/m²/K, for dry air. The transport carries moist static energy: it grows
-    /// with the latent heat of the water vapour that a warmer atmosphere holds, by the factor
-    /// `1 + (L/c_p) RH dq_sat/dT`.
+    /// unit sphere, in W/m²/K.
     pub heat_transport: f64,
-    /// Relative humidity of the air for the latent part of the heat transport.
-    pub transport_humidity: f64,
     /// Coefficient of local two-dimensional heat diffusion, in W/m²/K.
     pub local_heat_transport: f64,
     /// Number of equal-area latitude bands for the meridional heat transport.
@@ -162,12 +142,6 @@ pub struct TemperatureParams {
     pub land_albedo: f64,
     /// Planetary albedo over snow and ice.
     pub ice_albedo: f64,
-    /// Scaled optical depth `(1 − g) τ` of clouds. The ocean albedo rises as the sun gets lower
-    /// (reflection of the water surface and of the marine clouds), like the two-stream reflectance
-    /// `τ' / (τ' + 2 μ)` of a cloud layer (μ: the insolation-weighted cosine of the solar zenith
-    /// angle); [`Self::ocean_albedo`] holds at the planet's mean μ. Zero disables the zenith-angle
-    /// dependence.
-    pub cloud_optical_depth: f64,
     /// Permanent sea ice forms below this annual mean sea surface temperature; the albedo changes
     /// linearly over ±5 K around it.
     pub sea_ice_temperature: f64,
@@ -178,7 +152,8 @@ pub struct TemperatureParams {
     pub ice_sheet_transition: f64,
     /// Heat capacity of the ocean mixed layer in J/m²/K.
     pub ocean_heat_capacity: f64,
-    /// Effective heat capacity of land in J/m²/K.
+    /// Effective heat capacity of land in J/m²/K: the air column (p/g c_p ≈ 1.03e7) plus the soil
+    /// within the seasonal skin depth (≈ 0.3e7).
     pub land_heat_capacity: f64,
     /// Temperature decrease with elevation in K/m.
     pub lapse_rate: f64,
@@ -201,21 +176,17 @@ impl Default for TemperatureParams {
             radiation_a: 203.3,
             radiation_b: 2.09,
             inversion_temperature: -5.0,
-            inversion_strength: 0.33,
-            // Moist static energy diffusivity D = 1.06e6 m²/s (Hwang & Frierson, 2010; Siler et
-            // al., 2018) times the heat capacity of the air column p/g c_p, divided by R².
-            heat_transport: 0.27,
-            transport_humidity: 0.8,
+            inversion_strength: 0.0,
+            heat_transport: 0.45,
             local_heat_transport: 0.05,
             latitude_bands: 18,
             ocean_albedo: 0.29,
             land_albedo: 0.32,
             ice_albedo: 0.62,
-            cloud_optical_depth: 1.5,
             sea_ice_temperature: -10.0,
             ice_sheet_transition: 2.0,
             ocean_heat_capacity: 4.18e6 * 50.0,
-            land_heat_capacity: 2e7,
+            land_heat_capacity: 1.3e7,
             lapse_rate: 0.0065,
             seasons_per_year: 24,
             substeps_per_season: 8,
@@ -235,12 +206,10 @@ impl TemperatureParams {
             "inversion_temperature" => &mut self.inversion_temperature,
             "inversion_strength" => &mut self.inversion_strength,
             "heat_transport" => &mut self.heat_transport,
-            "transport_humidity" => &mut self.transport_humidity,
             "local_heat_transport" => &mut self.local_heat_transport,
             "ocean_albedo" => &mut self.ocean_albedo,
             "land_albedo" => &mut self.land_albedo,
             "ice_albedo" => &mut self.ice_albedo,
-            "cloud_optical_depth" => &mut self.cloud_optical_depth,
             "sea_ice_temperature" => &mut self.sea_ice_temperature,
             "ice_sheet_transition" => &mut self.ice_sheet_transition,
             "ocean_heat_capacity" => &mut self.ocean_heat_capacity,
@@ -427,7 +396,7 @@ impl TemperatureModel {
         }
         let mut band_temperature = vec![0.0; bands];
         let mut band_flux = vec![0.0; bands];
-        let mut band_diffusion = vec![0.0; bands - 1];
+        let band_diffusion = vec![params.heat_transport; bands - 1];
         let mut interface_flux = vec![0.0; bands - 1];
         let mut transport_sum = vec![0.0; bands - 1];
 
@@ -440,45 +409,6 @@ impl TemperatureModel {
                 self.coarse_latitude
                     .iter()
                     .map(|&latitude| params.orbit.daily_insolation(latitude, position))
-                    .collect()
-            })
-            .collect();
-
-        // Albedo factor of the ice-free surface per season, from the solar zenith angle.
-        let zenith: Vec<Vec<f64>> = (0..seasons)
-            .map(|season| {
-                let position = params
-                    .orbit
-                    .position((season as f64 + 0.5) / seasons as f64);
-                self.coarse_latitude
-                    .iter()
-                    .map(|&latitude| params.orbit.mean_cos_zenith(latitude, position))
-                    .collect()
-            })
-            .collect();
-        let (weighted, weight) = zenith
-            .iter()
-            .zip(&insolation)
-            .fold((0.0, 0.0), |acc, (mu, q)| {
-                mu.iter()
-                    .zip(q)
-                    .fold(acc, |(sum, total), (&mu, &q)| (sum + mu * q, total + q))
-            });
-        let reference = weighted / weight;
-        let tau = params.cloud_optical_depth;
-        let reflectance = |mu: f64| {
-            if tau > 0.0 {
-                tau / (tau + 2.0 * mu)
-            } else {
-                1.0
-            }
-        };
-        let zenith_factor: Vec<Vec<f64>> = zenith
-            .iter()
-            .map(|season| {
-                season
-                    .iter()
-                    .map(|&mu| reflectance(mu) / reflectance(reference))
                     .collect()
             })
             .collect();
@@ -499,8 +429,7 @@ impl TemperatureModel {
                 season.fill(0.0);
             }
             transport_sum.fill(0.0);
-            // Planetary albedo from the ice cover, which depends on last year's temperatures: the
-            // part of ice-free surfaces, which depends on the zenith angle, and the part of ice.
+            // Planetary albedo from the ice cover, which depends on last year's temperatures.
             // Ice-sheet cover of the land of every coarse cell: the mean over its fine land
             // cells, each with its own elevation and snowfall.
             let mut land_ice = vec![0.0; coarse_count];
@@ -510,25 +439,20 @@ impl TemperatureModel {
                 land_ice[self.fine_to_coarse[fine] as usize] +=
                     ice_sheet_cover(summer, line, params.ice_sheet_transition);
             }
-            // The zenith-angle dependent part (ocean, through the reflection of the water surface
-            // and of marine clouds) and the fixed part (land, ice).
-            let albedo: Vec<(f64, f64)> = (0..coarse_count)
+            let albedo: Vec<f64> = (0..coarse_count)
                 .map(|cell| {
                     let t = self.previous_annual_mean[cell];
                     let f = land_fraction[cell];
                     let ice = land_ice[cell] / land_cells[cell].max(1) as f64;
                     let sea_ice = blend(0.0, 1.0, t, params.sea_ice_temperature);
-                    (
-                        (1.0 - f) * (1.0 - sea_ice) * params.ocean_albedo,
-                        f * (1.0 - ice) * params.land_albedo
-                            + (f * ice + (1.0 - f) * sea_ice) * params.ice_albedo,
-                    )
+                    f * (params.land_albedo + (params.ice_albedo - params.land_albedo) * ice)
+                        + (1.0 - f)
+                            * (params.ocean_albedo
+                                + (params.ice_albedo - params.ocean_albedo) * sea_ice)
                 })
                 .collect();
             annual_sum.fill(0.0);
-            for (season, (insolation, zenith_factor)) in
-                insolation.iter().zip(&zenith_factor).enumerate()
-            {
+            for (season, insolation) in insolation.iter().enumerate() {
                 for _ in 0..params.substeps_per_season {
                     // Meridional transport between latitude bands, solved implicitly.
                     band_temperature.fill(0.0);
@@ -537,14 +461,6 @@ impl TemperatureModel {
                     }
                     for band in 0..bands {
                         band_temperature[band] /= band_cells[band].max(1) as f64;
-                    }
-                    for (b, diffusion) in band_diffusion.iter_mut().enumerate() {
-                        let t = 0.5 * (band_temperature[b] + band_temperature[b + 1]);
-                        *diffusion = params.heat_transport
-                            * (1.0
-                                + LATENT_HEAT / AIR_HEAT_CAPACITY
-                                    * params.transport_humidity
-                                    * saturation_humidity_slope(t));
                     }
                     meridional_transport(
                         &band_temperature,
@@ -560,8 +476,7 @@ impl TemperatureModel {
 
                     for cell in 0..coarse_count {
                         let t = self.temperature[cell];
-                        let (ocean, fixed) = albedo[cell];
-                        let albedo = (ocean * zenith_factor[cell] + fixed).min(0.9);
+                        let albedo = albedo[cell];
 
                         // Implicit in the cell's own temperature, explicit in its neighbours;
                         // stable for any time step.
@@ -790,19 +705,6 @@ fn meridional_transport(
     }
 }
 
-/// Latent heat of vaporisation in J/kg.
-const LATENT_HEAT: f64 = 2.5e6;
-/// Specific heat capacity of air at constant pressure in J/kg/K.
-const AIR_HEAT_CAPACITY: f64 = 1004.0;
-
-/// Derivative of the saturation specific humidity at the surface with temperature (1/K), at `t`
-/// °C (Magnus formula).
-fn saturation_humidity_slope(t: f64) -> f64 {
-    let t = t.clamp(-60.0, 50.0);
-    let pressure = 610.94 * (17.625 * t / (t + 243.04)).exp();
-    0.622 / 101_325.0 * pressure * 17.625 * 243.04 / (t + 243.04).powi(2)
-}
-
 /// The mean summer air temperature (°C) at the equilibrium line of glaciers, where the annual
 /// snowfall `precipitation` (m/yr) just melts: the empirical relation of Ohmura et al. (1992),
 /// `P = 645 + 296 T + 9 T²` (P in mm/yr), solved for T.
@@ -938,22 +840,6 @@ mod tests {
     }
 
     #[test]
-    fn mean_cos_zenith_at_equinox() {
-        let orbit = OrbitParams::default();
-        let equinox = OrbitalPosition {
-            declination: 0.0,
-            distance: 1.0,
-        };
-        // At the equator, the insolation-weighted mean of cos(zenith) over the day is π/4.
-        let equator = orbit.mean_cos_zenith(0.0, equinox);
-        assert!((equator - PI / 4.0).abs() < 1e-9, "{equator}");
-        // The sun stands lower at high latitudes, and not at all in the polar night.
-        assert!(orbit.mean_cos_zenith(60f64.to_radians(), equinox) < 0.5 * equator + 1e-9);
-        let july = orbit.position(0.5);
-        assert_eq!(orbit.mean_cos_zenith(-80f64.to_radians(), july), 0.0);
-    }
-
-    #[test]
     fn equilibrium_line_follows_ohmura() {
         // P = 645 + 296 T + 9 T² (mm/yr).
         assert!(equilibrium_line_temperature(0.645).abs() < 1e-9);
@@ -961,14 +847,6 @@ mod tests {
             let p = (645.0 + 296.0 * t + 9.0 * t * t) / 1000.0;
             assert!((equilibrium_line_temperature(p) - t).abs() < 1e-9);
         }
-    }
-
-    #[test]
-    fn latent_heat_strengthens_transport_in_warm_air() {
-        let warm = 1.0 + LATENT_HEAT / AIR_HEAT_CAPACITY * 0.8 * saturation_humidity_slope(25.0);
-        let cold = 1.0 + LATENT_HEAT / AIR_HEAT_CAPACITY * 0.8 * saturation_humidity_slope(-20.0);
-        assert!((3.0..4.5).contains(&warm), "{warm}");
-        assert!((1.0..1.2).contains(&cold), "{cold}");
     }
 
     #[test]
@@ -990,6 +868,6 @@ mod tests {
         };
         let with = polar(0.33);
         let without = polar(0.0);
-        assert!(with < without - 1.0, "{with} vs {without}");
+        assert!(with < without - 0.5, "{with} vs {without}");
     }
 }
