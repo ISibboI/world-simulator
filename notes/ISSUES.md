@@ -427,3 +427,11 @@ balance without ocean currents, Budyko annual-mean ice criterion, 50 m mixed lay
     correlated (fBm, domain-warped) noise for continents and crust thickness with an exact
     continental fraction, noise-warped weighted Voronoi plates with power-law sizes,
     great-circle instead of graph distances, and an optional supercontinent start.
+    **Done (2026-11-19, independent agent; `plans/issue-14-initial-conditions.md`)**: own 3D
+    gradient noise; continents = cratons + domain-warped fBm at the exact fraction; plates =
+    warped, additively weighted Voronoi regions by priority flood with Zipf-like target areas
+    and continent cohesion (plates spread through the continents they reach); great-circle
+    distances; quadratic margin thinning; `--initial dispersed|supercontinent`. 6 seeds × 500
+    Myr: initial collisions 66k → 19k km, shorter transient (ocean age peak 82 → 67 Myr, ocean
+    > 150 Myr at 100 Myr 17.8 → 13.2%), 300–500 Myr statistics within seed noise. The
+    supercontinent breaks up slowly (largely intact for 200–300 Myr).
