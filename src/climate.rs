@@ -388,7 +388,7 @@ impl Climate {
     }
 
     /// Evaporation, saturation and winds of one month. The evapotranspiration of land is left at
-    /// zero; see [`Self::distribute_evapotranspiration`].
+    /// zero; see [`Self::set_evapotranspiration`].
     fn month_inputs(
         &self,
         elevation: &[f64],
