@@ -14,15 +14,16 @@ use std::time::Instant;
 
 use anyhow::{Context, ensure};
 use clap::Parser;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::climate::ClimateParams;
-use crate::erosion::ErosionParams;
-use crate::planet::Planet;
+use crate::erosion::{ErosionParams, WaveErosion};
+use crate::planet::{Planet, PlanetStatistics};
 use crate::sphere::SphereMesh;
 use crate::tectonics::{
-    InitialConfiguration, MassLedger, MaterialBudget, Simulation, TectonicParams, TrenchSediment,
+    InitialConfiguration, MassLedger, MaterialBudget, SeaLevelBudget, Simulation, TectonicParams,
+    TrenchSediment,
 };
 use crate::temperature::TemperatureParams;
 
@@ -104,6 +105,11 @@ struct Cli {
     /// Measure the budget of felsic crust and sediment per step phase (slower).
     #[arg(long)]
     material_budget: bool,
+
+    /// Write the state of every cell (elevation, sediment, crust) as CSV with each snapshot,
+    /// for analysis.
+    #[arg(long)]
+    cell_dump: bool,
 
     /// Overrides a tectonic parameter for calibration, e.g. `--set basal_drag=8e14`, or an
     /// erosion parameter with the prefix `erosion.`; can be repeated. See `TectonicParams::set`
@@ -277,8 +283,8 @@ fn snapshot(
          {:.0}% flooded, freeboard {:.0} m, thickness {:.0}/{:.0}/{:.0} km (10/50/90%), \
          {:.0}% > 50 km",
         statistics.sea_level,
-        statistics.sea_level_change.0,
-        statistics.sea_level_change.1,
+        statistics.sea_level_budget.tectonics,
+        statistics.sea_level_budget.total() - statistics.sea_level_budget.tectonics,
         statistics.sediment_sea_level,
         statistics.ocean_volume,
         100.0 * statistics.continental_origin_fraction,
@@ -351,6 +357,7 @@ fn snapshot(
         statistics.events.initiation_contact_km,
         statistics.events.initiation_far_contact_km,
     );
+    log_sediment_reservoirs(&planet_statistics);
     // Crust mass budget since the last snapshot, in Gt/yr.
     let cell_area =
         4.0 * std::f64::consts::PI * EARTH_RADIUS * EARTH_RADIUS / simulation.mesh().len() as f64;
@@ -366,9 +373,81 @@ fn snapshot(
         budget: previous_budget,
         collision_inflow: previous_inflow,
         trench_sediment: previous_trench,
+        wave_erosion: previous_wave,
+        sediment_delivered: previous_delivered,
+        sea_level_budget: previous_sea_level,
+        metamorphosed: previous_metamorphosed,
     }) = previous_ledger.as_ref()
     {
         let years = (statistics.time - previous_time) * 1e6;
+        let sea_level_budget = &statistics.sea_level_budget;
+        let terms = [
+            (
+                "tectonics",
+                sea_level_budget.tectonics,
+                previous_sea_level.tectonics,
+            ),
+            (
+                "fluvial",
+                sea_level_budget.fluvial,
+                previous_sea_level.fluvial,
+            ),
+            (
+                "coastal",
+                sea_level_budget.coastal,
+                previous_sea_level.coastal,
+            ),
+            (
+                "sharing",
+                sea_level_budget.sharing,
+                previous_sea_level.sharing,
+            ),
+            (
+                "metamorphism",
+                sea_level_budget.metamorphism,
+                previous_sea_level.metamorphism,
+            ),
+        ];
+        let parts: Vec<String> = terms
+            .iter()
+            .map(|(name, now, before)| {
+                format!("{name} {now:+.1} | {:+.1}", (now - before) / years * 1e8)
+            })
+            .collect();
+        info!(
+            "    sea-level budget (m so far | m per 100 Myr since the last snapshot): {} | \
+             total {:+.1} | {:+.1}, unexplained {:+.4} m",
+            parts.join(", "),
+            sea_level_budget.total(),
+            (sea_level_budget.total() - previous_sea_level.total()) / years * 1e8,
+            statistics.sea_level_residual,
+        );
+        let wave = &planet_statistics.wave_erosion;
+        let rate = |now: f64, before: f64| (now - before) / years;
+        let rivers = rate(planet_statistics.sediment_delivered, *previous_delivered);
+        let cliff_bedrock = rate(wave.cliff_bedrock, previous_wave.cliff_bedrock);
+        info!(
+            "    wave erosion (Gt/yr): cliff sediment {:.3}, cliff bedrock {:.3}, reworked {:.3}, \
+             stayed {:.3} | rivers to the sea {:.2}, cliff bedrock {:.1}% of it",
+            rate(wave.cliff_sediment, previous_wave.cliff_sediment),
+            cliff_bedrock,
+            rate(wave.reworked, previous_wave.reworked),
+            rate(wave.stayed, previous_wave.stayed),
+            rivers,
+            100.0 * cliff_bedrock / rivers.max(1e-9),
+        );
+        let trench = &statistics.trench_sediment;
+        info!(
+            "    sediment turned into crust (Gt/yr): burial metamorphism {:.2} on continental \
+             crust, {:.2} on other crust | trench accretion {:.2} | collision stacking {:.2} | \
+             metasediment at trenches: accreted {:.2}, subducted {:.2}",
+            (statistics.metamorphosed.0 - previous_metamorphosed.0) / years,
+            (statistics.metamorphosed.1 - previous_metamorphosed.1) / years,
+            (trench.accreted - previous_trench.accreted) / years,
+            (trench.stacked - previous_trench.stacked) / years,
+            (trench.metasediment_accreted - previous_trench.metasediment_accreted) / years,
+            (trench.metasediment_subducted - previous_trench.metasediment_subducted) / years,
+        );
         info!(
             "    collision stacking (Gt/yr): {:.1} stacked, {:.1} carried in by convergence",
             (statistics.ledger.collision_stacked - previous.collision_stacked) * cell_area
@@ -432,6 +511,10 @@ fn snapshot(
         budget,
         collision_inflow: statistics.collision_inflow,
         trench_sediment: statistics.trench_sediment.clone(),
+        sea_level_budget: statistics.sea_level_budget,
+        metamorphosed: statistics.metamorphosed,
+        wave_erosion: planet_statistics.wave_erosion,
+        sediment_delivered: planet_statistics.sediment_delivered,
     });
     let segments = &statistics.segment_events;
     info!(
@@ -531,6 +614,10 @@ fn snapshot(
     );
 
     let time = simulation.time().round() as u64;
+    if cli.cell_dump {
+        let path = cli.output.join(format!("cells_{time:05}.csv"));
+        write_cell_dump(planet, &path).with_context(|| format!("writing {}", path.display()))?;
+    }
     for (name, image) in [
         (
             "elevation",
@@ -613,4 +700,106 @@ struct PreviousSnapshot {
     budget: Option<MaterialBudget>,
     collision_inflow: f64,
     trench_sediment: TrenchSediment,
+    sea_level_budget: SeaLevelBudget,
+    metamorphosed: (f64, f64),
+    wave_erosion: WaveErosion,
+    sediment_delivered: f64,
+}
+
+/// Writes one CSV row per cell: latitude (°), surface elevation (m), rock-equivalent and bulk
+/// sediment thickness (m), crust thickness (m), density, felsic fraction and metasediment
+/// thickness (m), crust class (0 continental origin, 1 transitional, 2 oceanic), plate, age (Myr),
+/// number of cells showing the same sample, whether the cell is at a coast, precipitation (m/yr)
+/// and discharge (m³/yr).
+fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::Write;
+    let simulation = planet.tectonics();
+    let mesh = simulation.mesh();
+    let cell_count = mesh.len() as u32;
+    let elevation = simulation.surface_elevations();
+    let mut shown = std::collections::HashMap::new();
+    for cell in 0..cell_count {
+        *shown.entry(simulation.owner(cell)).or_insert(0u32) += 1;
+    }
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(
+        file,
+        "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge"
+    )?;
+    for cell in 0..cell_count {
+        let crust = simulation.surface_crust(cell);
+        let class = if crust.is_continental_origin() {
+            0
+        } else if crust.is_oceanic() {
+            2
+        } else {
+            1
+        };
+        let e = elevation[cell as usize];
+        let coast = mesh
+            .neighbors(cell)
+            .iter()
+            .any(|&m| (elevation[m as usize] < 0.0) != (e < 0.0));
+        writeln!(
+            file,
+            "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e}",
+            mesh.vertex(cell).z.asin().to_degrees(),
+            crust.sediment,
+            isostasy::sediment_bulk_thickness(crust.sediment),
+            crust.thickness,
+            crust.density,
+            crust.felsic,
+            crust.metasediment_thickness(),
+            simulation.owner(cell).plate,
+            crust.age(simulation.time()),
+            shown[&simulation.owner(cell)],
+            u8::from(coast),
+            planet.precipitation()[cell as usize],
+            planet.discharge()[cell as usize],
+        )?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
+/// Logs where the sediment sits: its parts of the sea level, shelves and low land.
+fn log_sediment_reservoirs(statistics: &PlanetStatistics) {
+    let r = &statistics.sediment_reservoirs;
+    info!(
+        "    sediment part of the sea level (m): all {:+.1}, marine {:+.1} | continental land \
+         {:+.1}, continental flooded {:+.1}, transitional {:+.1}, oceanic {:+.1}, filled basins \
+         {:+.1} ({:.1}% of the surface; metasediment basins {:.1}%), above wave base {:+.1} | \
+         with run-formed metasediment \
+         {:+.1} | solver/total sediment {:.1}% | metasediment (Gt) on continental basement \
+         {:.3e}, on other {:.3e}",
+        r.all,
+        r.marine,
+        r.continental_land,
+        r.continental_flooded,
+        r.transitional,
+        r.oceanic,
+        r.filled_basins,
+        100.0 * r.filled_basin_fraction,
+        100.0 * r.metasediment_basin_fraction,
+        r.above_wave_base,
+        r.with_metasediment,
+        100.0 * r.solver_ratio,
+        r.metasediment.0,
+        r.metasediment.1,
+    );
+    if !(0.97..=1.03).contains(&r.solver_ratio) {
+        warn!(
+            "    the sea-level solve sees {:.1}% of the sediment (hidden and shared samples)",
+            100.0 * r.solver_ratio
+        );
+    }
+    info!(
+        "    land lower than 10 m {:.1}% of land | shelves (0 to -200 m) {:.1}% of the surface, \
+         mean sediment {:.2} km, {:.1}% on oceanic crust, {:.1}% on filled basins",
+        100.0 * r.low_land_fraction,
+        100.0 * r.shelf_fraction,
+        r.shelf_sediment / 1000.0,
+        100.0 * r.shelf_on_oceanic,
+        100.0 * r.shelf_on_filled_basins,
+    );
 }

@@ -427,6 +427,39 @@ pub struct MaterialBudget {
     pub metamorphism: (f64, f64),
 }
 
+/// Changes of the sea level (m, as an offset of dry elevations) so far per process. Each term is
+/// the difference between two exact solves of the sea level (see
+/// [`crate::isostasy::sea_level_for_volume_with_pores`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SeaLevelBudget {
+    /// Plate tectonics: motion, ageing and subsidence of the sea floor, subduction, accretion,
+    /// collisions, plate events.
+    pub tectonics: f64,
+    /// Fluvial erosion and the routing of river sediment into lakes and the sea.
+    pub fluvial: f64,
+    /// Coastal and marine processes after routing: delta plains, overfill, diffusion, waves.
+    pub coastal: f64,
+    /// Erosion works on cells; samples shown at several cells get the sum of their changes, and
+    /// hidden samples none. The difference to the cell-based estimate.
+    pub sharing: f64,
+    /// Burial metamorphism (pores close, the column subsides).
+    pub metamorphism: f64,
+}
+
+impl SeaLevelBudget {
+    pub fn total(&self) -> f64 {
+        self.tectonics + self.fluvial + self.coastal + self.sharing + self.metamorphism
+    }
+}
+
+/// The sea-level change (m) of one step of surface processes as solved on the cells: by fluvial
+/// erosion and routing, and by the coastal processes after it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SurfaceSeaLevel {
+    pub fluvial: f64,
+    pub coastal: f64,
+}
+
 /// Ratio of the length of a straight boundary measured as boundary cells × mean edge length to
 /// its true length: boundaries on the mesh zig-zag (see the test in [`statistics`]).
 const BOUNDARY_ZIGZAG: f64 = 1.1;
@@ -492,8 +525,10 @@ pub struct Simulation {
     /// Sea level as an offset of dry elevations (m) relative to the datum of the isostasy, set
     /// so that the ocean holds [`TectonicParams::ocean_volume`].
     sea_level: f64,
-    /// Changes of the sea level so far (m) by tectonics and by surface processes.
-    sea_level_change: (f64, f64),
+    /// The sea level after the initial setup (m).
+    initial_sea_level: f64,
+    /// Changes of the sea level so far (m) per process.
+    sea_level_budget: SeaLevelBudget,
     /// Simulated time in Myr.
     time: f64,
 }
@@ -565,6 +600,7 @@ impl Simulation {
                     birth: -1000.0,
                     sediment: 0.0,
                     felsic: 1.0,
+                    metasediment: 0.0,
                 }
             } else {
                 new_oceanic_crust(-ocean_age[cell])
@@ -649,7 +685,8 @@ impl Simulation {
             metamorphosed: (0.0, 0.0),
             material_budget: MaterialBudget::default(),
             sea_level: 0.0,
-            sea_level_change: (0.0, 0.0),
+            initial_sea_level: 0.0,
+            sea_level_budget: SeaLevelBudget::default(),
             time: 0.0,
         };
         // The sediment cover is part of the initial planet (a stock, not a source); it is
@@ -660,6 +697,7 @@ impl Simulation {
         }
         simulation.ledger = MassLedger::new(simulation.total_mass());
         simulation.sea_level = simulation.solve_sea_level();
+        simulation.initial_sea_level = simulation.sea_level;
         // Initial subduction zones have fully developed slabs.
         let max_slab_length = simulation.params.max_slab_length;
         for (pair, overriding) in initial_subduction {
@@ -837,13 +875,18 @@ impl Simulation {
         self.mantle.step(dt, &subduction, &mut self.rng);
 
         let sea_level = self.solve_sea_level();
-        self.sea_level_change.0 += sea_level - self.sea_level;
+        self.sea_level_budget.tectonics += sea_level - self.sea_level;
         self.sea_level = sea_level;
     }
 
     /// Areal mass (kg/m², summed over cells) of all crust, including hidden samples.
     pub fn total_mass(&self) -> f64 {
         ledger::plates_mass(&self.plates)
+    }
+
+    /// Volume of the ocean in m³ (see [`TectonicParams::ocean_volume`]).
+    pub fn ocean_volume(&self) -> f64 {
+        self.params.ocean_volume
     }
 
     /// The active mantle plumes.
@@ -881,22 +924,87 @@ impl Simulation {
     /// The part of the sea level due to sediment: the sea level minus the one without any
     /// sediment (m).
     pub(super) fn sediment_sea_level(&self) -> f64 {
-        let dry: Vec<f64> = (0..self.mesh.len() as u32)
+        self.sediment_sea_level_of(|_, _, _| true, false)
+    }
+
+    /// The part of the sea level due to the sediment of the cells selected by
+    /// `select(cell, crust, surface elevation)`: the sea level minus the one with their
+    /// sediment (and with `metasediment` also the metasediment of their crust, see
+    /// [`Crust::basement`]) removed (m). Each cell is counted as the sea-level solve counts it, so hidden samples do
+    /// not count and samples shown at several cells count at each.
+    pub fn sediment_sea_level_of(
+        &self,
+        select: impl Fn(u32, &Crust, f64) -> bool,
+        metasediment: bool,
+    ) -> f64 {
+        let (dry, pores): (Vec<f64>, Vec<f64>) = (0..self.mesh.len() as u32)
             .map(|cell| {
                 let crust = self.surface_crust(cell);
-                crust.dry_elevation(self.time)
-                    - crate::isostasy::sediment_dry_elevation(crust.sediment)
+                if select(
+                    cell,
+                    &crust,
+                    crust.surface_elevation(self.time, self.sea_level),
+                ) {
+                    let rest = if metasediment {
+                        crust.basement()
+                    } else {
+                        crust
+                    };
+                    (
+                        rest.dry_elevation(self.time)
+                            - crate::isostasy::sediment_dry_elevation(crust.sediment),
+                        0.0,
+                    )
+                } else {
+                    (
+                        crust.dry_elevation(self.time),
+                        crate::isostasy::sediment_pores(crust.sediment),
+                    )
+                }
             })
-            .collect();
+            .unzip();
         let cell_area =
             4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
         let without = crate::isostasy::sea_level_for_volume_with_pores(
             &dry,
-            &vec![0.0; dry.len()],
+            &pores,
             cell_area,
             self.params.ocean_volume,
         );
         self.sea_level - without
+    }
+
+    /// Rock-equivalent sediment thickness summed over the cells as the sea-level solve sees
+    /// them (samples shown at several cells count at each, hidden ones not), and over all
+    /// samples (m·cells).
+    pub fn sediment_totals(&self) -> (f64, f64) {
+        let cells = (0..self.mesh.len() as u32)
+            .map(|cell| self.surface_crust(cell).sediment)
+            .sum();
+        let samples = self
+            .plates
+            .iter()
+            .flat_map(|plate| plate.crust.iter().flatten())
+            .map(|crust| crust.sediment)
+            .sum();
+        (cells, samples)
+    }
+
+    /// Metasediment (Gt, all samples including hidden ones) in crust whose basement is of
+    /// continental origin and in other crust.
+    pub fn metasediment_masses(&self) -> (f64, f64) {
+        let cell_area =
+            4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
+        let mut masses = (0.0, 0.0);
+        for crust in self.plates.iter().flat_map(|p| p.crust.iter().flatten()) {
+            let mass = crust.metasediment_mass() * cell_area / 1e12;
+            if crust.basement().is_continental_origin() {
+                masses.0 += mass;
+            } else {
+                masses.1 += mass;
+            }
+        }
+        masses
     }
 
     /// The sea level at which the ocean holds [`TectonicParams::ocean_volume`], of which the
@@ -967,6 +1075,13 @@ impl Simulation {
                     continue;
                 }
                 let continental = crust.is_continental_origin();
+                // Burial metasediment is tracked where it forms on crust that is not of
+                // continental origin (basins and fans on oceanic, arc or thinned crust).
+                let tracked = if crust.basement().is_continental_origin() {
+                    0.0
+                } else {
+                    1.0
+                };
                 let mass = ((crust.sediment - keep) * SEDIMENT_ROCK_DENSITY)
                     .min((max_thickness - crust.thickness).max(0.0) * METASEDIMENT_DENSITY);
                 if mass <= 0.0 {
@@ -976,7 +1091,7 @@ impl Simulation {
                 crust.add_crust(
                     mass / METASEDIMENT_DENSITY,
                     METASEDIMENT_DENSITY,
-                    1.0,
+                    (1.0, tracked),
                     max_thickness,
                 );
                 converted[usize::from(!continental)] += mass;
@@ -995,7 +1110,15 @@ impl Simulation {
     /// surface. A crust sample visible at several cells gets the sum of their changes: erosion
     /// works per cell, and about as many samples are hidden by resampling as are shown twice.
     /// Sediment removal beyond the available sediment comes from the bedrock at the same mass.
-    pub fn apply_surface_changes(&mut self, thickness_delta: &[f64], sediment_delta: &[f64]) {
+    /// `predicted` is the sea-level change of the surface processes as solved on the cells by
+    /// the caller (see [`SurfaceSeaLevel`]); the difference to the solve on the samples is
+    /// booked as [`SeaLevelBudget::sharing`].
+    pub fn apply_surface_changes(
+        &mut self,
+        thickness_delta: &[f64],
+        sediment_delta: &[f64],
+        predicted: SurfaceSeaLevel,
+    ) {
         let before = self.felsic_and_sediment();
         let mut changes: Vec<(Ownership, f64, f64)> = Vec::new();
         let cell_count = self.mesh.len();
@@ -1024,19 +1147,38 @@ impl Simulation {
                 new_thickness += new_sediment * SEDIMENT_ROCK_DENSITY / crust.density;
             }
             crust.sediment = new_sediment.max(0.0);
-            crust.thickness = new_thickness.max(0.0);
+            // Erosion removes crust from the top; deposition never adds crystalline crust.
+            crust.thin_from_top(new_thickness.max(0.0));
             change += crust.mass() - before;
         }
         self.ledger.record(ledger::Term::SurfaceProcesses, change);
         let after = self.felsic_and_sediment();
         self.material_budget.surface.0 += after.0 - before.0;
         self.material_budget.surface.1 += after.1 - before.1;
-        self.metamorphose_sediment();
 
         // Sediment displaces water and eroded land no longer holds it back.
         let sea_level = self.solve_sea_level();
-        self.sea_level_change.1 += sea_level - self.sea_level;
+        let budget = &mut self.sea_level_budget;
+        budget.fluvial += predicted.fluvial;
+        budget.coastal += predicted.coastal;
+        budget.sharing += sea_level - self.sea_level - predicted.fluvial - predicted.coastal;
         self.sea_level = sea_level;
+
+        // Metamorphism closes the pores of deeply buried sediment, and the column subsides.
+        self.metamorphose_sediment();
+        let sea_level = self.solve_sea_level();
+        self.sea_level_budget.metamorphism += sea_level - self.sea_level;
+        self.sea_level = sea_level;
+    }
+
+    /// The changes of the sea level so far per process, and the remainder of the actual change
+    /// since the start that they do not explain (zero up to rounding).
+    pub fn sea_level_budget(&self) -> (SeaLevelBudget, f64) {
+        let budget = self.sea_level_budget;
+        (
+            budget,
+            self.sea_level - self.initial_sea_level - budget.total(),
+        )
     }
 }
 
@@ -1138,7 +1280,11 @@ mod tests {
                 })
                 .collect();
             let before = simulation.sea_level;
-            simulation.apply_surface_changes(&vec![0.0; cells], &sediment);
+            simulation.apply_surface_changes(
+                &vec![0.0; cells],
+                &sediment,
+                SurfaceSeaLevel::default(),
+            );
             check(&simulation);
             assert!(simulation.sea_level > before);
         }
@@ -1157,6 +1303,7 @@ mod tests {
             birth: -1000.0,
             sediment: 0.0,
             felsic: 1.0,
+            metasediment: 0.0,
         };
         // Normal continental crust stands a few hundred metres above sea level, doubly
         // thickened crust forms high plateaus like Tibet, thinned crust forms shelves.
@@ -1179,6 +1326,7 @@ mod tests {
                         birth: -age,
                         sediment: 0.0,
                         felsic: 1.0,
+                        metasediment: 0.0,
                     };
                     let elevation = crust.dry_elevation(0.0);
                     // At least 0.5 m per 100 m of crust (the thermal uplift fading out over the
@@ -1205,6 +1353,7 @@ mod tests {
                     birth: -age,
                     sediment: 0.0,
                     felsic: 1.0,
+                    metasediment: 0.0,
                 };
                 assert!(arc.buoyancy(0.0) > new_oceanic_crust(0.0).buoyancy(0.0));
             }
@@ -1219,6 +1368,7 @@ mod tests {
             birth: -age,
             sediment: 0.0,
             felsic: 1.0,
+            metasediment: 0.0,
         };
         assert!(
             (continent(0.0).surface_elevation(0.0, 0.0)
@@ -1237,6 +1387,7 @@ mod tests {
                 birth: -1000.0,
                 sediment: 0.0,
                 felsic: 1.0,
+                metasediment: 0.0,
             };
             let removed = 10.0;
             let thinner = Crust {
@@ -1264,6 +1415,7 @@ mod tests {
             birth: -1000.0,
             sediment: 0.0,
             felsic: 1.0,
+            metasediment: 0.0,
         };
         assert!(!eroded.is_oceanic());
         assert!(!eroded.is_continental());
@@ -1275,7 +1427,7 @@ mod tests {
         let mut crust = new_oceanic_crust(-80.0);
         let mut became_continental_at = None;
         for _ in 0..100 {
-            crust.add_crust(500.0, ARC_DENSITY, 1.0, 75_000.0);
+            crust.add_crust(500.0, ARC_DENSITY, (1.0, 0.0), 75_000.0);
             if crust.is_continental() && became_continental_at.is_none() {
                 became_continental_at = Some(crust.thickness);
             }
@@ -1291,7 +1443,7 @@ mod tests {
         let mut crust = new_oceanic_crust(-80.0);
         for _ in 0..100 {
             let added = if crust.is_oceanic() { felsic } else { 1.0 };
-            crust.add_crust(500.0, ARC_DENSITY, added, 75_000.0);
+            crust.add_crust(500.0, ARC_DENSITY, (added, 0.0), 75_000.0);
         }
         assert!(crust.is_continental_origin(), "{crust:?}");
     }
@@ -1371,7 +1523,7 @@ mod tests {
             let cells = simulation.mesh.len();
             let thickness: Vec<f64> = (0..cells).map(|c| -((c % 7) as f64)).collect();
             let sediment: Vec<f64> = (0..cells).map(|c| (c % 5) as f64 - 2.0).collect();
-            simulation.apply_surface_changes(&thickness, &sediment);
+            simulation.apply_surface_changes(&thickness, &sediment, SurfaceSeaLevel::default());
             assert_closes(&simulation, &format!("surface changes {step}"));
         }
         // Plates moved and things happened.
@@ -1390,7 +1542,11 @@ mod tests {
         let mut thickness = vec![0.0; simulation.mesh.len()];
         thickness[0] = -10.0;
         thickness[neighbor as usize] = -20.0;
-        simulation.apply_surface_changes(&thickness, &vec![0.0; simulation.mesh.len()]);
+        simulation.apply_surface_changes(
+            &thickness,
+            &vec![0.0; simulation.mesh.len()],
+            SurfaceSeaLevel::default(),
+        );
         assert!((simulation.surface_crust(0).thickness - (before.thickness - 30.0)).abs() < 1e-9);
     }
 }
