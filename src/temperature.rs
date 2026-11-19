@@ -21,7 +21,7 @@
 //! two-dimensionally would tie the temperature of land to the surrounding ocean over thousands of
 //! kilometres within a season, suppressing continental climates. Snow and sea ice raise the albedo `α`
 //! (ice-albedo feedback). Land has a much smaller heat capacity than the ocean (the air column,
-//! about 1e7 J/m²/K, plus the soil within the reach of the seasonal cycle), so continental
+//! about 1e7 J/m²/K), so continental
 //! interiors get hot summers and cold winters.
 //!
 //! Over cold surfaces, the air that radiates to space lies above a surface inversion and stays
@@ -147,13 +147,14 @@ pub struct TemperatureParams {
     pub sea_ice_temperature: f64,
     /// Ice sheets cover land whose summer is too cold to melt the snow of a year: where the mean
     /// temperature of the warmest three months is below the equilibrium-line temperature for the
-    /// local precipitation (Ohmura et al., 1992). The albedo changes linearly over ± this many
-    /// kelvin around it.
+    /// local precipitation (Ohmura et al., 1992). The cover changes linearly over ± this many
+    /// kelvin around it (the temperature spread within a cell, as for sea ice).
     pub ice_sheet_transition: f64,
     /// Heat capacity of the ocean mixed layer in J/m²/K.
     pub ocean_heat_capacity: f64,
-    /// Effective heat capacity of land in J/m²/K: the air column (p/g c_p ≈ 1.03e7) plus the soil
-    /// within the seasonal skin depth (≈ 0.3e7).
+    /// Effective heat capacity of land in J/m²/K: the air column (p/g c_p ≈ 1.03e7). The soil
+    /// within the seasonal skin depth would add ≈ 0.3e7, but the coarse model already
+    /// underestimates continental summers, and colder summers grow ice sheets.
     pub land_heat_capacity: f64,
     /// Temperature decrease with elevation in K/m.
     pub lapse_rate: f64,
@@ -184,9 +185,9 @@ impl Default for TemperatureParams {
             land_albedo: 0.32,
             ice_albedo: 0.62,
             sea_ice_temperature: -10.0,
-            ice_sheet_transition: 2.0,
+            ice_sheet_transition: 5.0,
             ocean_heat_capacity: 4.18e6 * 50.0,
-            land_heat_capacity: 1.3e7,
+            land_heat_capacity: 1e7,
             lapse_rate: 0.0065,
             seasons_per_year: 24,
             substeps_per_season: 8,
