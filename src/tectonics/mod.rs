@@ -475,10 +475,7 @@ impl Simulation {
         assert!(plate_count <= mesh.len(), "more plates than cells");
         let cell_count = mesh.len();
 
-        // Partition the sphere into plates of varying size.
-        let plate_of_cell = plate_partition(&mesh, plate_count, rng);
-
-        // Place continents independently of the plates.
+        // Place the continents.
         let continental_cells =
             (params.continental_fraction.clamp(0.0, 1.0) * cell_count as f64).round() as usize;
         let is_continental = continents(
@@ -488,6 +485,9 @@ impl Simulation {
             params.initial,
             rng,
         );
+
+        // Partition the sphere into plates of varying size.
+        let plate_of_cell = plate_partition(&mesh, plate_count, &is_continental, rng);
 
         // Continents rise towards their interior, oceans get older away from plate boundaries.
         let margin_angle =

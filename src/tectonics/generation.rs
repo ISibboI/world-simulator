@@ -194,6 +194,10 @@ struct Craton {
     radius: f64,
 }
 
+/// Score advantage (radians) of a plate spreading from continental into continental crust,
+/// see [`plate_partition`].
+const CONTINENT_COHESION: f64 = 2.0;
+
 /// Depth of the bowl that holds a supercontinent together (relative to the craton heights).
 const SUPERCONTINENT_BOWL: f64 = 0.3;
 
@@ -309,9 +313,16 @@ pub(super) fn continents(
 /// so that every plate is connected and owns its centre. The weights are adjusted until the
 /// plate areas approach power-law target areas (Zipf-like ranks with random scatter: a few
 /// large and several small plates, Bird 2003, Morra et al. 2013).
+///
+/// A plate spreads through continental crust that it has reached with a lower score (by
+/// [`CONTINENT_COHESION`]), so that continents mostly lie within one plate and plate boundaries
+/// run through the oceans and along coasts, as on Earth; plates cut through a continent only
+/// where it is too large for one plate. Independent plates and continents start with ~65,000 km
+/// of continental collisions (Earth: ~5,000 km) and a long transient of sutures.
 pub(super) fn plate_partition(
     mesh: &SphereMesh,
     plate_count: usize,
+    is_continental: &[bool],
     rng: &mut impl Rng,
 ) -> Vec<u32> {
     let cell_count = mesh.len();
@@ -369,9 +380,12 @@ pub(super) fn plate_partition(
             plate_of_cell[cell as usize] = plate;
             for &neighbor in mesh.neighbors(cell) {
                 if plate_of_cell[neighbor as usize] == u32::MAX {
-                    let score =
+                    let mut score =
                         angle_between(warped[neighbor as usize], centre_positions[plate as usize])
                             - weights[plate as usize];
+                    if is_continental[cell as usize] && is_continental[neighbor as usize] {
+                        score -= CONTINENT_COHESION;
+                    }
                     heap.push(Reverse((Key(score), neighbor, plate)));
                 }
             }
@@ -586,8 +600,9 @@ mod tests {
         let plate_count = 12;
         let mut ratios = Vec::new();
         for seed in 0..6 {
+            let is_continental = generate(&mesh, seed, InitialConfiguration::Dispersed);
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            let plate_of_cell = plate_partition(&mesh, plate_count, &mut rng);
+            let plate_of_cell = plate_partition(&mesh, plate_count, &is_continental, &mut rng);
             let mut sizes = Vec::new();
             for plate in 0..plate_count as u32 {
                 let parts = components(&mesh, |cell| plate_of_cell[cell as usize] == plate);
@@ -630,6 +645,36 @@ mod tests {
             assert_eq!(state(3, initial), state(3, initial), "{initial:?}");
             assert_ne!(state(3, initial), state(4, initial), "{initial:?}");
         }
+    }
+
+    #[test]
+    fn plate_boundaries_avoid_continents() {
+        let mesh = SphereMesh::icosphere(5);
+        // Continental cells next to continental crust of another plate (collision boundaries).
+        let contacts = |is_continental: &[bool], plate_of_cell: &[u32]| {
+            (0..mesh.len() as u32)
+                .filter(|&cell| {
+                    is_continental[cell as usize]
+                        && mesh.neighbors(cell).iter().any(|&n| {
+                            is_continental[n as usize]
+                                && plate_of_cell[n as usize] != plate_of_cell[cell as usize]
+                        })
+                })
+                .count()
+        };
+        let (mut cohesive, mut independent) = (0, 0);
+        for seed in 0..6 {
+            let is_continental = generate(&mesh, seed, InitialConfiguration::Dispersed);
+            let partition = |continents: &[bool]| {
+                let mut rng = ChaCha8Rng::seed_from_u64(seed);
+                plate_partition(&mesh, 12, continents, &mut rng)
+            };
+            let c = contacts(&is_continental, &partition(&is_continental));
+            let i = contacts(&is_continental, &partition(&vec![false; mesh.len()]));
+            cohesive += c;
+            independent += i;
+        }
+        assert!(2 * cohesive < independent, "{cohesive} vs {independent}");
     }
 
     #[test]
