@@ -97,7 +97,7 @@ balance → collapse/stretching if needed** → 1q relative-speed tuning (later,
    without trends): mean ocean age 66–86 Myr, median 38–52, 14–20 plates with births ≈ deaths,
    99% speed 8.5–9.4 cm/yr (was 20–31), production 5.1–6.7 km²/yr kinematic / 120–147 Gt/yr
    (~2× Earth, was 4×), continental mass −5% per 500 Myr, default run 103 s → 58 s.
-   **Still open:** 7–12% of the ocean is ≥ 200 Myr old (Earth ~0), in the interiors of large,
+   **Still open (now issue 13):** 7–12% of the ocean is ≥ 200 Myr old (Earth ~0), in the interiors of large,
    slow, continent-bearing plates far from their trenches — needs splitting along the
    continent–ocean margin instead of a great circle (issue 10) or intraplate initiation; ridge
    and trench lengths ~2× Earth; mean speed 3.4–3.8 cm/yr slightly low.
@@ -405,3 +405,16 @@ age-only ocean depth (no dynamic topography), nearest-neighbour resampling of ri
 diffusive crustal flow, n = 1 stream power with calibrated K, no hillslope/glacial erosion, no
 lithology, fixed three-cell winds without monsoons, single upwind neighbour, zonal energy
 balance without ocean currents, Budyko annual-mean ice criterion, 50 m mixed layer.
+
+13. **Ancient ocean (≥ 200 Myr) persists and traps sediment** (2026-11-19, split out of the
+    "still open" note of issue 1): 7–10% of the ocean area is older than 200 Myr (Earth ~0; the
+    oldest sea floor is ~180 Myr), in interiors of large, slow, continent-bearing plates far from
+    trenches. Measured (scratch `agent-scratch/arc-diag/sed-log-*`, seeds 0–3 × 1000 Myr): it
+    holds 44% (500 Myr) → 63% (1000 Myr) of all sediment on oceanic crust, ~10–14 km per cell, and
+    gains +0.86 Gt/yr over 500–1000 Myr — more than the whole oceanic stock growth (+0.73; younger
+    sea floor is flat or losing). It drives most of the rising sediment part of the sea level
+    (+26 ± 2 m per 100 Myr, 8 seeds). **Decision (user, 2026-11-19): fix this before further
+    sediment-sink work**; then re-measure the sediment budget. Candidate mechanisms: subduction
+    initiation at old, sediment-loaded passive margins and in plate interiors (age hazard far from
+    trenches), splitting geometry (issue 10). The remaining ~0.6 Gt/yr on continental and
+    transitional crust needs a sediment → crust path (orogenic metamorphism) independently.

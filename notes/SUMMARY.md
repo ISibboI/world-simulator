@@ -158,7 +158,7 @@ components (climate, erosion, …) are expected to build on it.
   the trench cell, not across reversed segments); upper-plate arc crust overridden by arriving
   buoyant crust is accreted onto it: felsic + sediment 4-seed mean −0.97 Gt/yr (target met),
   collision length 12–17k km; the sediment part of the sea level still rises ~60 m/100 Myr. 2–6% ancient (≥ 200 Myr) ocean
-  remains (issue 10).
+  remains (issue 13).
 - **Independent physics review (2026-11-15, see session log)** — top issues: ocean floor too old
   and plates only die (no slab pull / subduction initiation / rifting); sea level fixed so water
   volume isn't conserved; continental crust not conserved with erosion (several leaks); thermal
@@ -193,8 +193,10 @@ components (climate, erosion, …) are expected to build on it.
    convergence, within Earth's 30–95 km³/km/Myr); the sediment part of the sea level is not
    decelerating: 8 seeds × 1000 Myr show a real trend, +26 ± 2 m per 100 Myr over 500–1000 Myr
    (every seed +18…+33), stock +1.3 Gt/yr: crystalline felsic crust turns into sediment faster
-   than sediment returns to crust. **Next: find the missing/weak sediment → crust path** (see
-   session 2026-11-19).
+   than sediment returns to crust. Measured: ocean ≥ 200 Myr (7–10% of the ocean area) holds
+   63% of the oceanic sediment at 1000 Myr and takes all of its growth. **Next (user decision):
+   issue 13, the ancient ocean**, then re-measure the sediment budget; the ~0.6 Gt/yr on
+   continental/transitional crust needs a sediment → crust path independently.
 2. Separately: seed 1's loss at the collision stacking cap (0.4 Gt/yr); the mafic-erosion
    tracer artefact in the felsic budget (+0.3 Gt/yr; erosion of mafic crust becomes sediment).
 3. Then back to issue 1r/7: margin stretching covers < half of the continental opening (COB
