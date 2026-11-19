@@ -924,23 +924,27 @@ impl Simulation {
     /// The part of the sea level due to sediment: the sea level minus the one without any
     /// sediment (m).
     pub(super) fn sediment_sea_level(&self) -> f64 {
-        self.sediment_sea_level_of(|_, _| true, false)
+        self.sediment_sea_level_of(|_, _, _| true, false)
     }
 
     /// The part of the sea level due to the sediment of the cells selected by
-    /// `select(crust, surface elevation)`: the sea level minus the one with their sediment (and
-    /// with `metasediment` also the metasediment of their crust, see [`Crust::basement`])
-    /// removed (m). Each cell is counted as the sea-level solve counts it, so hidden samples do
+    /// `select(cell, crust, surface elevation)`: the sea level minus the one with their
+    /// sediment (and with `metasediment` also the metasediment of their crust, see
+    /// [`Crust::basement`]) removed (m). Each cell is counted as the sea-level solve counts it, so hidden samples do
     /// not count and samples shown at several cells count at each.
     pub fn sediment_sea_level_of(
         &self,
-        select: impl Fn(&Crust, f64) -> bool,
+        select: impl Fn(u32, &Crust, f64) -> bool,
         metasediment: bool,
     ) -> f64 {
         let (dry, pores): (Vec<f64>, Vec<f64>) = (0..self.mesh.len() as u32)
             .map(|cell| {
                 let crust = self.surface_crust(cell);
-                if select(&crust, crust.surface_elevation(self.time, self.sea_level)) {
+                if select(
+                    cell,
+                    &crust,
+                    crust.surface_elevation(self.time, self.sea_level),
+                ) {
                     let rest = if metasediment {
                         crust.basement()
                     } else {

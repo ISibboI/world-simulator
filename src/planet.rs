@@ -91,7 +91,8 @@ pub struct SedimentReservoirs {
     /// Share of the surface that is of continental origin only with its metasediment (see
     /// [`Crust::is_continental_origin_column`]): basins filled on other lithosphere.
     pub metasediment_basin_fraction: f64,
-    /// Sediment on cells above the storm wave base (land included).
+    /// Sediment on sea floor shallower than its storm wave base (see
+    /// [`crate::erosion::wave_bases`]).
     pub above_wave_base: f64,
     /// All sediment together with the metasediment formed from it during the simulation (see
     /// [`Crust::metasediment`]).
@@ -307,15 +308,16 @@ impl Planet {
 
     fn sediment_reservoirs(&self, elevation: &[f64]) -> SedimentReservoirs {
         let tectonics = &self.tectonics;
-        let part =
-            |select: &dyn Fn(&Crust, f64) -> bool| tectonics.sediment_sea_level_of(select, false);
+        let part = |select: &dyn Fn(&Crust, f64) -> bool| {
+            tectonics.sediment_sea_level_of(|_, c, e| select(c, e), false)
+        };
         let filled_basin = |crust: &Crust| crust.is_continental_origin() && crust.felsic < 0.8;
-        let wave_base = self
-            .erosion
-            .as_ref()
-            .map_or(ErosionParams::default().wave_base, |params| {
-                params.wave_base
-            });
+        let default = ErosionParams::default();
+        let wave_base = crate::erosion::wave_bases(
+            tectonics.mesh(),
+            elevation,
+            self.erosion.as_ref().unwrap_or(&default),
+        );
         let (cell_sediment, all_sediment) = tectonics.sediment_totals();
         let cell_count = elevation.len();
         let land = elevation.iter().filter(|&&e| e >= 0.0).count();
@@ -351,8 +353,11 @@ impl Planet {
             filled_basins: part(&|c, _| filled_basin(c)),
             filled_basin_fraction: basins as f64 / cell_count as f64,
             metasediment_basin_fraction: metasediment_basins as f64 / cell_count as f64,
-            above_wave_base: part(&|_, e| e >= wave_base),
-            with_metasediment: tectonics.sediment_sea_level_of(|_, _| true, true),
+            above_wave_base: tectonics.sediment_sea_level_of(
+                |cell, _, e| e < 0.0 && e >= wave_base[cell as usize],
+                false,
+            ),
+            with_metasediment: tectonics.sediment_sea_level_of(|_, _, _| true, true),
             solver_ratio: cell_sediment / all_sediment.max(1e-9),
             metasediment: tectonics.metasediment_masses(),
             low_land_fraction: low_land as f64 / land.max(1) as f64,

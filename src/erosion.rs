@@ -797,7 +797,7 @@ fn wave_erosion(
 /// [`ErosionParams::fetch_rings`] rings (through the sea) of open water deeper than
 /// [`ErosionParams::open_water_depth`], [`ErosionParams::sheltered_wave_base`] in the enclosed
 /// and epicontinental seas beyond.
-fn wave_bases(mesh: &SphereMesh, elevation: &[f64], params: &ErosionParams) -> Vec<f64> {
+pub fn wave_bases(mesh: &SphereMesh, elevation: &[f64], params: &ErosionParams) -> Vec<f64> {
     let cell_count = mesh.len();
     let mut ring = vec![u32::MAX; cell_count];
     let mut queue = VecDeque::new();
