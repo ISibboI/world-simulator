@@ -314,6 +314,8 @@ impl TectonicParams {
             "erosive_convergence" => &mut self.erosive_convergence,
             "trench_fill_time" => &mut self.trench_fill_time,
             "events.initiation_age" => &mut self.events.initiation_age,
+            "events.invasion_waiting_time" => &mut self.events.invasion_waiting_time,
+            "events.invasion_reach" => &mut self.events.invasion_reach,
             "events.initiation_full_age" => &mut self.events.initiation_full_age,
             "events.initiation_waiting_time" => &mut self.events.initiation_waiting_time,
             "events.boundary_initiation_waiting_time" => {

@@ -40,6 +40,16 @@ pub struct PlateEventParams {
     /// [`Self::initiation_full_age`] starts to subduct. The 180 Myr old margins of the
     /// Atlantic have not subducted yet, so it is long.
     pub initiation_waiting_time: f64,
+    /// Mean waiting time (Myr) until 1000 km of passive margin with lithosphere of at least
+    /// [`Self::initiation_full_age`] starts to subduct within [`Self::invasion_reach`] of a
+    /// trench where the same plate already subducts: subduction invades old ocean along strike
+    /// from existing trench tips (Scotia, Lesser Antilles, Gibraltar into the Atlantic; Duarte et
+    /// al. 2013), much faster than at an isolated passive margin. Three Atlantic invasions within
+    /// ~50 Myr along a few thousand km of margin near trench tips give ~65–100 Myr.
+    pub invasion_waiting_time: f64,
+    /// Distance (m) from a trench of the same plate within which passive margins start to
+    /// subduct with [`Self::invasion_waiting_time`].
+    pub invasion_reach: f64,
     /// Mean waiting time (Myr) until 1000 km of an existing plate boundary with old oceanic
     /// lithosphere on one side starts to subduct. Plate boundaries are weak zones, so
     /// subduction starts there much more easily than at a passive margin (Stern & Gerya 2018).
@@ -87,6 +97,8 @@ impl Default for PlateEventParams {
             initiation_age: 80.0,
             initiation_full_age: 180.0,
             initiation_waiting_time: 1000.0,
+            invasion_waiting_time: 100.0,
+            invasion_reach: 1500e3,
             boundary_initiation_waiting_time: 150.0,
             initiation_age_contrast: 20.0,
             initiation_slab_length: 150e3,
@@ -122,6 +134,11 @@ impl PlateEventParams {
     /// [`Self::initiation_age`] to [`Self::initiation_full_age`].
     pub fn initiation_hazard(&self, age: f64) -> f64 {
         self.hazard(age, self.initiation_waiting_time)
+    }
+
+    /// Like [`Self::initiation_hazard`], near a trench of the same plate (subduction invasion).
+    pub fn invasion_hazard(&self, age: f64) -> f64 {
+        self.hazard(age, self.invasion_waiting_time)
     }
 
     /// Like [`Self::initiation_hazard`], at an existing plate boundary.
@@ -822,6 +839,7 @@ impl Simulation {
         // region of the plate large enough to become a plate of its own.
         let (ocean_region, ocean_region_cells) = self.ocean_regions();
         let min_cells = params.min_plate_area * self.mesh.len() as f64;
+        let near_trench = self.near_own_trench(boundaries, params.invasion_reach);
         for cell in 0..self.mesh.len() as u32 {
             let owner = self.owners[cell as usize];
             if owner.plate >= first_new_plate {
@@ -842,10 +860,12 @@ impl Simulation {
                     && self.surface_crust(neighbor).is_continental_origin()
             });
             if at_margin {
-                candidates.push((
-                    Initiation::PassiveMargin(cell),
-                    params.initiation_hazard(age) * margin_length,
-                ));
+                let hazard = if near_trench[cell as usize] {
+                    params.invasion_hazard(age)
+                } else {
+                    params.initiation_hazard(age)
+                };
+                candidates.push((Initiation::PassiveMargin(cell), hazard * margin_length));
             }
         }
         // Old oceanic boundary cells facing younger or continental crust without subduction.
@@ -893,6 +913,39 @@ impl Simulation {
             }
         }
         candidates
+    }
+
+    /// Whether each cell is within `reach` (m) of a trench cell of its own plate, measured in
+    /// rings of cells of that plate.
+    fn near_own_trench(&self, boundaries: &[BoundaryCell], reach: f64) -> Vec<bool> {
+        let spacing = self.mesh.mean_edge_angle() * self.params.planet_radius;
+        let max_rings = (reach / spacing).round() as u32;
+        let mut rings = vec![u32::MAX; self.mesh.len()];
+        let mut queue = std::collections::VecDeque::new();
+        for boundary in boundaries {
+            if matches!(boundary.kind, BoundaryKind::Trench { .. })
+                && rings[boundary.cell as usize] == u32::MAX
+            {
+                rings[boundary.cell as usize] = 0;
+                queue.push_back(boundary.cell);
+            }
+        }
+        while let Some(cell) = queue.pop_front() {
+            let ring = rings[cell as usize];
+            if ring >= max_rings {
+                continue;
+            }
+            let plate = self.owners[cell as usize].plate;
+            for &neighbor in self.mesh.neighbors(cell) {
+                if rings[neighbor as usize] == u32::MAX
+                    && self.owners[neighbor as usize].plate == plate
+                {
+                    rings[neighbor as usize] = ring + 1;
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+        rings.into_iter().map(|ring| ring <= max_rings).collect()
     }
 
     /// Starts subduction of `subducting` below `overriding` in the boundary segment at `cell`
@@ -1288,6 +1341,49 @@ mod tests {
             });
         }
         simulation
+    }
+
+    #[test]
+    fn subduction_invades_passive_margins_near_trenches() {
+        let simulation = passive_margin(TectonicParams::default(), 250.0);
+        let params = &simulation.params.events;
+        let margin_length = simulation.boundary_length_per_cell();
+        let candidates = simulation.initiation_candidates(u32::MAX, &[]);
+        assert!(!candidates.is_empty());
+        let normal = params.initiation_hazard(250.0) * margin_length;
+        assert!(
+            candidates
+                .iter()
+                .all(|(_, h)| (h - normal).abs() < 1e-12 * normal)
+        );
+
+        // A trench of the same plate in the ocean near the margin at −y; the margin cells within
+        // the invasion reach of it start to subduct much more readily.
+        let trench_cell = simulation
+            .mesh
+            .nearest(DVec3::new(0.2, -0.98, 0.0).normalize());
+        assert!(simulation.surface_crust(trench_cell).is_oceanic());
+        let trench = BoundaryCell {
+            cell: trench_cell,
+            plate: 0,
+            other: 0,
+            normal: DVec3::Z,
+            convergence: 0.0,
+            kind: BoundaryKind::Trench { slab_age: 250.0 },
+            segment: None,
+        };
+        let candidates = simulation.initiation_candidates(u32::MAX, &[trench]);
+        let invasion = params.invasion_hazard(250.0) * margin_length;
+        let near = candidates
+            .iter()
+            .filter(|(_, h)| (h - invasion).abs() < 1e-12 * invasion)
+            .count();
+        assert!(
+            near > 0 && near < candidates.len(),
+            "{near} of {}",
+            candidates.len()
+        );
+        assert!(invasion > 5.0 * normal);
     }
 
     #[test]

@@ -113,3 +113,25 @@ Gt/yr; sediment part of the sea level at 1000 Myr 493 ± 10 → 420 ± 12 m, slo
 +26 ± 2 → **+19 ± 3 m per 100 Myr** (target ≤ 10); mean ocean age (500–1000 Myr) 79 → 68 Myr;
 collision length 11k → 13k km. Next: C' (induced initiation for open old ocean), starting with
 why 40% of initiations fail and induced initiations are rare.
+
+## C' step 0 and subduction invasion (8 seeds × 1000 Myr, `agent-scratch/invasion/`)
+
+Initiation diagnostic (scratch, seeds 0–3 × 1000 Myr): 33–42 margin attempts, 23–29 succeed;
+all failures from the area test (remainder 6–12, piece 2–7), none from the plate cap or missing
+pieces. Old oceanic boundary cell-steps: 64% already trench/ridge/collision, 20% diverging,
+5–6% facing neither continental nor younger crust, 10–11% candidates; 5–18 boundary initiations
+per 1000 Myr. All kinds ~0.04/Myr: a rate problem, not failures.
+Implemented **subduction invasion**: passive-margin candidates within `invasion_reach` 1500 km
+(rings within the same plate) of a trench where their plate subducts use
+`invasion_waiting_time` 100 Myr per 1000 km instead of 1000 (Atlantic: Scotia, Lesser Antilles,
+Gibraltar within ~50 Myr along a few thousand km of margin near trench tips). Test: only margin
+cells near the trench get the invasion hazard.
+Result (D1 → D1 + invasion, 8-seed means): ocean ≥ 200 Myr at 1000 Myr 6.2 → 4.5% (target ≤ 1%);
+initiations of all kinds 0.036 → 0.056 per Myr (target ≥ 0.05); mean ocean age (500–1000 Myr)
+68 → 54 Myr; plates 13.9 → 17.4; collision length 13k → 14k km; felsic + sediment −0.31 →
++0.06 Gt/yr; oceanic sediment stock 0.61 → 0.50e9 Gt; sediment part of the sea level slope
+500–1000 Myr +19 → +18 ± 4 m per 100 Myr (target ≤ 10). Stock growth 500–1000 Myr is now on
+continental-origin crust (+0.85 Gt/yr), oceanic +0.02, transitional +0.08: the remaining
+sea-level rise is continental sediment (flooded shelves, platform cover, filled basins now
+counted as continental) — the separate sediment → crust item, not issue 13. Ancient ocean 4.5%
+still above target: re-measure where it sits.
