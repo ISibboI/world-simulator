@@ -439,11 +439,14 @@ fn snapshot(
         let trench = &statistics.trench_sediment;
         info!(
             "    sediment turned into crust (Gt/yr): burial metamorphism {:.2} on continental \
-             crust, {:.2} on other crust | trench accretion {:.2} | collision stacking {:.2}",
+             crust, {:.2} on other crust | trench accretion {:.2} | collision stacking {:.2} | \
+             metasediment at trenches: accreted {:.2}, subducted {:.2}",
             (statistics.metamorphosed.0 - previous_metamorphosed.0) / years,
             (statistics.metamorphosed.1 - previous_metamorphosed.1) / years,
             (trench.accreted - previous_trench.accreted) / years,
             (trench.stacked - previous_trench.stacked) / years,
+            (trench.metasediment_accreted - previous_trench.metasediment_accreted) / years,
+            (trench.metasediment_subducted - previous_trench.metasediment_subducted) / years,
         );
         info!(
             "    collision stacking (Gt/yr): {:.1} stacked, {:.1} carried in by convergence",
@@ -765,7 +768,8 @@ fn log_sediment_reservoirs(statistics: &PlanetStatistics) {
     info!(
         "    sediment part of the sea level (m): all {:+.1}, marine {:+.1} | continental land \
          {:+.1}, continental flooded {:+.1}, transitional {:+.1}, oceanic {:+.1}, filled basins \
-         {:+.1} ({:.1}% of the surface), above wave base {:+.1} | with run-formed metasediment \
+         {:+.1} ({:.1}% of the surface; metasediment basins {:.1}%), above wave base {:+.1} | \
+         with run-formed metasediment \
          {:+.1} | solver/total sediment {:.1}% | metasediment (Gt) on continental basement \
          {:.3e}, on other {:.3e}",
         r.all,
@@ -776,6 +780,7 @@ fn log_sediment_reservoirs(statistics: &PlanetStatistics) {
         r.oceanic,
         r.filled_basins,
         100.0 * r.filled_basin_fraction,
+        100.0 * r.metasediment_basin_fraction,
         r.above_wave_base,
         r.with_metasediment,
         100.0 * r.solver_ratio,

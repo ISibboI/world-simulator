@@ -622,6 +622,8 @@ impl Simulation {
                 t.at_accretionary_margins *= to_gt;
                 t.upper_plate_accreted *= to_gt;
                 t.stacked *= to_gt;
+                t.metasediment_accreted *= to_gt;
+                t.metasediment_subducted *= to_gt;
                 t
             },
             continental_thickness,

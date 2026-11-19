@@ -63,7 +63,7 @@ impl Simulation {
                 let owner = self.owners[cell as usize];
                 let source = self.surface_crust(cell);
                 let excess = (source.thickness - params.crustal_flow_threshold).max(0.0);
-                if excess <= 0.0 || !source.is_continental_origin() {
+                if excess <= 0.0 || !source.is_continental_origin_column() {
                     continue;
                 }
                 let mobility = (excess / params.crustal_flow_range).min(1.0).powi(3);
@@ -76,7 +76,7 @@ impl Simulation {
                         continue;
                     }
                     let receiver = self.surface_crust(neighbor);
-                    if !receiver.is_continental_origin() {
+                    if !receiver.is_continental_origin_column() {
                         continue;
                     }
                     let drop = source_elevation - receiver.dry_elevation(self.time);
@@ -320,8 +320,11 @@ impl Simulation {
                 };
                 ledger.record(term, -crust_mass);
                 ledger.record(Term::SubductedSediment, -sediment_mass);
+                // Rock-equivalent thickness of the sediment and metasediment column.
+                let column =
+                    loser_crust.sediment + loser_crust.metasediment_mass() / SEDIMENT_ROCK_DENSITY;
                 let upper_is_oceanic = plates[winner.plate as usize].crust[winner.local as usize]
-                    .is_some_and(|crust| crust.is_oceanic());
+                    .is_some_and(|crust| crust.is_oceanic_column());
                 additions.push(CrustAddition {
                     cell: contact.cell,
                     plate: winner.plate,
@@ -349,20 +352,33 @@ impl Simulation {
                         &rotations,
                     )
                     .is_some_and(|segment| {
-                        let sediment = loser_crust.sediment;
-                        segment.incoming.0 += sediment;
-                        segment.incoming.1 += sediment * sediment;
+                        // The trench fill: sediment and the metasediment below it.
+                        let fill = column;
+                        segment.incoming.0 += fill;
+                        segment.incoming.1 += fill * fill;
                         segment.accretionary
                     });
-                let accreted_mass = if accretionary {
-                    (loser_crust.sediment * params.decollement_fraction)
-                        .min(loser_crust.sediment - params.subduction_channel_thickness)
+                // The décollement cuts through the column of sediment and metasediment
+                // (frontal accretion and basal underplating: Makran, Kodiak, Shimanto); the
+                // part above it is scraped off, sediment first.
+                let accreted_column = if accretionary {
+                    (column * params.decollement_fraction)
+                        .min(column - params.subduction_channel_thickness)
                         .max(0.0)
-                        * SEDIMENT_ROCK_DENSITY
                 } else {
                     0.0
                 };
-                trench_sediment.record(&loser_crust, accreted_mass, accretionary);
+                let accreted_sediment = accreted_column.min(loser_crust.sediment);
+                let accreted_mass = accreted_column * SEDIMENT_ROCK_DENSITY;
+                trench_sediment.record(
+                    &loser_crust,
+                    accreted_sediment * SEDIMENT_ROCK_DENSITY,
+                    accretionary,
+                );
+                trench_sediment.metasediment_accreted +=
+                    (accreted_column - accreted_sediment) * SEDIMENT_ROCK_DENSITY;
+                trench_sediment.metasediment_subducted += loser_crust.metasediment_mass()
+                    - (accreted_column - accreted_sediment) * SEDIMENT_ROCK_DENSITY;
                 if accreted_mass > 0.0 {
                     // Booked as accretion when added; all sediment left with the slab above.
                     additions.push(CrustAddition {
@@ -496,7 +512,7 @@ impl Simulation {
                     let plate = &plates[plate_index as usize];
                     let parent_crust =
                         plate.crust[parent.local as usize].expect("owners point to crust");
-                    parent_crust.is_continental_origin()
+                    parent_crust.is_continental_origin_column()
                         && parent_crust.thickness > params.breakup_thickness
                         && plate.crust[local as usize].is_none()
                         && (spreading
@@ -760,6 +776,10 @@ pub struct TrenchSediment {
     /// Sediment of buoyant crust stacked onto the overriding plate in collisions and terrane
     /// accretion, which becomes metasediment of the orogen.
     pub stacked: f64,
+    /// Metasediment (see [`Crust::metasediment`]) arriving at trenches: scraped off into the
+    /// accretionary wedge, and subducted.
+    pub metasediment_accreted: f64,
+    pub metasediment_subducted: f64,
 }
 
 impl TrenchSediment {
@@ -932,7 +952,7 @@ fn stretch_rift(
                 seen.push(neighbor);
                 next.push(neighbor);
                 if plate.crust[neighbor as usize].is_some_and(|crust| {
-                    crust.is_continental_origin() && crust.thickness > breakup_thickness
+                    crust.is_continental_origin_column() && crust.thickness > breakup_thickness
                 }) {
                     donors.push((neighbor, ring));
                 }
@@ -1236,6 +1256,43 @@ mod tests {
             simulation.update_slab_lengths(0.25, &boundaries);
         }
         simulation
+    }
+
+    #[test]
+    fn filled_oceanic_basins_subduct_below_their_wedge() {
+        // Oceanic crust with 15 km of burial metasediment (a filled basin, which would be
+        // felsic and buoyant enough to resist as a whole) and 2 km of sediment on top.
+        let mut simulation = single_plate();
+        simulation.split_plate(0, DVec3::Z).unwrap();
+        simulation.polarities.clear();
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            crust.add_crust(15_000.0, METASEDIMENT_DENSITY, (1.0, 1.0), 75_000.0);
+            crust.sediment = 2000.0;
+            assert!(crust.is_continental_origin_column() && !crust.resists_subduction());
+            assert!(crust.is_oceanic() && !crust.is_continental_origin());
+        }
+        for crust in simulation.plates[1].crust.iter_mut().flatten() {
+            crust.thickness = 20_000.0;
+            crust.density = crate::isostasy::ARC_DENSITY;
+        }
+        simulation.seed_subduction((0, 1), 1, 600e3);
+        simulation.plates[0].angular_velocity = -DVec3::Y * 0.004;
+        simulation.plates[1].angular_velocity = DVec3::ZERO;
+        for _ in 0..80 {
+            simulation.substep(0.25);
+            let boundaries = simulation.boundary_cells();
+            simulation.update_slab_lengths(0.25, &boundaries);
+        }
+        // It subducts (no collision), and the décollement scrapes off the top of the column
+        // into the wedge: all the sediment and part of the metasediment.
+        let ledger = &simulation.ledger;
+        assert_eq!(ledger.collision_consumed, 0.0);
+        assert!(ledger.subducted_oceanic < 0.0);
+        let trench = &simulation.trench_sediment;
+        assert!(trench.metasediment_accreted > 0.0, "{trench:?}");
+        assert!(trench.metasediment_subducted > 0.0, "{trench:?}");
+        let accreted = trench.accreted + trench.metasediment_accreted;
+        assert!((ledger.accretion - accreted).abs() < 1e-6 * accreted);
     }
 
     #[test]

@@ -88,6 +88,9 @@ pub struct SedimentReservoirs {
     /// during the simulation (filled basins, arcs), and its share of the surface.
     pub filled_basins: f64,
     pub filled_basin_fraction: f64,
+    /// Share of the surface that is of continental origin only with its metasediment (see
+    /// [`Crust::is_continental_origin_column`]): basins filled on other lithosphere.
+    pub metasediment_basin_fraction: f64,
     /// Sediment on cells above the storm wave base (land included).
     pub above_wave_base: f64,
     /// All sediment together with the metasediment formed from it during the simulation (see
@@ -322,10 +325,14 @@ impl Planet {
             .count();
         let (mut shelf, mut shelf_sediment, mut shelf_oceanic, mut shelf_basins) = (0, 0.0, 0, 0);
         let mut basins = 0;
+        let mut metasediment_basins = 0;
         for (cell, &e) in elevation.iter().enumerate() {
             let crust = tectonics.surface_crust(cell as u32);
             if filled_basin(&crust) {
                 basins += 1;
+            }
+            if crust.is_continental_origin_column() && !crust.is_continental_origin() {
+                metasediment_basins += 1;
             }
             if (-200.0..0.0).contains(&e) {
                 shelf += 1;
@@ -343,6 +350,7 @@ impl Planet {
             marine: part(&|_, e| e < 0.0),
             filled_basins: part(&|c, _| filled_basin(c)),
             filled_basin_fraction: basins as f64 / cell_count as f64,
+            metasediment_basin_fraction: metasediment_basins as f64 / cell_count as f64,
             above_wave_base: part(&|_, e| e >= wave_base),
             with_metasediment: tectonics.sediment_sea_level_of(|_, _| true, true),
             solver_ratio: cell_sediment / all_sediment.max(1e-9),

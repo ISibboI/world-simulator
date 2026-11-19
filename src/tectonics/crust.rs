@@ -107,9 +107,10 @@ impl Crust {
 
     /// How much of the oceanic thermal uplift applies: fully to oceanic and arc lithosphere
     /// (arcs and back-arcs are hot), fading out between the continental threshold and normal
-    /// continental crust, whose lithosphere has its own, cold geotherm.
+    /// continental crust, whose lithosphere has its own, cold geotherm. The lithosphere is that
+    /// of the basement: a filled oceanic basin subsides like the sea floor of its age.
     fn thermal_weight(&self) -> f64 {
-        ((NORMAL_CONTINENTAL_BUOYANCY - self.crustal_buoyancy())
+        ((NORMAL_CONTINENTAL_BUOYANCY - self.basement().crustal_buoyancy())
             / (NORMAL_CONTINENTAL_BUOYANCY - CONTINENTAL_BUOYANCY))
             .clamp(0.0, 1.0)
     }
@@ -132,8 +133,14 @@ impl Crust {
     }
 
     /// Whether the crust is continental: thick and light (see [`CONTINENTAL_BUOYANCY`]).
+    ///
+    /// Like all classifications of a sample, this judges its basement (see
+    /// [`Crust::basement`]): metasediment formed on oceanic, arc or thinned crust keeps the
+    /// fate of the lithosphere it formed on (thick fills of oceanic basins still subduct below
+    /// their accretionary wedge: Makran, Andaman, Cascadia). Crust becomes continental from
+    /// sediment only by accretion onto an overriding plate and by collisions.
     pub fn is_continental(&self) -> bool {
-        self.crustal_buoyancy() >= CONTINENTAL_BUOYANCY
+        self.basement().crustal_buoyancy() >= CONTINENTAL_BUOYANCY
     }
 
     /// Whether the crust is too buoyant to subduct (see [`SUBDUCTION_RESISTANCE_BUOYANCY`]):
@@ -143,34 +150,51 @@ impl Crust {
     /// on continental (felsic, not oceanic) crust: thick fill on oceanic crust subducts below
     /// its accretionary wedge, pulled by the old mantle lithosphere (Makran, Cascadia), which
     /// this crustal criterion does not see. The sediment counts at its compacted grain density
-    /// (metamorphosed at depth), not as porous bulk.
+    /// (metamorphosed at depth), not as porous bulk, and so does metasediment on such margins.
+    /// Judged on the basement (see [`Crust::is_continental`]).
     pub fn resists_subduction(&self) -> bool {
-        self.crust_resists_subduction()
-            || (self.felsic > 0.5
-                && !self.is_oceanic()
-                && self.crustal_buoyancy()
+        let basement = self.basement();
+        basement.crust_resists_subduction()
+            || (basement.felsic > 0.5
+                && !basement.is_oceanic_column()
+                && basement.crustal_buoyancy()
                     + self.sediment
                         * (1.0 - isostasy::SEDIMENT_POROSITY)
                         * isostasy::dry_response(isostasy::SEDIMENT_GRAIN_DENSITY)
+                    + self.metasediment_thickness() * isostasy::dry_response(METASEDIMENT_DENSITY)
                     >= SUBDUCTION_RESISTANCE_BUOYANCY)
     }
 
-    /// Whether the crystalline crust alone is too buoyant to subduct.
+    /// Whether the crystalline crust alone (as it is, metasediment included) is too buoyant to
+    /// subduct.
     fn crust_resists_subduction(&self) -> bool {
         self.crustal_buoyancy() >= SUBDUCTION_RESISTANCE_BUOYANCY
     }
 
     /// Whether the crust is of continental origin: mostly felsic (see [`Crust::felsic`]) and its
     /// crystalline crust too buoyant to subduct. Unlike [`Crust::is_continental`] this includes
-    /// stretched continental margins, and it excludes thin intra-oceanic arcs.
+    /// stretched continental margins, and it excludes thin intra-oceanic arcs. Judged on the
+    /// basement (see [`Crust::is_continental`]).
     pub fn is_continental_origin(&self) -> bool {
+        self.basement().is_continental_origin_column()
+    }
+
+    /// [`Crust::is_continental_origin`] for the whole crystalline column, metasediment
+    /// included: for processes that depend on the rock that is there rather than on the
+    /// lithosphere (crustal flow, rifting).
+    pub fn is_continental_origin_column(&self) -> bool {
         self.felsic > 0.5 && self.crust_resists_subduction()
     }
 
     /// Whether this is normal oceanic crust: thin and dense. Crust that is neither oceanic nor
     /// continental is transitional (thickened arc crust, or thinned continental crust, whose age
-    /// is not the age of a sea floor).
+    /// is not the age of a sea floor). Judged on the basement (see [`Crust::is_continental`]).
     pub fn is_oceanic(&self) -> bool {
+        self.basement().is_oceanic_column()
+    }
+
+    /// [`Crust::is_oceanic`] for the whole crystalline column, metasediment included.
+    pub fn is_oceanic_column(&self) -> bool {
         self.thickness < MAX_OCEANIC_THICKNESS && self.density > MIN_OCEANIC_DENSITY
     }
 
@@ -250,10 +274,23 @@ impl Crust {
     /// The crust without its metasediment: the basement it formed on, with the same sediment
     /// and age. Metasediment is felsic, so it is taken from the felsic part.
     pub fn basement(&self) -> Crust {
+        if self.metasediment <= 0.0 {
+            return *self;
+        }
         let mass = self.thickness * self.density;
         let meta = self.metasediment_mass().min(mass);
         let thickness = (self.thickness - meta / METASEDIMENT_DENSITY).max(0.0);
         let rest = mass - meta;
+        if thickness <= 0.0 || rest <= 0.0 {
+            // All metasediment: it formed on oceanic lithosphere, whose crust is gone.
+            return Crust {
+                thickness: 0.0,
+                density: isostasy::OCEANIC_DENSITY,
+                felsic: 0.0,
+                metasediment: 0.0,
+                ..*self
+            };
+        }
         Crust {
             thickness,
             density: if thickness > 0.0 && rest > 0.0 {
@@ -349,6 +386,54 @@ mod tests {
         let added = 2000.0 * CONTINENTAL_DENSITY;
         assert!((crust.felsic_mass() - (before + added)).abs() < 1e-6 * added);
         assert!((0.0..1.0).contains(&crust.felsic));
+    }
+
+    #[test]
+    fn metasediment_keeps_the_fate_of_its_lithosphere() {
+        // 15 km of burial metasediment on 7 km oceanic crust: felsic and buoyant as a whole,
+        // but classified, and cooling, by its oceanic basement.
+        let mut filled = new_oceanic_crust(-100.0);
+        filled.add_crust(15_000.0, METASEDIMENT_DENSITY, (1.0, 1.0), 75_000.0);
+        assert!(filled.felsic > 0.5 && filled.is_continental_origin_column());
+        assert!(filled.is_oceanic() && !filled.is_continental_origin());
+        assert!(!filled.is_continental() && !filled.resists_subduction());
+        let basement = filled.basement();
+        assert!((basement.thickness - OCEANIC_THICKNESS).abs() < 1e-6);
+        assert!(basement.felsic.abs() < 1e-9);
+        // It subsides with age like the sea floor (and stands higher by its metasediment).
+        let young = filled.dry_elevation(-90.0);
+        let old = filled.dry_elevation(0.0);
+        let ocean = new_oceanic_crust(-100.0);
+        let drop = young - old;
+        assert!((drop - (ocean.dry_elevation(-90.0) - ocean.dry_elevation(0.0))).abs() < 1e-6);
+        // Erosion takes the metasediment first (the eroded mass at the mean density, as the
+        // erosion's mass budget counts it).
+        let mut eroded = filled;
+        eroded.thin_from_top(filled.thickness - 5000.0);
+        let expected = filled.metasediment_mass() - 5000.0 * filled.density;
+        assert!((eroded.metasediment_mass() - expected).abs() < 1e-6 * expected);
+        assert!((eroded.basement().thickness - OCEANIC_THICKNESS).abs() < 200.0);
+        // A thinned continental margin with a metasediment wedge still jams a trench.
+        let mut margin = Crust {
+            thickness: 9000.0,
+            density: CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+            metasediment: 0.0,
+        };
+        assert!(!margin.resists_subduction());
+        margin.add_crust(8000.0, METASEDIMENT_DENSITY, (1.0, 1.0), 75_000.0);
+        assert!(!margin.is_continental_origin() && margin.resists_subduction());
+        // Crust that is all metasediment is oceanic lithosphere.
+        let pure = Crust {
+            thickness: 5000.0,
+            density: METASEDIMENT_DENSITY,
+            felsic: 1.0,
+            metasediment: 1.0,
+            ..new_oceanic_crust(0.0)
+        };
+        assert!(pure.is_oceanic());
     }
 
     #[test]
