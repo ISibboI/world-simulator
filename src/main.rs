@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::climate::ClimateParams;
-use crate::erosion::ErosionParams;
+use crate::erosion::{ErosionParams, WaveErosion};
 use crate::planet::{Planet, PlanetStatistics};
 use crate::sphere::SphereMesh;
 use crate::tectonics::{
@@ -373,6 +373,8 @@ fn snapshot(
         budget: previous_budget,
         collision_inflow: previous_inflow,
         trench_sediment: previous_trench,
+        wave_erosion: previous_wave,
+        sediment_delivered: previous_delivered,
         sea_level_budget: previous_sea_level,
         metamorphosed: previous_metamorphosed,
     }) = previous_ledger.as_ref()
@@ -419,6 +421,20 @@ fn snapshot(
             sea_level_budget.total(),
             (sea_level_budget.total() - previous_sea_level.total()) / years * 1e8,
             statistics.sea_level_residual,
+        );
+        let wave = &planet_statistics.wave_erosion;
+        let rate = |now: f64, before: f64| (now - before) / years;
+        let rivers = rate(planet_statistics.sediment_delivered, *previous_delivered);
+        let cliff_bedrock = rate(wave.cliff_bedrock, previous_wave.cliff_bedrock);
+        info!(
+            "    wave erosion (Gt/yr): cliff sediment {:.3}, cliff bedrock {:.3}, reworked {:.3}, \
+             stayed {:.3} | rivers to the sea {:.2}, cliff bedrock {:.1}% of it",
+            rate(wave.cliff_sediment, previous_wave.cliff_sediment),
+            cliff_bedrock,
+            rate(wave.reworked, previous_wave.reworked),
+            rate(wave.stayed, previous_wave.stayed),
+            rivers,
+            100.0 * cliff_bedrock / rivers.max(1e-9),
         );
         let trench = &statistics.trench_sediment;
         info!(
@@ -494,6 +510,8 @@ fn snapshot(
         trench_sediment: statistics.trench_sediment.clone(),
         sea_level_budget: statistics.sea_level_budget,
         metamorphosed: statistics.metamorphosed,
+        wave_erosion: planet_statistics.wave_erosion,
+        sediment_delivered: planet_statistics.sediment_delivered,
     });
     let segments = &statistics.segment_events;
     info!(
@@ -681,6 +699,8 @@ struct PreviousSnapshot {
     trench_sediment: TrenchSediment,
     sea_level_budget: SeaLevelBudget,
     metamorphosed: (f64, f64),
+    wave_erosion: WaveErosion,
+    sediment_delivered: f64,
 }
 
 /// Writes one CSV row per cell: latitude (°), surface elevation (m), rock-equivalent and bulk

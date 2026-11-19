@@ -76,9 +76,28 @@ pub struct ErosionParams {
     pub max_margin_cells: usize,
     /// Maximum number of ocean cells a deep-sea fan of one river mouth spreads over.
     pub max_fan_cells: usize,
-    /// Storm wave base (m, negative): waves rework the sea floor down to this depth (Earth
-    /// ~20–50 m, locally deeper; Peters & Loss 2012).
+    /// Whether waves erode coasts and rework the sea floor (see `wave_erosion`).
+    pub waves: bool,
+    /// Storm wave base (m, negative) on shelves open to the ocean, within
+    /// [`Self::fetch_rings`] of water deeper than [`Self::open_water_depth`]: waves rework the
+    /// sea floor down to this depth (Earth 30–100 m on open shelves; Immenhauser 2009, Peters &
+    /// Loss 2012).
     pub wave_base: f64,
+    /// Storm wave base (m, negative) in enclosed and epicontinental seas, where waves are
+    /// damped over long shallow fetches (Earth ~5–30 m; Shaw 1964, Irwin 1965).
+    pub sheltered_wave_base: f64,
+    pub open_water_depth: f64,
+    pub fetch_rings: u32,
+    /// Long-term (10⁵–10⁶ yr) retreat rates (m/yr) of cliffs whose waterline is in sediment
+    /// (sedimentary rock) and in crystalline bedrock. Measured rates are cm–dm/yr (Prémaillon
+    /// et al. 2018: medians 23 cm/yr weak, 2.9 cm/yr hard rock), but over decades to centuries;
+    /// cosmogenic platform ages give several times less over millennia (Hurst et al. 2016;
+    /// Swirad et al. 2020), and under a stable sea level the widening shore platform absorbs
+    /// the waves and retreat slows (Sunamura 1992; Trenhaile 2000; Anderson et al. 1999).
+    /// Averaged over sea-level cycles: ~1–20 mm/yr for sedimentary and ~0.05–1 mm/yr for
+    /// crystalline coasts.
+    pub cliff_retreat_sediment: f64,
+    pub cliff_retreat_bedrock: f64,
 }
 
 impl Default for ErosionParams {
@@ -104,7 +123,13 @@ impl Default for ErosionParams {
             prograde: false,
             max_margin_cells: 256,
             max_fan_cells: 256,
+            waves: true,
             wave_base: -50.0,
+            sheltered_wave_base: -15.0,
+            open_water_depth: -200.0,
+            fetch_rings: 2,
+            cliff_retreat_sediment: 5e-3,
+            cliff_retreat_bedrock: 3e-4,
         }
     }
 }
@@ -128,6 +153,18 @@ impl ErosionParams {
             "sediment_diffusivity" => &mut self.sediment_diffusivity,
             "marine_diffusivity_ratio" => &mut self.marine_diffusivity_ratio,
             "wave_base" => &mut self.wave_base,
+            "sheltered_wave_base" => &mut self.sheltered_wave_base,
+            "open_water_depth" => &mut self.open_water_depth,
+            "cliff_retreat_sediment" => &mut self.cliff_retreat_sediment,
+            "cliff_retreat_bedrock" => &mut self.cliff_retreat_bedrock,
+            "waves" => {
+                self.waves = value != 0.0;
+                return Ok(());
+            }
+            "fetch_rings" => {
+                self.fetch_rings = value as u32;
+                return Ok(());
+            }
             "prograde" => {
                 self.prograde = value != 0.0;
                 return Ok(());
@@ -213,6 +250,21 @@ pub struct ErosionResult {
     pub deposited: [f64; 4],
     /// Change of the sea level by the step (solved on the cells).
     pub sea_level_change: SurfaceSeaLevel,
+    /// Sediment moved by waves.
+    pub wave: WaveErosion,
+}
+
+/// Sediment moved by waves in one step, as rock-equivalent thickness over one cell, summed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WaveErosion {
+    /// Sediment eroded from coastal cliffs.
+    pub cliff_sediment: f64,
+    /// Sediment made from bedrock eroded at coastal cliffs.
+    pub cliff_bedrock: f64,
+    /// Sediment reworked from the sea floor above the wave base.
+    pub reworked: f64,
+    /// The part of all of it that found no room below the wave base within reach and stayed.
+    pub stayed: f64,
 }
 
 /// Performs one erosion step of `dt_years` years.
@@ -573,6 +625,20 @@ pub fn erode(
 
     diffuse_sediment(mesh, &mut seabed, params, dt_years);
 
+    let wave = if params.waves {
+        wave_erosion(
+            mesh,
+            &mut seabed,
+            &mut bedrock_delta,
+            (bedrock_density, bedrock_isostatic_density),
+            (&zones, class),
+            params,
+            dt_years,
+        )
+    } else {
+        WaveErosion::default()
+    };
+
     // Relative to the shifted sea level.
     let coastal = seabed.sea_level(cell_area, ocean_volume);
     ErosionResult {
@@ -583,7 +649,183 @@ pub fn erode(
         sediment_overfill,
         deposited,
         sea_level_change: SurfaceSeaLevel { fluvial, coastal },
+        wave,
     }
+}
+
+/// Wave erosion of coasts (Sunamura 1992; Trenhaile 2000) at the sea level after the step's
+/// deposition:
+///
+/// - **Cliffs.** At a coast (a land cell next to the sea) a sub-grid cliff retreats through the
+///   cell by `rate · dt`, removing that part of the cell's column above sea level (with the
+///   isostatic rebound). The rate is the long-term rate of the material at the waterline:
+///   sediment if the sediment reaches below sea level, else bedrock. Eroded bedrock becomes
+///   sediment of the same mass.
+/// - **Wave base.** Sediment on the sea floor above the storm wave base is reworked (Myr steps
+///   are far longer than its reworking time of 10³–10⁴ yr). The wave base is deep on shelves
+///   open to the ocean and shallow in enclosed and epicontinental seas.
+///
+/// The moved sediment goes offshore through the sea, nearest cells first, to cells below their
+/// wave base with room (zone targets and caps). What finds no room within reach stays.
+fn wave_erosion(
+    mesh: &SphereMesh,
+    seabed: &mut Seabed,
+    bedrock_delta: &mut [f64],
+    (bedrock_density, bedrock_isostatic_density): (&[f64], &[f64]),
+    (zones, class): (&[Zone], &[CrustClass]),
+    params: &ErosionParams,
+    dt_years: f64,
+) -> WaveErosion {
+    let cell_count = mesh.len();
+    let spacing = mesh.mean_edge_angle() * params.planet_radius;
+    let mut result = WaveErosion::default();
+
+    // Wave base per cell: by distance (in rings through the sea) from open water.
+    let mut ring = vec![u32::MAX; cell_count];
+    let mut queue = VecDeque::new();
+    for cell in 0..cell_count {
+        if seabed.elevation[cell] < params.open_water_depth {
+            ring[cell] = 0;
+            queue.push_back(cell);
+        }
+    }
+    while let Some(cell) = queue.pop_front() {
+        if ring[cell] >= params.fetch_rings {
+            continue;
+        }
+        for &neighbor in mesh.neighbors(cell as u32) {
+            let neighbor = neighbor as usize;
+            if ring[neighbor] == u32::MAX && seabed.elevation[neighbor] < 0.0 {
+                ring[neighbor] = ring[cell] + 1;
+                queue.push_back(neighbor);
+            }
+        }
+    }
+    let wave_base = |cell: usize| {
+        if ring[cell] <= params.fetch_rings {
+            params.wave_base
+        } else {
+            params.sheltered_wave_base
+        }
+    };
+
+    // Sources: (cell, rock-equivalent sediment), taken off at once.
+    let mut sources: Vec<(usize, f64)> = Vec::new();
+    let elevation = seabed.elevation.clone();
+    for cell in 0..cell_count {
+        let e = elevation[cell];
+        if e >= 0.0 {
+            let coastal = mesh
+                .neighbors(cell as u32)
+                .iter()
+                .any(|&m| elevation[m as usize] < 0.0);
+            if !coastal {
+                continue;
+            }
+            let sediment = seabed.sediment[cell];
+            let bulk = isostasy::sediment_bulk_thickness(sediment);
+            let rate = if bulk >= e {
+                params.cliff_retreat_sediment
+            } else {
+                params.cliff_retreat_bedrock
+            };
+            let fraction = (rate * dt_years / spacing).min(1.0);
+            if fraction <= 0.0 {
+                continue;
+            }
+            // The column above sea level: sediment first, then bedrock.
+            let from_sediment = if bulk >= e {
+                -isostasy::sediment_for_rise(e, 0.0, sediment)
+            } else {
+                sediment
+            }
+            .clamp(0.0, sediment);
+            let bare = isostasy::change_sediment(e, sediment, sediment - from_sediment);
+            let from_bedrock = (isostasy::to_dry(bare).max(0.0)
+                / isostasy::dry_response(bedrock_isostatic_density[cell]))
+            .max(0.0);
+            let (from_sediment, from_bedrock) = (fraction * from_sediment, fraction * from_bedrock);
+            let mut amount = 0.0;
+            if from_sediment > 0.0 {
+                seabed.remove(cell, from_sediment);
+                result.cliff_sediment += from_sediment;
+                amount += from_sediment;
+            }
+            if from_bedrock > 0.0 {
+                bedrock_delta[cell] -= from_bedrock;
+                seabed.elevation[cell] = isostasy::add_layer(
+                    seabed.elevation[cell],
+                    -from_bedrock,
+                    bedrock_isostatic_density[cell],
+                );
+                let made = from_bedrock * bedrock_density[cell] / SEDIMENT_ROCK_DENSITY;
+                result.cliff_bedrock += made;
+                amount += made;
+            }
+            if amount > 0.0 {
+                sources.push((cell, amount));
+            }
+        } else if e > wave_base(cell) && seabed.sediment[cell] > 0.0 {
+            let amount = (-isostasy::sediment_for_rise(e, wave_base(cell), seabed.sediment[cell]))
+                .clamp(0.0, seabed.sediment[cell]);
+            if amount > 0.0 {
+                seabed.remove(cell, amount);
+                result.reworked += amount;
+                sources.push((cell, amount));
+            }
+        }
+    }
+
+    // Offshore transport, nearest cells below the wave base first.
+    let mut mark = vec![usize::MAX; cell_count];
+    let limit = params.max_margin_cells + params.max_fan_cells;
+    let mut queue = VecDeque::new();
+    for (index, &(source, amount)) in sources.iter().enumerate() {
+        let mut remaining = amount;
+        queue.clear();
+        queue.push_back((source, 0u32));
+        mark[source] = index;
+        let mut visited = 0;
+        while let Some((cell, hops)) = queue.pop_front() {
+            if remaining <= 0.0 || visited >= limit {
+                break;
+            }
+            visited += 1;
+            let base = wave_base(cell);
+            if cell != source && seabed.elevation[cell] < base {
+                let (target, cap) = match zones[cell] {
+                    Zone::Shelf if class[cell] == CrustClass::Continental => {
+                        (params.shelf_depth, f64::INFINITY)
+                    }
+                    Zone::Shelf => (params.shelf_depth, params.max_shelf_sediment),
+                    Zone::Slope => (params.slope_depth, params.max_slope_sediment),
+                    Zone::Rise => (params.rise_depth, params.max_rise_sediment),
+                    Zone::Fan => (
+                        params.slope_depth,
+                        params.max_fan_sediment
+                            * (-f64::from(hops) * spacing / params.fan_length).exp(),
+                    ),
+                };
+                let thickness = remaining.min(seabed.room(cell, target.min(base), cap));
+                if thickness > 0.0 {
+                    seabed.deposit(cell, thickness);
+                    remaining -= thickness;
+                }
+            }
+            for &neighbor in mesh.neighbors(cell as u32) {
+                let neighbor = neighbor as usize;
+                if mark[neighbor] != index && seabed.elevation[neighbor] < 0.0 {
+                    mark[neighbor] = index;
+                    queue.push_back((neighbor, hops + 1));
+                }
+            }
+        }
+        if remaining > 0.0 {
+            seabed.deposit(source, remaining);
+            result.stayed += remaining;
+        }
+    }
+    result
 }
 
 /// The margin within reach of a river mouth: shelf, slope and rise cells connected to it
@@ -925,9 +1167,8 @@ mod tests {
             .collect()
     }
 
-    /// One erosion step of 1 Myr with uniform precipitation and bedrock density.
     /// One erosion step of 1 Myr with uniform precipitation and bedrock density, without
-    /// sediment diffusion (routing tests).
+    /// sediment diffusion and waves (routing tests).
     fn run(
         mesh: &SphereMesh,
         elevation: &[f64],
@@ -937,6 +1178,7 @@ mod tests {
     ) -> ErosionResult {
         let params = ErosionParams {
             sediment_diffusivity: 0.0,
+            waves: false,
             ..ErosionParams::default()
         };
         run_with(
@@ -1028,6 +1270,7 @@ mod tests {
         let plate = vec![0; mesh.len()];
         let params = ErosionParams {
             sediment_diffusivity: 0.0,
+            waves: false,
             ..ErosionParams::default()
         };
         // The same island with a thick sediment cover on land, at the same elevations.
@@ -1243,6 +1486,7 @@ mod tests {
         // sea level after the step; what does not fit stays on land, not piled on the sea.
         let params = ErosionParams {
             sediment_diffusivity: 0.0,
+            waves: false,
             ..ErosionParams::default()
         };
         let after = after_step(&elevation, &vec![0.0; mesh.len()], &result, &params);
@@ -1277,6 +1521,7 @@ mod tests {
         // Thin caps on the oceanic crust, so that the margin and fans fill.
         let params = ErosionParams {
             sediment_diffusivity: 0.0,
+            waves: false,
             max_slope_sediment: 260.0,
             max_rise_sediment: 260.0,
             max_fan_sediment: 260.0,
@@ -1395,5 +1640,181 @@ mod tests {
         for pair in means.windows(2) {
             assert!(pair[1] <= pair[0], "{means:?}");
         }
+    }
+
+    /// A flat coast at +50 m (north of z = 0.3) with `sediment` m on land, next to an open sea
+    /// at −3000 m; no rain, so only waves act.
+    fn coast(
+        mesh: &SphereMesh,
+        sediment: f64,
+        params: &ErosionParams,
+    ) -> (Vec<f64>, Vec<f64>, ErosionResult) {
+        let elevation: Vec<f64> = (0..mesh.len() as u32)
+            .map(|cell| {
+                if mesh.vertex(cell).z > 0.3 {
+                    50.0
+                } else {
+                    -3000.0
+                }
+            })
+            .collect();
+        let sediment: Vec<f64> = elevation
+            .iter()
+            .map(|&e| if e > 0.0 { sediment } else { 0.0 })
+            .collect();
+        let class = classes(&elevation, -1000.0);
+        let result = run_with(
+            mesh,
+            &elevation,
+            &sediment,
+            0.0,
+            &vec![0; mesh.len()],
+            &class,
+            params,
+        );
+        (elevation, sediment, result)
+    }
+
+    #[test]
+    fn cliffs_retreat_at_the_rate_of_their_waterline() {
+        let mesh = SphereMesh::icosphere(4);
+        let params = ErosionParams {
+            sediment_diffusivity: 0.0,
+            ..ErosionParams::default()
+        };
+        let spacing = mesh.mean_edge_angle() * params.planet_radius;
+        let coastal = |elevation: &[f64], cell: usize| {
+            elevation[cell] > 0.0
+                && mesh
+                    .neighbors(cell as u32)
+                    .iter()
+                    .any(|&m| elevation[m as usize] < 0.0)
+        };
+        // Sediment at the waterline: the cliff retreats by the sediment rate; the part of the
+        // column above sea level it passes through goes offshore.
+        let (elevation, sediment, result) = coast(&mesh, 2000.0, &params);
+        let fraction = params.cliff_retreat_sediment * 1e6 / spacing;
+        let need = -isostasy::sediment_for_rise(50.0, 0.0, 2000.0);
+        let mut coast_cells = 0;
+        for cell in 0..mesh.len() {
+            if coastal(&elevation, cell) {
+                coast_cells += 1;
+                let removed = -result.sediment_delta[cell];
+                assert!((removed - fraction * need).abs() < 1e-6 * need, "{removed}");
+                assert_eq!(result.bedrock_delta[cell], 0.0);
+            } else if elevation[cell] > 0.0 {
+                assert_eq!(result.sediment_delta[cell], 0.0);
+            }
+        }
+        assert!(coast_cells > 0);
+        assert!((result.wave.cliff_sediment - coast_cells as f64 * fraction * need).abs() < 1e-3);
+        assert_eq!(result.wave.stayed, 0.0);
+        let _ = sediment;
+        // Bedrock at the waterline: it retreats by the bedrock rate, ~17 times slower, and
+        // becomes sediment of the same mass.
+        let (elevation, _, result) = coast(&mesh, 0.0, &params);
+        let fraction = params.cliff_retreat_bedrock * 1e6 / spacing;
+        let need = 50.0 / isostasy::dry_response(2800.0);
+        for (cell, &delta) in result.bedrock_delta.iter().enumerate() {
+            if coastal(&elevation, cell) {
+                let removed = -delta;
+                assert!((removed - fraction * need).abs() < 1e-6 * need, "{removed}");
+            }
+        }
+        let made = result.wave.cliff_bedrock;
+        let eroded: f64 = result.bedrock_delta.iter().map(|d| -d).sum();
+        assert!((made - eroded * 2800.0 / SEDIMENT_ROCK_DENSITY).abs() < 1e-6 * made);
+    }
+
+    #[test]
+    fn waves_rework_the_sea_floor_down_to_the_wave_base() {
+        let mesh = SphereMesh::icosphere(4);
+        // A narrow shelf at −30 m with 1 km of sediment between land (z > 0.5) and the open
+        // sea (z < 0.42), and an enclosed lagoon at −30 m inside the land.
+        let lagoon = mesh.nearest(glam::DVec3::Z) as usize;
+        let elevation: Vec<f64> = (0..mesh.len() as u32)
+            .map(|cell| {
+                let z = mesh.vertex(cell).z;
+                if cell as usize == lagoon {
+                    -30.0
+                } else if z > 0.5 {
+                    100.0
+                } else if z > 0.42 {
+                    -30.0
+                } else {
+                    -3000.0
+                }
+            })
+            .collect();
+        let sediment: Vec<f64> = elevation
+            .iter()
+            .map(|&e| if e > -100.0 && e < 0.0 { 1000.0 } else { 0.0 })
+            .collect();
+        let class = classes(&elevation, -1000.0);
+        let params = ErosionParams {
+            sediment_diffusivity: 0.0,
+            ..ErosionParams::default()
+        };
+        let result = run_with(
+            &mesh,
+            &elevation,
+            &sediment,
+            0.0,
+            &vec![0; mesh.len()],
+            &class,
+            &params,
+        );
+        let after = after_step(&elevation, &sediment, &result, &params);
+        let rise = isostasy::to_surface(
+            -(result.sea_level_change.fluvial + result.sea_level_change.coastal),
+        );
+        assert!(result.wave.reworked > 0.0);
+        for (cell, &e) in after.iter().enumerate() {
+            let z = mesh.vertex(cell as u32).z;
+            if cell != lagoon && z > 0.42 && z <= 0.5 {
+                // Near the open sea: down to the storm wave base (relative to the sea level
+                // before the step's own rise).
+                assert!(e - rise <= params.wave_base + 1e-6, "{cell}: {e}");
+            }
+        }
+        // The sheltered lagoon is already below its shallow wave base: untouched.
+        assert_eq!(result.sediment_delta[lagoon], 0.0);
+        // Nothing is lost (the land's cliffs add sediment from bedrock).
+        let gained: f64 = result.sediment_delta.iter().sum::<f64>() - result.wave.cliff_bedrock;
+        assert!(gained.abs() < 1e-6 * result.wave.reworked, "{gained}");
+    }
+
+    #[test]
+    fn wave_erosion_conserves_rock_mass() {
+        let mesh = SphereMesh::icosphere(4);
+        let elevation = island(&mesh);
+        let class = classes(&elevation, 0.0);
+        // Fast retreat, so that much moves.
+        let params = ErosionParams {
+            cliff_retreat_sediment: 0.05,
+            cliff_retreat_bedrock: 0.01,
+            ..ErosionParams::default()
+        };
+        let sediment = vec![300.0; mesh.len()];
+        let result = run_with(
+            &mesh,
+            &elevation,
+            &sediment,
+            1.0,
+            &vec![0; mesh.len()],
+            &class,
+            &params,
+        );
+        assert!(result.wave.cliff_bedrock > 0.0 && result.wave.cliff_sediment > 0.0);
+        let change: f64 = (0..mesh.len())
+            .map(|c| {
+                result.bedrock_delta[c] * 2800.0 + result.sediment_delta[c] * SEDIMENT_ROCK_DENSITY
+            })
+            .sum();
+        let eroded: f64 = result.bedrock_delta.iter().map(|d| -d * 2800.0).sum();
+        assert!(
+            change.abs() < 1e-9 * eroded,
+            "change {change}, eroded {eroded}"
+        );
     }
 }

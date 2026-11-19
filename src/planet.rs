@@ -5,7 +5,7 @@ use std::time::Instant;
 use tracing::{debug, debug_span};
 
 use crate::climate::{Climate, ClimateParams};
-use crate::erosion::{CrustClass, ErosionParams, Surface, erode};
+use crate::erosion::{CrustClass, ErosionParams, Surface, WaveErosion, erode};
 use crate::tectonics::{Crust, Simulation, Statistics};
 use crate::temperature::{TemperatureFields, TemperatureModel, TemperatureParams};
 
@@ -27,6 +27,10 @@ pub struct Planet {
     sediment_overfill: f64,
     /// Sediment deposited in the ocean per zone in the last step, in m³/yr.
     sediment_deposition: [f64; 4],
+    /// Sediment moved by waves so far (rock-equivalent thickness over one cell, summed).
+    wave_erosion: WaveErosion,
+    /// Sediment delivered to the oceans so far (m³).
+    sediment_delivered: f64,
 }
 
 /// Statistics of the planet, extending the tectonic statistics.
@@ -59,6 +63,10 @@ pub struct PlanetStatistics {
     pub frozen_fraction: f64,
     /// Where the sediment sits and how much of the sea level it makes up.
     pub sediment_reservoirs: SedimentReservoirs,
+    /// Sediment moved by waves so far, in Gt.
+    pub wave_erosion: WaveErosion,
+    /// Sediment delivered to the oceans by rivers so far, in Gt.
+    pub sediment_delivered: f64,
 }
 
 /// The part of the sea level (m) due to the sediment of groups of cells (see
@@ -123,6 +131,8 @@ impl Planet {
             sediment_flux: 0.0,
             sediment_overfill: 0.0,
             sediment_deposition: [0.0; 4],
+            wave_erosion: WaveErosion::default(),
+            sediment_delivered: 0.0,
         };
         planet.precipitation = planet.compute_precipitation(&planet.tectonics.surface_elevations());
         planet
@@ -185,6 +195,12 @@ impl Planet {
             self.discharge = result.discharge;
             self.sediment_flux = result.sediment_to_ocean / dt_years;
             self.sediment_overfill += result.sediment_overfill;
+            self.sediment_delivered += result.sediment_to_ocean;
+            let wave = &mut self.wave_erosion;
+            wave.cliff_sediment += result.wave.cliff_sediment;
+            wave.cliff_bedrock += result.wave.cliff_bedrock;
+            wave.reworked += result.wave.reworked;
+            wave.stayed += result.wave.stayed;
             let cell_area = self.cell_area();
             self.sediment_deposition = result.deposited.map(|d| d * cell_area / dt_years);
         }
@@ -271,6 +287,18 @@ impl Planet {
             sediment_deposition: self.sediment_deposition,
             sediment_stock,
             sediment_reservoirs: self.sediment_reservoirs(&elevation),
+            wave_erosion: {
+                let to_gt = cell_area * crate::isostasy::SEDIMENT_ROCK_DENSITY / 1e12;
+                let w = &self.wave_erosion;
+                WaveErosion {
+                    cliff_sediment: w.cliff_sediment * to_gt,
+                    cliff_bedrock: w.cliff_bedrock * to_gt,
+                    reworked: w.reworked * to_gt,
+                    stayed: w.stayed * to_gt,
+                }
+            },
+            sediment_delivered: self.sediment_delivered * crate::isostasy::SEDIMENT_ROCK_DENSITY
+                / 1e12,
         }
     }
 
