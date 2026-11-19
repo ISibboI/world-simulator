@@ -21,7 +21,9 @@ use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
 use crate::planet::Planet;
 use crate::sphere::SphereMesh;
-use crate::tectonics::{MassLedger, MaterialBudget, Simulation, TectonicParams, TrenchSediment};
+use crate::tectonics::{
+    InitialConfiguration, MassLedger, MaterialBudget, Simulation, TectonicParams, TrenchSediment,
+};
 use crate::temperature::TemperatureParams;
 
 /// The planet radius in metres; used for erosion, climate and to report linear speeds.
@@ -50,6 +52,10 @@ struct Cli {
     /// Fraction of the surface initially covered by continental crust.
     #[arg(long, default_value_t = 0.4)]
     continental_fraction: f64,
+
+    /// Initial arrangement of the continents.
+    #[arg(long, value_enum, default_value_t = InitialConfiguration::Dispersed)]
+    initial: InitialConfiguration,
 
     /// Simulated duration in Myr.
     #[arg(long, default_value_t = 500.0)]
@@ -133,6 +139,7 @@ fn main() -> anyhow::Result<()> {
     info!(cells = mesh.len(), "Created planet mesh");
     let mut params = TectonicParams {
         continental_fraction: cli.continental_fraction,
+        initial: cli.initial,
         ..TectonicParams::default()
     };
     params.matching.verify = cli.verify_matching;

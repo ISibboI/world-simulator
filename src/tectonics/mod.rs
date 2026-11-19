@@ -50,6 +50,7 @@ mod topology;
 pub use boundaries::{GapStatistics, TrenchSediment};
 pub use crust::*;
 pub use events::{EventCounts, PlateEventParams};
+pub use generation::InitialConfiguration;
 pub use ledger::MassLedger;
 pub use mantle::{MantleParams, Plume};
 pub use matching::{MatchingParams, MatchingStatistics};
@@ -78,13 +79,16 @@ pub struct TectonicParams {
     pub initial_subduction_fraction: f64,
     /// The fraction of the surface initially covered by continental crust.
     pub continental_fraction: f64,
-    /// The number of initial continents.
+    /// The number of large initial continents (cratons of the continent field; noise adds
+    /// smaller fragments).
     pub continent_count: usize,
+    /// Arrangement of the initial continents.
+    pub initial: InitialConfiguration,
     /// Crust thickness at the edges of the initial continents in metres (thinned, partly
     /// flooded margins).
     pub continental_coast_thickness: f64,
-    /// Width (m) of the margins of the initial continents over which the crust thickens from the
-    /// edge to the interior.
+    /// Great-circle distance (m) from the coast of the initial continents over which the crust
+    /// thickens to the interior thickness (quadratically, most of it near the coast).
     pub continental_margin_width: f64,
     /// Crust thickness in the interior of the initial continents in metres.
     pub continental_interior_thickness: f64,
@@ -233,6 +237,7 @@ impl Default for TectonicParams {
             initial_subduction_fraction: 0.5,
             continental_fraction: 0.4,
             continent_count: 7,
+            initial: InitialConfiguration::Dispersed,
             continental_coast_thickness: 22_000.0,
             continental_interior_thickness: 35_000.0,
             continental_margin_width: 1000e3,
@@ -359,18 +364,13 @@ pub struct Plate {
 }
 
 /// Initial ocean ages with Earth's roughly triangular age–area distribution: the oceanic cells
-/// ranked by `distance` (ties by `jitter`) get the age 180 Myr · (1 − √(1 − u)) of their
-/// quantile u (mean 60 Myr).
-fn triangular_ages(distance: &[u32], jitter: &[f64], is_continental: &[bool]) -> Vec<f64> {
+/// ranked by their great-circle `distance` from the ridges (ties by index) get the age
+/// 180 Myr · (1 − √(1 − u)) of their quantile u (mean 60 Myr).
+fn triangular_ages(distance: &[f64], is_continental: &[bool]) -> Vec<f64> {
     let mut oceanic: Vec<usize> = (0..distance.len())
         .filter(|&cell| !is_continental[cell])
         .collect();
-    oceanic.sort_unstable_by(|&a, &b| {
-        distance[a]
-            .cmp(&distance[b])
-            .then(jitter[a].total_cmp(&jitter[b]))
-            .then(a.cmp(&b))
-    });
+    oceanic.sort_unstable_by(|&a, &b| distance[a].total_cmp(&distance[b]).then(a.cmp(&b)));
     let mut ages = vec![0.0; distance.len()];
     let count = oceanic.len().max(1) as f64;
     for (rank, &cell) in oceanic.iter().enumerate() {
@@ -476,32 +476,24 @@ impl Simulation {
         let cell_count = mesh.len();
 
         // Partition the sphere into plates of varying size.
-        let plate_seeds = sample_distinct_cells(&mesh, plate_count, rng);
-        let plate_scales: Vec<f64> = (0..plate_count)
-            .map(|_| rng.random_range(0.5..2.0))
-            .collect();
-        let plate_of_cell = grow_regions(&mesh, &plate_seeds, &plate_scales, cell_count, rng);
+        let plate_of_cell = plate_partition(&mesh, plate_count, rng);
 
         // Place continents independently of the plates.
         let continental_cells =
             (params.continental_fraction.clamp(0.0, 1.0) * cell_count as f64).round() as usize;
-        let continent_seeds = sample_distinct_cells(&mesh, params.continent_count.max(1), rng);
-        let continent_scales = vec![1.0; continent_seeds.len()];
-        let continent_of_cell = grow_regions(
+        let is_continental = continents(
             &mesh,
-            &continent_seeds,
-            &continent_scales,
             continental_cells,
+            params.continent_count,
+            params.initial,
             rng,
         );
-        let is_continental: Vec<bool> = continent_of_cell.iter().map(|&c| c != u32::MAX).collect();
 
         // Continents rise towards their interior, oceans get older away from plate boundaries.
-        let margin_cells = (params.continental_margin_width
-            / (params.planet_radius * mesh.mean_edge_angle()))
-        .max(1.0);
-        let coast_distance = distance_to(&mesh, |cell| !is_continental[cell as usize]);
-        let boundary_distance = distance_to(&mesh, |cell| {
+        let margin_angle =
+            (params.continental_margin_width / params.planet_radius).max(mesh.mean_edge_angle());
+        let coast_distance = great_circle_distance_to(&mesh, |cell| !is_continental[cell as usize]);
+        let boundary_distance = great_circle_distance_to(&mesh, |cell| {
             mesh.neighbors(cell)
                 .iter()
                 .any(|&n| plate_of_cell[n as usize] != plate_of_cell[cell as usize])
@@ -511,16 +503,7 @@ impl Simulation {
         // distribution (see `triangular_ages`); first from all boundaries, which only matters
         // for choosing the initial subduction zones below, then away from the boundaries that
         // do not become trenches (ridges), so that old crust subducts at the trenches.
-        let jitter: Vec<f64> = (0..cell_count)
-            .map(|cell| {
-                if is_continental[cell] {
-                    0.0
-                } else {
-                    rng.random_range(0.0..1.0)
-                }
-            })
-            .collect();
-        let ocean_age = triangular_ages(&boundary_distance, &jitter, &is_continental);
+        let ocean_age = triangular_ages(&boundary_distance, &is_continental);
 
         let mut plates: Vec<Plate> = (0..plate_count)
             .map(|_| Plate {
@@ -536,8 +519,11 @@ impl Simulation {
 
         for cell in 0..cell_count {
             let crust = if is_continental[cell] {
-                // Continents thicken from their coasts towards their interior.
-                let inland = (f64::from(coast_distance[cell]) / margin_cells).min(1.0);
+                // Continents thicken from their coasts towards their interior, most of it near
+                // the coast (thinned passive margins are a few hundred km wide), over the
+                // great-circle distance from the nearest oceanic cell.
+                let outside = 1.0 - (coast_distance[cell] / margin_angle).min(1.0);
+                let inland = 1.0 - outside * outside;
                 let thickness = params.continental_coast_thickness
                     + (params.continental_interior_thickness - params.continental_coast_thickness)
                         * inland
@@ -585,14 +571,14 @@ impl Simulation {
         // Ages grow away from the boundaries that are no subduction zones.
         let trench_pairs: HashSet<(u32, u32)> =
             initial_subduction.iter().map(|&(pair, _)| pair).collect();
-        let ridge_distance = distance_to(&mesh, |cell| {
+        let ridge_distance = great_circle_distance_to(&mesh, |cell| {
             let plate = plate_of_cell[cell as usize];
             mesh.neighbors(cell).iter().any(|&n| {
                 let other = plate_of_cell[n as usize];
                 other != plate && !trench_pairs.contains(&pair_key(plate, other))
             })
         });
-        let ocean_age = triangular_ages(&ridge_distance, &jitter, &is_continental);
+        let ocean_age = triangular_ages(&ridge_distance, &is_continental);
         for (cell, &age) in ocean_age.iter().enumerate() {
             if !is_continental[cell] {
                 plates[plate_of_cell[cell] as usize].crust[cell] = Some(new_oceanic_crust(-age));

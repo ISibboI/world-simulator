@@ -1637,6 +1637,19 @@ mod tests {
         let tiny = cap(-DVec3::Z, 0.1);
         let main_plate = simulation.owners[simulation.mesh.nearest(DVec3::X) as usize].plate;
         let other = 1 - main_plate;
+        // Plate 1 keeps only a cap around -x, far from both pieces (the random initial
+        // partition may otherwise reach the poles).
+        for cell in 0..cells {
+            let plate = if simulation.mesh.vertex(cell).x < -0.8 {
+                other
+            } else {
+                main_plate
+            };
+            let owner = simulation.owners[cell as usize];
+            let crust = simulation.plates[owner.plate as usize].crust[cell as usize].take();
+            simulation.plates[plate as usize].crust[cell as usize] = crust;
+            simulation.owners[cell as usize] = Ownership { plate, local: cell };
+        }
         for &cell in large.iter().chain(&tiny) {
             simulation.owners[cell as usize] = Ownership {
                 plate: other,
