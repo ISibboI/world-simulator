@@ -402,6 +402,17 @@ pub(super) fn great_circle_distance_to(
     mesh: &SphereMesh,
     is_source: impl Fn(u32) -> bool,
 ) -> Vec<f64> {
+    great_circle_distance_within(mesh, is_source, |_, _| true)
+}
+
+/// [`great_circle_distance_to`] along paths that only step between neighbouring cells `a` and
+/// `b` for which `connected(a, b)` holds (e.g. cells of the same plate); infinity for cells
+/// not connected to a source.
+pub(super) fn great_circle_distance_within(
+    mesh: &SphereMesh,
+    is_source: impl Fn(u32) -> bool,
+    connected: impl Fn(u32, u32) -> bool,
+) -> Vec<f64> {
     let mut distance = vec![f64::INFINITY; mesh.len()];
     let mut nearest = vec![u32::MAX; mesh.len()];
     let mut heap = BinaryHeap::new();
@@ -419,6 +430,9 @@ pub(super) fn great_circle_distance_to(
         let source = nearest[cell as usize];
         let source_position = mesh.vertex(source);
         for &neighbor in mesh.neighbors(cell) {
+            if !connected(cell, neighbor) {
+                continue;
+            }
             let candidate = angle_between(mesh.vertex(neighbor), source_position);
             if candidate < distance[neighbor as usize] {
                 distance[neighbor as usize] = candidate;
