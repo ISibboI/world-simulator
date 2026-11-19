@@ -209,10 +209,14 @@ components (climate, erosion, …) are expected to build on it.
    length 4–21% (Earth ~43%).
 4. Afterwards an independent evaluation of the whole sediment/trench chain against the targets.
 
+- Issue 14 done (2026-11-19, independent agent, `plans/issue-14-initial-conditions.md`): initial
+  continents from domain-warped fBm noise (exact continental fraction), noise-warped Voronoi
+  plates that spread through continents they reach, great-circle distances,
+  `--initial dispersed|supercontinent`; initial collisions 66k → 19k km, shorter start-up.
+
 ## Next steps (ideas)
 
 - Parallelise ownership resolution (rayon).
-- Better initial conditions (noise-based continents, interior relief).
 - Glacial erosion and snow; ocean currents for coastal climate.
 
 ## User preferences
