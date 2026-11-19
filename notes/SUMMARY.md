@@ -191,8 +191,10 @@ components (climate, erosion, …) are expected to build on it.
 1. ~~Maturing intra-oceanic arcs~~ done 2026-11-19 (continental balance target met). Open from
    it: arcs are still thin (re-measure the thickness distribution; arc growth less dependent on
    convergence, within Earth's 30–95 km³/km/Myr); the sediment part of the sea level is not
-   decelerating (+58 m per 100 Myr at 400–500 Myr, 4-seed mean) — more seeds or longer runs to
-   separate trend from seed noise before acting.
+   decelerating: 8 seeds × 1000 Myr show a real trend, +26 ± 2 m per 100 Myr over 500–1000 Myr
+   (every seed +18…+33), stock +1.3 Gt/yr: crystalline felsic crust turns into sediment faster
+   than sediment returns to crust. **Next: find the missing/weak sediment → crust path** (see
+   session 2026-11-19).
 2. Separately: seed 1's loss at the collision stacking cap (0.4 Gt/yr); the mafic-erosion
    tracer artefact in the felsic budget (+0.3 Gt/yr; erosion of mafic crust becomes sediment).
 3. Then back to issue 1r/7: margin stretching covers < half of the continental opening (COB
