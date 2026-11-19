@@ -589,10 +589,13 @@ fn snapshot(
         100.0 * statistics.continental_masses.largest_share,
     );
     info!(
-        "    land precipitation {:4.2} m/yr | largest river {:8.0} m³/s | \
+        "    land precipitation {:4.2} m/yr (20–60° {:4.2} m/yr, {:.0}% of land below 0.25 m/yr) | \
+         largest river {:8.0} m³/s | \
          sediment to ocean {:5.1} km³/yr (shelf {:.1}, slope {:.1}, rise {:.1}, fan {:.1}) | \
          sediment stock (Gt) continental {:.3e}, transitional {:.3e}, oceanic {:.3e}",
         planet_statistics.mean_land_precipitation,
+        planet_statistics.midlatitude_land_precipitation,
+        100.0 * planet_statistics.arid_land_fraction,
         planet_statistics.largest_river / SECONDS_PER_YEAR,
         planet_statistics.sediment_flux / 1e9,
         planet_statistics.sediment_deposition[0] / 1e9,
@@ -709,14 +712,16 @@ struct PreviousSnapshot {
 /// Writes one CSV row per cell: latitude (°), surface elevation (m), rock-equivalent and bulk
 /// sediment thickness (m), crust thickness (m), density, felsic fraction and metasediment
 /// thickness (m), crust class (0 continental origin, 1 transitional, 2 oceanic), plate, age (Myr),
-/// number of cells showing the same sample, whether the cell is at a coast, precipitation (m/yr)
-/// and discharge (m³/yr).
+/// number of cells showing the same sample, whether the cell is at a coast, precipitation (m/yr),
+/// discharge (m³/yr), longitude (°), and the annual mean, January and July surface temperatures
+/// (°C).
 fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Write;
     let simulation = planet.tectonics();
     let mesh = simulation.mesh();
     let cell_count = mesh.len() as u32;
     let elevation = simulation.surface_elevations();
+    let temperature = planet.temperature();
     let mut shown = std::collections::HashMap::new();
     for cell in 0..cell_count {
         *shown.entry(simulation.owner(cell)).or_insert(0u32) += 1;
@@ -724,7 +729,8 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
     writeln!(
         file,
-        "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge"
+        "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
+             lon,t_annual,t_jan,t_jul"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -742,7 +748,8 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             .any(|&m| (elevation[m as usize] < 0.0) != (e < 0.0));
         writeln!(
             file,
-            "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e}",
+            "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
+             {:.3},{:.2},{:.2},{:.2}",
             mesh.vertex(cell).z.asin().to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -756,6 +763,10 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             u8::from(coast),
             planet.precipitation()[cell as usize],
             planet.discharge()[cell as usize],
+            mesh.vertex(cell).y.atan2(mesh.vertex(cell).x).to_degrees(),
+            temperature.annual_mean[cell as usize],
+            temperature.monthly[0][cell as usize],
+            temperature.monthly[6][cell as usize],
         )?;
     }
     file.flush()?;

@@ -38,6 +38,10 @@ pub struct PlanetStatistics {
     pub tectonics: Statistics,
     /// Mean precipitation over land in m/yr.
     pub mean_land_precipitation: f64,
+    /// Mean precipitation over land between 20° and 60° latitude (both hemispheres) in m/yr.
+    pub midlatitude_land_precipitation: f64,
+    /// Fraction of land with less than 0.25 m/yr of precipitation (arid).
+    pub arid_land_fraction: f64,
     /// Discharge of the largest river mouth in m³/yr.
     pub largest_river: f64,
     /// Sediment delivered to the oceans in m³/yr.
@@ -264,6 +268,17 @@ impl Planet {
                 cells.fold((0.0, 0usize), |(sum, count), c| (sum + value(c), count + 1));
             if count == 0 { 0.0 } else { sum / count as f64 }
         };
+        let precipitation = |c: usize| self.precipitation[c];
+        let midlatitude_land_precipitation = mean(
+            &mut land
+                .iter()
+                .copied()
+                .filter(|&c| (20.0..60.0).contains(&latitude(c).abs())),
+            &precipitation,
+        );
+        let arid_land_fraction = mean(&mut land.iter().copied(), &|c| {
+            f64::from(u8::from(self.precipitation[c] < 0.25))
+        });
         let all = || 0..elevation.len();
         let annual = |c: usize| fields.annual_mean[c];
 
@@ -285,6 +300,8 @@ impl Planet {
                 / elevation.len() as f64,
             tectonics: self.tectonics.statistics(),
             mean_land_precipitation,
+            midlatitude_land_precipitation,
+            arid_land_fraction,
             largest_river,
             sediment_flux: self.sediment_flux,
             sediment_overfill: self.sediment_overfill,
