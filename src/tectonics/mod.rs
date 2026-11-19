@@ -52,7 +52,7 @@ pub use boundaries::{GapStatistics, TrenchSediment};
 pub use crust::*;
 pub use events::{EventCounts, PlateEventParams};
 pub use generation::InitialConfiguration;
-pub use initial_sediment::InitialSedimentParams;
+pub use initial_sediment::{InitialSedimentParams, PlatformEmplacement};
 pub use ledger::MassLedger;
 pub use mantle::{MantleParams, Plume};
 pub use matching::{MatchingParams, MatchingStatistics};
@@ -303,6 +303,15 @@ impl TectonicParams {
         let field = match name {
             "initial_sediment.enabled" => {
                 sediment.enabled = value != 0.0;
+                return Ok(());
+            }
+            "initial_sediment.platform_emplacement" => {
+                sediment.platform_emplacement = match value {
+                    0.0 => PlatformEmplacement::OnTop,
+                    1.0 => PlatformEmplacement::MohoDepth,
+                    2.0 => PlatformEmplacement::Elevation,
+                    _ => anyhow::bail!("platform_emplacement is 0, 1 or 2"),
+                };
                 return Ok(());
             }
             "initial_sediment.ccd_depth" => &mut sediment.ccd_depth,

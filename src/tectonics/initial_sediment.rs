@@ -13,9 +13,10 @@
 //! * **Passive-margin prisms** on flooded continental crust: thinned margin crust subsides, and
 //!   sediment fills the space up to the shelf (accommodation fill, as the erosion routing does).
 //! * **Platform cover** on the continental interior: sedimentary basins and platforms alternate
-//!   with bare shields. The cover fills space made by subsidence of the basement, so it is
-//!   emplaced keeping the surface where it was (the initial hypsometry is calibrated on Earth's,
-//!   which includes the cover): the basement thins beneath it.
+//!   with bare shields. The generated crustal thickness is taken as the depth of the Moho below
+//!   the surface, as Earth's crustal thicknesses are measured (cover included), so the cover
+//!   replaces basement of the same thickness (see [`PlatformEmplacement`]); its lower density
+//!   raises the surface a little (~0.3 km for 1.8 km of cover).
 //!
 //! The cover is part of the initial crust mass (a stock, not a source), and the sea level is
 //! solved with it. Earth's sedimentary shell is ~2.5–2.7e9 Gt (~1.1e9 km³), most of it in fold
@@ -25,9 +26,24 @@
 
 use super::*;
 use crate::isostasy::{
-    dry_response, sediment_dry_elevation, sediment_for_bulk_thickness, sediment_for_dry_elevation,
-    sediment_for_rise,
+    dry_response, sediment_bulk_thickness, sediment_dry_elevation, sediment_for_bulk_thickness,
+    sediment_for_dry_elevation, sediment_for_rise,
 };
+
+/// How the platform cover is placed on the continental basement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlatformEmplacement {
+    /// On top of the basement: the surface rises.
+    OnTop,
+    /// Replacing basement of the same thickness: the generated crustal thickness is the depth
+    /// of the Moho below the surface, as Earth's crustal thicknesses are measured (cover
+    /// included). The surface rises by the buoyancy of the light cover.
+    MohoDepth,
+    /// Replacing basement such that the surface stays (the cover fills space made by
+    /// subsidence of the basement); in this model the water-saturated cover is light, so
+    /// ~2.5 m of basement go per m of cover.
+    Elevation,
+}
 
 /// Parameters of the initial sediment cover. Rates are rock-equivalent thicknesses (mass /
 /// [`SEDIMENT_ROCK_DENSITY`]) per Myr: 1 m/Myr ≈ 0.2 g/cm²/kyr of mass accumulation.
@@ -58,6 +74,12 @@ pub struct InitialSedimentParams {
     /// intracratonic basins hold ~5–8 km), and the basement below it stays at least as thick
     /// as at the coast of the initial continents (so it stays continental crust).
     pub max_platform_factor: f64,
+    /// How the platform cover is placed (`--set initial_sediment.platform_emplacement=` 0 on
+    /// top, 1 Moho depth, 2 elevation). In 4-seed runs over 1000 Myr, keeping the elevation
+    /// removed 9% of the felsic crust and flooded the continents more (44% vs 29% at 1000 Myr);
+    /// on top raised the mean land to ~1.3 km at t = 0; keeping the Moho depth (land ~1.0 km,
+    /// felsic −4.5%) followed main within the scatter between seeds.
+    pub platform_emplacement: PlatformEmplacement,
     /// Weight (0–1) of low bare elevation, against the noise, in where the platform cover
     /// lies (platforms and basins lie low, shields stand high). Off by default: low ground of
     /// the initial continents is thinned crust near the coasts, where the minimum basement
@@ -85,6 +107,7 @@ impl Default for InitialSedimentParams {
             platform_thickness: 3000.0,
             shield_fraction: 0.4,
             max_platform_factor: 2.0,
+            platform_emplacement: PlatformEmplacement::MohoDepth,
             lowland_weight: 0.0,
             shelf_depth: -120.0,
             slope_depth: -2000.0,
@@ -283,9 +306,8 @@ impl Simulation {
 
         // Continental crust: platform cover where the bare surface lies above the shelf, a
         // prism filled up to the shelf below it (classified once, at the sea level of the bare
-        // continents). The platform cover keeps the surface where it was: the basement thins
-        // (see `Crust::crustal_buoyancy`; the old continental lithosphere has no thermal
-        // uplift), but stays at least as thick as at the coast.
+        // continents). Under the platform cover the basement thins (see `PlatformEmplacement`), but
+        // stays at least as thick as at the coast.
         let min_basement = self.params.continental_coast_thickness;
         let mut bare: Vec<Crust> = Vec::with_capacity(continental.len());
         let mut on_platform = vec![false; continental.len()];
@@ -295,12 +317,20 @@ impl Simulation {
             bare.push(*crust);
             if crust.surface_elevation(0.0, sea_level) >= params.shelf_depth {
                 on_platform[index] = true;
+                let room = (crust.thickness - min_basement).max(0.0);
                 let response = dry_response(crust.removal_isostatic_density());
-                let max_cover = sediment_for_dry_elevation(
-                    (crust.thickness - min_basement).max(0.0) * response,
-                );
-                crust.sediment = platform[index].min(max_cover);
-                crust.thickness -= sediment_dry_elevation(crust.sediment) / response;
+                match params.platform_emplacement {
+                    PlatformEmplacement::OnTop => crust.sediment = platform[index],
+                    PlatformEmplacement::MohoDepth => {
+                        crust.sediment = platform[index].min(sediment_for_bulk_thickness(room));
+                        crust.thickness -= sediment_bulk_thickness(crust.sediment);
+                    }
+                    PlatformEmplacement::Elevation => {
+                        crust.sediment =
+                            platform[index].min(sediment_for_dry_elevation(room * response));
+                        crust.thickness -= sediment_dry_elevation(crust.sediment) / response;
+                    }
+                }
             }
         }
         // The prism displaces water and raises the sea level, which deepens the shelf again:
@@ -479,13 +509,17 @@ mod tests {
                     || crust.thickness == bare.thickness
             );
             if crust.thickness < bare.thickness {
-                // Platform cover keeps the surface (at the sea level of the covered planet).
+                // Platform cover keeps the Moho depth and raises the surface a little.
                 covered += 1;
-                let bare_elevation = bare.surface_elevation(0.0, with.sea_level);
+                let moho = crust.thickness + sediment_bulk_thickness(crust.sediment);
                 assert!(
-                    (elevation - bare_elevation).abs() < 1.0,
-                    "{elevation} vs {bare_elevation}"
+                    (moho - bare.thickness).abs() < 1e-6,
+                    "{moho} vs {}",
+                    bare.thickness
                 );
+                let bare_elevation = bare.surface_elevation(0.0, with.sea_level);
+                let rise = elevation - bare_elevation;
+                assert!((0.0..1000.0).contains(&rise), "rise {rise}");
                 assert!(crust.is_continental_origin());
             } else if crust.sediment > 0.0 {
                 // Flooded margins are filled to the shelf.
