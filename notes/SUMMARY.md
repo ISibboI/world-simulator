@@ -187,34 +187,34 @@ components (climate, erosion, …) are expected to build on it.
   packages needed). The repository is public, so CI status can be read via the GitHub REST API
   without the gh CLI.
 
-## Current plan (updated 2026-11-19; resume here)
+## Current plan (end of 2026-11-19; resume here)
 
-1. ~~Maturing intra-oceanic arcs~~ done 2026-11-19 (continental balance target met). Open from
-   it: arcs are still thin (re-measure the thickness distribution; arc growth less dependent on
-   convergence, within Earth's 30–95 km³/km/Myr); the sediment part of the sea level is not
-   decelerating: 8 seeds × 1000 Myr show a real trend, +26 ± 2 m per 100 Myr over 500–1000 Myr
-   (every seed +18…+33), stock +1.3 Gt/yr: crystalline felsic crust turns into sediment faster
-   than sediment returns to crust. Issue 13 (`plans/issue-13-ancient-ocean.md`): burial
-   metamorphism on any crust and subduction invasion near trenches → ocean ≥ 200 Myr 10.8 →
-   4.5% (target ≤ 1%, re-measure where it sits), initiations 0.056/Myr, oceanic stock flat. The
-   remaining rise (+18 ± 4 m per 100 Myr) is continental: overfill piles up as coastal land on
-   thinned crust because margins lack accommodation (progradation does not help). Item 3
-   (`plans/margin-stretching.md`): rifts may stretch into consumed slots (stretched share 0.34
-   → 0.52, flooded 27%); thinner margins deferred (cost felsic crust, no sediment gain).
-   Sediment erodes 2× faster than bedrock and spreads by diffusion (land capped at sea level,
-   marine 50× slower): overfill halves, flooded 33%, slope unchanged. With the issue-14 initial
-   conditions the sediment-part slope is +25 m per 100 Myr (500–1000 Myr; +17 with the old ones).
-2. Separately: seed 1's loss at the collision stacking cap (0.4 Gt/yr); the mafic-erosion
-   tracer artefact in the felsic budget (+0.3 Gt/yr; erosion of mafic crust becomes sediment).
-3. Then back to issue 1r/7: margin stretching covers < half of the continental opening (COB
-   crust ~26 km); flooded continental crust is 16–22% (Earth 25–30%); accretionary trench
-   length 4–21% (Earth ~43%).
-4. Afterwards an independent evaluation of the whole sediment/trench chain against the targets.
+State: main at the sediment-process commit (a933ec2) plus notes. Done today: intra-oceanic arcs
+(continental balance target met), issue 13 partly (burial metamorphism on any crust, subduction
+invasion), rifts stretch into consumed slots, issue 14 (noise-shaped initial conditions, merged),
+sediment erodes 2× faster than bedrock and spreads by diffusion. Experiments run on the server
+tktie (see `CLAUDE.md`); the latest reference runs are `agent-scratch/base14/` (processes off) and
+`agent-scratch/sedproc/` (current defaults), 1000 Myr, evaluated with `agent-scratch/eval_sed.py`
+and `agent-scratch/trend/trend.py`.
 
-- Issue 14 done (2026-11-19, independent agent, `plans/issue-14-initial-conditions.md`): initial
-  continents from domain-warped fBm noise (exact continental fraction), noise-warped Voronoi
-  plates that spread through continents they reach, great-circle distances,
-  `--initial dispersed|supercontinent`; initial collisions 66k → 19k km, shorter start-up.
+1. **Why the issue-14 initial conditions make continental sediment grow faster** (new): sediment
+   part of the sea level over 500–1000 Myr +17 m per 100 Myr with the old initial conditions, +26
+   with the new ones (continental sediment growth +0.72 → +1.05 Gt/yr; current defaults +25 ± 2,
+   8 seeds). Check margin length/geometry, fragment count, flooded share, overfill and where the
+   continental sediment sits (land vs flooded, crust thickness) for old vs new initial conditions.
+2. **Continental sediment growth** (~+0.9 Gt/yr, mostly on land on thinned crust): overfill is
+   halved by diffusion; remaining options: wave erosion of coasts to wave base (issue 11),
+   accommodation of margins (thinner margins were tested and cost ~2 Gt/yr felsic crust —
+   `plans/margin-stretching.md`), sediment → crust in orogens. Target: sediment-part slope ≤ 10 m
+   per 100 Myr after 500 Myr (Earth's stock is near steady state by recycling).
+3. **Issue 13 remainder**: ocean ≥ 200 Myr 4.5% (target ≤ 1%; re-measure where it sits now,
+   with the new initial conditions); induced/transform initiation (issue 1l).
+4. Small leaks: seed 1's loss at the collision stacking cap (0.4 Gt/yr); the mafic-erosion tracer
+   artefact in the felsic budget (+0.3 Gt/yr).
+5. Open from earlier: intra-oceanic arcs stay thin (arc growth less dependent on convergence,
+   within Earth's 30–95 km³/km/Myr); accretionary trench length 4–21% (Earth ~43%); the
+   supercontinent start breaks up slowly (200–300 Myr vs Pangaea ~100 Myr; rifting model).
+6. Then an independent evaluation of the whole sediment/trench/margin chain against the targets.
 
 ## Next steps (ideas)
 
