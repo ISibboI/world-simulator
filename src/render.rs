@@ -49,15 +49,15 @@ pub fn render_elevation(planet: &Planet, width: u32, river_threshold: f64) -> Rg
 }
 
 /// The colour of a cell on the planet surface for the 3D view: elevation colours, rivers, and
-/// permanent ice where the annual mean temperature is below -10 °C.
+/// permanent ice (sea ice and ice sheets).
 pub fn surface_color(planet: &Planet, cell: u32, river_threshold: f64) -> Rgb<u8> {
     let simulation = planet.tectonics();
     let elevation = simulation.surface_elevation(cell);
     let frozen = planet
         .temperature()
-        .annual_mean
+        .ice
         .get(cell as usize)
-        .is_some_and(|&t| t < -10.0);
+        .is_some_and(|&ice| ice > 0.5);
     if frozen {
         if elevation >= 0.0 {
             Rgb([240, 245, 250])

@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use tracing::{debug, debug_span};
 
-use crate::climate::{Climate, ClimateParams};
+use crate::climate::{Climate, ClimateParams, WaterCycle};
 use crate::erosion::{CrustClass, ErosionParams, Surface, WaveErosion, erode};
 use crate::tectonics::{Crust, Simulation, Statistics};
 use crate::temperature::{TemperatureFields, TemperatureModel, TemperatureParams};
@@ -42,6 +42,13 @@ pub struct PlanetStatistics {
     pub midlatitude_land_precipitation: f64,
     /// Fraction of land with less than 0.25 m/yr of precipitation (arid).
     pub arid_land_fraction: f64,
+    /// Global mean precipitation and evaporation in m/yr (equal when the water cycle is closed).
+    pub global_precipitation: f64,
+    pub global_evaporation: f64,
+    /// Mean runoff (precipitation minus evapotranspiration) of land in m/yr.
+    pub land_runoff: f64,
+    /// Latitude of the ITCZ in the solved months, in degrees.
+    pub itcz: Vec<f64>,
     /// Discharge of the largest river mouth in m³/yr.
     pub largest_river: f64,
     /// Sediment delivered to the oceans in m³/yr.
@@ -63,7 +70,10 @@ pub struct PlanetStatistics {
     pub polar_temperature: f64,
     /// Mean difference between the warmest and coldest month over land in K.
     pub land_seasonal_range: f64,
-    /// Fraction of the surface with an annual mean temperature below -10 °C (permanent ice).
+    /// Largest northward and southward meridional heat transport in PW, and the transport across
+    /// the interfaces nearest to 65°N and 65°S.
+    pub heat_transport: [f64; 4],
+    /// Fraction of the surface covered by permanent ice (sea ice, ice sheets).
     pub frozen_fraction: f64,
     /// Where the sediment sits and how much of the sea level it makes up.
     pub sediment_reservoirs: SedimentReservoirs,
@@ -124,7 +134,7 @@ impl Planet {
         erosion: Option<ErosionParams>,
         planet_radius: f64,
     ) -> Self {
-        let climate = Climate::new(tectonics.mesh(), climate);
+        let climate = Climate::new(tectonics.mesh(), planet_radius, climate);
         let mut temperature = TemperatureModel::new(tectonics.mesh(), temperature);
         temperature.update(&tectonics.surface_elevations(), None);
         let cell_count = tectonics.mesh().len();
@@ -142,7 +152,7 @@ impl Planet {
             wave_erosion: WaveErosion::default(),
             sediment_delivered: 0.0,
         };
-        planet.precipitation = planet.compute_precipitation(&planet.tectonics.surface_elevations());
+        planet.update_water_cycle(&planet.tectonics.surface_elevations());
         planet
     }
 
@@ -174,7 +184,7 @@ impl Planet {
         // Ice sheets depend on last step's snowfall.
         self.temperature
             .update(&elevation, Some(&self.precipitation));
-        self.precipitation = self.compute_precipitation(&elevation);
+        self.update_water_cycle(&elevation);
         let climate_time = start.elapsed();
 
         if let Some(params) = &self.erosion {
@@ -236,13 +246,17 @@ impl Planet {
         4.0 * std::f64::consts::PI * self.planet_radius.powi(2) / self.tectonics.mesh().len() as f64
     }
 
-    fn compute_precipitation(&self, elevation: &[f64]) -> Vec<f64> {
-        let cell_spacing = self.tectonics.mesh().mean_edge_angle() * self.planet_radius;
-        self.climate.precipitation(
-            elevation,
-            cell_spacing,
-            Some(&self.temperature.fields().sea_level_annual_mean),
-        )
+    fn update_water_cycle(&mut self, elevation: &[f64]) {
+        let fields = self.temperature.fields();
+        self.climate
+            .update(elevation, &fields.monthly, &fields.thermal_equator);
+        let cycle = self.climate.water_cycle();
+        debug!(iterations = ?cycle.iterations, clipped = cycle.clipped, "Water cycle solved");
+        self.precipitation = cycle.precipitation.clone();
+    }
+
+    pub fn water_cycle(&self) -> &WaterCycle {
+        self.climate.water_cycle()
     }
 
     pub fn statistics(&self) -> PlanetStatistics {
@@ -276,6 +290,12 @@ impl Planet {
                 .filter(|&c| (20.0..60.0).contains(&latitude(c).abs())),
             &precipitation,
         );
+        let cycle = self.climate.water_cycle();
+        let global_precipitation = mean(&mut (0..elevation.len()), &precipitation);
+        let global_evaporation = mean(&mut (0..elevation.len()), &|c| cycle.evaporation[c]);
+        let land_runoff = mean(&mut land.iter().copied(), &|c| {
+            self.precipitation[c] - cycle.evaporation[c]
+        });
         let arid_land_fraction = mean(&mut land.iter().copied(), &|c| {
             f64::from(u8::from(self.precipitation[c] < 0.25))
         });
@@ -296,12 +316,38 @@ impl Planet {
             equatorial_temperature: mean(&mut all().filter(|&c| latitude(c).abs() < 10.0), &annual),
             polar_temperature: mean(&mut all().filter(|&c| latitude(c).abs() > 70.0), &annual),
             land_seasonal_range: mean(&mut land.iter().copied(), &|c| fields.seasonal_range(c)),
-            frozen_fraction: all().filter(|&c| fields.annual_mean[c] < -10.0).count() as f64
+            heat_transport: {
+                let transport = &fields.meridional_transport;
+                let to_petawatts = |t: f64| t * self.planet_radius.powi(2) / 1e15;
+                let nearest = |latitude: f64| {
+                    transport
+                        .iter()
+                        .min_by(|a, b| (a.0 - latitude).abs().total_cmp(&(b.0 - latitude).abs()))
+                        .map_or(0.0, |&(_, t)| to_petawatts(t))
+                };
+                [
+                    transport
+                        .iter()
+                        .map(|t| to_petawatts(t.1))
+                        .fold(0.0, f64::max),
+                    transport
+                        .iter()
+                        .map(|t| to_petawatts(t.1))
+                        .fold(0.0, f64::min),
+                    nearest(65.0),
+                    nearest(-65.0),
+                ]
+            },
+            frozen_fraction: all().filter(|&c| fields.ice[c] > 0.5).count() as f64
                 / elevation.len() as f64,
             tectonics: self.tectonics.statistics(),
             mean_land_precipitation,
             midlatitude_land_precipitation,
             arid_land_fraction,
+            global_precipitation,
+            global_evaporation,
+            land_runoff,
+            itcz: cycle.itcz.clone(),
             largest_river,
             sediment_flux: self.sediment_flux,
             sediment_overfill: self.sediment_overfill,
