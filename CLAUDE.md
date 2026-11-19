@@ -2,28 +2,41 @@
 
 A Rust binary that simulates a planet, starting with plate tectonics on a sphere.
 
-## Session notes
+## Issue and progress tracking
 
-Notes on every chat session live in [notes/](notes/) and are checked into git.
+Issues, plans, progress and results are tracked on **GitHub**
+(https://github.com/ISibboI/world-simulator/issues), not in local files:
 
-- `notes/SUMMARY.md` is the rolling summary of the project: goals, current state, architecture,
-  decisions, known issues and next steps. It is imported below, so it is loaded at the start of
-  every session. Familiarise yourself with it before starting work.
-- `notes/sessions/YYYY-MM-DD.md` holds the detailed log of the session(s) on that day: what the
-  user asked for, what was done, decisions and their reasons, and open questions. If several
-  sessions happen on one day, append a new `## Session N` section.
+- New problems, ideas and tasks become new GitHub issues.
+- Plans go into the issue body or a plan comment on the issue (revised plans as new comments).
+- Progress and results go into issue comments and PR descriptions (what was done, decisions and
+  their reasons, measurements, open questions).
 
-- Known physical-accuracy issues are tracked as **GitHub issues**
-  (https://github.com/ISibboI/world-simulator/issues); record new issues and progress there.
-  `notes/ISSUES.md` only maps the old notes numbers (used in older notes, plan file names and
-  session logs) to GitHub numbers; cite issues as "issue 13 (#14)" while the old number is in
-  use, or just "#N" for new issues. The order of work is the "Current plan" in `SUMMARY.md`.
+[notes/](notes/) is a **read-only archive** (frozen as of 2026-11-19) of the old issues, plans
+(`notes/plans/`), research (`notes/research/`), session logs (`notes/sessions/`) and the project
+summary. Read it for context. `notes/ISSUES.md` maps the old notes issue numbers to GitHub
+numbers; cite issues as "issue 13 (#14)" where the old number is still in use, or just "#N".
+When old material becomes relevant, move it to the GitHub issue (as text or a comment) instead
+of editing or extending the archive. **Do not create new local notes**: no new session logs,
+plan or research files, and no new entries in `notes/SUMMARY.md`.
 
-Before ending a session (or after any significant piece of work), update the session log and
-`notes/SUMMARY.md`, and commit the notes together with the work they describe. Keep the summary
-short; move detail into the session logs.
+The archived summary is imported below as background: its overview and architecture describe
+the code as of 2026-11-19, and its "Current plan" is still the order of work until its items
+are moved to GitHub issues. Its state and known-issue sections may be stale; the code and the
+GitHub issues are authoritative, and its preference to keep session notes in `notes/` is
+superseded by this section. Its still-binding user preferences are under "Working conventions".
 
 @notes/SUMMARY.md
+
+## Working conventions
+
+- Before working on an issue, have an independent agent review the plan; get independent
+  evaluations of the results.
+- Calibrate only as far as needed to confirm soundness; prefer fixing physics over tuning.
+- Efficiency before parallelism: the simulation is single-threaded by choice.
+- Logging uses `tracing`; use its macros, never `println!`, for console output.
+- CI follows the user's existing "Tests and Lints" workflow template; pin GitHub Actions to the
+  latest **major version tag** (e.g. `actions/checkout@v7`), not SHAs.
 
 ## Development
 
