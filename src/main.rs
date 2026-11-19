@@ -81,6 +81,10 @@ struct Cli {
     #[arg(long)]
     no_erosion: bool,
 
+    /// Start with a bare planet instead of an initial sediment cover.
+    #[arg(long)]
+    no_initial_sediment: bool,
+
     /// Minimum discharge in m³/yr for a cell to be drawn as a river.
     #[arg(long, default_value_t = 1e11)]
     river_threshold: f64,
@@ -143,6 +147,7 @@ fn main() -> anyhow::Result<()> {
         ..TectonicParams::default()
     };
     params.matching.verify = cli.verify_matching;
+    params.initial_sediment.enabled = !cli.no_initial_sediment;
     params.track_material_budget = cli.material_budget;
     let mut erosion = ErosionParams {
         planet_radius: EARTH_RADIUS,

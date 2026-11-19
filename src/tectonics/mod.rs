@@ -40,6 +40,7 @@ mod crust;
 mod dynamics;
 mod events;
 mod generation;
+mod initial_sediment;
 mod ledger;
 mod mantle;
 mod matching;
@@ -51,6 +52,7 @@ pub use boundaries::{GapStatistics, TrenchSediment};
 pub use crust::*;
 pub use events::{EventCounts, PlateEventParams};
 pub use generation::InitialConfiguration;
+pub use initial_sediment::InitialSedimentParams;
 pub use ledger::MassLedger;
 pub use mantle::{MantleParams, Plume};
 pub use matching::{MatchingParams, MatchingStatistics};
@@ -92,6 +94,8 @@ pub struct TectonicParams {
     pub continental_margin_width: f64,
     /// Crust thickness in the interior of the initial continents in metres.
     pub continental_interior_thickness: f64,
+    /// Sediment cover of the initial planet.
+    pub initial_sediment: InitialSedimentParams,
     /// Thickness (m) of sediment that the subduction channel carries down with the slab; the
     /// trench fill above it is scraped off into an accretionary wedge of the overriding plate
     /// (frontal accretion). Margins with more than ~1 km of trench fill are accretionary,
@@ -241,6 +245,7 @@ impl Default for TectonicParams {
             continental_coast_thickness: 22_000.0,
             continental_interior_thickness: 35_000.0,
             continental_margin_width: 1000e3,
+            initial_sediment: InitialSedimentParams::default(),
             subduction_channel_thickness: 1000.0,
             decollement_fraction: 0.45,
             accretionary_convergence: 6.0,
@@ -291,9 +296,24 @@ impl Default for TectonicParams {
 
 impl TectonicParams {
     /// Sets the tunable parameter `name` (the field name, with `events.` for
-    /// [`PlateEventParams`] fields) to `value`.
+    /// [`PlateEventParams`] fields and `initial_sediment.` for [`InitialSedimentParams`]
+    /// fields; `initial_sediment.enabled` is off for 0 and on otherwise) to `value`.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
+        let sediment = &mut self.initial_sediment;
         let field = match name {
+            "initial_sediment.enabled" => {
+                sediment.enabled = value != 0.0;
+                return Ok(());
+            }
+            "initial_sediment.ccd_depth" => &mut sediment.ccd_depth,
+            "initial_sediment.carbonate_rate" => &mut sediment.carbonate_rate,
+            "initial_sediment.clay_rate" => &mut sediment.clay_rate,
+            "initial_sediment.terrigenous_rate" => &mut sediment.terrigenous_rate,
+            "initial_sediment.terrigenous_length" => &mut sediment.terrigenous_length,
+            "initial_sediment.platform_thickness" => &mut sediment.platform_thickness,
+            "initial_sediment.shield_fraction" => &mut sediment.shield_fraction,
+            "initial_sediment.max_platform_factor" => &mut sediment.max_platform_factor,
+            "initial_sediment.shelf_depth" => &mut sediment.shelf_depth,
             "basal_drag" => &mut self.basal_drag,
             "continental_drag_factor" => &mut self.continental_drag_factor,
             "collision_resistance" => &mut self.collision_resistance,
@@ -621,6 +641,12 @@ impl Simulation {
             sea_level_change: (0.0, 0.0),
             time: 0.0,
         };
+        // The sediment cover is part of the initial planet (a stock, not a source); it is
+        // added after the plate setup and with its own random numbers, so that it changes
+        // nothing else.
+        if simulation.params.initial_sediment.enabled {
+            simulation.add_initial_sediment(seed, &is_continental, &plate_of_cell);
+        }
         simulation.ledger = MassLedger::new(simulation.total_mass());
         simulation.sea_level = simulation.solve_sea_level();
         // Initial subduction zones have fully developed slabs.
