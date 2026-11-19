@@ -469,7 +469,9 @@ impl Simulation {
                 );
                 // Continental rifting: where crust of continental origin thicker than the breakup
                 // thickness opens (also slowly), the rift zone is stretched into the gap instead
-                // of forming sea floor.
+                // of forming sea floor. This includes slots whose crust was consumed at an earlier
+                // convergent contact: rifts often reopen old sutures and subduction edges
+                // (stretching is mass-conserving, so it cannot bring consumed crust back).
                 let rifting = {
                     let plate = &plates[plate_index as usize];
                     let parent_crust =
@@ -477,7 +479,6 @@ impl Simulation {
                     parent_crust.is_continental_origin()
                         && parent_crust.thickness > params.breakup_thickness
                         && plate.crust[local as usize].is_none()
-                        && !plate.consumed[local as usize]
                         && (spreading
                             || opens_away(
                                 &mut rings,
@@ -1574,6 +1575,30 @@ mod tests {
         assert_eq!(simulation.gap_statistics.new_crust_cells, 0);
         assert_eq!(simulation.ledger.new_sea_floor, 0.0);
         assert!(simulation.total_mass() > 0.9 * mass);
+    }
+
+    #[test]
+    fn rifts_reopening_old_sutures_stretch_too() {
+        // As above, but every empty slot of both plates held crust that was consumed at an
+        // earlier convergent contact (the rift reopens an old suture).
+        let mut simulation = single_continent();
+        simulation.split_plate(0, DVec3::Z).unwrap();
+        simulation.polarities.clear();
+        for plate in &mut simulation.plates {
+            for (local, crust) in plate.crust.iter().enumerate() {
+                if crust.is_none() {
+                    plate.consumed[local] = true;
+                }
+            }
+        }
+        simulation.plates[0].angular_velocity = DVec3::Y * 0.004;
+        simulation.plates[1].angular_velocity = -DVec3::Y * 0.004;
+        for _ in 0..10 {
+            simulation.substep(1.0);
+        }
+        assert!(simulation.gap_statistics.stretched_cells > 0);
+        assert_eq!(simulation.gap_statistics.new_crust_cells, 0);
+        assert_eq!(simulation.ledger.new_sea_floor, 0.0);
     }
 
     #[test]

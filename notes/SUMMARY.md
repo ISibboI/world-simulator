@@ -197,8 +197,11 @@ components (climate, erosion, …) are expected to build on it.
    metamorphism on any crust and subduction invasion near trenches → ocean ≥ 200 Myr 10.8 →
    4.5% (target ≤ 1%, re-measure where it sits), initiations 0.056/Myr, oceanic stock flat. The
    remaining rise (+18 ± 4 m per 100 Myr) is continental: overfill piles up as coastal land on
-   thinned crust because margins lack accommodation (progradation does not help). **Next:
-   margin stretching and thermal subsidence (item 3).**
+   thinned crust because margins lack accommodation (progradation does not help). Item 3
+   (`plans/margin-stretching.md`): rifts may stretch into consumed slots (stretched share 0.34
+   → 0.52, flooded 27%); thinner margins deferred (cost felsic crust, no sediment gain).
+   **Next (research `research/shelf-sediment-removal.md`): higher erodibility of sediment and
+   diffusion of low-gradient sediment.**
 2. Separately: seed 1's loss at the collision stacking cap (0.4 Gt/yr); the mafic-erosion
    tracer artefact in the felsic budget (+0.3 Gt/yr; erosion of mafic crust becomes sediment).
 3. Then back to issue 1r/7: margin stretching covers < half of the continental opening (COB
