@@ -53,9 +53,10 @@ impl Simulation {
         let mut inflow = vec![0.0; self.plates.len() * cell_count];
         // Per crust sample: (outgoing thickness, incoming thickness, incoming mass, incoming
         // felsic mass).
-        let mut flows = vec![(0.0, 0.0, 0.0, 0.0); self.plates.len() * cell_count];
+        let mut flows = vec![(0.0, 0.0, 0.0, 0.0, 0.0); self.plates.len() * cell_count];
         // (source sample, receiver sample, thickness, density, felsic fraction)
-        let mut transfers: Vec<(usize, usize, f64, f64, f64)> = Vec::new();
+        #[allow(clippy::type_complexity)]
+        let mut transfers: Vec<(usize, usize, f64, f64, (f64, f64))> = Vec::new();
         let mut touched: Vec<usize> = Vec::new();
         for _ in 0..cycles {
             for cell in 0..cell_count as u32 {
@@ -101,7 +102,13 @@ impl Simulation {
                     let to = sample_index(neighbor_owner, cell_count);
                     outflow[from] += amount;
                     inflow[to] += amount;
-                    transfers.push((from, to, amount, source.density, source.felsic));
+                    transfers.push((
+                        from,
+                        to,
+                        amount,
+                        source.density,
+                        (source.felsic, source.metasediment),
+                    ));
                 }
             }
             // A sample (possibly shown at several cells) gives at most its crust above the
@@ -111,13 +118,13 @@ impl Simulation {
                 self.plates[index / cell_count].crust[index % cell_count]
                     .map_or(0.0, |c| c.thickness)
             };
-            for &(from, to, amount, density, felsic) in &transfers {
+            for &(from, to, amount, density, (felsic, metasediment)) in &transfers {
                 let available = (thickness(from) - params.crustal_flow_threshold).max(0.0);
                 let room = (params.max_crust_thickness - thickness(to)).max(0.0);
                 let scaled =
                     amount * (available / outflow[from]).min(1.0) * (room / inflow[to]).min(1.0);
                 for index in [from, to] {
-                    if flows[index] == (0.0, 0.0, 0.0, 0.0) {
+                    if flows[index] == (0.0, 0.0, 0.0, 0.0, 0.0) {
                         touched.push(index);
                     }
                 }
@@ -126,6 +133,7 @@ impl Simulation {
                 flow.1 += scaled;
                 flow.2 += scaled * density;
                 flow.3 += scaled * density * felsic;
+                flow.4 += scaled * density * metasediment;
             }
             for &(from, to, ..) in &transfers {
                 outflow[from] = 0.0;
@@ -136,8 +144,9 @@ impl Simulation {
             touched.dedup();
             for &index in &touched {
                 let (plate, local) = (index / cell_count, index % cell_count);
-                let (outgoing, incoming, incoming_mass, incoming_felsic) = flows[index];
-                flows[index] = (0.0, 0.0, 0.0, 0.0);
+                let (outgoing, incoming, incoming_mass, incoming_felsic, incoming_metasediment) =
+                    flows[index];
+                flows[index] = (0.0, 0.0, 0.0, 0.0, 0.0);
                 let crust = self.plates[plate].crust[local]
                     .as_mut()
                     .expect("flows only between existing samples");
@@ -148,7 +157,10 @@ impl Simulation {
                     crust.add_crust(
                         incoming,
                         incoming_mass / incoming,
-                        incoming_felsic / incoming_mass.max(1e-9),
+                        (
+                            incoming_felsic / incoming_mass.max(1e-9),
+                            incoming_metasediment / incoming_mass.max(1e-9),
+                        ),
                         params.max_crust_thickness,
                     );
                 }
@@ -272,6 +284,9 @@ impl Simulation {
                 trench_sediment.upper_plate_accreted += loser_crust.mass();
             }
             if loser_crust.resists_subduction() || overridden_upper_plate {
+                trench_sediment.stacked += sediment_mass;
+            }
+            if loser_crust.resists_subduction() || overridden_upper_plate {
                 // Collision or terrane accretion: buoyant crust of the lower plate (continents,
                 // thick arcs, plateaus) is stacked onto the overriding plate instead of
                 // subducting, and so is the upper plate's crust overridden by it; sediment
@@ -290,6 +305,8 @@ impl Simulation {
                     // Sediment is eroded continental (felsic) material.
                     felsic: (loser_crust.felsic_mass() + sediment_mass)
                         / loser_crust.mass().max(1e-9),
+                    // Stacked into an orogen, it becomes part of the continental basement.
+                    metasediment: 0.0,
                     kind: AdditionKind::Collision,
                 });
             } else {
@@ -316,6 +333,7 @@ impl Simulation {
                     } else {
                         1.0
                     },
+                    metasediment: 0.0,
                     kind: AdditionKind::Arc,
                 });
                 // At accretionary margins (thick trench fill, slow convergence; see
@@ -354,6 +372,7 @@ impl Simulation {
                         thickness: accreted_mass / METASEDIMENT_DENSITY,
                         density: METASEDIMENT_DENSITY,
                         felsic: 1.0,
+                        metasediment: 0.0,
                         kind: AdditionKind::Accretion,
                     });
                 }
@@ -375,8 +394,9 @@ impl Simulation {
                 let from_sediment = amount.min(crust.sediment);
                 crust.sediment -= from_sediment;
                 amount -= from_sediment;
-                crust.thickness =
-                    (crust.thickness - amount).max(crust.thickness.min(OCEANIC_THICKNESS));
+                crust.thin_from_below(
+                    (crust.thickness - amount).max(crust.thickness.min(OCEANIC_THICKNESS)),
+                );
                 ledger.record(Term::SubductionErosion, crust.mass() - before);
             }
         }
@@ -675,7 +695,12 @@ impl Simulation {
                 let share = addition.thickness * weight / total_weight;
                 let fitting = share.min((max_thickness - crust.thickness).max(0.0));
                 let before = crust.mass();
-                crust.add_crust(fitting, addition.density, addition.felsic, max_thickness);
+                crust.add_crust(
+                    fitting,
+                    addition.density,
+                    (addition.felsic, addition.metasediment),
+                    max_thickness,
+                );
                 change += crust.mass() - before;
                 leftover += share - fitting;
             }
@@ -688,7 +713,12 @@ impl Simulation {
                     .expect("owners always point to existing crust");
                 let fitting = leftover.min((max_thickness - crust.thickness).max(0.0));
                 let before = crust.mass();
-                crust.add_crust(fitting, addition.density, addition.felsic, max_thickness);
+                crust.add_crust(
+                    fitting,
+                    addition.density,
+                    (addition.felsic, addition.metasediment),
+                    max_thickness,
+                );
                 change += crust.mass() - before;
                 leftover -= fitting;
             }
@@ -727,6 +757,9 @@ pub struct TrenchSediment {
     /// it instead of subducting (not sediment arriving at a trench; kept here as a trench
     /// statistic).
     pub upper_plate_accreted: f64,
+    /// Sediment of buoyant crust stacked onto the overriding plate in collisions and terrane
+    /// accretion, which becomes metasediment of the orogen.
+    pub stacked: f64,
 }
 
 impl TrenchSediment {
@@ -932,6 +965,7 @@ fn stretch_rift(
         return false;
     }
     let (mut thickness, mut mass, mut felsic, mut sediment) = (0.0, 0.0, 0.0, 0.0);
+    let mut metasediment = 0.0;
     // Mass-weighted thickness and thermal fraction of the donors after stretching (repeated
     // stretching compounds in the donors).
     let (mut donor_thickness, mut donor_heat) = (0.0, 0.0);
@@ -948,6 +982,7 @@ fn stretch_rift(
         thickness += given;
         mass += given * crust.density;
         felsic += given * crust.density * crust.felsic;
+        metasediment += given * crust.density * crust.metasediment;
         donor_thickness += given * crust.density * (crust.thickness - given);
         donor_heat += given * crust.density * fraction;
         sediment += crust.sediment * share;
@@ -963,6 +998,7 @@ fn stretch_rift(
         birth,
         sediment,
         felsic: felsic / mass.max(1e-9),
+        metasediment: metasediment / mass.max(1e-9),
     });
     true
 }
@@ -1017,6 +1053,7 @@ fn heal_gap(
     // oceanic crust ancient).
     let share = 1.0 / (neighbors.len() + 1) as f64;
     let (mut thickness, mut mass, mut sediment, mut felsic) = (0.0, 0.0, 0.0, 0.0);
+    let mut metasediment = 0.0;
     let mut birth = f64::NEG_INFINITY;
     for &neighbor in &neighbors {
         let crust = plate.crust[neighbor as usize]
@@ -1026,6 +1063,7 @@ fn heal_gap(
         thickness += given;
         mass += given * crust.density;
         felsic += given * crust.density * crust.felsic;
+        metasediment += given * crust.density * crust.metasediment;
         birth = birth.max(crust.birth);
         sediment += crust.sediment * share;
         crust.thickness -= given;
@@ -1037,6 +1075,7 @@ fn heal_gap(
         birth,
         sediment,
         felsic: felsic / mass.max(1e-9),
+        metasediment: metasediment / mass.max(1e-9),
     });
     plate.consumed[local as usize] = false;
     statistics.enclosed_fills += 1;
@@ -1052,8 +1091,9 @@ pub(super) struct CrustAddition {
     /// Total volume as a thickness over one cell.
     thickness: f64,
     density: f64,
-    /// Felsic mass fraction (see [`Crust::felsic`]).
+    /// Felsic and metasediment mass fractions (see [`Crust::felsic`], [`Crust::metasediment`]).
     felsic: f64,
+    metasediment: f64,
     kind: AdditionKind,
 }
 
@@ -1068,8 +1108,7 @@ pub(super) enum AdditionKind {
     Collision,
 }
 
-/// Density of crust formed from sediment (metasediment) in kg/m³.
-pub(super) const METASEDIMENT_DENSITY: f64 = 2750.0;
+pub(super) use super::crust::METASEDIMENT_DENSITY;
 
 pub(super) fn pair_key(a: u32, b: u32) -> (u32, u32) {
     (a.min(b), a.max(b))
@@ -1148,6 +1187,7 @@ mod tests {
                             birth: -50.0,
                             sediment: 0.0,
                             felsic: 1.0,
+                            metasediment: 0.0,
                         };
                         assert!(crust.resists_subduction() && !crust.is_continental());
                     } else if plate == 1 && continental_upper_plate && z < 0.3 {
@@ -1157,6 +1197,7 @@ mod tests {
                             birth: -1000.0,
                             sediment: 0.0,
                             felsic: 1.0,
+                            metasediment: 0.0,
                         };
                     }
                 }
@@ -1245,6 +1286,7 @@ mod tests {
                 birth: -1000.0,
                 sediment: 8000.0,
                 felsic: 1.0,
+                metasediment: 0.0,
             };
         }
         if let Some(upper) = upper {
@@ -1277,6 +1319,7 @@ mod tests {
             birth: -50.0,
             sediment: 0.0,
             felsic: 0.4,
+            metasediment: 0.0,
         };
         assert!(!arc.is_oceanic() && !arc.resists_subduction());
         // Most of it: after the segment flips (sustained arrival), the arc plate subducts.
@@ -1292,6 +1335,7 @@ mod tests {
             birth: -1000.0,
             sediment: 0.0,
             felsic: 1.0,
+            metasediment: 0.0,
         };
         let ledger = wedged_margin_arriving_at_a_trench(Some(continent));
         assert_eq!(ledger.subducted_transitional, 0.0, "{ledger:?}");
@@ -1327,6 +1371,7 @@ mod tests {
             thickness: 500.0,
             density: crate::isostasy::ARC_DENSITY,
             felsic: 0.4,
+            metasediment: 0.0,
             kind: AdditionKind::Arc,
         }]);
         // Nothing on the trench cell (amagmatic forearc), most one ring behind it.
@@ -1362,6 +1407,7 @@ mod tests {
                 birth: -1000.0,
                 sediment: 0.0,
                 felsic: 1.0,
+                metasediment: 0.0,
             };
         }
         simulation
@@ -1478,6 +1524,7 @@ mod tests {
             birth: -1000.0,
             sediment: 0.0,
             felsic: 1.0,
+            metasediment: 0.0,
         });
         simulation.crustal_flow(5.0);
         assert_eq!(simulation.surface_crust(cell).thickness, 70_000.0);

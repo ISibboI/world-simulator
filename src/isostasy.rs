@@ -261,6 +261,20 @@ pub fn sea_level_for_volume_with_pores(
     unreachable!("the loop returns at the last cell")
 }
 
+/// The sea level (as an offset of dry elevations, m) at which the ocean holds `volume` (m³),
+/// relative to the sea level that the surface `elevations` (m) refer to, for cells of equal
+/// `cell_area` (m²) carrying the given rock-equivalent `sediment` (m), whose pores hold water.
+pub fn relative_sea_level(
+    elevations: &[f64],
+    sediment: &[f64],
+    cell_area: f64,
+    volume: f64,
+) -> f64 {
+    let dry: Vec<f64> = elevations.iter().map(|&e| to_dry(e)).collect();
+    let pores: Vec<f64> = sediment.iter().map(|&s| sediment_pores(s)).collect();
+    sea_level_for_volume_with_pores(&dry, &pores, cell_area, volume)
+}
+
 /// Volume (m³) of the ocean over cells of equal `cell_area` with the given surface elevations
 /// relative to sea level.
 #[cfg(test)]

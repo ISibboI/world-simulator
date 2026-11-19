@@ -700,6 +700,7 @@ mod tests {
             birth: -1000.0,
             sediment: 0.0,
             felsic: 1.0,
+            metasediment: 0.0,
         }
     }
 

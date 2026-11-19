@@ -25,6 +25,7 @@ use std::collections::{BinaryHeap, VecDeque};
 
 use crate::isostasy::{self, SEDIMENT_ROCK_DENSITY};
 use crate::sphere::SphereMesh;
+use crate::tectonics::SurfaceSeaLevel;
 
 /// Parameters of erosion. Lengths in metres, times in years unless noted otherwise.
 #[derive(Clone, Debug)]
@@ -75,6 +76,9 @@ pub struct ErosionParams {
     pub max_margin_cells: usize,
     /// Maximum number of ocean cells a deep-sea fan of one river mouth spreads over.
     pub max_fan_cells: usize,
+    /// Storm wave base (m, negative): waves rework the sea floor down to this depth (Earth
+    /// ~20–50 m, locally deeper; Peters & Loss 2012).
+    pub wave_base: f64,
 }
 
 impl Default for ErosionParams {
@@ -100,6 +104,7 @@ impl Default for ErosionParams {
             prograde: false,
             max_margin_cells: 256,
             max_fan_cells: 256,
+            wave_base: -50.0,
         }
     }
 }
@@ -122,6 +127,7 @@ impl ErosionParams {
             "sediment_erodibility_factor" => &mut self.sediment_erodibility_factor,
             "sediment_diffusivity" => &mut self.sediment_diffusivity,
             "marine_diffusivity_ratio" => &mut self.marine_diffusivity_ratio,
+            "wave_base" => &mut self.wave_base,
             "prograde" => {
                 self.prograde = value != 0.0;
                 return Ok(());
@@ -184,6 +190,9 @@ pub struct Surface<'a> {
     pub plate: &'a [u32],
     /// The kind of crust.
     pub class: &'a [CrustClass],
+    /// Volume of the ocean (m³), to solve the sea level (see
+    /// [`isostasy::sea_level_for_volume_with_pores`]) as sediment fills it.
+    pub ocean_volume: f64,
 }
 
 /// Changes caused by one erosion step, and diagnostic fields.
@@ -202,6 +211,8 @@ pub struct ErosionResult {
     /// Sediment deposited in the ocean per [`Zone`] (thickness over one cell, summed; deltas
     /// count as shelf, overfill not at all).
     pub deposited: [f64; 4],
+    /// Change of the sea level by the step (solved on the cells).
+    pub sea_level_change: SurfaceSeaLevel,
 }
 
 /// Performs one erosion step of `dt_years` years.
@@ -219,6 +230,7 @@ pub fn erode(
         precipitation,
         plate,
         class,
+        ocean_volume,
     } = *surface;
     let cell_count = mesh.len();
     let cell_area = 4.0 * std::f64::consts::PI * params.planet_radius.powi(2) / cell_count as f64;
@@ -305,6 +317,10 @@ pub fn erode(
         );
     }
 
+    // The sea level (relative to the current one) before the step, to measure its changes;
+    // zero up to rounding.
+    let initial_sea_level =
+        isostasy::relative_sea_level(elevation, sediment, cell_area, ocean_volume);
     let mut seabed = Seabed {
         sediment: sediment
             .iter()
@@ -362,6 +378,11 @@ pub fn erode(
     let mut fan = Vec::new();
     let mut water = Vec::new();
     let mut shelf = Vec::new();
+    let mut rooms = Vec::new();
+
+    // Pass A: river sediment fills the marine accommodation (margins and open-sea fans).
+    let mut leftovers = Vec::new();
+    let is_ocean = |cell: usize| elevation[cell] < 0.0;
     for (mouth, &delivered) in delivered.iter().enumerate() {
         let mut remaining = delivered;
         if remaining <= 0.0 {
@@ -370,28 +391,16 @@ pub fn erode(
         sediment_to_ocean += remaining * cell_area;
         let source_cell = source[mouth] as usize;
         let own_plate = plate[source_cell];
-
-        // The margin within reach: shelf, slope and rise cells connected to the mouth.
-        queue.clear();
-        margin.clear();
-        queue.push_back(mouth);
-        margin_mark[mouth] = mouth;
-        while let Some(cell) = queue.pop_front() {
-            margin.push(cell);
-            if margin.len() >= params.max_margin_cells {
-                break;
-            }
-            for &neighbor in mesh.neighbors(cell as u32) {
-                let neighbor = neighbor as usize;
-                if is_ocean(neighbor)
-                    && zones[neighbor] != Zone::Fan
-                    && margin_mark[neighbor] != mouth
-                {
-                    margin_mark[neighbor] = mouth;
-                    queue.push_back(neighbor);
-                }
-            }
-        }
+        margin_within_reach(
+            mesh,
+            mouth,
+            &zones,
+            params,
+            &is_ocean,
+            &mut margin_mark,
+            &mut queue,
+            &mut margin,
+        );
         // Fill the margin up to the depth of each zone, nearest cells first, so that shelves
         // prograde: the river's own plate first, other plates' margins once it is full.
         for own in [true, false] {
@@ -426,18 +435,18 @@ pub fn erode(
         // far from margins within reach in proportion to the room below the slope depth, with
         // a thickness cap that falls with distance from the mouth.
         if remaining > 0.0 {
-            fan_queue.clear();
+            water_within_reach(
+                mesh,
+                mouth,
+                params,
+                &is_ocean,
+                &mut fan_mark,
+                &mut fan_queue,
+                &mut water,
+            );
             fan.clear();
-            fan_queue.push_back((mouth, 0u32));
-            fan_mark[mouth] = mouth;
-            let mut rooms = Vec::new();
-            let mut reached = 1;
-            // Whether the reach limit cut the search short, i.e. the mouth is not on a small
-            // enclosed water body.
-            let mut open = false;
-            water.clear();
-            while let Some((cell, hops)) = fan_queue.pop_front() {
-                water.push(cell);
+            rooms.clear();
+            for &(cell, hops) in &water {
                 if zones[cell] == Zone::Fan {
                     let cap = params.max_fan_sediment
                         * (-f64::from(hops) * spacing / params.fan_length).exp();
@@ -445,18 +454,6 @@ pub fn erode(
                     if room > 0.0 {
                         fan.push(cell);
                         rooms.push(room);
-                    }
-                }
-                for &neighbor in mesh.neighbors(cell as u32) {
-                    let neighbor = neighbor as usize;
-                    if is_ocean(neighbor) && fan_mark[neighbor] != mouth {
-                        if reached >= params.max_fan_cells {
-                            open = true;
-                            continue;
-                        }
-                        reached += 1;
-                        fan_mark[neighbor] = mouth;
-                        fan_queue.push_back((neighbor, hops + 1));
                     }
                 }
             }
@@ -469,19 +466,42 @@ pub fn erode(
                 deposited[Zone::Fan as usize] += total_room * fraction;
                 remaining -= total_room * fraction;
             }
-            // A small enclosed sea or depression fills up completely, nearest cells first.
-            if !open {
-                for &cell in &water {
-                    if remaining <= 0.0 {
-                        break;
-                    }
-                    let thickness =
-                        remaining.min(seabed.room(cell, params.delta_top, f64::INFINITY));
-                    if thickness > 0.0 {
-                        seabed.deposit(cell, thickness);
-                        deposited[zones[cell] as usize] += thickness;
-                        remaining -= thickness;
-                    }
+        }
+        if remaining > 0.0 {
+            leftovers.push((mouth, source_cell, remaining));
+        }
+    }
+
+    // The deposits displace water: the coastal processes below work against the sea level
+    // they raised, so that delta plains are not built for a sea level that their own sediment
+    // floods (all elevations are shifted; land lower than the rise becomes sea).
+    let fluvial = seabed.sea_level(cell_area, ocean_volume) - initial_sea_level;
+    seabed.shift_sea_level(fluvial);
+
+    // Pass B: what did not fit fills small enclosed seas, builds delta plains and piles up.
+    for &(mouth, source_cell, mut remaining) in &leftovers {
+        // The sea now also covers land lower than its rise.
+        let is_ocean = |cell: usize| elevation[cell] < 0.0 || seabed.elevation[cell] < 0.0;
+        let open = water_within_reach(
+            mesh,
+            mouth,
+            params,
+            &is_ocean,
+            &mut fan_mark,
+            &mut fan_queue,
+            &mut water,
+        );
+        // A small enclosed sea or depression fills up completely, nearest cells first.
+        if !open {
+            for &(cell, _) in &water {
+                if remaining <= 0.0 {
+                    break;
+                }
+                let thickness = remaining.min(seabed.room(cell, params.delta_top, f64::INFINITY));
+                if thickness > 0.0 {
+                    seabed.deposit(cell, thickness);
+                    deposited[zones[cell] as usize] += thickness;
+                    remaining -= thickness;
                 }
             }
         }
@@ -490,6 +510,17 @@ pub fn erode(
         // on the margin crust. Anything beyond that piles up evenly on the shelf within reach,
         // or at the river's last land cell if there is no shelf (it becomes land, and the next
         // step's drainage carries it on); never on the slope or rise.
+        let is_ocean = |cell: usize| elevation[cell] < 0.0 || seabed.elevation[cell] < 0.0;
+        margin_within_reach(
+            mesh,
+            mouth,
+            &zones,
+            params,
+            &is_ocean,
+            &mut margin_mark,
+            &mut queue,
+            &mut margin,
+        );
         for &cell in &margin {
             if remaining <= 0.0 {
                 break;
@@ -505,6 +536,7 @@ pub fn erode(
             }
         }
         if params.prograde {
+            let own_plate = plate[source_cell];
             for own in [true, false] {
                 for &cell in &margin {
                     if remaining <= 0.0 {
@@ -541,6 +573,8 @@ pub fn erode(
 
     diffuse_sediment(mesh, &mut seabed, params, dt_years);
 
+    // Relative to the shifted sea level.
+    let coastal = seabed.sea_level(cell_area, ocean_volume);
     ErosionResult {
         bedrock_delta,
         sediment_delta: seabed.delta,
@@ -548,7 +582,87 @@ pub fn erode(
         sediment_to_ocean,
         sediment_overfill,
         deposited,
+        sea_level_change: SurfaceSeaLevel { fluvial, coastal },
     }
+}
+
+/// The margin within reach of a river mouth: shelf, slope and rise cells connected to it
+/// through the ocean, nearest first, at most [`ErosionParams::max_margin_cells`] (into
+/// `margin`).
+#[allow(clippy::too_many_arguments)]
+fn margin_within_reach(
+    mesh: &SphereMesh,
+    mouth: usize,
+    zones: &[Zone],
+    params: &ErosionParams,
+    is_ocean: &dyn Fn(usize) -> bool,
+    mark: &mut [usize],
+    queue: &mut VecDeque<usize>,
+    margin: &mut Vec<usize>,
+) {
+    queue.clear();
+    margin.clear();
+    queue.push_back(mouth);
+    mark[mouth] = mouth;
+    while let Some(cell) = queue.pop_front() {
+        margin.push(cell);
+        if margin.len() >= params.max_margin_cells {
+            break;
+        }
+        for &neighbor in mesh.neighbors(cell as u32) {
+            let neighbor = neighbor as usize;
+            if is_ocean(neighbor) && zones[neighbor] != Zone::Fan && mark[neighbor] != mouth {
+                mark[neighbor] = mouth;
+                queue.push_back(neighbor);
+            }
+        }
+    }
+    // Reset the marks so that a second search from the same mouth works.
+    for &cell in margin.iter() {
+        mark[cell] = usize::MAX;
+    }
+    for &cell in queue.iter() {
+        mark[cell] = usize::MAX;
+    }
+}
+
+/// The ocean cells within reach of a river mouth with their distance in hops, nearest first,
+/// at most [`ErosionParams::max_fan_cells`] (into `water`). Returns whether the reach limit cut
+/// the search short, i.e. the mouth is not on a small enclosed water body.
+fn water_within_reach(
+    mesh: &SphereMesh,
+    mouth: usize,
+    params: &ErosionParams,
+    is_ocean: &dyn Fn(usize) -> bool,
+    mark: &mut [usize],
+    queue: &mut VecDeque<(usize, u32)>,
+    water: &mut Vec<(usize, u32)>,
+) -> bool {
+    queue.clear();
+    water.clear();
+    queue.push_back((mouth, 0));
+    mark[mouth] = mouth;
+    let mut reached = 1;
+    let mut open = false;
+    while let Some((cell, hops)) = queue.pop_front() {
+        water.push((cell, hops));
+        for &neighbor in mesh.neighbors(cell as u32) {
+            let neighbor = neighbor as usize;
+            if is_ocean(neighbor) && mark[neighbor] != mouth {
+                if reached >= params.max_fan_cells {
+                    open = true;
+                    continue;
+                }
+                reached += 1;
+                mark[neighbor] = mouth;
+                queue.push_back((neighbor, hops + 1));
+            }
+        }
+    }
+    for &(cell, _) in water.iter() {
+        mark[cell] = usize::MAX;
+    }
+    open
 }
 
 /// Surface elevation and sediment of every cell while sediment is deposited.
@@ -569,6 +683,19 @@ impl Seabed {
                 .max(0.0)
         } else {
             0.0
+        }
+    }
+
+    /// The sea level relative to the one the elevations refer to (m, an offset of dry
+    /// elevations).
+    fn sea_level(&self, cell_area: f64, ocean_volume: f64) -> f64 {
+        isostasy::relative_sea_level(&self.elevation, &self.sediment, cell_area, ocean_volume)
+    }
+
+    /// Makes the elevations relative to a sea level `rise` m (dry offset) higher.
+    fn shift_sea_level(&mut self, rise: f64) {
+        for elevation in &mut self.elevation {
+            *elevation = isostasy::to_surface(isostasy::to_dry(*elevation) - rise);
         }
     }
 
@@ -843,10 +970,54 @@ mod tests {
                 precipitation: &vec![precipitation; n],
                 plate,
                 class,
+                ocean_volume: ocean_volume(elevation, sediment, params.planet_radius),
             },
             params,
             1e6,
         )
+    }
+
+    /// Surface elevations after an erosion step, relative to the sea level after it.
+    fn after_step(
+        elevation: &[f64],
+        sediment: &[f64],
+        result: &ErosionResult,
+        params: &ErosionParams,
+    ) -> Vec<f64> {
+        let new_sediment: Vec<f64> = sediment
+            .iter()
+            .zip(&result.sediment_delta)
+            .map(|(s, d)| s + d)
+            .collect();
+        let new_elevation: Vec<f64> = (0..elevation.len())
+            .map(|c| {
+                let e = isostasy::change_sediment(elevation[c], sediment[c], new_sediment[c]);
+                isostasy::add_layer(e, result.bedrock_delta[c], 2800.0)
+            })
+            .collect();
+        let cell_area =
+            4.0 * std::f64::consts::PI * params.planet_radius.powi(2) / elevation.len() as f64;
+        let volume = ocean_volume(elevation, sediment, params.planet_radius);
+        let rise = isostasy::relative_sea_level(&new_elevation, &new_sediment, cell_area, volume);
+        let total = result.sea_level_change.fluvial + result.sea_level_change.coastal;
+        assert!((rise - total).abs() < 1e-6, "{rise} vs {total}");
+        new_elevation
+            .iter()
+            .map(|&e| isostasy::to_surface(isostasy::to_dry(e) - rise))
+            .collect()
+    }
+
+    /// The ocean volume (m³) over the cells of a mesh of the given radius, including the pores of
+    /// submerged sediment: the sea level stays where it is.
+    fn ocean_volume(elevation: &[f64], sediment: &[f64], radius: f64) -> f64 {
+        let cell_area = 4.0 * std::f64::consts::PI * radius * radius / elevation.len() as f64;
+        elevation
+            .iter()
+            .zip(sediment)
+            .filter(|&(&e, _)| e < 0.0)
+            .map(|(&e, &s)| -e + isostasy::sediment_pores(s))
+            .sum::<f64>()
+            * cell_area
     }
 
     #[test]
@@ -1068,12 +1239,98 @@ mod tests {
         let mut class = classes(&elevation, -1000.0);
         class[pit] = CrustClass::Oceanic;
         let result = run(&mesh, &elevation, 1.0, &vec![0; mesh.len()], &class);
-        // The sea fills up to the delta top (beyond the slope depth of oceanic crust); what
-        // does not fit stays on land, not piled on the sea.
-        let after = isostasy::change_sediment(elevation[pit], 0.0, result.sediment_delta[pit]);
-        let delta_top = ErosionParams::default().delta_top;
+        // The sea fills up to the delta top (beyond the slope depth of oceanic crust) above the
+        // sea level after the step; what does not fit stays on land, not piled on the sea.
+        let params = ErosionParams {
+            sediment_diffusivity: 0.0,
+            ..ErosionParams::default()
+        };
+        let after = after_step(&elevation, &vec![0.0; mesh.len()], &result, &params);
         assert!(result.sediment_overfill > 0.0);
-        assert!((after - delta_top).abs() < 1e-6, "{after}");
+        let rise = result.sea_level_change.coastal;
+        assert!(
+            (after[pit] - params.delta_top + rise).abs() < 1e-6,
+            "{} {rise}",
+            after[pit]
+        );
+    }
+
+    #[test]
+    fn delta_plains_are_not_drowned_by_their_own_sediment() {
+        // An island with a nearly full shelf (10 m of room) and the deep ocean beyond: the
+        // river sediment goes to the slope and fans and raises the sea level, and the rest
+        // builds delta plains on the shelf.
+        let mesh = SphereMesh::icosphere(4);
+        let elevation: Vec<f64> = (0..mesh.len() as u32)
+            .map(|cell| {
+                let angle = mesh.vertex(cell).angle_between(glam::DVec3::Z).to_degrees();
+                if angle <= 60.0 {
+                    3000.0 - angle * 50.0
+                } else if angle <= 62.0 {
+                    -130.0
+                } else {
+                    -4500.0
+                }
+            })
+            .collect();
+        let class = classes(&elevation, -1000.0);
+        // Thin caps on the oceanic crust, so that the margin and fans fill.
+        let params = ErosionParams {
+            sediment_diffusivity: 0.0,
+            max_slope_sediment: 260.0,
+            max_rise_sediment: 260.0,
+            max_fan_sediment: 260.0,
+            ..ErosionParams::default()
+        };
+        let sediment = vec![0.0; mesh.len()];
+        let result = run_with(
+            &mesh,
+            &elevation,
+            &sediment,
+            3.0,
+            &vec![0; mesh.len()],
+            &class,
+            &params,
+        );
+        let change = result.sea_level_change;
+        assert!(change.fluvial > params.delta_top, "{change:?}");
+        // The delta deposits themselves raise it by less than the delta top.
+        assert!(change.coastal < params.delta_top, "{change:?}");
+        let after = after_step(&elevation, &sediment, &result, &params);
+        // Delta plains (cells of the former sea that were built up to the delta top) stay above
+        // the new sea level.
+        let mut deltas = 0;
+        for cell in 0..mesh.len() {
+            let built =
+                isostasy::change_sediment(elevation[cell], 0.0, result.sediment_delta[cell]);
+            if elevation[cell] < 0.0 && built > 0.0 {
+                deltas += 1;
+                assert!(after[cell] > 0.0, "{cell}: {}", after[cell]);
+            }
+        }
+        assert!(deltas > 0);
+    }
+
+    #[test]
+    fn routing_keeps_the_sea_level_budget() {
+        let mesh = SphereMesh::icosphere(4);
+        let elevation = island(&mesh);
+        let class = classes(&elevation, -1000.0);
+        let sediment = vec![0.0; mesh.len()];
+        let params = ErosionParams::default();
+        let result = run_with(
+            &mesh,
+            &elevation,
+            &sediment,
+            1.0,
+            &vec![0; mesh.len()],
+            &class,
+            &params,
+        );
+        // Deposition in the sea raises the sea level; `after_step` checks that the reported
+        // change is the solved one.
+        assert!(result.sea_level_change.fluvial > 0.0);
+        after_step(&elevation, &sediment, &result, &params);
     }
 
     #[test]

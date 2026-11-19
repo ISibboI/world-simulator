@@ -65,6 +65,11 @@ pub struct Crust {
     /// and metasedimentary crust) rather than mafic (oceanic crust, partly young intra-oceanic
     /// arcs); a tracer for mass budgets.
     pub felsic: f64,
+    /// Mass fraction of the crystalline crust that formed by burial metamorphism of sediment
+    /// during the simulation (see `Simulation::metamorphose_sediment`); a tracer like
+    /// [`Crust::felsic`], mixed by mass. Metasediment is felsic, so it never exceeds
+    /// [`Crust::felsic`].
+    pub metasediment: f64,
 }
 
 impl Crust {
@@ -175,31 +180,101 @@ impl Crust {
         self.dry_elevation(time)
     }
 
-    /// Adds crust of the given thickness, density and felsic mass fraction, mixing densities
-    /// and felsic fractions by mass. Crust beyond `max_thickness` is removed from below.
+    /// Adds crust of the given thickness, density, felsic and metasediment mass fractions,
+    /// mixing densities and tracers by mass. Crust beyond `max_thickness` is removed from below
+    /// (with the mean composition).
     pub(super) fn add_crust(
         &mut self,
         thickness: f64,
         density: f64,
-        felsic: f64,
+        (felsic, metasediment): (f64, f64),
         max_thickness: f64,
     ) {
         let total = self.thickness + thickness;
         let (mass, added) = (self.thickness * self.density, thickness * density);
         if mass + added > 0.0 {
             self.felsic = (mass * self.felsic + added * felsic) / (mass + added);
+            self.metasediment = (mass * self.metasediment + added * metasediment) / (mass + added);
         }
         if total > 0.0 {
             self.density = (mass + added) / total;
         }
-        self.thickness = total.min(max_thickness);
+        self.thickness = total;
+        self.thin_from_below(total.min(max_thickness));
+    }
+
+    /// Thins the crystalline crust to `thickness` (not thicker than now) from the top, as
+    /// erosion does: metasediment, which lies on its basement, goes first.
+    pub(super) fn thin_from_top(&mut self, thickness: f64) {
+        let thickness = thickness.clamp(0.0, self.thickness);
+        let removed = (self.thickness - thickness) * self.density;
+        let meta = (self.metasediment_mass() - removed).max(0.0);
+        self.thickness = thickness;
+        self.set_metasediment_mass(meta);
+    }
+
+    /// Thins the crystalline crust to `thickness` (not thicker than now) from below (thickness
+    /// caps, subduction erosion of the underside): the basement goes first.
+    pub(super) fn thin_from_below(&mut self, thickness: f64) {
+        let thickness = thickness.clamp(0.0, self.thickness);
+        let meta = self.metasediment_mass();
+        self.thickness = thickness;
+        self.set_metasediment_mass(meta);
+    }
+
+    fn set_metasediment_mass(&mut self, meta: f64) {
+        let mass = self.thickness * self.density;
+        self.metasediment = if mass > 0.0 {
+            (meta / mass).min(self.felsic).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
     }
 
     /// Areal mass (kg/m²) of the felsic part of the crystalline crust.
     pub fn felsic_mass(&self) -> f64 {
         self.thickness * self.density * self.felsic
     }
+
+    /// Areal mass (kg/m²) of the metasediment in the crystalline crust (see
+    /// [`Crust::metasediment`]).
+    pub fn metasediment_mass(&self) -> f64 {
+        self.thickness * self.density * self.metasediment
+    }
+
+    /// Thickness (m) of the metasediment in the crystalline crust.
+    pub fn metasediment_thickness(&self) -> f64 {
+        self.metasediment_mass() / METASEDIMENT_DENSITY
+    }
+
+    /// The crust without its metasediment: the basement it formed on, with the same sediment
+    /// and age. Metasediment is felsic, so it is taken from the felsic part.
+    pub fn basement(&self) -> Crust {
+        let mass = self.thickness * self.density;
+        let meta = self.metasediment_mass().min(mass);
+        let thickness = (self.thickness - meta / METASEDIMENT_DENSITY).max(0.0);
+        let rest = mass - meta;
+        Crust {
+            thickness,
+            density: if thickness > 0.0 && rest > 0.0 {
+                rest / thickness
+            } else {
+                self.density
+            },
+            felsic: if rest > 0.0 {
+                ((self.felsic_mass() - meta) / rest).clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+            metasediment: 0.0,
+            ..*self
+        }
+    }
 }
+
+/// Density of metasediment (kg/m³): metamorphosed sediment, accreted wedges and stacked
+/// sediment (greenschist to amphibolite facies pelites and greywackes).
+pub(super) const METASEDIMENT_DENSITY: f64 = 2750.0;
 
 /// Elevation of lithosphere of the given age above fully cooled lithosphere, without water load.
 pub(super) fn thermal_uplift(age: f64) -> f64 {
@@ -249,6 +324,7 @@ pub(super) fn new_oceanic_crust(time: f64) -> Crust {
         birth: time,
         sediment: 0.0,
         felsic: 0.0,
+        metasediment: 0.0,
     }
 }
 
@@ -269,7 +345,7 @@ mod tests {
     fn felsic_mass_is_conserved_when_mixing() {
         let mut crust = new_oceanic_crust(0.0);
         let before = crust.felsic_mass();
-        crust.add_crust(2000.0, CONTINENTAL_DENSITY, 1.0, 75_000.0);
+        crust.add_crust(2000.0, CONTINENTAL_DENSITY, (1.0, 0.0), 75_000.0);
         let added = 2000.0 * CONTINENTAL_DENSITY;
         assert!((crust.felsic_mass() - (before + added)).abs() < 1e-6 * added);
         assert!((0.0..1.0).contains(&crust.felsic));
@@ -283,6 +359,7 @@ mod tests {
             birth: -1000.0,
             sediment: 0.0,
             felsic: 1.0,
+            metasediment: 0.0,
         };
         assert!(!margin.resists_subduction() && !margin.is_continental_origin());
         let wedged = Crust {

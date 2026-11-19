@@ -59,6 +59,9 @@ fn spread_crust(mesh: &SphereMesh, plate: &mut Plate, target: u32, crust: Crust)
         let mass = receiver.thickness * receiver.density + added * crust.density;
         receiver.felsic =
             (receiver.felsic_mass() + added * crust.density * crust.felsic) / mass.max(1e-9);
+        receiver.metasediment = (receiver.metasediment_mass()
+            + added * crust.density * crust.metasediment)
+            / mass.max(1e-9);
         receiver.thickness += added;
         receiver.density = mass / receiver.thickness.max(1e-9);
         receiver.sediment += crust.sediment * share;
