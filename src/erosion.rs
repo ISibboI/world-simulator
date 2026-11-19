@@ -48,7 +48,8 @@ pub struct ErosionParams {
     pub slope_width: f64,
     pub rise_width: f64,
     /// Maximum sediment thickness on the shelf, slope and rise, and at the head of a deep-sea
-    /// fan, which thins with distance from the river mouth over [`Self::fan_length`].
+    /// fan, which thins with distance from the river mouth over [`Self::fan_length`] (large
+    /// fans keep km of sediment over 1000–2000 km: Bengal, Indus, Amazon; Curray et al. 2003).
     pub max_shelf_sediment: f64,
     pub max_slope_sediment: f64,
     pub max_rise_sediment: f64,
@@ -76,6 +77,13 @@ pub struct ErosionParams {
     pub max_margin_cells: usize,
     /// Maximum number of ocean cells a deep-sea fan of one river mouth spreads over.
     pub max_fan_cells: usize,
+    /// Delta plains build up on shelf cells at most this many rings from a river mouth.
+    pub delta_reach: u32,
+    /// Farthest distance (m) that turbidity currents carry sediment from a river mouth into
+    /// deep-sea fans, along their path.
+    pub max_bypass_distance: f64,
+    /// Height (m) that turbidity currents can run up above the lowest point of their path.
+    pub fan_climb: f64,
     /// Whether waves erode coasts and rework the sea floor (see `wave_erosion`).
     pub waves: bool,
     /// Storm wave base (m, negative) on shelves open to the ocean, within
@@ -115,7 +123,7 @@ impl Default for ErosionParams {
             max_slope_sediment: 8e3,
             max_rise_sediment: 5e3,
             max_fan_sediment: 1.5e3,
-            fan_length: 500e3,
+            fan_length: 1000e3,
             sediment_erodibility_factor: 2.0,
             sediment_diffusivity: 5e3,
             marine_diffusivity_ratio: 0.02,
@@ -123,6 +131,9 @@ impl Default for ErosionParams {
             prograde: false,
             max_margin_cells: 256,
             max_fan_cells: 256,
+            delta_reach: 1,
+            max_bypass_distance: 3000e3,
+            fan_climb: 50.0,
             waves: true,
             wave_base: -50.0,
             sheltered_wave_base: -15.0,
@@ -157,6 +168,12 @@ impl ErosionParams {
             "open_water_depth" => &mut self.open_water_depth,
             "cliff_retreat_sediment" => &mut self.cliff_retreat_sediment,
             "cliff_retreat_bedrock" => &mut self.cliff_retreat_bedrock,
+            "max_bypass_distance" => &mut self.max_bypass_distance,
+            "fan_climb" => &mut self.fan_climb,
+            "delta_reach" => {
+                self.delta_reach = value as u32;
+                return Ok(());
+            }
             "waves" => {
                 self.waves = value != 0.0;
                 return Ok(());
@@ -417,7 +434,6 @@ pub fn erode(
     }
 
     let zones = zones(mesh, plate, class, params);
-    let spacing = mesh.mean_edge_angle() * params.planet_radius;
 
     let mut sediment_to_ocean = 0.0;
     let mut sediment_overfill = 0.0;
@@ -427,10 +443,25 @@ pub fn erode(
     let mut queue = VecDeque::new();
     let mut fan_queue = VecDeque::new();
     let mut margin = Vec::new();
-    let mut fan = Vec::new();
     let mut water = Vec::new();
-    let mut shelf = Vec::new();
-    let mut rooms = Vec::new();
+    let mut fan_scratch = FanScratch::new(cell_count);
+
+    // The shelf is graded: next to the coast it fills up to the wave base (the inner shelf),
+    // further out up to the shelf break (Harris et al. 2014: ~130 m).
+    let wave_base = wave_bases(mesh, elevation, params);
+    let shelf_target: Vec<f64> = (0..cell_count)
+        .map(|cell| {
+            let coastal = mesh
+                .neighbors(cell as u32)
+                .iter()
+                .any(|&m| elevation[m as usize] >= 0.0);
+            if coastal {
+                wave_base[cell].max(params.shelf_depth)
+            } else {
+                params.shelf_depth
+            }
+        })
+        .collect();
 
     // Pass A: river sediment fills the marine accommodation (margins and open-sea fans).
     let mut leftovers = Vec::new();
@@ -467,9 +498,9 @@ pub fn erode(
                     // Deeply buried sediment on continental crust metamorphoses (see
                     // `Simulation::metamorphose_sediment`), so it needs no cap.
                     Zone::Shelf if class[cell] == CrustClass::Continental => {
-                        (params.shelf_depth, f64::INFINITY)
+                        (shelf_target[cell], f64::INFINITY)
                     }
-                    Zone::Shelf => (params.shelf_depth, params.max_shelf_sediment),
+                    Zone::Shelf => (shelf_target[cell], params.max_shelf_sediment),
                     Zone::Slope => (params.slope_depth, params.max_slope_sediment),
                     Zone::Rise => (params.rise_depth, params.max_rise_sediment),
                     Zone::Fan => continue,
@@ -483,41 +514,20 @@ pub fn erode(
             }
         }
 
-        // What does not fit flows down the slope into a deep-sea fan: spread over the ocean
-        // far from margins within reach in proportion to the room below the slope depth, with
-        // a thickness cap that falls with distance from the mouth.
+        // What does not fit bypasses the margin as turbidity currents down the slope into a
+        // deep-sea fan (see `fill_fan`).
         if remaining > 0.0 {
-            water_within_reach(
+            let fan = fill_fan(
                 mesh,
-                mouth,
+                &mut seabed,
+                &zones,
                 params,
-                &is_ocean,
-                &mut fan_mark,
-                &mut fan_queue,
-                &mut water,
+                mouth,
+                remaining,
+                &mut fan_scratch,
             );
-            fan.clear();
-            rooms.clear();
-            for &(cell, hops) in &water {
-                if zones[cell] == Zone::Fan {
-                    let cap = params.max_fan_sediment
-                        * (-f64::from(hops) * spacing / params.fan_length).exp();
-                    let room = seabed.room(cell, params.slope_depth, cap);
-                    if room > 0.0 {
-                        fan.push(cell);
-                        rooms.push(room);
-                    }
-                }
-            }
-            let total_room: f64 = rooms.iter().sum();
-            if total_room > 0.0 {
-                let fraction = (remaining / total_room).min(1.0);
-                for (&cell, &room) in fan.iter().zip(&rooms) {
-                    seabed.deposit(cell, room * fraction);
-                }
-                deposited[Zone::Fan as usize] += total_room * fraction;
-                remaining -= total_room * fraction;
-            }
+            deposited[Zone::Fan as usize] += fan;
+            remaining -= fan;
         }
         if remaining > 0.0 {
             leftovers.push((mouth, source_cell, remaining));
@@ -558,22 +568,33 @@ pub fn erode(
             }
         }
 
-        // When the fan is full too, deltas build up to a delta plain slightly above sea level
-        // on the margin crust. Anything beyond that piles up evenly on the shelf within reach,
-        // or at the river's last land cell if there is no shelf (it becomes land, and the next
-        // step's drainage carries it on); never on the slope or rise.
+        // When the margin and the fans within reach are full, a delta plain builds up slightly
+        // above sea level on the shelf around the mouth, at most [`ErosionParams::delta_reach`]
+        // rings wide (Earth's largest delta plains are ~10⁵ km²). What is left piles up on the
+        // river's last land cell: it is land, and rivers and waves carry it on later.
         let is_ocean = |cell: usize| elevation[cell] < 0.0 || seabed.elevation[cell] < 0.0;
-        margin_within_reach(
-            mesh,
-            mouth,
-            &zones,
-            params,
-            &is_ocean,
-            &mut margin_mark,
-            &mut queue,
-            &mut margin,
-        );
-        for &cell in &margin {
+        water.clear();
+        water.push((mouth, 0));
+        fan_scratch.mark[mouth] = mouth;
+        let mut next = 0;
+        while next < water.len() {
+            let (cell, hops) = water[next];
+            next += 1;
+            if hops >= params.delta_reach {
+                continue;
+            }
+            for &neighbor in mesh.neighbors(cell as u32) {
+                let neighbor = neighbor as usize;
+                if is_ocean(neighbor) && fan_scratch.mark[neighbor] != mouth {
+                    fan_scratch.mark[neighbor] = mouth;
+                    water.push((neighbor, hops + 1));
+                }
+            }
+        }
+        for &(cell, _) in &water {
+            fan_scratch.mark[cell] = usize::MAX;
+        }
+        for &(cell, _) in &water {
             if remaining <= 0.0 {
                 break;
             }
@@ -587,38 +608,8 @@ pub fn erode(
                 remaining -= thickness;
             }
         }
-        if params.prograde {
-            let own_plate = plate[source_cell];
-            for own in [true, false] {
-                for &cell in &margin {
-                    if remaining <= 0.0 {
-                        break;
-                    }
-                    if (plate[cell] == own_plate) != own
-                        || !matches!(zones[cell], Zone::Slope | Zone::Rise)
-                    {
-                        continue;
-                    }
-                    let thickness =
-                        remaining.min(seabed.room(cell, params.shelf_depth, f64::INFINITY));
-                    if thickness > 0.0 {
-                        seabed.deposit(cell, thickness);
-                        deposited[zones[cell] as usize] += thickness;
-                        remaining -= thickness;
-                    }
-                }
-            }
-        }
         if remaining > 0.0 {
-            shelf.clear();
-            shelf.extend(margin.iter().copied().filter(|&c| zones[c] == Zone::Shelf));
-            if shelf.is_empty() {
-                shelf.push(source_cell);
-            }
-            let share = remaining / shelf.len() as f64;
-            for &cell in &shelf {
-                seabed.deposit(cell, share);
-            }
+            seabed.deposit(source_cell, remaining);
             sediment_overfill += remaining;
         }
     }
@@ -680,34 +671,8 @@ fn wave_erosion(
     let spacing = mesh.mean_edge_angle() * params.planet_radius;
     let mut result = WaveErosion::default();
 
-    // Wave base per cell: by distance (in rings through the sea) from open water.
-    let mut ring = vec![u32::MAX; cell_count];
-    let mut queue = VecDeque::new();
-    for cell in 0..cell_count {
-        if seabed.elevation[cell] < params.open_water_depth {
-            ring[cell] = 0;
-            queue.push_back(cell);
-        }
-    }
-    while let Some(cell) = queue.pop_front() {
-        if ring[cell] >= params.fetch_rings {
-            continue;
-        }
-        for &neighbor in mesh.neighbors(cell as u32) {
-            let neighbor = neighbor as usize;
-            if ring[neighbor] == u32::MAX && seabed.elevation[neighbor] < 0.0 {
-                ring[neighbor] = ring[cell] + 1;
-                queue.push_back(neighbor);
-            }
-        }
-    }
-    let wave_base = |cell: usize| {
-        if ring[cell] <= params.fetch_rings {
-            params.wave_base
-        } else {
-            params.sheltered_wave_base
-        }
-    };
+    let wave_base = wave_bases(mesh, &seabed.elevation, params);
+    let wave_base = |cell: usize| wave_base[cell];
 
     // Sources: (cell, rock-equivalent sediment), taken off at once.
     let mut sources: Vec<(usize, f64)> = Vec::new();
@@ -826,6 +791,117 @@ fn wave_erosion(
         }
     }
     result
+}
+
+/// The storm wave base of every cell (m): [`ErosionParams::wave_base`] within
+/// [`ErosionParams::fetch_rings`] rings (through the sea) of open water deeper than
+/// [`ErosionParams::open_water_depth`], [`ErosionParams::sheltered_wave_base`] in the enclosed
+/// and epicontinental seas beyond.
+fn wave_bases(mesh: &SphereMesh, elevation: &[f64], params: &ErosionParams) -> Vec<f64> {
+    let cell_count = mesh.len();
+    let mut ring = vec![u32::MAX; cell_count];
+    let mut queue = VecDeque::new();
+    for cell in 0..cell_count {
+        if elevation[cell] < params.open_water_depth {
+            ring[cell] = 0;
+            queue.push_back(cell);
+        }
+    }
+    while let Some(cell) = queue.pop_front() {
+        if ring[cell] >= params.fetch_rings {
+            continue;
+        }
+        for &neighbor in mesh.neighbors(cell as u32) {
+            let neighbor = neighbor as usize;
+            if ring[neighbor] == u32::MAX && elevation[neighbor] < 0.0 {
+                ring[neighbor] = ring[cell] + 1;
+                queue.push_back(neighbor);
+            }
+        }
+    }
+    ring.iter()
+        .map(|&ring| {
+            if ring <= params.fetch_rings {
+                params.wave_base
+            } else {
+                params.sheltered_wave_base
+            }
+        })
+        .collect()
+}
+
+/// Scratch space of [`fill_fan`].
+struct FanScratch {
+    /// The mouth that last reached each cell.
+    mark: Vec<usize>,
+    /// Cells reached, with their distance in hops and the lowest elevation on the path there.
+    path: Vec<(usize, u32, f64)>,
+}
+
+impl FanScratch {
+    fn new(cell_count: usize) -> Self {
+        Self {
+            mark: vec![usize::MAX; cell_count],
+            path: Vec::new(),
+        }
+    }
+}
+
+/// Deposits up to `amount` of sediment from a river mouth into deep-sea fans and returns the
+/// deposited amount. Turbidity currents run downhill: from the mouth, the flow spreads through
+/// the sea to neighbours no higher than [`ErosionParams::fan_climb`] above the lowest point of
+/// its path so far, up to [`ErosionParams::max_bypass_distance`] (the Bengal fan reaches
+/// ~3000 km; Curray et al. 2003). It fills the cells far from margins (the fan zone) nearest
+/// first along the paths, up to the slope depth and a thickness cap that falls with the
+/// distance from the mouth, so that fans pond in basins and thin into lobes.
+fn fill_fan(
+    mesh: &SphereMesh,
+    seabed: &mut Seabed,
+    zones: &[Zone],
+    params: &ErosionParams,
+    mouth: usize,
+    amount: f64,
+    scratch: &mut FanScratch,
+) -> f64 {
+    let spacing = mesh.mean_edge_angle() * params.planet_radius;
+    let max_hops = (params.max_bypass_distance / spacing).floor() as u32;
+    let path = &mut scratch.path;
+    path.clear();
+    path.push((mouth, 0, seabed.elevation[mouth]));
+    scratch.mark[mouth] = mouth;
+    let mut remaining = amount;
+    let mut next = 0;
+    while next < path.len() && remaining > 0.0 {
+        let (cell, hops, lowest) = path[next];
+        next += 1;
+        if cell != mouth && zones[cell] == Zone::Fan {
+            let cap =
+                params.max_fan_sediment * (-f64::from(hops) * spacing / params.fan_length).exp();
+            let thickness = remaining.min(seabed.room(cell, params.slope_depth, cap));
+            if thickness > 0.0 {
+                seabed.deposit(cell, thickness);
+                remaining -= thickness;
+            }
+        }
+        if hops >= max_hops {
+            continue;
+        }
+        for &neighbor in mesh.neighbors(cell as u32) {
+            let neighbor = neighbor as usize;
+            let height = seabed.elevation[neighbor];
+            if height < 0.0
+                && height <= lowest + params.fan_climb
+                && scratch.mark[neighbor] != mouth
+            {
+                scratch.mark[neighbor] = mouth;
+                path.push((neighbor, hops + 1, lowest.min(height)));
+            }
+        }
+    }
+    for &(cell, ..) in path.iter() {
+        scratch.mark[cell] = usize::MAX;
+    }
+    amount - remaining
 }
 
 /// The margin within reach of a river mouth: shelf, slope and rise cells connected to it
@@ -1816,5 +1892,119 @@ mod tests {
             change.abs() < 1e-9 * eroded,
             "change {change}, eroded {eroded}"
         );
+    }
+
+    #[test]
+    fn delta_plains_stay_at_the_mouth_and_the_rest_piles_on_land() {
+        // A wide shelf (20°–40°) with 10 m of room below the shelf break, and no room on the
+        // oceanic crust beyond: delta plains build at the mouths only, the rest piles on land.
+        let mesh = SphereMesh::icosphere(4);
+        let elevation: Vec<f64> = (0..mesh.len() as u32)
+            .map(|cell| {
+                let angle = mesh.vertex(cell).angle_between(glam::DVec3::Z).to_degrees();
+                if angle <= 20.0 {
+                    3000.0 - angle * 150.0
+                } else if angle <= 40.0 {
+                    -130.0
+                } else {
+                    -4500.0
+                }
+            })
+            .collect();
+        let class = classes(&elevation, -1000.0);
+        let params = ErosionParams {
+            sediment_diffusivity: 0.0,
+            waves: false,
+            max_slope_sediment: 0.0,
+            max_rise_sediment: 0.0,
+            max_fan_sediment: 0.0,
+            ..ErosionParams::default()
+        };
+        let sediment = vec![0.0; mesh.len()];
+        let result = run_with(
+            &mesh,
+            &elevation,
+            &sediment,
+            3.0,
+            &vec![0; mesh.len()],
+            &class,
+            &params,
+        );
+        assert!(result.sediment_overfill > 0.0);
+        let after = after_step(&elevation, &sediment, &result, &params);
+        // Rings through the sea from land: the mouths are at ring 1.
+        let mut ring = vec![u32::MAX; mesh.len()];
+        let mut queue = VecDeque::new();
+        for cell in 0..mesh.len() {
+            if elevation[cell] >= 0.0 {
+                ring[cell] = 0;
+                queue.push_back(cell);
+            }
+        }
+        while let Some(cell) = queue.pop_front() {
+            for &m in mesh.neighbors(cell as u32) {
+                if ring[m as usize] == u32::MAX {
+                    ring[m as usize] = ring[cell] + 1;
+                    queue.push_back(m as usize);
+                }
+            }
+        }
+        let mut deltas = 0;
+        for cell in 0..mesh.len() {
+            if elevation[cell] < 0.0 && after[cell] >= 0.0 {
+                deltas += 1;
+                assert!(
+                    ring[cell] <= 1 + params.delta_reach,
+                    "{cell}: ring {}",
+                    ring[cell]
+                );
+            }
+            if elevation[cell] >= 0.0 && result.sediment_delta[cell] > 0.0 {
+                // The pile is on the rivers' last land cells, at the coast.
+                assert!(
+                    mesh.neighbors(cell as u32)
+                        .iter()
+                        .any(|&m| ring[m as usize] == 1),
+                    "{cell}"
+                );
+            }
+        }
+        assert!(deltas > 0);
+    }
+
+    #[test]
+    fn fans_run_downhill() {
+        // The island's ocean deepens outwards; a ridge at 40°–45° (−1000 m) separates it from a
+        // deeper basin. Turbidity currents cannot climb the ridge.
+        let mesh = SphereMesh::icosphere(4);
+        let elevation: Vec<f64> = island(&mesh)
+            .iter()
+            .enumerate()
+            .map(|(cell, &e)| {
+                let angle = mesh
+                    .vertex(cell as u32)
+                    .angle_between(glam::DVec3::Z)
+                    .to_degrees();
+                if (40.0..45.0).contains(&angle) {
+                    -1000.0
+                } else if angle >= 45.0 {
+                    -5000.0
+                } else {
+                    e
+                }
+            })
+            .collect();
+        let class = classes(&elevation, 0.0);
+        let result = run(&mesh, &elevation, 20.0, &vec![0; mesh.len()], &class);
+        assert!(result.deposited[Zone::Fan as usize] > 0.0);
+        for (cell, &delta) in result.sediment_delta.iter().enumerate() {
+            let angle = mesh
+                .vertex(cell as u32)
+                .angle_between(glam::DVec3::Z)
+                .to_degrees();
+            if angle >= 45.0 {
+                assert_eq!(delta, 0.0, "{cell}");
+            }
+        }
     }
 }
