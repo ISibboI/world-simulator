@@ -58,6 +58,13 @@ pub struct InitialSedimentParams {
     /// intracratonic basins hold ~5–8 km), and the basement below it stays at least as thick
     /// as at the coast of the initial continents (so it stays continental crust).
     pub max_platform_factor: f64,
+    /// Weight (0–1) of low bare elevation, against the noise, in where the platform cover
+    /// lies (platforms and basins lie low, shields stand high). Off by default: low ground of
+    /// the initial continents is thinned crust near the coasts, where the minimum basement
+    /// leaves little room for cover (0.5 gives 0.6e9 instead of 0.8e9 Gt), and in 4-seed runs
+    /// over 1000 Myr it changed neither the early loss of freeboard nor the long-term state
+    /// beyond the scatter between seeds.
+    pub lowland_weight: f64,
     /// Flooded continental crust is filled with sediment up to this elevation (m, the shelf;
     /// as [`crate::erosion::ErosionParams::shelf_depth`]).
     pub shelf_depth: f64,
@@ -78,6 +85,7 @@ impl Default for InitialSedimentParams {
             platform_thickness: 3000.0,
             shield_fraction: 0.4,
             max_platform_factor: 2.0,
+            lowland_weight: 0.0,
             shelf_depth: -120.0,
             slope_depth: -2000.0,
         }
@@ -88,6 +96,18 @@ impl Default for InitialSedimentParams {
 /// and arches of several hundred to a few thousand km.
 const PLATFORM_NOISE_FREQUENCY: f64 = 3.0;
 const PLATFORM_NOISE_OCTAVES: u32 = 4;
+
+/// The rank of each value among `values` as a fraction in [0, 1] (ties by index).
+fn ranks(values: &[f64]) -> Vec<f64> {
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_unstable_by(|&a, &b| values[a].total_cmp(&values[b]).then(a.cmp(&b)));
+    let mut rank = vec![0.0; values.len()];
+    let last = (values.len().max(2) - 1) as f64;
+    for (position, &index) in order.iter().enumerate() {
+        rank[index] = position as f64 / last;
+    }
+    rank
+}
 
 /// Mixed into the seed for the random numbers of the cover, so that they do not change the
 /// rest of the initial conditions.
@@ -201,15 +221,32 @@ impl Simulation {
         let continental: Vec<u32> = (0..cell_count as u32)
             .filter(|&cell| is_continental[cell as usize])
             .collect();
-        let field: Vec<f64> = continental
+        // Platforms and basins lie low, shields stand high (and lose any cover first): the
+        // field mixes the rank of the noise with the inverted rank of the bare elevation.
+        let noise_rank = ranks(
+            &continental
+                .iter()
+                .map(|&cell| {
+                    noise.fbm(
+                        self.mesh.vertex(cell) * PLATFORM_NOISE_FREQUENCY + offset,
+                        PLATFORM_NOISE_OCTAVES,
+                        0.5,
+                        DVec3::new(5.3, 9.1, 2.7),
+                    )
+                })
+                .collect::<Vec<f64>>(),
+        );
+        let elevation_rank = ranks(
+            &continental
+                .iter()
+                .map(|&cell| self.surface_elevation(cell))
+                .collect::<Vec<f64>>(),
+        );
+        let field: Vec<f64> = noise_rank
             .iter()
-            .map(|&cell| {
-                noise.fbm(
-                    self.mesh.vertex(cell) * PLATFORM_NOISE_FREQUENCY + offset,
-                    PLATFORM_NOISE_OCTAVES,
-                    0.5,
-                    DVec3::new(5.3, 9.1, 2.7),
-                )
+            .zip(&elevation_rank)
+            .map(|(&noise, &elevation)| {
+                (1.0 - params.lowland_weight) * noise + params.lowland_weight * (1.0 - elevation)
             })
             .collect();
         let mut sorted = field.clone();
@@ -385,6 +422,27 @@ mod tests {
         // (Next to a continent, young sea floor already has a little terrigenous mud.)
         let young_max = params.pelagic(2.0, ccd_age) + params.terrigenous(2.0, 0.0);
         assert!(young.iter().all(|&s| s <= young_max));
+        // Sea-floor cover stays below the continental slope and the metamorphic depth.
+        let slope = params.slope_depth;
+        for cell in 0..simulation.mesh.len() as u32 {
+            let crust = simulation.surface_crust(cell);
+            if crust.is_oceanic() && crust.sediment > 0.0 {
+                let bare = Crust {
+                    sediment: 0.0,
+                    ..crust
+                };
+                let floor = bare.surface_elevation(0.0, simulation.sea_level);
+                if floor < slope {
+                    assert!(simulation.surface_elevation(cell) <= slope + 50.0);
+                }
+                assert!(
+                    sediment_bulk_thickness(crust.sediment)
+                        <= simulation.params.metamorphic_depth + 1.0
+                );
+            }
+        }
+        // No terrigenous apron without a continent on the plate.
+        assert_eq!(params.terrigenous(100.0, f64::INFINITY), 0.0);
         assert!(young.iter().filter(|&&s| s < 20.0).count() * 2 > young.len());
         assert!(old.iter().all(|&s| s > 150.0));
     }
