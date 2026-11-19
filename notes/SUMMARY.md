@@ -193,10 +193,12 @@ components (climate, erosion, …) are expected to build on it.
    convergence, within Earth's 30–95 km³/km/Myr); the sediment part of the sea level is not
    decelerating: 8 seeds × 1000 Myr show a real trend, +26 ± 2 m per 100 Myr over 500–1000 Myr
    (every seed +18…+33), stock +1.3 Gt/yr: crystalline felsic crust turns into sediment faster
-   than sediment returns to crust. Measured: ocean ≥ 200 Myr (7–10% of the ocean area) holds
-   63% of the oceanic sediment at 1000 Myr and takes all of its growth. **Next (user decision):
-   issue 13, the ancient ocean**, then re-measure the sediment budget; the ~0.6 Gt/yr on
-   continental/transitional crust needs a sediment → crust path independently.
+   than sediment returns to crust. Issue 13 (`plans/issue-13-ancient-ocean.md`): burial
+   metamorphism on any crust and subduction invasion near trenches → ocean ≥ 200 Myr 10.8 →
+   4.5% (target ≤ 1%, re-measure where it sits), initiations 0.056/Myr, oceanic stock flat. The
+   remaining rise (+18 ± 4 m per 100 Myr) is continental: overfill piles up as coastal land on
+   thinned crust because margins lack accommodation (progradation does not help). **Next:
+   margin stretching and thermal subsidence (item 3).**
 2. Separately: seed 1's loss at the collision stacking cap (0.4 Gt/yr); the mafic-erosion
    tracer artefact in the felsic budget (+0.3 Gt/yr; erosion of mafic crust becomes sediment).
 3. Then back to issue 1r/7: margin stretching covers < half of the continental opening (COB
