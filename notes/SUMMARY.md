@@ -77,7 +77,8 @@ components (climate, erosion, …) are expected to build on it.
   then is **routed onto margins** by zone (shelf on non-oceanic crust to −120 m, slope/rise on
   oceanic crust by distance from its plate's margin crust to −2000/−3500 m, with thickness caps),
   the river's own plate first, then thinning deep-sea fans, enclosed seas fill, delta plains to
-  +2 m, overfill on the shelf or land; `--set erosion.NAME=…`. Sediment is stored as
+  +2 m, overfill on the shelf or land; sediment erodes 2× faster than bedrock and spreads by
+  diffusion (5 × 10³ m²/yr on land down to sea level, 50× slower under water); `--set erosion.NAME=…`. Sediment is stored as
   rock-equivalent thickness and **compacts** (Athy φ0 0.6, λ 2 km; tabulated in `isostasy`);
   below 11 km on continental-origin crust it **metamorphoses** into felsic crust.
 - `src/temperature.rs`: energy balance model `C dT/dt = Q(1−α) − (A + BT) + transport` with a
@@ -200,8 +201,9 @@ components (climate, erosion, …) are expected to build on it.
    thinned crust because margins lack accommodation (progradation does not help). Item 3
    (`plans/margin-stretching.md`): rifts may stretch into consumed slots (stretched share 0.34
    → 0.52, flooded 27%); thinner margins deferred (cost felsic crust, no sediment gain).
-   **Next (research `research/shelf-sediment-removal.md`): higher erodibility of sediment and
-   diffusion of low-gradient sediment.**
+   Sediment erodes 2× faster than bedrock and spreads by diffusion (land capped at sea level,
+   marine 50× slower): overfill halves, flooded 33%, slope unchanged. With the issue-14 initial
+   conditions the sediment-part slope is +25 m per 100 Myr (500–1000 Myr; +17 with the old ones).
 2. Separately: seed 1's loss at the collision stacking cap (0.4 Gt/yr); the mafic-erosion
    tracer artefact in the felsic budget (+0.3 Gt/yr; erosion of mafic crust becomes sediment).
 3. Then back to issue 1r/7: margin stretching covers < half of the continental opening (COB

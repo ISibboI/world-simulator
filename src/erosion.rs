@@ -53,6 +53,17 @@ pub struct ErosionParams {
     pub max_rise_sediment: f64,
     pub max_fan_sediment: f64,
     pub fan_length: f64,
+    /// Erodibility of sediment relative to bedrock: sedimentary rock and loose sediment erode
+    /// ~2–4× faster than crystalline rock (cosmogenic rates ~20 vs 9–11 mm/kyr; stream-power K
+    /// ~4× in Neogene sediments vs metamorphic rock), so exposed sediment is recycled before new
+    /// crust is eroded, as on Earth (half-mass age of sedimentary rocks ~600 Myr).
+    pub sediment_erodibility_factor: f64,
+    /// Diffusivity (m²/yr) of transport-limited sediment spreading on land (deltas ~4–6 × 10³
+    /// m²/yr; alluvial basins 10³–10⁴).
+    pub sediment_diffusivity: f64,
+    /// Diffusivity of sediment below sea level relative to [`Self::sediment_diffusivity`]
+    /// (marine diffusion is 10–100× slower than on land; Kaufman et al. 1991).
+    pub marine_diffusivity_ratio: f64,
     /// Elevation of delta plains above sea level, built when the margin within reach is full.
     pub delta_top: f64,
     /// Whether sediment that does not fit anywhere progrades the shelf over the slope and rise
@@ -82,6 +93,9 @@ impl Default for ErosionParams {
             max_rise_sediment: 5e3,
             max_fan_sediment: 1.5e3,
             fan_length: 500e3,
+            sediment_erodibility_factor: 2.0,
+            sediment_diffusivity: 5e3,
+            marine_diffusivity_ratio: 0.02,
             delta_top: 2.0,
             prograde: false,
             max_margin_cells: 256,
@@ -105,6 +119,9 @@ impl ErosionParams {
             "max_rise_sediment" => &mut self.max_rise_sediment,
             "max_fan_sediment" => &mut self.max_fan_sediment,
             "fan_length" => &mut self.fan_length,
+            "sediment_erodibility_factor" => &mut self.sediment_erodibility_factor,
+            "sediment_diffusivity" => &mut self.sediment_diffusivity,
+            "marine_diffusivity_ratio" => &mut self.marine_diffusivity_ratio,
             "prograde" => {
                 self.prograde = value != 0.0;
                 return Ok(());
@@ -245,14 +262,30 @@ pub fn erode(
             .vertex(cell as u32)
             .angle_between(mesh.vertex(receiver))
             * params.planet_radius;
-        let factor =
-            params.erodibility * dt_years * discharge[cell].powf(params.discharge_exponent)
-                / distance;
-        let target = (elevation[cell] + factor * receiver_elevation) / (1.0 + factor);
-        let thickness = elevation[cell] - target;
+        let factor = |erodibility: f64, years: f64| {
+            erodibility * years * discharge[cell].powf(params.discharge_exponent) / distance
+        };
+        // Sediment erodes faster than bedrock. Cut through the sediment with its erodibility;
+        // if the cut goes through all of it, the rest of the step cuts the bedrock below.
+        let bulk = isostasy::sediment_bulk_thickness(sediment[cell]);
+        let factor_sediment = factor(
+            params.erodibility * params.sediment_erodibility_factor,
+            dt_years,
+        );
+        let cut = elevation[cell]
+            - (elevation[cell] + factor_sediment * receiver_elevation) / (1.0 + factor_sediment);
+        let thickness = if cut <= bulk {
+            cut
+        } else {
+            let remaining_years = dt_years * (1.0 - bulk / cut);
+            let factor_bedrock = factor(params.erodibility, remaining_years);
+            let exposed = elevation[cell] - bulk;
+            let bedrock_cut =
+                exposed - (exposed + factor_bedrock * receiver_elevation) / (1.0 + factor_bedrock);
+            bulk + bedrock_cut.max(0.0)
+        };
 
         // The top `thickness` metres are removed: sediment (bulk, compacted) first.
-        let bulk = isostasy::sediment_bulk_thickness(sediment[cell]);
         let from_bulk = thickness.min(bulk);
         let left = isostasy::sediment_for_bulk_thickness(bulk - from_bulk);
         let from_sediment = sediment[cell] - left;
@@ -506,6 +539,8 @@ pub fn erode(
         }
     }
 
+    diffuse_sediment(mesh, &mut seabed, params, dt_years);
+
     ErosionResult {
         bedrock_delta,
         sediment_delta: seabed.delta,
@@ -537,12 +572,74 @@ impl Seabed {
         }
     }
 
+    fn remove(&mut self, cell: usize, thickness: f64) {
+        let before = self.sediment[cell];
+        let after = (before - thickness).max(0.0);
+        self.delta[cell] -= before - after;
+        self.sediment[cell] = after;
+        self.elevation[cell] = isostasy::change_sediment(self.elevation[cell], before, after);
+    }
+
     fn deposit(&mut self, cell: usize, thickness: f64) {
         let before = self.sediment[cell];
         self.delta[cell] += thickness;
         self.sediment[cell] += thickness;
         self.elevation[cell] =
             isostasy::change_sediment(self.elevation[cell], before, self.sediment[cell]);
+    }
+}
+
+/// Transport-limited spreading of sediment (Kenyon & Turcotte 1985; Kaufman et al. 1991; Paola
+/// et al. 1992): sediment moves to lower neighbours with a flux proportional to the difference in
+/// surface elevation (linear diffusion), as far as the cell has sediment. On land the diffusivity
+/// is [`ErosionParams::sediment_diffusivity`] and land is lowered at most to sea level: delta and
+/// coastal plains spread seaward and grade to sea level, they are not drowned. Below sea level
+/// sediment spreads [`ErosionParams::marine_diffusivity_ratio`] times as fast (below wave base
+/// only gravity flows move it).
+fn diffuse_sediment(mesh: &SphereMesh, seabed: &mut Seabed, params: &ErosionParams, dt_years: f64) {
+    if params.sediment_diffusivity <= 0.0 {
+        return;
+    }
+    let spacing = mesh.mean_edge_angle() * params.planet_radius;
+    // Explicit scheme: each cell may pass at most ~1/2 of its excess over ~6 neighbours.
+    let rate = params.sediment_diffusivity * dt_years / (spacing * spacing);
+    let substeps = (rate * 6.0 / 0.5).ceil().max(1.0) as usize;
+    let rate = rate / substeps as f64;
+    let cell_count = mesh.len();
+    let mut outflow = vec![0.0; cell_count];
+    let mut transfers: Vec<(usize, usize, f64)> = Vec::new();
+    for _ in 0..substeps {
+        transfers.clear();
+        outflow.iter_mut().for_each(|x| *x = 0.0);
+        for cell in 0..cell_count {
+            let height = seabed.elevation[cell];
+            if seabed.sediment[cell] <= 0.0 {
+                continue;
+            }
+            let (rate, floor) = if height >= 0.0 {
+                (rate, 0.0)
+            } else {
+                (rate * params.marine_diffusivity_ratio, f64::NEG_INFINITY)
+            };
+            for &neighbor in mesh.neighbors(cell as u32) {
+                let neighbor = neighbor as usize;
+                let drop = height - seabed.elevation[neighbor].max(floor);
+                if drop > 0.0 {
+                    let amount = rate * drop;
+                    outflow[cell] += amount;
+                    transfers.push((cell, neighbor, amount));
+                }
+            }
+        }
+        for &(from, to, amount) in &transfers {
+            // No cell gives more sediment than it has.
+            let scale = (seabed.sediment[from] / outflow[from]).min(1.0);
+            let amount = amount * scale;
+            if amount > 0.0 {
+                seabed.remove(from, amount);
+                seabed.deposit(to, amount);
+            }
+        }
     }
 }
 
@@ -702,6 +799,8 @@ mod tests {
     }
 
     /// One erosion step of 1 Myr with uniform precipitation and bedrock density.
+    /// One erosion step of 1 Myr with uniform precipitation and bedrock density, without
+    /// sediment diffusion (routing tests).
     fn run(
         mesh: &SphereMesh,
         elevation: &[f64],
@@ -709,21 +808,142 @@ mod tests {
         plate: &[u32],
         class: &[CrustClass],
     ) -> ErosionResult {
+        let params = ErosionParams {
+            sediment_diffusivity: 0.0,
+            ..ErosionParams::default()
+        };
+        run_with(
+            mesh,
+            elevation,
+            &vec![0.0; mesh.len()],
+            precipitation,
+            plate,
+            class,
+            &params,
+        )
+    }
+
+    fn run_with(
+        mesh: &SphereMesh,
+        elevation: &[f64],
+        sediment: &[f64],
+        precipitation: f64,
+        plate: &[u32],
+        class: &[CrustClass],
+        params: &ErosionParams,
+    ) -> ErosionResult {
         let n = mesh.len();
         erode(
             mesh,
             &Surface {
                 elevation,
-                sediment: &vec![0.0; n],
+                sediment,
                 bedrock_density: &vec![2800.0; n],
                 bedrock_isostatic_density: &vec![2800.0; n],
                 precipitation: &vec![precipitation; n],
                 plate,
                 class,
             },
-            &ErosionParams::default(),
+            params,
             1e6,
         )
+    }
+
+    #[test]
+    fn sediment_erodes_faster_than_bedrock() {
+        let mesh = SphereMesh::icosphere(4);
+        let elevation = island(&mesh);
+        let class = classes(&elevation, -1000.0);
+        let plate = vec![0; mesh.len()];
+        let params = ErosionParams {
+            sediment_diffusivity: 0.0,
+            ..ErosionParams::default()
+        };
+        // The same island with a thick sediment cover on land, at the same elevations.
+        let covered: Vec<f64> = elevation
+            .iter()
+            .map(|&e| if e > 0.0 { 5000.0 } else { 0.0 })
+            .collect();
+        let bare = run_with(
+            &mesh,
+            &elevation,
+            &vec![0.0; mesh.len()],
+            1.0,
+            &plate,
+            &class,
+            &params,
+        );
+        let soft = run_with(&mesh, &elevation, &covered, 1.0, &plate, &class, &params);
+        let removed = |r: &ErosionResult| -> f64 {
+            (0..mesh.len())
+                .filter(|&c| elevation[c] > 0.0)
+                .map(|c| -(r.bedrock_delta[c] + r.sediment_delta[c]))
+                .sum()
+        };
+        assert!(
+            removed(&soft) > 1.5 * removed(&bare),
+            "{} {}",
+            removed(&soft),
+            removed(&bare)
+        );
+        // The covered island loses sediment, not bedrock, where the cover is thick.
+        assert!(soft.bedrock_delta.iter().all(|&d| d == 0.0));
+    }
+
+    #[test]
+    fn sediment_spreads_from_coastal_plains_into_the_sea() {
+        let mesh = SphereMesh::icosphere(4);
+        // A flat coastal plain at +50 m with 2 km of sediment next to a shelf at −1000 m.
+        let elevation: Vec<f64> = (0..mesh.len() as u32)
+            .map(|cell| {
+                if mesh.vertex(cell).z > 0.3 {
+                    50.0
+                } else {
+                    -1000.0
+                }
+            })
+            .collect();
+        let sediment: Vec<f64> = elevation
+            .iter()
+            .map(|&e| if e > 0.0 { 2000.0 } else { 0.0 })
+            .collect();
+        let class = classes(&elevation, -2000.0);
+        let plate = vec![0; mesh.len()];
+        let params = ErosionParams {
+            sediment_erodibility_factor: 1.0,
+            ..ErosionParams::default()
+        };
+        let result = run_with(&mesh, &elevation, &sediment, 0.0, &plate, &class, &params);
+        let to_sea: f64 = (0..mesh.len())
+            .filter(|&c| elevation[c] < 0.0)
+            .map(|c| result.sediment_delta[c])
+            .sum();
+        let from_land: f64 = (0..mesh.len())
+            .filter(|&c| elevation[c] > 0.0)
+            .map(|c| -result.sediment_delta[c])
+            .sum();
+        assert!(to_sea > 0.0);
+        // Conserved, and no cell gives more than it has.
+        assert!((to_sea - from_land).abs() < 1e-6 * from_land);
+        assert!((0..mesh.len()).all(|c| sediment[c] + result.sediment_delta[c] >= -1e-9));
+        // The plain spreads seaward but is not drowned: diffusion lowers land at most to sea
+        // level.
+        for c in 0..mesh.len() {
+            if elevation[c] > 0.0 {
+                let after = isostasy::change_sediment(
+                    elevation[c],
+                    sediment[c],
+                    sediment[c] + result.sediment_delta[c],
+                );
+                assert!(after >= -1e-6, "cell {c}: {after}");
+            }
+        }
+        // Only cells next to the coast change much: diffusion over ~1 cell per Myr.
+        let deep_inland = (0..mesh.len() as u32)
+            .filter(|&c| mesh.vertex(c).z > 0.8)
+            .map(|c| result.sediment_delta[c as usize].abs())
+            .fold(0.0, f64::max);
+        assert!(deep_inland < 1.0, "{deep_inland}");
     }
 
     #[test]
