@@ -121,8 +121,7 @@ pub struct TectonicParams {
     /// thickened arc or continental crust are fully felsic, so intra-oceanic arcs mature into
     /// continental crust once they have thickened.
     pub oceanic_arc_felsic: f64,
-    /// Sediment buried deeper than this (bulk thickness, m) on crust of continental origin
-    /// metamorphoses into felsic crust (greenschist facies, ~250–300 °C at 10–12 km under
+    /// Sediment buried deeper than this (bulk thickness, m) metamorphoses into felsic crust (greenschist facies, ~250–300 °C at 10–12 km under
     /// sediment-blanketed margins).
     pub metamorphic_depth: f64,
     /// Relative amounts of new arc crust at distances of 0, 1, 2, … cells from the trench:
@@ -451,8 +450,9 @@ pub struct Simulation {
     /// Mass (Gt) of crust carried into continental collisions by the plates' convergence so
     /// far (kinematic expectation for collision stacking).
     collision_inflow: f64,
-    /// Sediment turned into crust by metamorphism so far, in Gt.
-    metamorphosed: f64,
+    /// Sediment turned into crust by metamorphism so far, in Gt: on crust of continental origin
+    /// and on other crust (basins, fans).
+    metamorphosed: (f64, f64),
     /// Changes of the felsic crust and sediment masses so far (areal mass summed over cells, see
     /// [`Simulation::felsic_and_sediment`]) per phase of the step.
     material_budget: MaterialBudget,
@@ -627,7 +627,7 @@ impl Simulation {
             opened_area: 0.0,
             continental_opened_area: 0.0,
             collision_inflow: 0.0,
-            metamorphosed: 0.0,
+            metamorphosed: (0.0, 0.0),
             material_budget: MaterialBudget::default(),
             sea_level: 0.0,
             sea_level_change: (0.0, 0.0),
@@ -925,20 +925,23 @@ impl Simulation {
             .collect()
     }
 
-    /// Sediment buried deeper than [`TectonicParams::metamorphic_depth`] on crust of continental
-    /// origin becomes felsic crust (metasediment) at the same mass, as far as the crust stays
-    /// below [`TectonicParams::max_crust_thickness`]. Its pores close, so the column subsides a
-    /// little. Sediment on other crust stays until it is subducted or accreted.
+    /// Sediment buried deeper than [`TectonicParams::metamorphic_depth`] becomes felsic crust
+    /// (metasediment) at the same mass, as far as the crust stays below
+    /// [`TectonicParams::max_crust_thickness`]. Its pores close, so the column subsides a
+    /// little. Burial metamorphism does not depend on the basement: the deep fill of trapped
+    /// oceanic basins (South Caspian, Precaspian) and of deep-sea fans metamorphoses too.
     fn metamorphose_sediment(&mut self) {
         let before = self.felsic_and_sediment();
         let keep = crate::isostasy::sediment_for_bulk_thickness(self.params.metamorphic_depth);
         let max_thickness = self.params.max_crust_thickness;
-        let mut converted = 0.0;
+        // On crust of continental origin, and on other crust (basins, fans).
+        let mut converted = [0.0; 2];
         for plate in &mut self.plates {
             for crust in plate.crust.iter_mut().flatten() {
-                if crust.sediment <= keep || !crust.is_continental_origin() {
+                if crust.sediment <= keep {
                     continue;
                 }
+                let continental = crust.is_continental_origin();
                 let mass = ((crust.sediment - keep) * SEDIMENT_ROCK_DENSITY)
                     .min((max_thickness - crust.thickness).max(0.0) * METASEDIMENT_DENSITY);
                 if mass <= 0.0 {
@@ -951,12 +954,13 @@ impl Simulation {
                     1.0,
                     max_thickness,
                 );
-                converted += mass;
+                converted[usize::from(!continental)] += mass;
             }
         }
         let cell_area =
             4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
-        self.metamorphosed += converted * cell_area / 1e12;
+        self.metamorphosed.0 += converted[0] * cell_area / 1e12;
+        self.metamorphosed.1 += converted[1] * cell_area / 1e12;
         let after = self.felsic_and_sediment();
         self.material_budget.metamorphism.0 += after.0 - before.0;
         self.material_budget.metamorphism.1 += after.1 - before.1;
@@ -1021,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn deeply_buried_sediment_on_continents_metamorphoses() {
+    fn deeply_buried_sediment_metamorphoses() {
         let mut simulation = simulation(2);
         let deep = 30_000.0;
         let (mut continental, mut oceanic) = (None, None);
@@ -1032,7 +1036,9 @@ mod tests {
                     crust.sediment = deep;
                     continental = Some((p, local));
                 } else if crust.is_oceanic() && oceanic.is_none() {
-                    crust.sediment = deep;
+                    // A trapped basin filled with ~20 km of sediment (South Caspian); much
+                    // thicker fills turn the basin into buoyant, continental-like crust.
+                    crust.sediment = 20_000.0;
                     oceanic = Some((p, local));
                 }
             }
@@ -1051,9 +1057,13 @@ mod tests {
         assert!(after.felsic_mass() > before.felsic_mass());
         assert!((after.mass() - before.mass()).abs() < 1e-6 * before.mass());
         assert!((simulation.total_mass() - total).abs() < 1e-9 * total);
-        assert!(simulation.metamorphosed > 0.0);
-        // Oceanic crust keeps its sediment.
-        assert_eq!(crust(&simulation, oceanic).sediment, deep);
+        assert!(simulation.metamorphosed.0 > 0.0);
+        // So does deeply buried sediment on oceanic crust (trapped basins, fans), and the crust
+        // still subducts.
+        let ocean = crust(&simulation, oceanic);
+        assert!((ocean.sediment - keep).abs() < 1e-6, "{}", ocean.sediment);
+        assert!(!ocean.resists_subduction(), "{ocean:?}");
+        assert!(simulation.metamorphosed.1 > 0.0);
     }
 
     #[test]

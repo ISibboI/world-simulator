@@ -94,8 +94,9 @@ pub struct Statistics {
     pub collision_inflow: f64,
     /// Sediment arriving at trenches so far (Gt).
     pub trench_sediment: TrenchSediment,
-    /// Sediment turned into crust by metamorphism so far, in Gt.
-    pub metamorphosed: f64,
+    /// Sediment turned into crust by metamorphism so far, in Gt: on crust of continental origin
+    /// and on other crust (basins, fans).
+    pub metamorphosed: (f64, f64),
     /// Thickness percentiles (10/50/90%, km) of the visible crust samples of continental origin,
     /// and the fraction of them thicker than 50 km.
     pub continental_thickness: [f64; 3],
