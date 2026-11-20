@@ -146,10 +146,30 @@ to get pixels on screen quickly. The worker is the target design.
   does this with `data-wasm-opt="3"`). Measure the speedup in M2 and keep it only if it helps.
 - Expected download: a typical eframe+wgpu app is ~4–8 MB of wasm, ~1.5–3 MB gzipped (Pages
   serves gzip). This needs to be measured in M1.
-- Results will **not be bit-identical** to native for the same seed: wasm uses Rust's
-  `libm` for `sin`/`exp`/…, native uses glibc, and the simulation is chaotic. Both are valid
-  Earth-like planets, but a given seed looks different on the web. (If this ever matters, the
-  `libm` crate could be used on both targets.)
+- **Same seed on web and desktop** (checked 2026-11-20, see D6):
+  - The RNG is not the issue. All randomness is the seeded `ChaCha8Rng`, which gives the same
+    sequence on every platform.
+  - Natively the simulation is **deterministic**: two runs with `--seed 3`, 15 Myr, gave
+    byte-identical outputs (all 29 PNG and cell-dump CSV files, and the logs).
+  - The difference comes from floating-point math functions. The simulation calls
+    `sin`/`cos`/`exp`/`ln`/`asin`/`acos`/`atan2`/`tan`/`powf` about 150 times in its source.
+    The basic operations (`+ − × ÷ sqrt`) are exactly rounded by IEEE 754 and identical
+    everywhere. The transcendental functions are not: native Linux uses glibc, while
+    `wasm32-unknown-unknown` uses Rust's port of musl's libm (the `libm` crate). Comparing
+    the two natively on 2 M random inputs, **3–14 % of the results differ in the last bit**
+    (sin 3.0 %, exp 9.7 %, atan2 14 %, pow 9.7 %).
+  - The simulation is chaotic (plate splits, thresholds), so last-bit differences grow into
+    a different planet: equally valid, but not the same.
+  - This is expected, not measured end-to-end (no wasm runtime on tktie). The same applies
+    today between Linux, Windows and macOS builds, or even different glibc versions.
+- **Fix if wanted:** call the `libm` crate on **all** targets through a small `crate::math`
+  module (`math::sin(x)` instead of `x.sin()`). A `clippy::disallowed_methods` entry for
+  `f64::sin` etc. keeps new code from bypassing it. Then a seed gives the same planet on web,
+  Linux, Windows and macOS.
+  - Cost: per call, `libm` is about as fast as glibc for sin/cos/asin/atan2, ~2× slower
+    for exp, ~1.6× for ln and ~4× for pow (measured, 2 M calls). The effect on step time is
+    unmeasured but probably small, because these calls are a small part of a step.
+  - Effort: ~0.5 day, including a timing check, as part of M0.
 - WebGPU where available (Chrome/Edge, Firefox 141+ on Windows, Safari 26), otherwise WebGL2.
   Both are built in by egui-wgpu's defaults.
 
@@ -203,7 +223,6 @@ Each milestone is one PR, CI-clean, desktop behaviour unchanged.
 | M1 | Web entry: `viewer::run` for wasm via `WebRunner`, MSAA 1, console logging, panic hook, `index.html` + `Trunk.toml`; simulation stepped on the main thread (temporary). CI job `rust_check_wasm`. First manual test in Chrome + Firefox; measure wasm size and ms/step. | ~1 day |
 | M2 | Web Worker for the simulation (transferable vertex buffers), time overlay label shared by both targets, URL-parameter config, `+simd128`/LTO measurements, defaults (subdivisions 5). | ~1–1.5 days |
 | M3 | Pages deploy workflow, README link/badge, smoke test of the deployed site. | ~0.5 day |
-| M4 (optional) | Web niceties: pause/restart and seed/subdivision controls in egui (they also benefit desktop, since they are shared), a loading/progress indicator for the planet setup (~4 s native at subdivisions 6), touch rotation. | ~1 day |
 
 In total about **3–4 agent-days for M0–M3**, plus review rounds. Per the repo conventions,
 an independent agent reviews this plan before M0 starts.
@@ -230,12 +249,21 @@ an independent agent reviews this plan before M0 starts.
   that freezes during each step. Neither uses wasm threads.
 - **D2 Web defaults:** subdivisions 5 on the web (recommended; ~0.3 s/step) or the desktop
   default 6 (~0.5–1 s/step, ~1.6 MB per update).
-- **D3 Parameters on the web:** URL query parameters only (cheap, shares the clap
-  definition), or also egui controls (seed, plates, subdivisions, restart). The egui controls
-  would appear on desktop too.
+- **D3 (dropped after Sebastian's question, 2026-11-20):** the desktop viewer's only input is
+  click-and-drag rotation (`response.drag_delta()` in `Viewer::ui`, `src/viewer/mod.rs`). The
+  window has no widgets, keys or zoom. D3 asked whether options that come from the CLI on
+  desktop (seed, subdivisions, …) should get *new* egui controls on the web. That isn't needed:
+  the web version takes them as URL query parameters (`?seed=3&subdivisions=5`) through the
+  same clap definition, so the UI stays identical to desktop. New controls, if ever wanted,
+  are a separate issue (M4 is dropped).
 - **D4 Deploy trigger:** every push to `main` (recommended) or only tagged releases or a
   manual trigger.
 - **D5 Enable Pages:** set Settings → Pages → Source to "GitHub Actions" when M3 lands.
-- **D6 Determinism:** is it acceptable that a seed gives a different (but equally valid)
-  planet on the web than natively? (Recommended: yes. Otherwise use `libm` on both targets,
-  which may slow down native.)
+- **D6 Same seed → same planet everywhere?** The RNG and the native simulation are
+  deterministic. Only the last bits of `sin`/`exp`/`pow`/… differ between the platform math
+  libraries (glibc vs. wasm's libm), and chaos amplifies them (§4). Options:
+  - (a) accept that a seed gives a different but equally valid planet on the web (and possibly
+    between OSes);
+  - (b) route the ~150 math calls through the `libm` crate on all targets, so seeds are
+    reproducible everywhere: ~0.5 day, small (unmeasured) slowdown.
+  If you care about sharing seeds/URLs, I recommend (b).
