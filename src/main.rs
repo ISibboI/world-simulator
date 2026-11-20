@@ -743,13 +743,19 @@ fn snapshot(
     let land_cells = hydrology.land_cells.max(1.0);
     info!(
         "    hydrology: runoff {:.0} km³/yr, to the ocean {:.0} km³/yr, lake evaporation {:.0} \
-         km³/yr | endorheic {:.1}% of land, lakes {:.1}% of land | sediment trapped in lakes \
-         {:.2} km³/yr",
+         km³/yr | endorheic {:.1}% of land ({:.1}% into single-cell pits), lakes {:.1}% of land, \
+         lake potential evaporation {:.2} m/yr | depressions {}, endorheic {}, with inner sills \
+         {} | sediment trapped in lakes {:.2} km³/yr",
         hydrology.runoff / 1e9,
         hydrology.to_ocean / 1e9,
         hydrology.lake_evaporation / 1e9,
         100.0 * hydrology.endorheic_cells / land_cells,
+        100.0 * hydrology.endorheic_pit_cells / land_cells,
         100.0 * hydrology.lake_cells / land_cells,
+        hydrology.lake_potential_evaporation / hydrology.lake_cells.max(1e-9),
+        hydrology.lakes,
+        hydrology.endorheic_lakes,
+        hydrology.nested_lakes,
         hydrology.lake_sediment / 1e9,
     );
     info!(

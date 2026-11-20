@@ -1111,6 +1111,14 @@ impl Simulation {
             .collect()
     }
 
+    /// Thickness of the densified lower crust of every world cell (see
+    /// [`Crust::dense_crust_thickness`]).
+    pub fn dense_crust_thicknesses(&self) -> Vec<f64> {
+        (0..self.mesh.len() as u32)
+            .map(|cell| self.surface_crust(cell).dense_crust_thickness())
+            .collect()
+    }
+
     /// Sediment thickness of every world cell.
     pub fn sediment_thicknesses(&self) -> Vec<f64> {
         (0..self.mesh.len() as u32)

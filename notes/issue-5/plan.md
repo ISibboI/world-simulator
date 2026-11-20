@@ -70,7 +70,38 @@ land, lake share of land, sediment trapped in lakes (km³/yr). Earth: runoff ~40
 
 ## 2. Mountain heights (#5)
 
-_To be filled after the main-branch diagnosis below._
+**Diagnosis on current `main` (4937b86, after #22, #23, #24, #29, #34).** Main baseline runs, 8 seeds × 1000
+Myr, cell dumps every 100 Myr. The highest cells are broken down per snapshot into crust
+buoyancy, sediment, thermal uplift, dynamic topography and the sea-level offset (all from the dump;
+script `relief.py`). First 2 seeds (all 8 to be added in `results.md`):
+
+| | 0–100 Myr | 100–1000 Myr |
+|---|---|---|
+| mean land (m) | 731 | 436 |
+| land p50 / p90 / p99 (m) | — / — / 1914 | 279 / 986 / 2482 |
+| highest cell per snapshot (m), mean | 2434 | 3563 |
+| highest cell over all snapshots (m) | 3130 | 4177 |
+| top-20 cells: crust thickness / sediment / thermal / dynamic topography | | 54 km / 3 m / 0 m / +140 m |
+
+**The 8–9.7 km peaks of #5 no longer occur.** The highest cells are now continental crust
+(cls 0, old lithosphere) 50–60 km thick with no sediment and no thermal uplift. Their height
+matches the crust's isostatic height to within the sea-level offset (~±100 m). Since the 2026-11-15 measurement, the following changed: the
+crust model (thermal uplift fading, dense lower crust; issue 4), orogenic collapse and weaker
+collision stacking (#23), sediment that no longer piles up in lake cells and on land the way it used to
+(#22), and the climate (#24), which wetted the land and lowered it. At ~120 km cells, Earth's
+highest cell means are ~5–6 km (Tibet, Himalaya at 1°). Earth's land p99 is ~4 km and its mean land ~700–840 m
+(without/with Antarctic ice). **Main is now too low, not too high**: mean land 436 m, p99 2.5 km, max 3.6 km.
+
+**Plan for #5:** no new uplift mechanism in this PR, and no tuning. Steps:
+1. Document the diagnosis and confirm it on all 8 seeds, including time series of the
+   maximum. If any snapshot exceeds ~6.5 km, decompose that cell.
+2. Check that the #7 changes do not bring back unphysical peaks. Runoff lowers the discharge and
+   so steepens headwaters. Lake sediment now fills from the lowest floor, so it no longer builds
+   towers. Acceptance: no cell above ~6.5 km in any snapshot. The highest cells should still be
+   explained by crust buoyancy, without sediment or thermal artefacts.
+3. Close #5 if steps 1–2 hold. Report the "too low" state (mean land, p99) and its likely causes:
+   crust thickness distribution, collapse, and erosion with K tuned under the old solve. These go
+   into the PR as a follow-up; they are not fixed here.
 
 ## 3. Validation
 
@@ -86,3 +117,19 @@ _To be filled after the main-branch diagnosis below._
 Unit tests: implicit incision balance with rebound (bedrock, sediment, mixed; never below base);
 lake balance (partial / spilling); humid basin spills, arid basin keeps its water and sediment,
 water budget closes (runoff = to ocean + lake evaporation).
+
+## 4. Changes after the independent review ([`review-plan.md`](review-plan.md))
+
+- `incise` solves the piecewise response of thick orogens in closed form: the densified lower
+  crust (> 50 km, ~0.10 per m) first, then normal crust (~0.15). The elevation update applies
+  both pieces, and the response is guarded ≥ 1e-3.
+- The lake spill level for sediment is capped by the pass after this step's incision.
+- New diagnostics: the area-weighted potential evaporation of lake water, which decides whether
+  a wet-environment lake rate is needed (Earth's closed lakes evaporate ~1–1.5 m/yr); the number
+  of depressions, endorheic ones and ones with inner sills (a known simplification: a depression
+  is filled as one hypsometric curve, not by Fill-Spill-Merge); the endorheic share draining into
+  single-cell pits.
+- Attribution switches `erosion.runoff_discharge` and `erosion.isostatic_incision` (default on)
+  separate the two fixes in 4-seed runs.
+- Corrected Earth targets: lakes 0.5–2% of land, sediment 14–16 Gt/yr ≈ 7–9 km³/yr, highest
+  1° cell ~5.0–5.5 km, land p99 ~4–4.5 km, mean land ~700 m (no ice).

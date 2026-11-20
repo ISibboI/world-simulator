@@ -138,6 +138,13 @@ impl Crust {
         }
     }
 
+    /// Thickness (m) of the densified lower crust: the part of the crust deeper than
+    /// [`DENSE_LOWER_CRUST_DEPTH`]. Removing crust from the top shrinks this part first (with
+    /// [`Crust::removal_isostatic_density`]), then the normal crust (with [`Crust::density`]).
+    pub fn dense_crust_thickness(&self) -> f64 {
+        (self.thickness - DENSE_LOWER_CRUST_DEPTH).max(0.0)
+    }
+
     /// Areal mass (kg/m²) of the crust: crystalline crust plus the rock mass of its sediment.
     pub fn mass(&self) -> f64 {
         self.thickness * self.density + self.sediment * SEDIMENT_ROCK_DENSITY

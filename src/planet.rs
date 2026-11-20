@@ -247,6 +247,7 @@ impl Planet {
                     sediment: &self.tectonics.sediment_thicknesses(),
                     bedrock_density: &self.tectonics.bedrock_densities(),
                     bedrock_isostatic_density: &self.tectonics.bedrock_isostatic_densities(),
+                    dense_crust: &self.tectonics.dense_crust_thicknesses(),
                     precipitation: &self.precipitation,
                     runoff: &self.climate.water_cycle().runoff,
                     potential_evaporation: &self.climate.water_cycle().potential_evaporation,
