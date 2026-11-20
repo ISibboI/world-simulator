@@ -37,7 +37,12 @@ pub enum Biosphere {
     #[default]
     Modern,
     /// A planet without life, like Earth before land plants (and before plankton for the
-    /// pelagic sediment).
+    /// pelagic sediment). In 4-seed runs over 1000 Myr (means of 200–1000 Myr against modern):
+    /// 2.1 K colder with 2.6% more permanent ice (bright land), 35% less rain on land and 11%
+    /// more arid land (less recycling), ~80 m lower land and ~2% less land (K ×2), and the same
+    /// sediment flux to the ocean within the scatter. The initial highlands of ~1.5 km lie
+    /// close to the threshold of land ice in this model, so the first ~100 Myr are much colder
+    /// (−3 to −9 K, ice sheets even on tropical plateaus).
     Abiotic,
 }
 
