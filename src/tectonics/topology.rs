@@ -175,9 +175,13 @@ impl Simulation {
         new_side: Vec<bool>,
         segment_side: impl Fn(&SphereMesh, DVec3) -> polarity::Side,
     ) -> Option<u32> {
-        let before = ledger::plates_mass(&self.plates);
+        // Only the split plate and the new one change.
+        let before = ledger::plates_mass(&self.plates[plate as usize..=plate as usize]);
         let result = self.split_plate_inner(plate, &new_side, segment_side);
-        let after = ledger::plates_mass(&self.plates);
+        let mut after = ledger::plates_mass(&self.plates[plate as usize..=plate as usize]);
+        if let Some(new_plate) = result {
+            after += ledger::plates_mass(&self.plates[new_plate as usize..=new_plate as usize]);
+        }
         self.ledger.record(Term::Splits, after - before);
         if result.is_some() {
             self.configuration_changes += 1;
@@ -250,9 +254,16 @@ impl Simulation {
     /// neighbours. No crust is lost or created. Returns the volume (thickness × cells, m) of
     /// continental crust lost, which is zero.
     pub(super) fn merge_plates(&mut self, into: u32, absorbed: u32) -> f64 {
-        let before = ledger::plates_mass(&self.plates);
+        // Only the two merged plates change; removing `absorbed` moves the last plate into its
+        // index.
+        let mass = |plates: &[Plate], plate: u32| {
+            ledger::plates_mass(&plates[plate as usize..=plate as usize])
+        };
+        let before = mass(&self.plates, into) + mass(&self.plates, absorbed);
+        let last = self.plates.len() as u32 - 1;
         self.merge_plates_inner(into, absorbed);
-        let after = ledger::plates_mass(&self.plates);
+        let into = if into == last { absorbed } else { into };
+        let after = mass(&self.plates, into);
         self.ledger.record(Term::Merges, after - before);
         0.0
     }

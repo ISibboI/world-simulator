@@ -797,17 +797,23 @@ impl Simulation {
             .expect("owners always point to existing crust")
     }
 
-    /// Advances the simulation by `dt` Myr, splitting it into substeps such that no plate moves
-    /// more than [`TectonicParams::max_substep_movement`] cells per substep.
+    /// Advances the simulation by `dt` Myr, splitting it into substeps such that no cell moves
+    /// more than [`TectonicParams::max_substep_movement`] cell spacings per substep.
     pub fn step(&mut self, dt: f64) {
         let mantle_velocity = self
             .mantle
             .velocities(&self.mesh, self.params.planet_radius);
         self.update_plate_velocities(&mantle_velocity);
-        let max_angle = self
-            .plates
-            .iter()
-            .map(|plate| plate.angular_velocity.length() * dt)
+        // The farthest any cell moves (a small plate turning about a pole inside it moves its
+        // cells much less than its angular speed suggests).
+        let max_angle = (0..self.mesh.len() as u32)
+            .map(|cell| {
+                self.plates[self.owners[cell as usize].plate as usize]
+                    .angular_velocity
+                    .cross(self.mesh.vertex(cell))
+                    .length()
+                    * dt
+            })
             .fold(0.0, f64::max);
         let max_substep_angle = self.params.max_substep_movement * self.mesh.mean_edge_angle();
         let substeps = (max_angle / max_substep_angle).ceil().max(1.0) as usize;
