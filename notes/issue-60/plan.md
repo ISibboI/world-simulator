@@ -162,14 +162,28 @@ to get pixels on screen quickly. The worker is the target design.
     a different planet: equally valid, but not the same.
   - This is expected, not measured end-to-end (no wasm runtime on tktie). The same applies
     today between Linux, Windows and macOS builds, or even different glibc versions.
-- **Fix if wanted:** call the `libm` crate on **all** targets through a small `crate::math`
-  module (`math::sin(x)` instead of `x.sin()`). A `clippy::disallowed_methods` entry for
-  `f64::sin` etc. keeps new code from bypassing it. Then a seed gives the same planet on web,
-  Linux, Windows and macOS.
-  - Cost: per call, `libm` is about as fast as glibc for sin/cos/asin/atan2, ~2× slower
-    for exp, ~1.6× for ln and ~4× for pow (measured, 2 M calls). The effect on step time is
-    unmeasured but probably small, because these calls are a small part of a step.
-  - Effort: ~0.5 day, including a timing check, as part of M0.
+- **Decided (D6):** determinism is required **per platform**, not across platforms, so the
+  `libm`-everywhere switch is not needed. The web version must give the same simulation for a
+  seed on every run, in every browser and on every machine. Desktop must be deterministic as an
+  algorithm, but its math-library differences don't matter. The web side gets this almost for
+  free: the wasm binary carries its own `libm` (compiled into the module, not taken from the
+  browser), and wasm floating point is IEEE-exact except for NaN bit patterns. Checked in the
+  code for things that could break run-to-run determinism in the browser:
+  - **Step size:** `dt` comes from the config (`--dt`/URL), never from wall-clock or frame time.
+    The worker must keep it that way, so a slow machine takes longer but computes the same
+    steps.
+  - **Worker and UI timing** only decide *which* states get displayed (the viewer drains its
+    channel and keeps the latest). They never feed back into the simulation. Control messages
+    (later: pause/restart, #61) must act only between steps.
+  - **`Instant`** (`planet.rs:228,232`, `main.rs:250`) is used only for log timings.
+  - **Hash maps:** simulation maps use the fixed `FxHasher` (`tectonics/mod.rs:66`). The three
+    std `RandomState` maps (`sphere.rs:69`, `ocean.rs:49`, `climate.rs:1085`) are only used
+    for lookups and never iterated, so their random seed doesn't matter.
+  - **SIMD:** `+simd128` is deterministic. Do **not** enable `relaxed-simd`, whose fused
+    multiply-add and min/max results may differ between CPUs.
+  - **Check:** M2 adds a reproducibility test that runs the same seed twice in the browser (or
+    in Node/wasmtime in CI, if cheap) and compares a hash of the surface elevations after
+    N steps.
 - WebGPU where available (Chrome/Edge, Firefox 141+ on Windows, Safari 26), otherwise WebGL2.
   Both are built in by egui-wgpu's defaults.
 
@@ -249,21 +263,17 @@ an independent agent reviews this plan before M0 starts.
   that freezes during each step. Neither uses wasm threads.
 - **D2 Web defaults:** subdivisions 5 on the web (recommended; ~0.3 s/step) or the desktop
   default 6 (~0.5–1 s/step, ~1.6 MB per update).
-- **D3 (dropped after Sebastian's question, 2026-11-20):** the desktop viewer's only input is
-  click-and-drag rotation (`response.drag_delta()` in `Viewer::ui`, `src/viewer/mod.rs`). The
-  window has no widgets, keys or zoom. D3 asked whether options that come from the CLI on
-  desktop (seed, subdivisions, …) should get *new* egui controls on the web. That isn't needed:
-  the web version takes them as URL query parameters (`?seed=3&subdivisions=5`) through the
-  same clap definition, so the UI stays identical to desktop. New controls, if ever wanted,
-  are a separate issue (M4 is dropped).
+- **D3 decided (Sebastian, 2026-11-20):** the web version reads the parameters from URL query
+  parameters (`?seed=3&subdivisions=5`, same clap definition as the CLI). A GUI panel for
+  choosing parameters and restarting goes to a separate issue, #61 (desktop and web, shared
+  code). Its initial values still come from the CLI or URL. The desktop viewer's only input
+  today is click-and-drag rotation.
 - **D4 Deploy trigger:** every push to `main` (recommended) or only tagged releases or a
   manual trigger.
 - **D5 Enable Pages:** set Settings → Pages → Source to "GitHub Actions" when M3 lands.
-- **D6 Same seed → same planet everywhere?** The RNG and the native simulation are
-  deterministic. Only the last bits of `sin`/`exp`/`pow`/… differ between the platform math
-  libraries (glibc vs. wasm's libm), and chaos amplifies them (§4). Options:
-  - (a) accept that a seed gives a different but equally valid planet on the web (and possibly
-    between OSes);
-  - (b) route the ~150 math calls through the `libm` crate on all targets, so seeds are
-    reproducible everywhere: ~0.5 day, small (unmeasured) slowdown.
-  If you care about sharing seeds/URLs, I recommend (b).
+- **D6 decided (Sebastian, 2026-11-20):** seeds must reproduce the same simulation
+  **on the web** (run to run, across browsers and machines). Desktop must be deterministic as
+  an algorithm, but math-library differences don't matter, and web and desktop needn't
+  match. So there is no `libm` switch; see §4 for what keeps the web build deterministic.
+
+Still open before M0 can start: **D1, D2, D4, D5**.
