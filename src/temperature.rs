@@ -13,9 +13,8 @@
 //! poleward heat transport by diffusion `D ∇²T` (Sellers, 1969; North, 1975), and the heat
 //! capacity `C` of the ocean mixed layer or of land. Permanent sea ice forms where the annual
 //! mean temperature of the previous year is low (Budyko's criterion), which avoids the runaway
-//! cooling that seasonal snow albedo causes in energy balance models. Ice sheets form on land
-//! whose summer (the warmest three months of the previous year) is too cold to melt the year's
-//! snowfall (the equilibrium-line relation of Ohmura et al., 1992). Most of the transport acts on the means of
+//! cooling that seasonal snow albedo causes in energy balance models; ice sheets also need
+//! snowfall. Most of the transport acts on the means of
 //! latitude bands (the one-dimensional model of North, 1975), and only a weak part acts as
 //! two-dimensional diffusion between neighbouring cells. Applying the full transport
 //! two-dimensionally would tie the temperature of land to the surrounding ocean over thousands of
@@ -145,16 +144,18 @@ pub struct TemperatureParams {
     /// Permanent sea ice forms below this annual mean sea surface temperature; the albedo changes
     /// linearly over ±5 K around it.
     pub sea_ice_temperature: f64,
-    /// Ice sheets cover land whose summer is too cold to melt the snow of a year: where the mean
-    /// temperature of the warmest three months is below the equilibrium-line temperature for the
-    /// local precipitation (Ohmura et al., 1992). The cover changes linearly over ± this many
-    /// kelvin around it (the temperature spread within a cell, as for sea ice).
-    pub ice_sheet_transition: f64,
+    /// Ice sheets form below this annual mean land surface temperature; the cover changes
+    /// linearly over ±5 K around it.
+    pub land_ice_temperature: f64,
+    /// Ice sheets need snowfall: below this annual precipitation in m/yr, the ice cover is reduced
+    /// proportionally, so cold deserts (like Siberia) stay free of ice sheets.
+    pub ice_sheet_precipitation: f64,
     /// Heat capacity of the ocean mixed layer in J/m²/K.
     pub ocean_heat_capacity: f64,
     /// Effective heat capacity of land in J/m²/K: the air column (p/g c_p ≈ 1.03e7). The soil
     /// within the seasonal skin depth would add ≈ 0.3e7, but the coarse model already
-    /// underestimates continental summers, and colder summers grow ice sheets.
+    /// underestimates continental summers, and with 1.3e7 or more the ice-albedo feedback ran away
+    /// into a snowball for some continental configurations.
     pub land_heat_capacity: f64,
     /// Temperature decrease with elevation in K/m.
     pub lapse_rate: f64,
@@ -185,7 +186,8 @@ impl Default for TemperatureParams {
             land_albedo: 0.32,
             ice_albedo: 0.62,
             sea_ice_temperature: -10.0,
-            ice_sheet_transition: 5.0,
+            land_ice_temperature: -10.0,
+            ice_sheet_precipitation: 0.3,
             ocean_heat_capacity: 4.18e6 * 50.0,
             land_heat_capacity: 1e7,
             lapse_rate: 0.0065,
@@ -212,7 +214,8 @@ impl TemperatureParams {
             "land_albedo" => &mut self.land_albedo,
             "ice_albedo" => &mut self.ice_albedo,
             "sea_ice_temperature" => &mut self.sea_ice_temperature,
-            "ice_sheet_transition" => &mut self.ice_sheet_transition,
+            "land_ice_temperature" => &mut self.land_ice_temperature,
+            "ice_sheet_precipitation" => &mut self.ice_sheet_precipitation,
             "ocean_heat_capacity" => &mut self.ocean_heat_capacity,
             "land_heat_capacity" => &mut self.land_heat_capacity,
             "lapse_rate" => &mut self.lapse_rate,
@@ -273,9 +276,6 @@ pub struct TemperatureModel {
     /// Annual mean sea-level temperature of each coarse cell in the previous year, which
     /// determines ice cover.
     previous_annual_mean: Vec<f64>,
-    /// Mean sea-level temperature of the warmest three months of each coarse cell in the previous
-    /// year, which determines ice sheets.
-    previous_summer_mean: Vec<f64>,
     spun_up: bool,
     fields: TemperatureFields,
 }
@@ -329,7 +329,6 @@ impl TemperatureModel {
 
         let temperature = vec![15.0; coarse.len()];
         let previous_annual_mean = temperature.clone();
-        let previous_summer_mean = temperature.clone();
         Self {
             params,
             coarse,
@@ -339,7 +338,6 @@ impl TemperatureModel {
             interpolation,
             temperature,
             previous_annual_mean,
-            previous_summer_mean,
             spun_up: false,
             fields: TemperatureFields::default(),
         }
@@ -365,13 +363,8 @@ impl TemperatureModel {
                 land_cells[coarse as usize] += 1;
             }
         }
-        // Summer temperature below which the snow of a year survives, for every land cell.
         let land_cells_list: Vec<usize> = (0..elevation.len())
             .filter(|&fine| elevation[fine] >= 0.0)
-            .collect();
-        let equilibrium_line: Vec<f64> = land_cells_list
-            .iter()
-            .map(|&fine| equilibrium_line_temperature(precipitation.map_or(1.0, |p| p[fine])))
             .collect();
         let land_fraction: Vec<f64> = (0..coarse_count)
             .map(|c| land_cells[c] as f64 / cells[c].max(1) as f64)
@@ -434,11 +427,11 @@ impl TemperatureModel {
             // Ice-sheet cover of the land of every coarse cell: the mean over its fine land
             // cells, each with its own elevation and snowfall.
             let mut land_ice = vec![0.0; coarse_count];
-            for (&fine, &line) in land_cells_list.iter().zip(&equilibrium_line) {
-                let summer = self.interpolate(&self.previous_summer_mean, fine)
+            for &fine in &land_cells_list {
+                let t = self.interpolate(&self.previous_annual_mean, fine)
                     - params.lapse_rate * elevation[fine];
-                land_ice[self.fine_to_coarse[fine] as usize] +=
-                    ice_sheet_cover(summer, line, params.ice_sheet_transition);
+                let p = precipitation.map_or(f64::INFINITY, |p| p[fine]);
+                land_ice[self.fine_to_coarse[fine] as usize] += ice_sheet_cover(t, p, params);
             }
             let albedo: Vec<f64> = (0..coarse_count)
                 .map(|cell| {
@@ -518,18 +511,6 @@ impl TemperatureModel {
             for (previous, &sum) in self.previous_annual_mean.iter_mut().zip(&annual_sum) {
                 *previous = sum / steps_per_year;
             }
-            // The warmest quarter of the year, in either hemisphere.
-            let quarter = seasons / 4;
-            for (cell, summer) in self.previous_summer_mean.iter_mut().enumerate() {
-                *summer = (0..seasons)
-                    .map(|start| {
-                        (start..start + quarter)
-                            .map(|s| seasonal[s % seasons][cell])
-                            .sum::<f64>()
-                            / quarter as f64
-                    })
-                    .fold(f64::NEG_INFINITY, f64::max);
-            }
         }
 
         // Monthly means of the sea-level temperature on the coarse mesh.
@@ -571,21 +552,17 @@ impl TemperatureModel {
             .map(|(fine, &t)| lapse(fine, t))
             .collect();
 
-        // Ice cover of the fine cells: sea ice by the annual mean temperature, ice sheets by the
-        // summer temperature and the precipitation.
+        // Ice cover of the fine cells: sea ice by the annual mean temperature, ice sheets also by
+        // the snowfall.
         let ice = (0..elevation.len())
             .map(|fine| {
                 if elevation[fine] < 0.0 {
                     let t = self.interpolate(&self.previous_annual_mean, fine);
                     blend(0.0, 1.0, t, params.sea_ice_temperature)
                 } else {
-                    let summer = lapse(fine, self.interpolate(&self.previous_summer_mean, fine));
-                    let p = precipitation.map_or(1.0, |p| p[fine]);
-                    ice_sheet_cover(
-                        summer,
-                        equilibrium_line_temperature(p),
-                        params.ice_sheet_transition,
-                    )
+                    let t = lapse(fine, self.interpolate(&self.previous_annual_mean, fine));
+                    let p = precipitation.map_or(f64::INFINITY, |p| p[fine]);
+                    ice_sheet_cover(t, p, params)
                 }
             })
             .collect();
@@ -706,18 +683,11 @@ fn meridional_transport(
     }
 }
 
-/// The mean summer air temperature (°C) at the equilibrium line of glaciers, where the annual
-/// snowfall `precipitation` (m/yr) just melts: the empirical relation of Ohmura et al. (1992),
-/// `P = 645 + 296 T + 9 T²` (P in mm/yr), solved for T.
-fn equilibrium_line_temperature(precipitation: f64) -> f64 {
-    let p = (precipitation * 1000.0).clamp(0.0, 5000.0);
-    (-296.0 + (296.0f64.powi(2) - 36.0 * (645.0 - p)).sqrt()) / 18.0
-}
-
-/// Ice-sheet cover (0 to 1) for a summer temperature, changing linearly over ±`transition` K
-/// around the equilibrium-line temperature.
-fn ice_sheet_cover(summer: f64, equilibrium_line: f64, transition: f64) -> f64 {
-    ((equilibrium_line + transition - summer) / (2.0 * transition)).clamp(0.0, 1.0)
+/// Ice-sheet cover (0 to 1) of land with the annual mean temperature `t` (°C) and the
+/// precipitation `precipitation` (m/yr).
+fn ice_sheet_cover(t: f64, precipitation: f64, params: &TemperatureParams) -> f64 {
+    blend(0.0, 1.0, t, params.land_ice_temperature)
+        * (precipitation / params.ice_sheet_precipitation).clamp(0.0, 1.0)
 }
 
 /// Linear transition from `warm` to `cold` over ±5 K around `threshold`.
@@ -838,16 +808,6 @@ mod tests {
             fields.monthly[0][c]
         });
         assert!(south_january > south_july);
-    }
-
-    #[test]
-    fn equilibrium_line_follows_ohmura() {
-        // P = 645 + 296 T + 9 T² (mm/yr).
-        assert!(equilibrium_line_temperature(0.645).abs() < 1e-9);
-        for t in [-2.0, 0.5, 3.0] {
-            let p = (645.0 + 296.0 * t + 9.0 * t * t) / 1000.0;
-            assert!((equilibrium_line_temperature(p) - t).abs() < 1e-9);
-        }
     }
 
     #[test]
