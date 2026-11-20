@@ -42,30 +42,87 @@ fn free_vertex(mesh: &SphereMesh, plate: &Plate, target: u32, position: DVec3) -
     None
 }
 
+/// Rings around the target vertex over which crust that does not fit under the thickness cap
+/// spills when merging plates.
+const SPILL_RINGS: usize = 12;
+
+/// Adds `thickness` m of `crust` (its density and tracers) to `receiver`, mixing by mass.
+fn add_crystalline(receiver: &mut Crust, thickness: f64, crust: &Crust) {
+    if thickness <= 0.0 {
+        return;
+    }
+    let mass = receiver.thickness * receiver.density + thickness * crust.density;
+    receiver.felsic =
+        (receiver.felsic_mass() + thickness * crust.density * crust.felsic) / mass.max(1e-9);
+    receiver.metasediment = (receiver.metasediment_mass()
+        + thickness * crust.density * crust.metasediment)
+        / mass.max(1e-9);
+    receiver.thickness += thickness;
+    receiver.density = mass / receiver.thickness.max(1e-9);
+    receiver.orogeny = receiver.orogeny.max(crust.orogeny);
+}
+
 /// Adds `crust` to the sample of `plate` at `target` and its neighbours with crust in equal
-/// shares (thickness and sediment; densities mixed by mass, no thickness cap: mass is
-/// conserved, crustal flow and erosion act on it later).
-fn spread_crust(mesh: &SphereMesh, plate: &mut Plate, target: u32, crust: Crust) {
+/// shares (thickness and sediment; densities mixed by mass). Like crust stacked in collisions,
+/// the crystalline crust only thickens samples up to `max_thickness` (orogenic collapse and
+/// lateral flow limit crustal thickness to ~70–75 km); what does not fit spills to the
+/// plate's samples further out, nearest first. Mass is conserved: crust that finds no room
+/// within [`SPILL_RINGS`] rings stays on the target.
+fn spread_crust(
+    mesh: &SphereMesh,
+    plate: &mut Plate,
+    target: u32,
+    crust: Crust,
+    max_thickness: f64,
+) {
     let receivers: Vec<u32> = std::iter::once(target)
         .chain(mesh.neighbors(target).iter().copied())
         .filter(|&vertex| plate.crust[vertex as usize].is_some())
         .collect();
     let share = 1.0 / receivers.len() as f64;
-    for vertex in receivers {
+    let mut leftover = 0.0;
+    for &vertex in &receivers {
         let receiver = plate.crust[vertex as usize]
             .as_mut()
             .expect("receivers have crust");
         let added = crust.thickness * share;
-        let mass = receiver.thickness * receiver.density + added * crust.density;
-        receiver.felsic =
-            (receiver.felsic_mass() + added * crust.density * crust.felsic) / mass.max(1e-9);
-        receiver.metasediment = (receiver.metasediment_mass()
-            + added * crust.density * crust.metasediment)
-            / mass.max(1e-9);
-        receiver.thickness += added;
-        receiver.density = mass / receiver.thickness.max(1e-9);
+        let fitting = added.min((max_thickness - receiver.thickness).max(0.0));
+        add_crystalline(receiver, fitting, &crust);
+        leftover += added - fitting;
         receiver.add_sediment(crust.sediment * share, crust.cohort);
-        receiver.orogeny = receiver.orogeny.max(crust.orogeny);
+    }
+    if leftover <= 0.0 {
+        return;
+    }
+    // Spill outwards, ring by ring, nearest first.
+    let mut ring = vec![target];
+    let mut seen = vec![target];
+    for _ in 0..SPILL_RINGS {
+        let mut next = Vec::new();
+        for &vertex in &ring {
+            for &neighbor in mesh.neighbors(vertex) {
+                if !seen.contains(&neighbor) {
+                    seen.push(neighbor);
+                    next.push(neighbor);
+                }
+            }
+        }
+        for &vertex in &next {
+            if leftover <= 0.0 {
+                return;
+            }
+            if let Some(receiver) = plate.crust[vertex as usize].as_mut() {
+                let fitting = leftover.min((max_thickness - receiver.thickness).max(0.0));
+                add_crystalline(receiver, fitting, &crust);
+                leftover -= fitting;
+            }
+        }
+        ring = next;
+    }
+    if leftover > 0.0
+        && let Some(receiver) = plate.crust[target as usize].as_mut()
+    {
+        add_crystalline(receiver, leftover, &crust);
     }
 }
 
@@ -296,7 +353,13 @@ impl Simulation {
                     vertex
                 }
                 None => {
-                    spread_crust(&self.mesh, receiving, target, crust);
+                    spread_crust(
+                        &self.mesh,
+                        receiving,
+                        target,
+                        crust,
+                        self.params.max_crust_thickness,
+                    );
                     target
                 }
             };
@@ -451,6 +514,47 @@ mod tests {
         // Spreading samples that found no free vertex thickens crust only a little.
         assert!(max_thickness(&simulation) < 1.25 * thickest);
         assert_consistent(&simulation);
+    }
+
+    #[test]
+    fn merged_crust_spills_instead_of_exceeding_the_cap() {
+        let mut simulation = simulation();
+        let mesh = &simulation.mesh;
+        let plate = &mut simulation.plates[0];
+        let target = (0..mesh.len() as u32)
+            .find(|&v| {
+                plate.crust[v as usize].is_some()
+                    && mesh
+                        .neighbors(v)
+                        .iter()
+                        .all(|&n| plate.crust[n as usize].is_some())
+            })
+            .expect("plate 0 has interior samples");
+        for crust in plate.crust.iter_mut().flatten() {
+            crust.thickness = 70_000.0;
+        }
+        let thickness = |plate: &Plate| {
+            plate
+                .crust
+                .iter()
+                .flatten()
+                .map(|c| c.thickness)
+                .sum::<f64>()
+        };
+        let before = thickness(plate);
+        let added = Crust {
+            thickness: 60_000.0,
+            ..plate.crust[target as usize].unwrap()
+        };
+        spread_crust(mesh, plate, target, added, 75_000.0);
+        assert!((thickness(plate) - before - 60_000.0).abs() < 1e-6);
+        let thickest = plate
+            .crust
+            .iter()
+            .flatten()
+            .map(|c| c.thickness)
+            .fold(0.0, f64::max);
+        assert!(thickest <= 75_000.0 + 1e-6, "{thickest}");
     }
 
     #[test]
