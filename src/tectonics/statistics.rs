@@ -295,6 +295,55 @@ impl Simulation {
         boundary / circles.max(1e-9)
     }
 
+    /// The boundary cells with their kinematics, for analysis (see [`BoundaryRecord`]).
+    pub fn boundary_records(&self) -> Vec<BoundaryRecord> {
+        let boundaries = self.boundary_cells();
+        let normals = self.smoothed_normals(&boundaries);
+        // rad/Myr → cm/yr.
+        let speed = self.params.planet_radius * 100.0 / 1e6;
+        boundaries
+            .iter()
+            .zip(&normals)
+            .map(|(boundary, &normal)| {
+                let r = self.mesh.vertex(boundary.cell);
+                let relative = (self.plates[boundary.plate as usize].angular_velocity
+                    - self.plates[boundary.other as usize].angular_velocity)
+                    .cross(r);
+                let segment = boundary
+                    .segment
+                    .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id));
+                let crust = self.surface_crust(boundary.cell);
+                BoundaryRecord {
+                    cell: boundary.cell,
+                    plate: boundary.plate,
+                    other: boundary.other,
+                    kind: match boundary.kind {
+                        super::dynamics::BoundaryKind::Trench { .. } => 't',
+                        super::dynamics::BoundaryKind::Ridge => 'r',
+                        super::dynamics::BoundaryKind::Collision => 'c',
+                        super::dynamics::BoundaryKind::Other => 'o',
+                    },
+                    convergence: relative.dot(normal) * speed,
+                    strike_slip: relative.dot(r.cross(normal)) * speed,
+                    segment: boundary.segment,
+                    overriding: segment.map(|segment| segment.overriding),
+                    slab_length: segment.map_or(0.0, |segment| segment.slab_length),
+                    age: crust.age(self.time),
+                    oceanic: crust.is_oceanic(),
+                    continental: crust.is_continental_origin(),
+                }
+            })
+            .collect()
+    }
+
+    /// Angular velocity (rad/Myr, world frame) of every plate.
+    pub fn plate_angular_velocities(&self) -> Vec<glam::DVec3> {
+        self.plates
+            .iter()
+            .map(|plate| plate.angular_velocity)
+            .collect()
+    }
+
     pub fn statistics(&self) -> Statistics {
         let cell_count = self.mesh.len();
         let mut plate_areas = vec![0; self.plates.len()];
@@ -709,4 +758,28 @@ mod tests {
             }
         }
     }
+}
+
+/// A boundary cell seen from its plate towards one other plate, for analysis.
+#[derive(Clone, Copy, Debug)]
+pub struct BoundaryRecord {
+    pub cell: u32,
+    pub plate: u32,
+    pub other: u32,
+    /// `t` where the plate subducts, `r` at a ridge flank, `c` at a collision, `o` otherwise
+    /// (including the overriding side of a trench).
+    pub kind: char,
+    /// Relative speed (cm/yr) of the plate towards the other plate across the boundary
+    /// (smoothed normal; positive where they converge) and along it.
+    pub convergence: f64,
+    pub strike_slip: f64,
+    /// The boundary segment covering the cell, the plate that overrides in it, and the length
+    /// (m) of its slab.
+    pub segment: Option<u32>,
+    pub overriding: Option<u32>,
+    pub slab_length: f64,
+    /// Age (Myr) and kind of the plate's crust at the cell.
+    pub age: f64,
+    pub oceanic: bool,
+    pub continental: bool,
 }
