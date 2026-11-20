@@ -115,7 +115,7 @@ then eroded like any sediment and carried on to the new mouth.
 
 ## Measurement of the advance (added after the PR discussion)
 
-Logging-only diagnostic of every cone (no physics change; the runs reproduce the PR's), seeds
+Logging-only diagnostic of every cone (physics unchanged, code not committed), seeds
 0–3 × 500 Myr. "Deep" is a cell more than 1000 m below sea level before the cone; it counts as
 converted when the cone leaves it shallower than 200 m or as land.
 
@@ -126,7 +126,7 @@ converted when the cone leaves it shallower than 200 m or as land.
 | … of those, converting a deep cell in that step | 1% | 2% | 2% | 1% |
 | Cone sediment that goes into deep cells | 23% | 23% | 26% | 29% |
 | Deep cells converted per Myr (whole planet) | 0.09 | 0.16 | 0.60 | 0.30 |
-| Advance per deep-touching cone, front one cell wide (km/Myr) | 0.9 | 2.2 | 2.8 | 1.1 |
+| Advance per deep-touching cone, front one cell wide (km/Myr) | 0.9 | 2.2 | 2.8 | 2.1 |
 | Advance per deep-touching cone, by the distance of the converted cell from the mouth (km/Myr; upper bound) | 2.4 | 5.9 | 6.8 | 4.2 |
 | Mouths above 100 km/Myr by that upper bound (of mouths with ≥ 5 such steps) | 0.3% | 1.3% | 1.6% | 1.2% |
 
