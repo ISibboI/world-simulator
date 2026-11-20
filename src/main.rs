@@ -365,7 +365,7 @@ fn snapshot(
         "    trenches {:.0} km, ridges {:.0} km, collisions {:.0} km ({:.0} converging, {:.0} diverging) | slab pull {:.2e} N, ridge push {:.2e} N | \
          rifts {}, initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
          blocked splits {}, terranes {} ({} cells, {} slab break-offs) | continental contacts made by rifts {:.0} km ({:.0} far), by initiations {:.0} km ({:.0} far) | \
-         splits along weak zones {} ({} cut again, {} along the coast, {} rift triple junctions; rift boundaries on sutures {:.0}% of their continental cells vs {:.0}% of the rifted plates), along great circles {}, boundary deviation from a great circle: rifts {:.0} km, initiations {:.0} km | \
+         splits along weak zones {} ({} cut again, {} along the coast, {} rifts through the plume head; rift boundaries on sutures {:.0}% of their continental cells vs {:.0}% of the rifted plates), along great circles {}, boundary deviation from a great circle: rifts {:.0} km, initiations {:.0} km | \
          fracture-zone initiations {}, failed initiations (no division/overriding/subducting part too small) {}/{}/{}, \
          undone initiations (suture/capture/piece/terrane) {}/{}/{}/{}",
         statistics.trench_length,
@@ -398,7 +398,7 @@ fn snapshot(
         statistics.events.weak_zone_splits,
         statistics.events.recut_splits,
         statistics.events.coastal_splits,
-        statistics.events.junction_rifts,
+        statistics.events.head_rifts,
         100.0 * statistics.events.rift_suture_cells[0] as f64
             / statistics.events.rift_suture_cells[1].max(1) as f64,
         100.0 * statistics.events.rift_suture_cells[2] as f64

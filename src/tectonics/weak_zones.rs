@@ -10,11 +10,16 @@
 //! are the parts of the plate farther than [`BAND_WIDTH`] from the split's reference great circle
 //! (through the plume, or along the margin), which stands in for the stress field: the break
 //! may wander from it within that band.
+//!
+//! Above a plume head the lithosphere is heated and thinned (see [`plume_head_strength`]), so
+//! plume rifts break through the plume where that is the weakest way, and their arms leave it
+//! along whatever weak zones lie around it: the angle at the plume is an outcome of the cut.
 
 use std::collections::VecDeque;
 
 use glam::DVec3;
 
+use super::mantle::Plume;
 use super::*;
 
 /// Thickness (m) of unthinned continental crust; stretched (thinner) continental lithosphere is
@@ -33,6 +38,16 @@ const FULL_STRENGTH_AGE: f64 = 100.0;
 /// cratons, ~100–150 vs ~200–300 km (Artemieva & Mooney 2001).
 const SUTURE_WEAKENING: f64 = 0.5;
 
+/// Thermal age (Myr) to which a plume head reheats the lithosphere at its centre: the
+/// thermal-rejuvenation model of hotspot swells (Detrick & Crough 1978; Crough 1983). Heat-flow
+/// data suggest oceanic swells are reheated less (Von Herzen et al. 1989); continental plume
+/// heads such as Afar clearly thin the lithosphere.
+const PLUME_HEAD_THERMAL_AGE: f64 = 25.0;
+
+/// Radius (rad, ~1000 km) of a plume head flattened below the lithosphere, ~2000 km across
+/// (Campbell & Griffiths 1990; White & McKenzie 1989).
+pub(super) const PLUME_HEAD_RADIUS: f64 = 0.157;
+
 /// Weakest lithosphere (the axis of a spreading ridge) relative to old lithosphere.
 const MIN_STRENGTH: f64 = 0.05;
 
@@ -50,11 +65,13 @@ const UNBREAKABLE: f64 = 1e12;
 /// last stretching for continental crust (see `boundaries::stretch_rift`); stretched continental
 /// lithosphere is also thinned with its crust (McKenzie 1978). Old cratons and old ocean are
 /// equally strong; rifted margins, orogenic belts and sutures of any age (see
-/// [`SUTURE_WEAKENING`]), young arcs and young sea floor are weak.
-pub(super) fn lithosphere_strength(crust: &Crust, time: f64) -> f64 {
+/// [`SUTURE_WEAKENING`]), young arcs and young sea floor are weak. `plume_head` caps the
+/// thermal thickness above plume heads (see [`plume_head_strength`]; 1 elsewhere).
+pub(super) fn lithosphere_strength(crust: &Crust, time: f64, plume_head: f64) -> f64 {
     let thermal = (crust.age(time).max(0.0) / FULL_STRENGTH_AGE)
         .sqrt()
-        .min(1.0);
+        .min(1.0)
+        .min(plume_head);
     let thinning = if crust.is_continental_origin() {
         (crust.basement().thickness / REFERENCE_CONTINENTAL_THICKNESS).min(1.0)
     } else {
@@ -68,16 +85,34 @@ pub(super) fn lithosphere_strength(crust: &Crust, time: f64) -> f64 {
     (thermal * thinning * suture).max(MIN_STRENGTH)
 }
 
+/// The largest relative thickness (strength) of the lithosphere at `r` above the given plume
+/// heads: a head heats and thins the lithosphere above it to the thickness of
+/// [`PLUME_HEAD_THERMAL_AGE`] old lithosphere at its centre, tapering with the head's flattened
+/// shape, `1 − (d/R)²`, back to the unaffected thickness at its edge ([`PLUME_HEAD_RADIUS`]),
+/// in proportion to how far the head has arrived ([`Plume::head_growth`]). The weakening is
+/// tied to the plume's position in the mantle, not carried along with the plate; the narrower
+/// swell of the later plume tail is not distinguished from the head. 1 away from plumes.
+pub(super) fn plume_head_strength(plumes: &[Plume], r: DVec3) -> f64 {
+    let centre = (PLUME_HEAD_THERMAL_AGE / FULL_STRENGTH_AGE).sqrt();
+    plumes
+        .iter()
+        .map(|plume| {
+            let x = r.angle_between(plume.position) / PLUME_HEAD_RADIUS;
+            if x >= 1.0 {
+                1.0
+            } else {
+                1.0 - (1.0 - centre) * (1.0 - x * x) * plume.head_growth()
+            }
+        })
+        .fold(1.0, f64::min)
+}
+
 /// The reference geometry of a break, standing in for the stress field.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Break {
     /// A great circle with the given normal; the positive part is on the side the normal points
     /// to.
     Circle { normal: DVec3 },
-    /// Two arms of a rift–rift–rift triple junction at `nucleus`, half great circles in the
-    /// tangent directions `arms`; the positive part is the lune between them (the smaller
-    /// angle), the negative part the rest.
-    Junction { nucleus: DVec3, arms: [DVec3; 2] },
 }
 
 impl Break {
@@ -87,25 +122,6 @@ impl Break {
             Break::Circle { normal } => {
                 let offset = r.dot(normal).clamp(-1.0, 1.0).asin();
                 (offset > 0.0, offset.abs())
-            }
-            Break::Junction { nucleus, arms } => {
-                // Distance from a half great circle from `nucleus` towards `arm` to its antipode.
-                let distance = |arm: DVec3| {
-                    if r.dot(arm) >= 0.0 {
-                        r.dot(nucleus.cross(arm).normalize_or_zero())
-                            .clamp(-1.0, 1.0)
-                            .asin()
-                            .abs()
-                    } else {
-                        r.angle_between(nucleus).min(r.angle_between(-nucleus))
-                    }
-                };
-                let direction = r - nucleus * r.dot(nucleus);
-                let turn = |a: DVec3, b: DVec3| a.cross(b).dot(nucleus);
-                let orientation = turn(arms[0], arms[1]).signum();
-                let inside = turn(arms[0], direction) * orientation >= 0.0
-                    && turn(direction, arms[1]) * orientation >= 0.0;
-                (inside, distance(arms[0]).min(distance(arms[1])))
             }
         }
     }
@@ -313,6 +329,13 @@ impl Simulation {
         if !seed.contains(&Some(true)) || !seed.contains(&Some(false)) {
             return None;
         }
+        let strength: Vec<f64> = cells
+            .iter()
+            .map(|&cell| {
+                let plume_head = plume_head_strength(self.mantle.plumes(), self.mesh.vertex(cell));
+                lithosphere_strength(&self.surface_crust(cell), self.time, plume_head)
+            })
+            .collect();
         let (source, sink) = (cells.len(), cells.len() + 1);
         let mut network = Network::new(cells.len() + 2);
         for (index, &cell) in cells.iter().enumerate() {
@@ -321,9 +344,6 @@ impl Simulation {
                 Some(false) => network.link(index, sink, UNBREAKABLE),
                 None => {}
             }
-            let strength_of =
-                |cell: u32| lithosphere_strength(&self.surface_crust(cell), self.time);
-            let strength = strength_of(cell);
             let r = self.mesh.vertex(cell);
             for &neighbor in self.mesh.neighbors(cell) {
                 let other = node[neighbor as usize];
@@ -336,8 +356,9 @@ impl Simulation {
                 {
                     UNBREAKABLE
                 } else {
-                    let other_strength = strength_of(neighbor);
-                    r.angle_between(self.mesh.vertex(neighbor)) * 0.5 * (strength + other_strength)
+                    r.angle_between(self.mesh.vertex(neighbor))
+                        * 0.5
+                        * (strength[index] + strength[other as usize])
                 };
                 network.link(index, other as usize, capacity);
             }
@@ -472,34 +493,6 @@ mod tests {
     }
 
     #[test]
-    fn triple_junction_arms_bound_a_lune() {
-        let nucleus = DVec3::Z;
-        let turn = glam::DQuat::from_axis_angle(nucleus, 2.0 * std::f64::consts::FRAC_PI_3);
-        let first = DVec3::X;
-        let geometry = Break::Junction {
-            nucleus,
-            arms: [first, turn * first],
-        };
-        // Between the arms (azimuth 0°…120°) is positive, the rest negative.
-        let at = |azimuth: f64, latitude: f64| {
-            let (azimuth, latitude) = (azimuth.to_radians(), latitude.to_radians());
-            DVec3::new(
-                latitude.cos() * azimuth.cos(),
-                latitude.cos() * azimuth.sin(),
-                latitude.sin(),
-            )
-        };
-        assert!(geometry.place(at(60.0, 30.0)).0);
-        assert!(!geometry.place(at(200.0, 30.0)).0);
-        assert!(!geometry.place(at(300.0, -30.0)).0);
-        // Distance to the nearest arm.
-        let (_, distance) = geometry.place(at(10.0, 0.0));
-        assert!((distance - 10f64.to_radians()).abs() < 1e-9);
-        let (_, distance) = geometry.place(at(240.0, 0.0));
-        assert!((distance - 90f64.to_radians()).abs() < 1e-9);
-    }
-
-    #[test]
     fn young_and_thinned_lithosphere_is_weak() {
         let old_ocean = new_oceanic_crust(-250.0);
         let young_ocean = new_oceanic_crust(-4.0);
@@ -518,15 +511,45 @@ mod tests {
             birth: -4.0,
             ..craton
         };
-        assert_eq!(lithosphere_strength(&old_ocean, 0.0), 1.0);
-        assert_eq!(lithosphere_strength(&craton, 0.0), 1.0);
-        assert!(lithosphere_strength(&young_ocean, 0.0) < 0.25);
-        assert!(lithosphere_strength(&rifted, 0.0) < 0.25);
+        assert_eq!(lithosphere_strength(&old_ocean, 0.0, 1.0), 1.0);
+        assert_eq!(lithosphere_strength(&craton, 0.0, 1.0), 1.0);
+        assert!(lithosphere_strength(&young_ocean, 0.0, 1.0) < 0.25);
+        assert!(lithosphere_strength(&rifted, 0.0, 1.0) < 0.25);
         // Old sutures stay weak.
         let suture = Crust {
             orogeny: -400.0,
             ..craton
         };
-        assert_eq!(lithosphere_strength(&suture, 0.0), SUTURE_WEAKENING);
+        assert_eq!(lithosphere_strength(&suture, 0.0, 1.0), SUTURE_WEAKENING);
+    }
+
+    #[test]
+    fn plume_heads_thin_the_lithosphere_above_them() {
+        let plume = |age: f64| Plume {
+            position: DVec3::Z,
+            age,
+            lifetime: 200.0,
+            peak_flux: 5e-3,
+            has_rifted: false,
+        };
+        let at = |angle: f64| DVec3::new(angle.sin(), 0.0, angle.cos());
+        let head = [plume(50.0)];
+        // As thick as 25 Myr old lithosphere at the centre, unaffected from the head's edge on.
+        let centre = plume_head_strength(&head, DVec3::Z);
+        assert!((centre - 0.5).abs() < 1e-9);
+        assert_eq!(plume_head_strength(&head, at(PLUME_HEAD_RADIUS)), 1.0);
+        assert_eq!(plume_head_strength(&head, at(0.5)), 1.0);
+        let middle = plume_head_strength(&head, at(0.5 * PLUME_HEAD_RADIUS));
+        assert!(centre < middle && middle < 1.0);
+        // A head that is still arriving weakens less.
+        assert!((plume_head_strength(&[plume(5.0)], DVec3::Z) - 0.75).abs() < 1e-9);
+        // Old lithosphere is weakened, young lithosphere does not become stronger.
+        let old_ocean = new_oceanic_crust(-250.0);
+        let young_ocean = new_oceanic_crust(-4.0);
+        assert_eq!(lithosphere_strength(&old_ocean, 0.0, centre), centre);
+        assert_eq!(
+            lithosphere_strength(&young_ocean, 0.0, centre),
+            lithosphere_strength(&young_ocean, 0.0, 1.0)
+        );
     }
 }

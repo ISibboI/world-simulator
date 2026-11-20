@@ -154,9 +154,14 @@ impl Plume {
     /// Current area flux in m²/s: the plume head grows quickly and the plume fades towards the
     /// end of its life.
     pub fn flux(&self) -> f64 {
-        let growth = (self.age / 10.0).min(1.0);
         let decay = ((self.lifetime - self.age) / 20.0).clamp(0.0, 1.0);
-        self.peak_flux * growth * decay
+        self.peak_flux * self.head_growth() * decay
+    }
+
+    /// How far the plume head has arrived and spread below the plate (0 to 1 over its first
+    /// 10 Myr).
+    pub fn head_growth(&self) -> f64 {
+        (self.age / 10.0).min(1.0)
     }
 }
 
