@@ -643,7 +643,7 @@ fn snapshot(
     info!(
         "    segments {} ({} with slab; slab at trenches {:.0} km; incipient trenches {:.0} km converging at {:.1} cm/yr, others at {:.1} cm/yr) | created {}, merged {}, expired {}, \
          flips {}, continental overrides {}, initiation segments {} ({} grew to 300 km), \
-         failed initiations {}",
+         failed initiations {} | unsettled velocity solves {}",
         statistics.segments,
         statistics.slab_segments,
         statistics.mean_slab_length,
@@ -658,6 +658,7 @@ fn snapshot(
         segments.initiation_segments,
         segments.successful_initiation_segments,
         statistics.events.failed_initiations,
+        statistics.unsettled_solves,
     );
     info!(
         "    crust mass (Gt): continental {:.3e}, transitional {:.3e}, oceanic {:.3e}, \

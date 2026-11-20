@@ -561,6 +561,9 @@ pub struct Simulation {
     /// Number of changes of the plate configuration (splits, merges, removals, induced
     /// subduction) so far; boundaries must be reclassified after each.
     configuration_changes: u64,
+    /// Number of velocity solves so far whose collision and subduction resistances did not
+    /// settle within the allowed iterations (see [`Self::update_plate_velocities`]).
+    unsettled_solves: u64,
     /// Area of sea floor opened by diverging plates so far (one flank), in km².
     opened_area: f64,
     /// Area opened so far at diverging boundary cells showing crust of continental origin (half
@@ -737,6 +740,7 @@ impl Simulation {
             matching_scratch: matching::MatchingScratch::default(),
             rng: owned_rng,
             configuration_changes: 0,
+            unsettled_solves: 0,
             opened_area: 0.0,
             continental_opened_area: 0.0,
             collision_inflow: 0.0,

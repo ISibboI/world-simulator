@@ -32,8 +32,10 @@ use super::*;
 /// Seconds per million years.
 const SECONDS_PER_MYR: f64 = 1e6 * 365.25 * 24.0 * 3600.0;
 
-/// Maximum number of solves for the set of converging collision contacts.
-const MAX_ACTIVE_SET_ITERATIONS: usize = 20;
+/// Maximum number of solves for the set of converging collision contacts and the resisting
+/// forces of subduction initiation. The damped iteration for a yielding contact alone needs
+/// about ten; contacts that influence each other need more.
+const MAX_ACTIVE_SET_ITERATIONS: usize = 100;
 
 /// What happens at a boundary cell, seen from the plate the cell belongs to.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -361,6 +363,7 @@ impl Simulation {
             }
         }
         if !converged {
+            self.unsettled_solves += 1;
             tracing::debug!(
                 time = self.time,
                 "Collision and subduction resistance did not converge"
@@ -974,12 +977,13 @@ mod tests {
     #[test]
     fn a_short_slab_of_young_lithosphere_resists_being_pushed_down() {
         let pull = TectonicParams::default().slab_pull;
-        // A 150 km slab of 2 Myr old lithosphere, with its crustal buoyancy and without it
-        // (neutral at age zero; the slab's viscous resistance is the same in both).
+        // A 150 km slab of 2 Myr old lithosphere, with its crustal buoyancy and with none (neutral
+        // at its own age, so that it neither pulls nor resists; the slab's viscous resistance is
+        // the same in both).
         let buoyant = dragged((2.0, 150e3), 3.0, |params| params.slab_pull = pull);
         let neutral = dragged((2.0, 150e3), 3.0, |params| {
             params.slab_pull = pull;
-            params.neutral_buoyancy_age = 0.0;
+            params.neutral_buoyancy_age = 2.0;
         });
         let (slow, fast) = (mean_approach(&buoyant), mean_approach(&neutral));
         assert!(slow < 0.8 * fast, "{slow} {fast}");

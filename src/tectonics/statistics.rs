@@ -123,6 +123,9 @@ pub struct Statistics {
     /// [`TectonicParams::self_sustaining_slab_length`] (incipient subduction), and the mean
     /// convergence there and at the other trenches (cm/yr).
     pub incipient_trench_length: f64,
+    /// Velocity solves so far whose resistances did not settle (collisions, subduction
+    /// initiation), which then used the last iterate.
+    pub unsettled_solves: u64,
     pub incipient_convergence: f64,
     pub mature_convergence: f64,
     /// Segment events so far.
@@ -678,6 +681,7 @@ impl Simulation {
             slab_segments: slabs.len(),
             mean_slab_length: trench_slab / trench_cells.max(1) as f64 / 1000.0,
             incipient_trench_length: by_stage[0].0 as f64 * boundary_length,
+            unsettled_solves: self.unsettled_solves,
             incipient_convergence: by_stage[0].1 / by_stage[0].0.max(1) as f64
                 * self.params.planet_radius
                 * 100.0
