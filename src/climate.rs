@@ -15,9 +15,10 @@
 //!
 //! - **Winds** follow Earth's zonal-mean low-level circulation: easterly trade winds that converge
 //!   in the intertropical convergence zone (ITCZ), westerlies in mid-latitudes and weak polar
-//!   easterlies. The pattern moves with the seasons, following the thermal equator of the energy
-//!   balance model (the ITCZ lies near the energy-flux equator, which in a diffusive energy
-//!   balance model is the temperature maximum). In the tropics the mean Hadley circulation
+//!   easterlies. The pattern moves with the seasons and with longitude: the ITCZ lies at the
+//!   maximum of the moist static energy of the near-surface air (`c_p T + L q`) in each sector of
+//!   longitude, so it swings far over warm, moist summer continents (monsoons) and little over
+//!   the ocean, but not over hot, dry deserts. In the tropics the mean Hadley circulation
 //!   carries the moisture and eddy diffusion fades out (as in the moist energy balance model of
 //!   Siler et al., 2018).
 //! - **Evaporation** over the ocean follows the bulk aerodynamic formula
