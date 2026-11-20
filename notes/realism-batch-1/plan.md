@@ -72,7 +72,8 @@ the land drains into them as endorheic basins (of 11.3% endorheic in total).
      cone exceeds its search radius (64 rings).
    - Not done: a transport threshold for incision. Sediment of a cone is eroded again like any
      sediment; in a filled basin the next step's drainage then carries it on to the next sea.
-3. **Depressions that a river crosses at its transport slope are not basins**
+3. **Dropped after measuring it (see [`results.md`](results.md)).** Depressions that a river
+   crosses at its transport slope are not basins
    (`erosion.lake_min_depth`, 20 m ≈ `alluvial_slope` × cell spacing). A cell's elevation is a
    mean over ~110 km. Review finding 3: such depressions must keep filling with sediment and
    must keep holding the base level of their rivers, or they would persist and widen. So they
