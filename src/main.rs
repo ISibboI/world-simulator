@@ -739,6 +739,19 @@ fn snapshot(
         planet_statistics.sediment_stock[1],
         planet_statistics.sediment_stock[2],
     );
+    let hydrology = &planet_statistics.hydrology;
+    let land_cells = hydrology.land_cells.max(1.0);
+    info!(
+        "    hydrology: runoff {:.0} km³/yr, to the ocean {:.0} km³/yr, lake evaporation {:.0} \
+         km³/yr | endorheic {:.1}% of land, lakes {:.1}% of land | sediment trapped in lakes \
+         {:.2} km³/yr",
+        hydrology.runoff / 1e9,
+        hydrology.to_ocean / 1e9,
+        hydrology.lake_evaporation / 1e9,
+        100.0 * hydrology.endorheic_cells / land_cells,
+        100.0 * hydrology.lake_cells / land_cells,
+        hydrology.lake_sediment / 1e9,
+    );
     info!(
         "    temperature global {:5.1} °C, equator {:5.1} °C, poles {:6.1} °C | \
          land seasonal range {:4.1} K | permanently frozen {:4.1}% | heat transport {:+.1}/{:+.1} PW \
