@@ -6,15 +6,13 @@
 //! (which plate would subduct, by buoyancy) exists from their first contact, and the boundary
 //! becomes a trench as soon as they converge (see [`super::dynamics`]).
 
-use std::f64::consts::FRAC_PI_6;
-
 use glam::{DQuat, DVec3};
 use rand::RngExt;
 use tracing::debug;
 
 use super::dynamics::{BoundaryCell, BoundaryKind};
 use super::generation::random_unit_vector;
-use super::weak_zones::Break;
+use super::weak_zones::{Break, PLUME_HEAD_RADIUS};
 use super::*;
 
 /// Parameters of plate birth and merging.
@@ -226,9 +224,10 @@ pub struct EventCounts {
     /// back to a great circle because no cut along weak lithosphere divided the plate.
     pub weak_zone_splits: usize,
     /// Splits along weak lithosphere found by cutting again after a part was too small, and plume
-    /// rifts whose break is two arms of a triple junction (the third arm failed).
+    /// rifts whose new boundary passes within half the plume head's radius of the plume (the
+    /// break found the plume's weakened lithosphere; it is not tied to it).
     pub recut_splits: usize,
-    pub junction_rifts: usize,
+    pub head_rifts: usize,
     /// Passive-margin initiations whose whole ocean region broke off along its coasts because no
     /// break along weak lithosphere left both parts large enough.
     pub coastal_splits: usize,
@@ -254,10 +253,16 @@ pub struct EventCounts {
     pub initiation_far_contact_km: f64,
 }
 
-/// Length (rad, ~2600 km) of the lines of cells from a plume into the middle of the two parts of
-/// a rift that move apart (tying the break to the plume; longer than the band of
-/// [`super::weak_zones`] in which the break forms).
+/// Length (rad, ~2600 km) of the lines of cells from a plume across the reference great circle
+/// of a rift into the two parts that move apart: the plume head pushes the lithosphere on either
+/// side of it apart, so the break nucleates at the plume (longer than the band of
+/// [`super::weak_zones`] in which the break forms, so that the lines reach the rigid blocks).
 const SPINE_LENGTH: f64 = 0.4;
+
+/// Orientations of the reference great circle through a plume that a rift tries (evenly spaced
+/// over 180°): the plume pushes the lithosphere apart in every direction, and the plate breaks
+/// where that is easiest.
+const RIFT_ORIENTATIONS: usize = 6;
 
 /// How often a split along weak lithosphere that leaves a part too small is cut again.
 const MAX_RECUTS: usize = 3;
@@ -285,13 +290,9 @@ enum SplitAnchor {
     /// Subduction initiation at an age step inside a plate: the old oceanic `cell` next to the
     /// younger oceanic cell `young`.
     FractureZone { cell: u32, young: u32 },
-    /// A plume rift from the cell `nucleus` above the plume with three arms in the tangent
-    /// directions `arms`; `cut` is a cell of the continent the rift divides, if any.
-    Rift {
-        nucleus: u32,
-        cut: Option<u32>,
-        arms: [DVec3; 3],
-    },
+    /// A plume rift from the cell `nucleus` above the plume; `cut` is a cell of the continent the
+    /// rift may divide, if any.
+    Rift { nucleus: u32, cut: Option<u32> },
 }
 
 impl EventCounts {
@@ -527,9 +528,6 @@ impl Simulation {
             self.event_counts.great_circle_splits += 1;
         } else {
             self.event_counts.weak_zone_splits += 1;
-            if !initiation {
-                self.event_counts.junction_rifts += 1;
-            }
         }
         Some(new_plate)
     }
@@ -661,40 +659,33 @@ impl Simulation {
                     self.weak_zone_cut(plate, &geometry, scale, &forced, &rigid)
                         .map(|(side, _)| side)
                 }
-                SplitAnchor::Rift { nucleus, arms, .. } => {
-                    // Three rift arms grow from the plume; the weakest two become the break
-                    // through the plume, the third fails (an aulacogen).
+                SplitAnchor::Rift { nucleus, .. } => {
+                    // The plume pushes the lithosphere apart in every direction; the plate
+                    // breaks where that takes the least force, through the plume's weakened
+                    // lithosphere and along weak zones around it (see `weak_zones`). The
+                    // reference circle runs through the plume in several orientations. The
+                    // head pushes the lithosphere on its two sides apart, so the break
+                    // nucleates at the plume: lines of cells from the plume, perpendicular to
+                    // the circle, are tied to the two parts. The arms may leave the plume in
+                    // any direction between these lines, so the angle at the plume is not set.
                     let origin = self.mesh.vertex(nucleus);
-                    [(0, 1), (1, 2), (2, 0)]
-                        .into_iter()
-                        .filter_map(|(first, second)| {
-                            let geometry = Break::Junction {
-                                nucleus: origin,
-                                arms: [arms[first], arms[second]],
-                            };
-                            // The plume's neighbours by sector, tied to the rigid blocks
-                            // along the bisectors of the two parts (so that the break runs
-                            // through the plume, not around a pocket next to it).
-                            let bisector = (arms[first] + arms[second]).normalize_or_zero();
-                            let spine = |direction: DVec3, other: u32| {
-                                let normal = origin.cross(direction).normalize_or_zero();
-                                let r = self.mesh.vertex(other);
-                                r.dot(direction) > 0.0
-                                    && r.dot(normal).abs() < self.mesh.mean_edge_angle()
-                                    && r.angle_between(origin) <= SPINE_LENGTH
-                            };
+                    let width = self.mesh.mean_edge_angle();
+                    let total = (0..cell_count).filter(|&c| in_plate(c as u32)).count();
+                    let min = self.params.events.min_plate_area * cell_count as f64;
+                    (0..RIFT_ORIENTATIONS)
+                        .filter_map(|step| {
+                            let angle =
+                                step as f64 * std::f64::consts::PI / RIFT_ORIENTATIONS as f64;
+                            let normal = DQuat::from_axis_angle(origin, angle) * normal;
+                            let geometry = Break::Circle { normal };
+                            let across = origin.cross(normal);
                             let forced: Vec<(u32, bool)> = (0..cell_count as u32)
-                                .filter(|&other| in_plate(other))
+                                .filter(|&other| other != nucleus && in_plate(other))
                                 .filter_map(|other| {
-                                    if self.mesh.neighbors(nucleus).contains(&other) {
-                                        Some((other, geometry.place(self.mesh.vertex(other)).0))
-                                    } else if spine(bisector, other) {
-                                        Some((other, true))
-                                    } else if spine(-bisector, other) {
-                                        Some((other, false))
-                                    } else {
-                                        None
-                                    }
+                                    let r = self.mesh.vertex(other);
+                                    (r.dot(across).abs() < width
+                                        && r.angle_between(origin) <= SPINE_LENGTH)
+                                        .then(|| (other, r.dot(normal) > 0.0))
                                 })
                                 .collect();
                             self.weak_zone_cut(plate, &geometry, scale, &forced, &rigid)
@@ -704,8 +695,6 @@ impl Simulation {
                         .min_by(|a, b| {
                             let small = |side: &[bool]| {
                                 let positive = side.iter().filter(|&&s| s).count();
-                                let total = (0..cell_count).filter(|&c| in_plate(c as u32)).count();
-                                let min = self.params.events.min_plate_area * cell_count as f64;
                                 (positive as f64) < min || ((total - positive) as f64) < min
                             };
                             small(&a.0).cmp(&small(&b.0)).then(a.1.total_cmp(&b.1))
@@ -910,9 +899,23 @@ impl Simulation {
             })
             .collect();
         debug!(?anchor, ?boundary, time = self.time, "New plate boundary");
-        if !matches!(anchor, SplitAnchor::Rift { .. }) {
+        let SplitAnchor::Rift { nucleus, .. } = anchor else {
             return;
+        };
+        let origin = self.mesh.vertex(nucleus);
+        let distance = boundary
+            .iter()
+            .map(|&cell| self.mesh.vertex(cell).angle_between(origin))
+            .fold(f64::INFINITY, f64::min);
+        if distance <= 0.5 * PLUME_HEAD_RADIUS {
+            self.event_counts.head_rifts += 1;
         }
+        debug!(
+            distance,
+            continental = self.surface_crust(nucleus).is_continental_origin(),
+            time = self.time,
+            "Rift boundary distance from the plume"
+        );
         let mut counts = [0usize; 4];
         for cell in 0..self.mesh.len() as u32 {
             let plate = self.owners[cell as usize].plate;
@@ -1125,8 +1128,8 @@ impl Simulation {
     }
 
     /// A plume that has been rising below a plate with continental crust nearby (or below a
-    /// very large plate) for long enough splits it along a great circle through the plume. The
-    /// plume's outflow then drives the two parts apart.
+    /// very large plate) for long enough splits it along its weakest lithosphere near the plume
+    /// (see [`Self::local_split_piece`]). The plume's outflow then drives the two parts apart.
     fn rift_above_plumes(&mut self) {
         let params = self.params.events.clone();
         let candidates: Vec<(usize, DVec3)> = self
@@ -1155,8 +1158,8 @@ impl Simulation {
             if continent.is_none() && !large {
                 continue;
             }
-            // A great circle through the plume that crosses the nearest continent (within
-            // ±30° of the direction towards it), else a random one.
+            // The first reference circle through the plume crosses the nearest continent (else
+            // a random one); the split tries the others too (see `local_split_piece`).
             let direction = random_unit_vector(&mut self.rng);
             let random_normal =
                 (direction - position * direction.dot(position)).normalize_or_zero();
@@ -1166,19 +1169,14 @@ impl Simulation {
             let normal = if towards == DVec3::ZERO {
                 random_normal
             } else {
-                let azimuth = self.rng.random_range(-FRAC_PI_6..FRAC_PI_6);
-                DQuat::from_axis_angle(position, azimuth) * towards
+                towards
             };
             if normal == DVec3::ZERO {
                 continue;
             }
-            // Three arms 120° apart, one of them along the circle towards the continent.
-            let first = normal.cross(position).normalize_or_zero();
-            let turn = DQuat::from_axis_angle(position, 2.0 * std::f64::consts::FRAC_PI_3);
             let anchor = SplitAnchor::Rift {
                 nucleus: cell,
                 cut: continent,
-                arms: [first, turn * first, turn * turn * first],
             };
             if let Some(new_plate) = self.split_locally(plate, normal, anchor) {
                 self.event_counts.rifts += 1;
@@ -2429,14 +2427,95 @@ mod tests {
             });
             simulation.rift_above_plumes();
             assert_eq!(simulation.event_counts.rifts, 1, "seed {seed}");
-            assert_eq!(simulation.event_counts.junction_rifts, 1, "seed {seed}");
             let plume = simulation.mesh.nearest(position);
             let plate = simulation.owners[plume as usize].plate;
             // The new boundary passes next to the plume.
-            let near = (0..simulation.mesh.len() as u32)
-                .filter(|&cell| simulation.mesh.vertex(cell).angle_between(position) < 0.13)
-                .any(|cell| simulation.owners[cell as usize].plate != plate);
-            assert!(near, "seed {seed}");
+            let distance = (0..simulation.mesh.len() as u32)
+                .filter(|&cell| simulation.owners[cell as usize].plate != plate)
+                .map(|cell| simulation.mesh.vertex(cell).angle_between(position))
+                .fold(f64::INFINITY, f64::min);
+            assert!(distance < 0.13, "seed {seed}: {distance}");
+            assert_eq!(simulation.event_counts.head_rifts, 1, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn plume_rift_arms_follow_sutures_around_the_plume() {
+        // A belt of old continent around the equator between two polar caps of another plate,
+        // a plume at +x, and two old sutures leaving the plume towards the caps, each leaning
+        // `lean` towards -y: the break runs through the plume along both sutures, so the
+        // angle at the plume follows them (180° − 2 × lean) instead of being prescribed.
+        let plume = DVec3::X;
+        for (lean, seed) in [(30.0f64, 0), (30.0, 1), (15.0, 2), (15.0, 3), (45.0, 4)] {
+            let mut simulation =
+                Simulation::new(SphereMesh::icosphere(5), 1, TectonicParams::default(), seed);
+            let lean_rad = lean.to_radians();
+            let arms = [
+                -DVec3::Z * lean_rad.cos() - DVec3::Y * lean_rad.sin(),
+                DVec3::Z * lean_rad.cos() - DVec3::Y * lean_rad.sin(),
+            ];
+            let width = simulation.mesh.mean_edge_angle();
+            for (local, crust) in simulation.plates[0].crust.iter_mut().enumerate() {
+                let r = simulation.mesh.vertex(local as u32);
+                let suture = arms.iter().any(|&arm| {
+                    r.dot(arm) > 0.0
+                        && r.angle_between(plume) < 0.9
+                        && r.dot(plume.cross(arm)).abs().asin() < width
+                });
+                *crust = Some(Crust {
+                    thickness: 35_000.0,
+                    density: CONTINENTAL_DENSITY,
+                    birth: -1000.0,
+                    sediment: 0.0,
+                    felsic: 1.0,
+                    metasediment: 0.0,
+                    orogeny: if suture { -500.0 } else { NO_OROGENY },
+                });
+            }
+            let caps: Vec<u32> = (0..simulation.mesh.len() as u32)
+                .filter(|&cell| simulation.mesh.vertex(cell).z.abs() > 0.5)
+                .collect();
+            simulation.split_plate_cells(0, &caps).unwrap();
+            simulation.polarities.clear();
+            simulation.mantle.insert_plume(Plume {
+                position: plume,
+                age: 50.0,
+                lifetime: 200.0,
+                peak_flux: 5e-3,
+                has_rifted: false,
+            });
+            simulation.rift_above_plumes();
+            assert_eq!(simulation.event_counts.rifts, 1, "lean {lean}, seed {seed}");
+            assert_eq!(
+                simulation.event_counts.head_rifts, 1,
+                "lean {lean}, seed {seed}"
+            );
+            // Directions from the plume to the new boundary 0.25…0.45 rad away, north and
+            // south of it.
+            let mut directions = [DVec3::ZERO; 2];
+            for cell in 0..simulation.mesh.len() as u32 {
+                let r = simulation.mesh.vertex(cell);
+                let plate = simulation.owners[cell as usize].plate;
+                let distance = r.angle_between(plume);
+                if plate == 1
+                    || !(0.25..=0.45).contains(&distance)
+                    || simulation
+                        .mesh
+                        .neighbors(cell)
+                        .iter()
+                        .all(|&other| simulation.owners[other as usize].plate == plate)
+                {
+                    continue;
+                }
+                let tangent = (r - plume * r.dot(plume)).normalize();
+                directions[usize::from(r.z > 0.0)] += tangent;
+            }
+            let angle = directions[0].angle_between(directions[1]).to_degrees();
+            let expected = 180.0 - 2.0 * lean;
+            assert!(
+                (angle - expected).abs() < 20.0,
+                "lean {lean}, seed {seed}: angle {angle:.0}°, expected {expected:.0}°"
+            );
         }
     }
 
