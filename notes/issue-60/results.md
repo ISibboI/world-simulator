@@ -72,6 +72,23 @@ below.
   - a `wasm-bindgen-test` under Node, because there is no Node in CI. Reproducibility was
     checked in a headless browser instead (below).
 
+### Diff review
+
+An independent review of the diff ([review-diff.md](review-diff.md)) found no must-fix items.
+Its should-fix items were handled as follows:
+
+- **Fixed:**
+  - worker failures reach the page (`init().catch` → `{ error }` in `web/worker.js`, plus a
+    `Worker.onerror` handler);
+  - a worker start error is no longer overwritten by the "Starting…" status;
+  - surface updates of the wrong size are rejected instead of panicking;
+  - query values are passed as `--name=value`, so `?epoch=-1` works.
+  - From the nits: the speed comment is corrected, and the build job has a timeout.
+- **Documented instead of fixed:** with fixed file names, a browser can briefly (Pages caches
+  for 10 min) combine an old JS file with a new wasm file right after a deploy. It now shows
+  an error, and a reload fixes it. Cache-busting would mean hashed names passed on to the
+  worker; that's not worth it for now.
+
 ## Results
 
 All on tktie, 2026-11-20.
@@ -93,6 +110,8 @@ All on tktie, 2026-11-20.
     **identical statistics** (74 lines);
   - **errors:** `?seed=abc` shows the clap error on the page, and
     `?set=nonexistent=1` shows "Simulation failed: unknown or untunable tectonic parameter …".
+  - After the review fixes, the same checks were rerun. Two runs are again identical, and
+    negative values such as `?epoch=-0.0` parse.
   - Not tested: a real GPU, WebGPU, Firefox and Safari. SwiftShader only exercises the WebGL2
     path.
 

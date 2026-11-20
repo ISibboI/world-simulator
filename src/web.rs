@@ -88,9 +88,10 @@ fn parse_query(search: &str) -> anyhow::Result<Cli> {
             ),
             "the option `{name}` is not available on the web"
         );
-        args.push(format!("--{name}"));
-        if let Some(value) = value.filter(|value| !value.is_empty()) {
-            args.push(decode(value)?);
+        // One `--name=value` token, so that values starting with `-` are not taken as options.
+        match value.filter(|value| !value.is_empty()) {
+            Some(value) => args.push(format!("--{name}={}", decode(value)?)),
+            None => args.push(format!("--{name}")),
         }
     }
     Cli::try_parse_from(args).map_err(|error| anyhow!("invalid URL parameters: {error}"))
@@ -151,19 +152,19 @@ async fn run_page() -> anyhow::Result<()> {
     // receiving them from the worker.
     let mesh = SphereMesh::icosphere(cli.subdivisions);
     let (vertex_count, faces) = (mesh.len(), mesh.faces().to_vec());
+    show_status("Starting the simulation…");
     viewer::run_web(
         canvas,
         vertex_count,
         faces,
         Box::new(move |updates, wake_up| {
-            if let Err(error) = start_worker(&search, updates, wake_up) {
+            if let Err(error) = start_worker(&search, vertex_count, updates, wake_up) {
                 error!("{error:#}");
                 show_status(&format!("{error:#}"));
             }
         }),
     )
     .await?;
-    show_status("Starting the simulation…");
     Ok(())
 }
 
@@ -171,6 +172,7 @@ async fn run_page() -> anyhow::Result<()> {
 /// to the view.
 fn start_worker(
     search: &str,
+    vertex_count: usize,
     updates: Sender<SurfaceUpdate>,
     wake_up: Box<dyn Fn() + Send>,
 ) -> anyhow::Result<()> {
@@ -195,10 +197,18 @@ fn start_worker(
             };
             let floats = js_sys::Float32Array::new(&buffer);
             let floats_per_vertex = std::mem::size_of::<Vertex>() / std::mem::size_of::<f32>();
-            let mut vertices: Vec<Vertex> =
-                vec![bytemuck::Zeroable::zeroed(); floats.length() as usize / floats_per_vertex];
+            if floats.length() as usize != vertex_count * floats_per_vertex {
+                error!(
+                    floats = floats.length(),
+                    vertex_count, "Surface update of the wrong size from the simulation worker"
+                );
+                return;
+            }
+            let mut vertices: Vec<Vertex> = vec![bytemuck::Zeroable::zeroed(); vertex_count];
             floats.copy_to(bytemuck::cast_slice_mut(&mut vertices));
-            show_status("");
+            if time == 0.0 {
+                show_status("");
+            }
             if let Ok(document) = document() {
                 document.set_title(&format!("World Simulator — {time:.0} Myr"));
             }
@@ -213,8 +223,17 @@ fn start_worker(
             }
         });
     worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
-    // The worker and its message handler live as long as the page.
+    // Errors while loading the worker script or module (a failure inside the simulation arrives
+    // as an `{ error }` message, see `web/worker.js`).
+    let on_error = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(|event: web_sys::ErrorEvent| {
+        let message = event.message();
+        error!("Simulation worker error: {message}");
+        show_status(&format!("Simulation failed: {message}"));
+    });
+    worker.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+    // The worker and its handlers live as long as the page.
     on_message.forget();
+    on_error.forget();
     std::mem::forget(worker);
     Ok(())
 }

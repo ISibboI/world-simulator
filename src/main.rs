@@ -153,7 +153,7 @@ struct Cli {
 }
 
 /// Default icosphere subdivisions: 6 on the desktop, 5 on the web, where the simulation runs about
-/// 1.5× slower and 6 would take about a second per step.
+/// 2.4× slower (~0.4 s per step at 5) and 6 would take more than a second per step.
 #[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_SUBDIVISIONS: u32 = 6;
 #[cfg(target_arch = "wasm32")]
