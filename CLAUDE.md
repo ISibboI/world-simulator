@@ -2,6 +2,13 @@
 
 A Rust binary that simulates a planet, starting with plate tectonics on a sphere.
 
+## Project goal
+
+The goal is to simulate an **Earth-like planet, not Earth itself**. Realism means physical
+plausibility for an Earth-like planet: real physical processes, conservation, and values within
+plausible ranges. Earth's present-day numbers (including those in the archived notes) are
+orientation and plausibility checks, not exact targets to match.
+
 ## Issue and progress tracking
 
 Issues are tracked on **GitHub** (https://github.com/ISibboI/world-simulator/issues); new
