@@ -880,9 +880,11 @@ mod tests {
         mantle_speed: f64,
         set: impl Fn(&mut TectonicParams),
     ) -> Simulation {
-        let mut params = TectonicParams::default();
-        params.initiation_resistance = 0.0;
-        params.slab_pull = 0.0;
+        let params = TectonicParams {
+            initiation_resistance: 0.0,
+            slab_pull: 0.0,
+            ..TectonicParams::default()
+        };
         let mut simulation = one_sided_trench(params);
         simulation.polarities.clear();
         simulation.seed_subduction((0, 1), 1, slab_length);
