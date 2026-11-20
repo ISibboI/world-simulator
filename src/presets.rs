@@ -148,7 +148,12 @@ impl Epoch {
     /// global glaciation except the Palaeoproterozoic and Neoproterozoic episodes (Feulner,
     /// 2012). At 3.5 Ga this is ~56 W/m², in radiative–convective models of the order of 0.1
     /// bar of CO₂, or 0.01–0.03 bar with ~0.1–0.5% of methane (Haqq-Misra et al., 2008; Wolf &
-    /// Toon, 2013; Charnay et al., 2013).
+    /// Toon, 2013; Charnay et al., 2013). The default is a prescribed, climate-compensated
+    /// forcing, not a prediction. It is uniform, while the missing sunlight is largest in the
+    /// tropics, so the gradient flattens: at 3.5 Ga (4 seeds, 1000 Myr) the global mean was
+    /// 0.8–1.9 K warmer than today's, the poles 8–10 K warmer, the equator ~2 K cooler, and the
+    /// permanent ice covered 7–10% less of the surface. Without it the planet is a snowball
+    /// (−36 °C, 95% frozen).
     pub fn greenhouse_forcing(&self) -> f64 {
         match self.co2 {
             Some(co2) => CO2_FORCING_PER_E_FOLD * co2.ln(),
@@ -168,7 +173,7 @@ impl Epoch {
 }
 
 /// The parameters of a run: the defaults with the planet radius, then the presets, then the
-/// individual overrides `NAME=VALUE` (see [`set_parameter`]).
+/// individual overrides `NAME=VALUE` (see [`Parameters::set`]).
 pub struct Parameters {
     pub tectonics: TectonicParams,
     pub erosion: ErosionParams,
