@@ -516,7 +516,11 @@ pub fn erode(
         let without_sediment = isostasy::change_sediment(elevation[cell], sediment[cell], left);
         let from_dense = from_bedrock.min(dense_crust[cell]);
         new_elevation[cell] = isostasy::add_layer(
-            isostasy::add_layer(without_sediment, -from_dense, bedrock_isostatic_density[cell]),
+            isostasy::add_layer(
+                without_sediment,
+                -from_dense,
+                bedrock_isostatic_density[cell],
+            ),
             -(from_bedrock - from_dense),
             bedrock_density[cell],
         );
@@ -967,7 +971,7 @@ fn lake_balance(
         if evaporation + loss >= inflow {
             // The water surface lies between this floor and the next one (or the spill level).
             let fraction = if loss > 0.0 {
-                ((inflow - evaporation) / loss).clamp(0.0, 1.0, true)
+                ((inflow - evaporation) / loss).clamp(0.0, 1.0)
             } else {
                 0.0
             };
@@ -1874,7 +1878,15 @@ mod tests {
             density: 2800.0,
         };
         let (elevation, base, factor) = (3000.0, 100.0, 50.0);
-        let cut = incise(elevation, base, 0.0, &bedrock, (2.0 * factor, factor), 1.0, true);
+        let cut = incise(
+            elevation,
+            base,
+            0.0,
+            &bedrock,
+            (2.0 * factor, factor),
+            1.0,
+            true,
+        );
         assert!(cut.bedrock > bedrock.dense);
         let after = isostasy::add_layer(
             isostasy::add_layer(elevation, -bedrock.dense, bedrock.dense_density),
@@ -1896,14 +1908,26 @@ mod tests {
         // rebound, so a big river (F = 10) removes ~4 km and lowers the surface to ~400 m,
         // instead of removing ~0.9 km as if the surface dropped by the removed thickness.
         let (elevation, base, factor) = (1000.0, 0.0, 10.0);
-        let cut = incise(elevation, base, 0.0, &CRUST, (2.0 * factor, factor), 1.0, true);
+        let cut = incise(
+            elevation,
+            base,
+            0.0,
+            &CRUST,
+            (2.0 * factor, factor),
+            1.0,
+            true,
+        );
         let after = isostasy::add_layer(elevation, -cut.bedrock, 2800.0);
         assert_eq!(cut.bulk, 0.0);
         assert!((cut.bedrock - factor * (after - base)).abs() < 1e-6);
         assert!((cut.bedrock - 3976.0).abs() < 1.0, "{}", cut.bedrock);
         // A small stream (F ≪ 1) barely notices the rebound.
         let small = incise(elevation, base, 0.0, &CRUST, (0.02, 0.01), 1.0, true);
-        assert!((small.bedrock - 0.01 * 1000.0).abs() < 0.2, "{}", small.bedrock);
+        assert!(
+            (small.bedrock - 0.01 * 1000.0).abs() < 0.2,
+            "{}",
+            small.bedrock
+        );
 
         // Sediment: the step ends in the sediment and the same balance holds with the
         // compacting column.
@@ -1918,7 +1942,15 @@ mod tests {
 
         // Through thin sediment into bedrock: the surface never drops below the base level.
         for factor in [0.1, 1.0, 10.0, 1e3] {
-            let cut = incise(elevation, 200.0, 50.0, &CRUST, (2.0 * factor, factor), 1.0, true);
+            let cut = incise(
+                elevation,
+                200.0,
+                50.0,
+                &CRUST,
+                (2.0 * factor, factor),
+                1.0,
+                true,
+            );
             let bulk = isostasy::sediment_bulk_thickness(50.0);
             assert_eq!(cut.bulk, bulk);
             let bare = isostasy::change_sediment(elevation, 50.0, 0.0);
@@ -2008,8 +2040,7 @@ mod tests {
         let expected = arid.hydrology.runoff - arid.hydrology.lake_evaporation;
         assert!((into_ocean(&arid) - expected).abs() / expected < 1e-9);
         assert!(
-            (arid.hydrology.lake_evaporation
-                - arid.hydrology.endorheic_cells * 0.01 * cell_area)
+            (arid.hydrology.lake_evaporation - arid.hydrology.endorheic_cells * 0.01 * cell_area)
                 .abs()
                 < 1e-6 * arid.hydrology.lake_evaporation
         );
