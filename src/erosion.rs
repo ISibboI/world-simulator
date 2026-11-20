@@ -789,7 +789,6 @@ pub fn erode(
             let fan = build_terminal_fan(
                 mesh,
                 &mut seabed,
-                &zones,
                 params,
                 mouth,
                 remaining,
@@ -798,7 +797,7 @@ pub fn erode(
             terminal_fan += fan;
             remaining -= fan;
         }
-        if remaining > 1e-9 {
+        if remaining > 0.0 {
             seabed.deposit(source_cell, remaining);
             sediment_overfill += remaining;
         }
@@ -1373,89 +1372,105 @@ fn fill_fan(
 
 /// Deposits `amount` of sediment that found no room in the sea as a terminal fan or prograding
 /// delta around the river mouth `apex`, and returns the deposited amount. The deposit is a cone
-/// whose surface falls from the apex with [`ErosionParams::alluvial_slope`], over land and
-/// shelf alike (a full shelf sea becomes land: the delta progrades); its height is the one that
-/// holds the amount, with the isostatic response of every column. Cells standing above the cone
-/// get nothing, and the cone does not cross deep water (slope, rise and fan zones, which
-/// [`fill_fan`] fills). Fluvial megafans and terminal fans in filled basins are such cones
-/// (Kosi, Pilcomayo, Okavango; Leier et al. 2005; Hartley et al. 2010).
+/// whose surface falls from the apex with [`ErosionParams::alluvial_slope`]; its height is the
+/// one that holds the amount, with the isostatic response of every column. The cone only
+/// spreads through cells that it covers, so it does not reach lows behind higher ground. Where
+/// it meets the sea, the sea becomes land: the delta progrades, slowly into deep water, which
+/// takes far more sediment per cell. Fluvial megafans and terminal fans in filled basins are
+/// such cones (Kosi, Pilcomayo, Okavango; Leier et al. 2005; Hartley et al. 2010).
 fn build_terminal_fan(
     mesh: &SphereMesh,
     seabed: &mut Seabed,
-    zones: &[Zone],
     params: &ErosionParams,
     apex: usize,
     amount: f64,
     scratch: &mut FanScratch,
 ) -> f64 {
-    /// The cone is searched within this many rings of cells around the apex.
-    const MAX_RINGS: u32 = 64;
+    /// The cone reaches at most this many cells from the apex.
+    const MAX_HOPS: u32 = 64;
     if amount <= 0.0 || params.alluvial_slope <= 0.0 {
         return 0.0;
     }
     let drop = params.alluvial_slope * mesh.mean_edge_angle() * params.planet_radius;
-    let cells = &mut scratch.path;
-    cells.clear();
-    cells.push((apex, 0, 0.0));
-    scratch.mark[apex] = apex;
-    let room = |seabed: &Seabed, cells: &[(usize, u32, f64)], top: f64| {
-        cells
-            .iter()
-            .map(|&(cell, hops, _)| seabed.room(cell, top - drop * f64::from(hops), f64::INFINITY))
-            .sum::<f64>()
-    };
-    let (mut next, mut rings) = (0, 2);
-    let top = loop {
-        // Extend the search to `rings` rings.
-        while next < cells.len() && cells[next].1 < rings {
-            let (cell, hops, _) = cells[next];
+    // The cells covered by the cone with its apex at `top` (into `scratch.path`, with their
+    // distance in cells), and the sediment it holds on them; the search ends early once it
+    // holds more than `limit`.
+    let cone = |seabed: &Seabed, scratch: &mut FanScratch, top: f64, limit: f64| {
+        let FanScratch { mark, path } = scratch;
+        path.clear();
+        path.push((apex, 0, 0.0));
+        mark[apex] = apex;
+        let mut room = 0.0;
+        let mut next = 0;
+        while next < path.len() && room <= limit {
+            let (cell, hops, _) = path[next];
             next += 1;
+            room += seabed.room(cell, top - drop * f64::from(hops), f64::INFINITY);
+            if hops >= MAX_HOPS {
+                continue;
+            }
+            let surface = top - drop * f64::from(hops + 1);
             for &neighbor in mesh.neighbors(cell as u32) {
                 let neighbor = neighbor as usize;
-                let crossable = seabed.elevation[neighbor] >= 0.0 || zones[neighbor] == Zone::Shelf;
-                if crossable && scratch.mark[neighbor] != apex {
-                    scratch.mark[neighbor] = apex;
-                    cells.push((neighbor, hops + 1, 0.0));
+                if mark[neighbor] != apex && seabed.elevation[neighbor] < surface {
+                    mark[neighbor] = apex;
+                    path.push((neighbor, hops + 1, 0.0));
                 }
             }
         }
-        // The height of the cone that holds the amount on these cells.
-        let mut low = cells
-            .iter()
-            .map(|&(cell, ..)| seabed.elevation[cell])
-            .fold(f64::INFINITY, f64::min);
-        let mut high = low + 1.0;
-        while room(seabed, cells, high) < amount && high < 1e6 {
-            high = low + 2.0 * (high - low);
+        for &(cell, ..) in path.iter() {
+            mark[cell] = usize::MAX;
         }
-        for _ in 0..50 {
-            let mid = 0.5 * (low + high);
-            if room(seabed, cells, mid) <= amount {
-                low = mid;
-            } else {
-                high = mid;
-            }
-        }
-        // If the cone reaches the outermost ring, it extends beyond the search.
-        let reaches_rim = next < cells.len()
-            && cells.iter().any(|&(cell, hops, _)| {
-                hops == rings && seabed.elevation[cell] < low - drop * f64::from(hops)
-            });
-        if !reaches_rim || rings >= MAX_RINGS {
-            break low;
-        }
-        rings *= 2;
+        room
     };
-    let mut deposited = 0.0;
-    for &(cell, hops, _) in cells.iter() {
-        scratch.mark[cell] = usize::MAX;
-        let thickness = seabed.room(cell, top - drop * f64::from(hops), f64::INFINITY);
-        if thickness > 0.0 {
-            seabed.deposit(cell, thickness);
-            deposited += thickness;
+    // The highest cone that holds at most the amount.
+    let mut low = seabed.elevation[apex];
+    let mut step = 1.0;
+    while cone(seabed, scratch, low + step, amount) <= amount && step < 1e6 {
+        step *= 2.0;
+    }
+    let mut high = low + step;
+    while high - low > 1e-4 {
+        let mid = 0.5 * (low + high);
+        if cone(seabed, scratch, mid, amount) <= amount {
+            low = mid;
+        } else {
+            high = mid;
         }
     }
-    deposited.min(amount)
+    let mut remaining = amount;
+    cone(seabed, scratch, low, f64::INFINITY);
+    for &(cell, hops, _) in &scratch.path {
+        let thickness = seabed
+            .room(cell, low - drop * f64::from(hops), f64::INFINITY)
+            .min(remaining);
+        if thickness > 0.0 {
+            seabed.deposit(cell, thickness);
+            remaining -= thickness;
+        }
+    }
+    // A cone that just overtops a sill covers a low beyond it, which holds more than is left:
+    // the rest is shared out there in proportion to the room.
+    if remaining > 0.0 {
+        let room = cone(seabed, scratch, high, f64::INFINITY);
+        if room > 0.0 {
+            let share = (remaining / room).min(1.0);
+            for &(cell, hops, _) in &scratch.path {
+                let thickness =
+                    share * seabed.room(cell, high - drop * f64::from(hops), f64::INFINITY);
+                if thickness > 0.0 {
+                    seabed.deposit(cell, thickness);
+                    remaining -= thickness;
+                }
+            }
+        }
+    }
+    // Rounding dust stays at the apex.
+    if remaining > 0.0 && remaining <= 1e-9 * amount.max(1.0) {
+        seabed.deposit(apex, remaining);
+        remaining = 0.0;
+    }
+    amount - remaining.max(0.0)
 }
 
 /// The margin within reach of a river mouth: shelf, slope and rise cells connected to it
@@ -2847,10 +2862,6 @@ mod tests {
                     "{cell}: {} above {lowest}",
                     after[cell]
                 );
-            }
-            // The deep sea is not crossed.
-            if class[cell] == CrustClass::Oceanic {
-                assert_eq!(result.sediment_delta[cell], 0.0, "{cell}");
             }
         }
         // Rock mass is conserved.
