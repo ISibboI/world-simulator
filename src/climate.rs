@@ -57,6 +57,8 @@ const LATENT_HEAT: f64 = 2.5e6;
 /// Surface air pressure in Pa.
 const SURFACE_PRESSURE: f64 = 101_325.0;
 
+/// Angular velocity of the planet's rotation in rad/s.
+const EARTH_ROTATION: f64 = 7.292e-5;
 /// Gravitational acceleration in m/s².
 const GRAVITY: f64 = 9.81;
 
@@ -96,6 +98,13 @@ pub struct ClimateParams {
     /// Temperature decrease with height in K/m, for the scale height of water vapour and to
     /// reduce surface temperatures to sea level.
     pub lapse_rate: f64,
+    /// Depth (m) of the boundary layer whose temperature anomaly sets the surface pressure of the
+    /// thermally driven winds; 0 disables them.
+    pub thermal_wind_depth: f64,
+    /// Damping time (days) of the thermally driven winds by friction.
+    pub thermal_wind_damping: f64,
+    /// Largest speed (m/s) of the thermally driven winds.
+    pub max_thermal_wind: f64,
     /// Number of months per year for which the budget is solved, evenly spaced from January; must
     /// divide 12.
     pub months: usize,
@@ -126,6 +135,9 @@ impl Default for ClimateParams {
             hadley_width: 15.0,
             polar_width: 15.0,
             lapse_rate: 0.0065,
+            thermal_wind_depth: 1500.0,
+            thermal_wind_damping: 1.5,
+            max_thermal_wind: 10.0,
             months: 4,
             spin_up_iterations: 40,
             update_iterations: 6,
@@ -152,6 +164,9 @@ impl ClimateParams {
             "hadley_width" => &mut self.hadley_width,
             "polar_width" => &mut self.polar_width,
             "lapse_rate" => &mut self.lapse_rate,
+            "thermal_wind_depth" => &mut self.thermal_wind_depth,
+            "thermal_wind_damping" => &mut self.thermal_wind_damping,
+            "max_thermal_wind" => &mut self.max_thermal_wind,
             "tolerance" => &mut self.tolerance,
             "months" | "spin_up_iterations" | "update_iterations" | "months_per_update" => {
                 anyhow::ensure!(value >= 1.0, "{name} must be at least 1");
@@ -419,15 +434,16 @@ impl Climate {
     ) -> Month {
         let params = &self.params;
         let cell_count = elevation.len();
-        let wind: Vec<DVec3> = (0..cell_count)
-            .map(|cell| low_level_wind(self.position[cell], thermal_equator))
-            .collect();
-
         // The temperature of the free troposphere, which sets the saturation of the column, is
         // much more uniform horizontally than the surface temperature: use the zonal mean of the
         // sea-level temperature.
-        let column_temperature = self
-            .zonal_mean(&|cell| temperature[cell] + params.lapse_rate * elevation[cell].max(0.0));
+        let sea_level =
+            |cell: usize| temperature[cell] + params.lapse_rate * elevation[cell].max(0.0);
+        let column_temperature = self.zonal_mean(&sea_level);
+        let thermal = self.thermal_wind(&sea_level, &column_temperature);
+        let wind: Vec<DVec3> = (0..cell_count)
+            .map(|cell| low_level_wind(self.position[cell], thermal_equator) + thermal[cell])
+            .collect();
 
         let vapour = &self.vapour[slot];
         let mut evaporation = vec![0.0; cell_count];
@@ -512,6 +528,47 @@ impl Climate {
                 precipitation - budyko_runoff(precipitation, potential, self.params.budyko_omega);
             month.evaporation[cell] = actual * self.solved[slot].potential[cell] / potential;
         }
+    }
+
+    /// Thermally driven boundary-layer winds (m/s) after Lindzen & Nigam (1987): air warmer than
+    /// the zonal mean (`sea_level` minus `zonal`, in K) lowers the surface pressure by
+    /// `p' = −ρ g H T'/T₀`, and the wind balances the pressure gradient with friction and the
+    /// Coriolis force, `ε u + f k × u = −∇p'/ρ`. Summer continents draw air in (monsoons), winter
+    /// continents push it out.
+    fn thermal_wind(&self, sea_level: &dyn Fn(usize) -> f64, zonal: &[f64]) -> Vec<DVec3> {
+        let params = &self.params;
+        if params.thermal_wind_depth <= 0.0 {
+            return vec![DVec3::ZERO; zonal.len()];
+        }
+        let anomaly: Vec<f64> = (0..zonal.len()).map(|c| sea_level(c) - zonal[c]).collect();
+        let friction = 1.0 / (params.thermal_wind_damping * 86_400.0);
+        (0..zonal.len())
+            .map(|cell| {
+                // Least-squares gradient of the anomaly (K/m).
+                let edges = &self.edges[cell];
+                let mut gradient = DVec3::ZERO;
+                for edge in edges {
+                    gradient += edge.direction * (anomaly[edge.neighbor as usize] - anomaly[cell])
+                        / edge.distance;
+                }
+                gradient *= 2.0 / edges.len() as f64;
+                let position = self.position[cell];
+                // Remove the radial part of the chord directions.
+                let gradient = gradient - position * gradient.dot(position);
+                let force = gradient * GRAVITY * params.thermal_wind_depth / 288.0;
+                let coriolis = 2.0 * EARTH_ROTATION * position.z;
+                let wind = (force * friction - position.cross(force) * coriolis)
+                    / (friction * friction + coriolis * coriolis);
+                // Without the cumulus friction of the deep tropics, the balance overestimates the
+                // winds near the equator; real monsoon flows reach about 10 m/s.
+                let speed = wind.length();
+                if speed > params.max_thermal_wind {
+                    wind * (params.max_thermal_wind / speed)
+                } else {
+                    wind
+                }
+            })
+            .collect()
     }
 
     /// The zonal mean of a field at the latitude of every cell, smoothed over a few degrees.
@@ -832,6 +889,17 @@ fn zonal_mean_wind(latitude: f64) -> (f64, f64) {
     let (l1, u1, v1) = TABLE[index + 1];
     let f = (latitude - l0) / (l1 - l0);
     (u0 + (u1 - u0) * f, v0 + (v1 - v0) * f)
+}
+
+/// The zonal-mean eastward surface wind stress (N/m²) at `latitude` (degrees) for a circulation
+/// centred on the equator: `ρ_a C_D |U| u`, with the speed of the mean wind and of the
+/// fluctuations `variability` (m/s) of weather systems.
+pub fn surface_wind_stress(latitude: f64, variability: f64) -> f64 {
+    const AIR_DENSITY: f64 = 1.2;
+    const DRAG_COEFFICIENT: f64 = 1.3e-3;
+    let (eastward, poleward) = zonal_mean_wind(latitude.abs());
+    let speed = (eastward * eastward + poleward * poleward + variability * variability).sqrt();
+    AIR_DENSITY * DRAG_COEFFICIENT * speed * eastward
 }
 
 /// The latitude of the circulation (degrees): the geographic latitude stretched so that the ITCZ

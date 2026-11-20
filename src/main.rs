@@ -1,6 +1,7 @@
 mod climate;
 mod erosion;
 mod isostasy;
+mod ocean;
 mod planet;
 mod render;
 mod sparse;
@@ -621,7 +622,7 @@ fn snapshot(
     info!(
         "    temperature global {:5.1} °C, equator {:5.1} °C, poles {:6.1} °C | \
          land seasonal range {:4.1} K | permanently frozen {:4.1}% | heat transport {:+.1}/{:+.1} PW \
-         (63°N {:+.1}, 63°S {:+.1})",
+         (ocean at 20°N {:+.1}, 20°S {:+.1}) | gyres {:.0} Sv",
         planet_statistics.global_temperature,
         planet_statistics.equatorial_temperature,
         planet_statistics.polar_temperature,
@@ -631,6 +632,7 @@ fn snapshot(
         planet_statistics.heat_transport[1],
         planet_statistics.heat_transport[2],
         planet_statistics.heat_transport[3],
+        planet_statistics.gyre_transport,
     );
 
     let time = simulation.time().round() as u64;

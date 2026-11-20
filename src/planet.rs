@@ -72,9 +72,11 @@ pub struct PlanetStatistics {
     pub polar_temperature: f64,
     /// Mean difference between the warmest and coldest month over land in K.
     pub land_seasonal_range: f64,
-    /// Largest northward and southward meridional heat transport in PW, and the transport across
-    /// the interfaces nearest to 65°N and 65°S.
+    /// Largest northward and southward meridional heat transport (atmosphere and ocean) in PW,
+    /// and the ocean's transport across the interfaces nearest to 20°N and 20°S.
     pub heat_transport: [f64; 4],
+    /// Largest transport of the wind-driven ocean gyres in Sv.
+    pub gyre_transport: f64,
     /// Fraction of the surface covered by permanent ice (sea ice, ice sheets).
     pub frozen_fraction: f64,
     /// Where the sediment sits and how much of the sea level it makes up.
@@ -318,6 +320,7 @@ impl Planet {
             equatorial_temperature: mean(&mut all().filter(|&c| latitude(c).abs() < 10.0), &annual),
             polar_temperature: mean(&mut all().filter(|&c| latitude(c).abs() > 70.0), &annual),
             land_seasonal_range: mean(&mut land.iter().copied(), &|c| fields.seasonal_range(c)),
+            gyre_transport: fields.gyre_transport,
             heat_transport: {
                 let transport = &fields.meridional_transport;
                 let to_petawatts = |t: f64| t * self.planet_radius.powi(2) / 1e15;
@@ -325,19 +328,14 @@ impl Planet {
                     transport
                         .iter()
                         .min_by(|a, b| (a.0 - latitude).abs().total_cmp(&(b.0 - latitude).abs()))
-                        .map_or(0.0, |&(_, t)| to_petawatts(t))
+                        .map_or(0.0, |&(_, _, ocean)| to_petawatts(ocean))
                 };
+                let total = || transport.iter().map(|t| to_petawatts(t.1 + t.2));
                 [
-                    transport
-                        .iter()
-                        .map(|t| to_petawatts(t.1))
-                        .fold(0.0, f64::max),
-                    transport
-                        .iter()
-                        .map(|t| to_petawatts(t.1))
-                        .fold(0.0, f64::min),
-                    nearest(65.0),
-                    nearest(-65.0),
+                    total().fold(0.0, f64::max),
+                    total().fold(0.0, f64::min),
+                    nearest(20.0),
+                    nearest(-20.0),
                 ]
             },
             frozen_fraction: all().filter(|&c| fields.ice[c] > 0.5).count() as f64
