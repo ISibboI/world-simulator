@@ -109,6 +109,24 @@ pub struct ErosionParams {
     /// crystalline coasts.
     pub cliff_retreat_sediment: f64,
     pub cliff_retreat_bedrock: f64,
+    /// Whether a deep-sea fan whose lobes are full aggrades up to its graded surface (see
+    /// [`fill_fan`]); otherwise sediment beyond the lobes' thickness cap is refused (the model
+    /// before #47, for attribution).
+    pub graded_fans: bool,
+    /// Fall (m) of the graded surface of a deep-sea fan from its head, at
+    /// [`Self::slope_depth`], to its far end; the surface approaches it over
+    /// [`Self::fan_length`], so fans are concave: ~3 m/km at the head, below 1 m/km beyond
+    /// 1500 km (Bengal, Indus, Amazon and Mississippi fans average 1–5 m/km, steeper on the
+    /// upper fan; Curray et al. 2003; Damuth & Flood 1985; Bouma et al. 1985).
+    pub fan_relief: f64,
+    /// Whether sediment that finds no room in the sea builds a terminal fan or delta around the
+    /// river mouth (see [`build_terminal_fan`]); otherwise it is piled on the river's last land
+    /// cell (the model before #47, for attribution).
+    pub terminal_fans: bool,
+    /// Surface slope of terminal fans and prograding deltas: fluvial megafans and delta plains
+    /// fall by 10⁻⁴–10⁻³ (Kosi, Okavango, Taquari and Pilcomayo megafans ~2–6 × 10⁻⁴; large
+    /// delta plains ~10⁻⁴; Leier et al. 2005; Hartley et al. 2010).
+    pub alluvial_slope: f64,
     /// Whether rivers carry the runoff (`P − ET`); otherwise all precipitation (the model before
     /// #7, for attribution).
     pub runoff_discharge: bool,
@@ -151,6 +169,10 @@ impl Default for ErosionParams {
             fetch_rings: 2,
             cliff_retreat_sediment: 5e-3,
             cliff_retreat_bedrock: 3e-4,
+            graded_fans: true,
+            fan_relief: 3000.0,
+            terminal_fans: true,
+            alluvial_slope: 2e-4,
             runoff_discharge: true,
             isostatic_incision: true,
         }
@@ -182,6 +204,16 @@ impl ErosionParams {
             "cliff_retreat_bedrock" => &mut self.cliff_retreat_bedrock,
             "max_bypass_distance" => &mut self.max_bypass_distance,
             "fan_climb" => &mut self.fan_climb,
+            "fan_relief" => &mut self.fan_relief,
+            "alluvial_slope" => &mut self.alluvial_slope,
+            "graded_fans" => {
+                self.graded_fans = value != 0.0;
+                return Ok(());
+            }
+            "terminal_fans" => {
+                self.terminal_fans = value != 0.0;
+                return Ok(());
+            }
             "delta_reach" => {
                 self.delta_reach = value as u32;
                 return Ok(());
@@ -293,6 +325,9 @@ pub struct ErosionResult {
     /// Sediment piled above the delta top because the ocean within reach was full (thickness
     /// over one cell, summed); it becomes land and is eroded again.
     pub sediment_overfill: f64,
+    /// Sediment that found no room in the sea and built terminal fans and prograding deltas
+    /// (thickness over one cell, summed).
+    pub terminal_fan: f64,
     /// Sediment deposited in the ocean per [`Zone`] (thickness over one cell, summed; deltas
     /// count as shelf, overfill not at all).
     pub deposited: [f64; 4],
@@ -578,6 +613,7 @@ pub fn erode(
 
     let mut sediment_to_ocean = 0.0;
     let mut sediment_overfill = 0.0;
+    let mut terminal_fan = 0.0;
     let mut deposited = [0.0; 4];
     let mut margin_mark = vec![usize::MAX; cell_count];
     let mut fan_mark = vec![usize::MAX; cell_count];
@@ -749,6 +785,18 @@ pub fn erode(
                 remaining -= thickness;
             }
         }
+        if remaining > 0.0 && params.terminal_fans {
+            let fan = build_terminal_fan(
+                mesh,
+                &mut seabed,
+                params,
+                mouth,
+                remaining,
+                &mut fan_scratch,
+            );
+            terminal_fan += fan;
+            remaining -= fan;
+        }
         if remaining > 0.0 {
             seabed.deposit(source_cell, remaining);
             sediment_overfill += remaining;
@@ -780,6 +828,7 @@ pub fn erode(
         hydrology,
         sediment_to_ocean,
         sediment_overfill,
+        terminal_fan,
         deposited,
         sea_level_change: SurfaceSeaLevel { fluvial, coastal },
         wave,
@@ -1294,10 +1343,134 @@ fn fill_fan(
             }
         }
     }
+    // The lobes are full (the search above ended without placing everything): the fan aggrades
+    // up to its graded surface, nearest cells first. Slope and rise cells on the paths take
+    // part, so a narrow basin without a fan zone fills like a fan.
+    if params.graded_fans && remaining > 0.0 {
+        for &(cell, hops, _) in path.iter() {
+            if remaining <= 0.0 {
+                break;
+            }
+            if cell == mouth || zones[cell] == Zone::Shelf {
+                continue;
+            }
+            let distance = f64::from(hops) * spacing;
+            let surface = params.slope_depth
+                - params.fan_relief * (1.0 - (-distance / params.fan_length).exp());
+            let thickness = remaining.min(seabed.room(cell, surface, f64::INFINITY));
+            if thickness > 0.0 {
+                seabed.deposit(cell, thickness);
+                remaining -= thickness;
+            }
+        }
+    }
     for &(cell, ..) in path.iter() {
         scratch.mark[cell] = usize::MAX;
     }
     amount - remaining
+}
+
+/// Deposits `amount` of sediment that found no room in the sea as a terminal fan or prograding
+/// delta around the river mouth `apex`, and returns the deposited amount. The deposit is a cone
+/// whose surface falls from the apex with [`ErosionParams::alluvial_slope`]; its height is the
+/// one that holds the amount, with the isostatic response of every column. The cone only
+/// spreads through cells that it covers, so it does not reach lows behind higher ground. Where
+/// it meets the sea, the sea becomes land: the delta progrades, slowly into deep water, which
+/// takes far more sediment per cell. Fluvial megafans and terminal fans in filled basins are
+/// such cones (Kosi, Pilcomayo, Okavango; Leier et al. 2005; Hartley et al. 2010).
+fn build_terminal_fan(
+    mesh: &SphereMesh,
+    seabed: &mut Seabed,
+    params: &ErosionParams,
+    apex: usize,
+    amount: f64,
+    scratch: &mut FanScratch,
+) -> f64 {
+    /// The cone reaches at most this many cells from the apex.
+    const MAX_HOPS: u32 = 64;
+    if amount <= 0.0 || params.alluvial_slope <= 0.0 {
+        return 0.0;
+    }
+    let drop = params.alluvial_slope * mesh.mean_edge_angle() * params.planet_radius;
+    // The cells covered by the cone with its apex at `top` (into `scratch.path`, with their
+    // distance in cells), and the sediment it holds on them; the search ends early once it
+    // holds more than `limit`.
+    let cone = |seabed: &Seabed, scratch: &mut FanScratch, top: f64, limit: f64| {
+        let FanScratch { mark, path } = scratch;
+        path.clear();
+        path.push((apex, 0, 0.0));
+        mark[apex] = apex;
+        let mut room = 0.0;
+        let mut next = 0;
+        while next < path.len() && room <= limit {
+            let (cell, hops, _) = path[next];
+            next += 1;
+            room += seabed.room(cell, top - drop * f64::from(hops), f64::INFINITY);
+            if hops >= MAX_HOPS {
+                continue;
+            }
+            let surface = top - drop * f64::from(hops + 1);
+            for &neighbor in mesh.neighbors(cell as u32) {
+                let neighbor = neighbor as usize;
+                if mark[neighbor] != apex && seabed.elevation[neighbor] < surface {
+                    mark[neighbor] = apex;
+                    path.push((neighbor, hops + 1, 0.0));
+                }
+            }
+        }
+        for &(cell, ..) in path.iter() {
+            mark[cell] = usize::MAX;
+        }
+        room
+    };
+    // The highest cone that holds at most the amount.
+    let mut low = seabed.elevation[apex];
+    let mut step = 1.0;
+    while cone(seabed, scratch, low + step, amount) <= amount && step < 1e6 {
+        step *= 2.0;
+    }
+    let mut high = low + step;
+    while high - low > 1e-4 {
+        let mid = 0.5 * (low + high);
+        if cone(seabed, scratch, mid, amount) <= amount {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    let mut remaining = amount;
+    cone(seabed, scratch, low, f64::INFINITY);
+    for &(cell, hops, _) in &scratch.path {
+        let thickness = seabed
+            .room(cell, low - drop * f64::from(hops), f64::INFINITY)
+            .min(remaining);
+        if thickness > 0.0 {
+            seabed.deposit(cell, thickness);
+            remaining -= thickness;
+        }
+    }
+    // A cone that just overtops a sill covers a low beyond it, which holds more than is left:
+    // the rest is shared out there in proportion to the room.
+    if remaining > 0.0 {
+        let room = cone(seabed, scratch, high, f64::INFINITY);
+        if room > 0.0 {
+            let share = (remaining / room).min(1.0);
+            for &(cell, hops, _) in &scratch.path {
+                let thickness =
+                    share * seabed.room(cell, high - drop * f64::from(hops), f64::INFINITY);
+                if thickness > 0.0 {
+                    seabed.deposit(cell, thickness);
+                    remaining -= thickness;
+                }
+            }
+        }
+    }
+    // Rounding dust stays at the apex.
+    if remaining > 0.0 && remaining <= 1e-9 * amount.max(1.0) {
+        seabed.deposit(apex, remaining);
+        remaining = 0.0;
+    }
+    amount - remaining.max(0.0)
 }
 
 /// The margin within reach of a river mouth: shelf, slope and rise cells connected to it
@@ -2145,17 +2318,18 @@ mod tests {
         class[pit] = CrustClass::Oceanic;
         let result = run(&mesh, &elevation, 1.0, &vec![0; mesh.len()], &class);
         // The sea fills up to the delta top (beyond the slope depth of oceanic crust) above the
-        // sea level after the step; what does not fit stays on land, not piled on the sea.
+        // sea level after the step; what does not fit builds a terminal fan around it.
         let params = ErosionParams {
             sediment_diffusivity: 0.0,
             waves: false,
             ..ErosionParams::default()
         };
         let after = after_step(&elevation, &vec![0.0; mesh.len()], &result, &params);
-        assert!(result.sediment_overfill > 0.0);
+        assert!(result.terminal_fan > 0.0);
+        assert_eq!(result.sediment_overfill, 0.0);
         let rise = result.sea_level_change.coastal;
         assert!(
-            (after[pit] - params.delta_top + rise).abs() < 1e-6,
+            after[pit] + rise >= params.delta_top - 1e-6,
             "{} {rise}",
             after[pit]
         );
@@ -2187,6 +2361,8 @@ mod tests {
             max_slope_sediment: 260.0,
             max_rise_sediment: 260.0,
             max_fan_sediment: 260.0,
+            graded_fans: false,
+            terminal_fans: false,
             ..ErosionParams::default()
         };
         let sediment = vec![0.0; mesh.len()];
@@ -2504,6 +2680,9 @@ mod tests {
             max_slope_sediment: 0.0,
             max_rise_sediment: 0.0,
             max_fan_sediment: 0.0,
+            // The model before #47.
+            graded_fans: false,
+            terminal_fans: false,
             ..ErosionParams::default()
         };
         let sediment = vec![0.0; mesh.len()];
@@ -2592,5 +2771,106 @@ mod tests {
                 assert_eq!(delta, 0.0, "{cell}");
             }
         }
+    }
+
+    #[test]
+    fn full_fans_aggrade_to_their_graded_surface() {
+        // An island in a deep ocean with a load far beyond the lobes' thickness cap: the fan
+        // takes all of it, thicker than the cap at its head, and nowhere above its graded
+        // surface.
+        let mesh = SphereMesh::icosphere(5);
+        let elevation = island(&mesh);
+        let class = classes(&elevation, 0.0);
+        let params = ErosionParams {
+            sediment_diffusivity: 0.0,
+            waves: false,
+            max_fan_sediment: 100.0,
+            max_slope_sediment: 100.0,
+            max_rise_sediment: 100.0,
+            ..ErosionParams::default()
+        };
+        let sediment = vec![0.0; mesh.len()];
+        let plate = vec![0; mesh.len()];
+        let result = run_with(&mesh, &elevation, &sediment, 1.0, &plate, &class, &params);
+        assert_eq!(result.sediment_overfill, 0.0);
+        assert_eq!(result.terminal_fan, 0.0);
+        let thickest = result.sediment_delta.iter().copied().fold(0.0, f64::max);
+        assert!(thickest > 2.0 * params.max_fan_sediment, "{thickest}");
+        for cell in 0..mesh.len() {
+            if class[cell] == CrustClass::Oceanic && result.sediment_delta[cell] > 0.0 {
+                let built =
+                    isostasy::change_sediment(elevation[cell], 0.0, result.sediment_delta[cell]);
+                assert!(built <= params.slope_depth + 1e-6, "{cell}: {built}");
+            }
+        }
+        // Without the graded surface, the same load does not fit.
+        let capped = ErosionParams {
+            graded_fans: false,
+            terminal_fans: false,
+            ..params
+        };
+        let result = run_with(&mesh, &elevation, &sediment, 1.0, &plate, &class, &capped);
+        assert!(result.sediment_overfill > 0.0);
+    }
+
+    #[test]
+    fn sediment_without_room_builds_a_cone_instead_of_a_pile() {
+        // A wide full shelf and no room on the oceanic crust beyond: what the sea refuses
+        // builds deltas and fans whose surface falls with the alluvial slope, so no cell
+        // gains more than the fall over one cell above its lowest neighbour.
+        let mesh = SphereMesh::icosphere(4);
+        let elevation: Vec<f64> = (0..mesh.len() as u32)
+            .map(|cell| {
+                let angle = mesh.vertex(cell).angle_between(glam::DVec3::Z).to_degrees();
+                if angle <= 20.0 {
+                    3000.0 - angle * 150.0
+                } else if angle <= 40.0 {
+                    -130.0
+                } else {
+                    -4500.0
+                }
+            })
+            .collect();
+        let class = classes(&elevation, -1000.0);
+        let params = ErosionParams {
+            sediment_diffusivity: 0.0,
+            waves: false,
+            max_slope_sediment: 0.0,
+            max_rise_sediment: 0.0,
+            max_fan_sediment: 0.0,
+            graded_fans: false,
+            ..ErosionParams::default()
+        };
+        let sediment = vec![0.0; mesh.len()];
+        let plate = vec![0; mesh.len()];
+        let result = run_with(&mesh, &elevation, &sediment, 3.0, &plate, &class, &params);
+        assert!(result.terminal_fan > 0.0);
+        assert_eq!(result.sediment_overfill, 0.0);
+        let after = after_step(&elevation, &sediment, &result, &params);
+        let drop = params.alluvial_slope * mesh.mean_edge_angle() * params.planet_radius;
+        for cell in 0..mesh.len() {
+            // Former sea that the deltas built into land.
+            if elevation[cell] < 0.0 && after[cell] > 0.0 {
+                let lowest = mesh
+                    .neighbors(cell as u32)
+                    .iter()
+                    .map(|&m| after[m as usize])
+                    .fold(f64::INFINITY, f64::min);
+                // Several cones may overlap; each adds at most one fall per cell.
+                assert!(
+                    after[cell] - lowest.max(0.0) <= 6.0 * drop + params.delta_top,
+                    "{cell}: {} above {lowest}",
+                    after[cell]
+                );
+            }
+        }
+        // Rock mass is conserved.
+        let change: f64 = (0..mesh.len())
+            .map(|c| {
+                result.bedrock_delta[c] * 2800.0 + result.sediment_delta[c] * SEDIMENT_ROCK_DENSITY
+            })
+            .sum();
+        let eroded: f64 = result.bedrock_delta.iter().map(|d| -d * 2800.0).sum();
+        assert!(change.abs() < 1e-9 * eroded, "{change} {eroded}");
     }
 }
