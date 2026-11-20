@@ -59,7 +59,7 @@ fn add_crystalline(receiver: &mut Crust, thickness: f64, crust: &Crust) {
         / mass.max(1e-9);
     receiver.thickness += thickness;
     receiver.density = mass / receiver.thickness.max(1e-9);
-    receiver.orogeny = receiver.orogeny.max(crust.orogeny);
+    receiver.mix_orogeny(crust.orogeny);
 }
 
 /// Adds `crust` to the sample of `plate` at `target` and its neighbours with crust in equal
@@ -440,6 +440,45 @@ mod tests {
             for segment in &pair.segments {
                 assert!(segment.overriding == a || segment.overriding == b);
             }
+        }
+    }
+
+    #[test]
+    fn merged_suture_crust_does_not_mark_oceanic_crust() {
+        let mesh = SphereMesh::icosphere(3);
+        let mut simulation = Simulation::new(mesh, 1, TectonicParams::default(), 11);
+        let plate = &mut simulation.plates[0];
+        for crust in plate.crust.iter_mut().flatten() {
+            *crust = new_oceanic_crust(-50.0);
+        }
+        let suture = Crust {
+            thickness: 35_000.0,
+            density: crate::isostasy::CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+            metasediment: 0.0,
+            orogeny: 400.0,
+            cohort: 0.0,
+        };
+        // A sample of an orogenic belt spread over sea floor: the mixtures stay oceanic or
+        // transitional and unweakened.
+        spread_crust(&simulation.mesh, plate, 0, suture, 75_000.0);
+        for crust in plate.crust.iter().flatten() {
+            assert!(!crust.is_continental_origin());
+            assert_eq!(crust.orogeny, NO_OROGENY);
+        }
+        // Spread over continental crust, it marks the continental lithosphere it mixes into.
+        let neighbors = simulation.mesh.neighbors(0).to_vec();
+        for vertex in std::iter::once(0).chain(neighbors.iter().copied()) {
+            plate.crust[vertex as usize] = Some(Crust {
+                orogeny: NO_OROGENY,
+                ..suture
+            });
+        }
+        spread_crust(&simulation.mesh, plate, 0, suture, 75_000.0);
+        for vertex in std::iter::once(0).chain(neighbors) {
+            assert_eq!(plate.crust[vertex as usize].unwrap().orogeny, 400.0);
         }
     }
 

@@ -723,7 +723,7 @@ impl Simulation {
                 // Crust thickened by a continental collision is an orogenic belt.
                 if addition.kind == AdditionKind::Collision
                     && fitting > 0.0
-                    && crust.is_continental_origin_column()
+                    && crust.is_continental_origin()
                     && crust.thickness > OROGENIC_THICKNESS
                 {
                     crust.orogeny = time;
@@ -1028,16 +1028,18 @@ fn stretch_rift(
     let beta = (donor_thickness / mass.max(1e-9)) / thickness.max(1e-9);
     let fraction = 1.0 - (1.0 - donor_heat / mass.max(1e-9)) / beta.max(1.0);
     let birth = age_for_thermal_fraction(fraction).map_or(time - 1000.0, |age| time - age);
-    plate.crust[local as usize] = Some(Crust {
+    let mut crust = Crust {
         thickness,
         density: mass / thickness.max(1e-9),
         birth,
         sediment,
         felsic: felsic / mass.max(1e-9),
         metasediment: metasediment / mass.max(1e-9),
-        orogeny,
+        orogeny: NO_OROGENY,
         cohort: cohort / sediment.max(1e-9),
-    });
+    };
+    crust.mix_orogeny(orogeny);
+    plate.crust[local as usize] = Some(crust);
     true
 }
 
@@ -1110,16 +1112,18 @@ fn heal_gap(
         crust.thickness -= given;
         crust.sediment -= crust.sediment * share;
     }
-    plate.crust[local as usize] = Some(Crust {
+    let mut crust = Crust {
         thickness,
         density: mass / thickness.max(1e-9),
         birth,
         sediment,
         felsic: felsic / mass.max(1e-9),
         metasediment: metasediment / mass.max(1e-9),
-        orogeny,
+        orogeny: NO_OROGENY,
         cohort: cohort / sediment.max(1e-9),
-    });
+    };
+    crust.mix_orogeny(orogeny);
+    plate.crust[local as usize] = Some(crust);
     plate.consumed[local as usize] = false;
     statistics.enclosed_fills += 1;
     own
@@ -1283,6 +1287,61 @@ mod tests {
             simulation.update_slab_lengths(0.25, &boundaries);
         }
         simulation
+    }
+
+    /// Continental crust of an orogenic belt that was deformed at 400 Myr.
+    fn suture_crust() -> Crust {
+        Crust {
+            thickness: 35_000.0,
+            density: crate::isostasy::CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+            metasediment: 0.0,
+            orogeny: 400.0,
+            cohort: 0.0,
+        }
+    }
+
+    #[test]
+    fn gaps_filled_with_oceanic_crust_do_not_inherit_the_suture_mark() {
+        let mut simulation = single_plate();
+        let local = 0;
+        let neighbors = simulation.mesh.neighbors(local).to_vec();
+        let parent = Ownership { plate: 0, local };
+        let mut statistics = GapStatistics::default();
+        // A gap at a coast: one neighbour is a suture, the others are sea floor. The fill is
+        // oceanic and starts unweakened.
+        let plate = &mut simulation.plates[0];
+        plate.crust[local as usize] = None;
+        plate.crust[neighbors[0] as usize] = Some(suture_crust());
+        heal_gap(
+            &simulation.mesh,
+            plate,
+            parent,
+            local,
+            true,
+            &mut statistics,
+        );
+        let fill = plate.crust[local as usize].expect("an enclosed gap is filled");
+        assert!(!fill.is_continental_origin());
+        assert_eq!(fill.orogeny, NO_OROGENY);
+        // A gap inside the belt is filled with the belt's lithosphere and stays weak.
+        plate.crust[local as usize] = None;
+        for &neighbor in &neighbors {
+            plate.crust[neighbor as usize] = Some(suture_crust());
+        }
+        heal_gap(
+            &simulation.mesh,
+            plate,
+            parent,
+            local,
+            true,
+            &mut statistics,
+        );
+        let fill = plate.crust[local as usize].expect("an enclosed gap is filled");
+        assert!(fill.is_continental_origin());
+        assert_eq!(fill.orogeny, 400.0);
     }
 
     #[test]

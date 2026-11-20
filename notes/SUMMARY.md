@@ -1,4 +1,4 @@
-> **Frozen archive as of 2026-11-19.** Issue and progress tracking moved to GitHub issues (https://github.com/ISibboI/world-simulator/issues); see `CLAUDE.md`. Do not edit or extend this file.
+> **Archive as of 2026-11-19.** Issues are tracked on GitHub (https://github.com/ISibboI/world-simulator/issues); per-issue notes live in `notes/issue-<N>/`; see `CLAUDE.md`. Do not extend this file.
 
 # Project summary
 
