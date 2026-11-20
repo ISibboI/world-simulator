@@ -57,6 +57,8 @@ const LATENT_HEAT: f64 = 2.5e6;
 /// Surface air pressure in Pa.
 const SURFACE_PRESSURE: f64 = 101_325.0;
 
+/// Specific heat capacity of air at constant pressure in J/kg/K.
+const AIR_HEAT_CAPACITY: f64 = 1004.0;
 /// Angular velocity of the planet's rotation in rad/s.
 const EARTH_ROTATION: f64 = 7.292e-5;
 /// Gravitational acceleration in m/s².
@@ -281,6 +283,8 @@ struct Month {
     diffusivity: Vec<f64>,
     /// Low-level wind of every cell in m/s.
     wind: Vec<DVec3>,
+    /// Mean latitude of the ITCZ over the sectors of longitude, in degrees.
+    itcz: f64,
 }
 
 impl Climate {
@@ -377,8 +381,7 @@ impl Climate {
                     slot,
                 );
                 self.solved[slot].potential = input.potential.clone();
-                self.solved[slot].itcz =
-                    thermal_equator.iter().sum::<f64>() / thermal_equator.len() as f64;
+                self.solved[slot].itcz = input.itcz;
                 self.set_evapotranspiration(elevation, slot, &mut input);
                 let (precipitation, used, clipped) = self.solve_month(&input, slot, max_newton);
                 iterations[slot] = used;
@@ -466,7 +469,34 @@ impl Climate {
             |cell: usize| temperature[cell] + params.lapse_rate * elevation[cell].max(0.0);
         let column_temperature = self.zonal_mean(&sea_level);
         let thermal = self.thermal_wind(&sea_level, &column_temperature);
-        // The thermal equator over every cell, interpolated between the sectors of longitude.
+        let vapour = &self.vapour[slot];
+        let mut saturation = vec![0.0; cell_count];
+        let mut vapour_per_humidity = vec![0.0; cell_count];
+        for cell in 0..cell_count {
+            let (column, scale_height) =
+                saturation_column(column_temperature[cell], params.lapse_rate);
+            // Above high ground, the air column is shorter and colder.
+            let height = (-elevation[cell].max(0.0) / scale_height).exp();
+            saturation[cell] = column * height;
+            vapour_per_humidity[cell] = params.air_density * scale_height * height;
+        }
+        // The ITCZ lies where the moist static energy of the near-surface air peaks, which over
+        // a hot, dry summer continent is equatorward of the temperature maximum. Before the first
+        // solve, the thermal equator of the temperature model stands in.
+        let moist_equator;
+        let thermal_equator = if vapour.iter().any(|&w| w > 0.0) {
+            moist_equator = self.moist_static_energy_equator(
+                &|cell| {
+                    AIR_HEAT_CAPACITY * sea_level(cell)
+                        + LATENT_HEAT * vapour[cell] / vapour_per_humidity[cell]
+                },
+                thermal_equator.len().max(1),
+            );
+            &moist_equator[..]
+        } else {
+            thermal_equator
+        };
+        // The equator of the circulation over every cell, interpolated between the sectors.
         let local_equator: Vec<f64> = self
             .position
             .iter()
@@ -485,18 +515,9 @@ impl Climate {
             .map(|cell| low_level_wind(self.position[cell], local_equator[cell]) + thermal[cell])
             .collect();
 
-        let vapour = &self.vapour[slot];
         let mut evaporation = vec![0.0; cell_count];
         let mut potential = vec![0.0; cell_count];
-        let mut saturation = vec![0.0; cell_count];
-        let mut vapour_per_humidity = vec![0.0; cell_count];
         for cell in 0..cell_count {
-            let (column, scale_height) =
-                saturation_column(column_temperature[cell], params.lapse_rate);
-            // Above high ground, the air column is shorter and colder.
-            let height = (-elevation[cell].max(0.0) / scale_height).exp();
-            saturation[cell] = column * height;
-            vapour_per_humidity[cell] = params.air_density * scale_height * height;
             let speed = (wind[cell].length_squared() + params.wind_variability.powi(2)).sqrt();
             let transfer = params.air_density * params.moisture_exchange * speed;
             let saturated = saturation_specific_humidity(temperature[cell]);
@@ -507,7 +528,6 @@ impl Climate {
                     );
                 evaporation[cell] = transfer * (saturated - air).max(0.0);
             } else {
-                // The specific humidity of the surface air follows from the column vapour.
                 // The specific humidity of the surface air follows from the column vapour, but
                 // the air over a wet surface is no more humid than over the ocean.
                 let air = (vapour[cell] / vapour_per_humidity[cell])
@@ -538,6 +558,7 @@ impl Climate {
             saturation,
             vapour_per_humidity,
             diffusivity,
+            itcz: thermal_equator.iter().sum::<f64>() / thermal_equator.len().max(1) as f64,
             wind,
         }
     }
@@ -613,6 +634,60 @@ impl Climate {
                 } else {
                     wind
                 }
+            })
+            .collect()
+    }
+
+    /// The latitude (degrees, between 30°S and 30°N) of the maximum of `energy` in each of
+    /// `sectors` sectors of longitude (from 180°W eastwards), averaging over a Gaussian of 30° in
+    /// longitude and 5° in latitude.
+    fn moist_static_energy_equator(
+        &self,
+        energy: &dyn Fn(usize) -> f64,
+        sectors: usize,
+    ) -> Vec<f64> {
+        const BINS: usize = 120;
+        let mut sum = vec![[0.0; BINS]; sectors];
+        let mut weight = vec![[0.0; BINS]; sectors];
+        let width = 30f64.to_radians();
+        for (cell, p) in self.position.iter().enumerate() {
+            let latitude = self.latitude[cell].to_degrees();
+            if latitude.abs() >= 30.0 {
+                continue;
+            }
+            let bin = (((latitude + 30.0) * 2.0) as usize).min(BINS - 1);
+            let longitude = p.y.atan2(p.x);
+            let value = energy(cell);
+            for sector in 0..sectors {
+                let centre = (sector as f64 + 0.5) / sectors as f64 * std::f64::consts::TAU
+                    - std::f64::consts::PI;
+                let difference = (longitude - centre + std::f64::consts::PI)
+                    .rem_euclid(std::f64::consts::TAU)
+                    - std::f64::consts::PI;
+                if difference.abs() > 2.0 * width {
+                    continue;
+                }
+                let w = (-(difference / width).powi(2)).exp();
+                sum[sector][bin] += w * value;
+                weight[sector][bin] += w;
+            }
+        }
+        (0..sectors)
+            .map(|sector| {
+                let smoothed = |bin: usize| {
+                    let (mut s, mut c) = (0.0, 0.0);
+                    for other in bin.saturating_sub(30)..(bin + 31).min(BINS) {
+                        let d = (other as f64 - bin as f64) / 10.0;
+                        let w = (-0.5 * d * d).exp();
+                        s += w * sum[sector][other];
+                        c += w * weight[sector][other];
+                    }
+                    s / c.max(1e-12)
+                };
+                (0..BINS)
+                    .map(|bin| (bin, smoothed(bin)))
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .map_or(0.0, |(bin, _)| bin as f64 / 2.0 - 30.0 + 0.25)
             })
             .collect()
     }
@@ -1144,12 +1219,15 @@ mod tests {
     }
 
     #[test]
-    fn rain_belt_follows_the_thermal_equator() {
+    fn rain_belt_follows_the_warmest_air() {
         let mesh = SphereMesh::icosphere(5);
         let ocean = vec![-4000.0; mesh.len()];
         let mut climate = Climate::new(&mesh, RADIUS, ClimateParams::default());
-        let monthly = vec![temperatures(&mesh, &ocean); 12];
-        climate.update(&ocean, &monthly, &vec![vec![10.0]; 12]);
+        // The warmest (and moistest) air at 10°N.
+        let warm: Vec<f64> = (0..mesh.len() as u32)
+            .map(|c| -25.0 + 52.0 * (mesh.vertex(c).z.asin() - 10f64.to_radians()).cos())
+            .collect();
+        climate.update(&ocean, &vec![warm; 12], &vec![vec![10.0]; 12]);
         let precipitation = &climate.water_cycle().precipitation;
         let mean_at = |from: f64, to: f64| {
             let cells: Vec<f64> = (0..mesh.len())

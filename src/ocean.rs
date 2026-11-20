@@ -39,13 +39,42 @@ pub struct Gyres {
 pub struct GyreModel {
     hierarchy: Hierarchy,
     radius: f64,
+    /// For every cell and neighbour, the third cells of the two triangles on their edge: the
+    /// corner of the Voronoi edge to the left and to the right of the direction to the neighbour.
+    corners: Vec<Vec<(u32, u32)>>,
 }
 
 impl GyreModel {
     pub fn new(mesh: &SphereMesh, radius: f64) -> Self {
+        let mut third: std::collections::HashMap<(u32, u32), Vec<u32>> = Default::default();
+        for &[a, b, c] in mesh.faces() {
+            for (i, j, k) in [(a, b, c), (b, c, a), (c, a, b)] {
+                third.entry((i.min(j), i.max(j))).or_default().push(k);
+            }
+        }
+        let corners = (0..mesh.len() as u32)
+            .map(|cell| {
+                let position = mesh.vertex(cell);
+                mesh.neighbors(cell)
+                    .iter()
+                    .map(|&j| {
+                        let ks = &third[&(cell.min(j), cell.max(j))];
+                        let direction = mesh.vertex(j) - position;
+                        let left =
+                            |k: u32| direction.cross(mesh.vertex(k) - position).dot(position) > 0.0;
+                        if left(ks[0]) {
+                            (ks[0], ks[1])
+                        } else {
+                            (ks[1], ks[0])
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
         Self {
             hierarchy: Hierarchy::new(mesh, mesh.subdivisions().min(1)),
             radius,
+            corners,
         }
     }
 
@@ -99,44 +128,34 @@ impl GyreModel {
                 wind_stress_curl(latitude, stress, self.radius) / SEA_WATER_DENSITY;
         }
         let multigrid = Multigrid::new(&self.hierarchy, values);
-        let (streamfunction, _) = multigrid.solve(&rhs, 1e-8, 400);
+        let (streamfunction, iterations) = multigrid.solve(&rhs, 1e-8, 400);
 
-        // Depth-integrated transport (m²/s) of every ocean cell from the gradient of ψ, and the
-        // volume fluxes across the edges (hexagonal edge length spacing/√3).
-        let edge = spacing / 3f64.sqrt();
-        let transport: Vec<DVec3> = (0..n as u32)
-            .map(|cell| {
-                if !ocean[cell as usize] {
-                    return DVec3::ZERO;
-                }
-                let position = mesh.vertex(cell);
-                // Least-squares gradient over the neighbours.
-                let neighbors = mesh.neighbors(cell);
-                let mut gradient = DVec3::ZERO;
-                for &j in neighbors {
-                    let direction = (mesh.vertex(j) - position).normalize();
-                    gradient +=
-                        direction * (streamfunction[j as usize] - streamfunction[cell as usize]);
-                }
-                gradient *= 2.0 / (neighbors.len() as f64 * spacing);
-                // (U, V) = k × ∇ψ … in vector form: transport = r̂ × ∇ψ.
-                position.cross(gradient)
-            })
-            .collect();
+        tracing::debug!(iterations, "Gyres solved");
+
+        // Volume flux across every Voronoi edge from ψ at its two corners (the mean of the three
+        // cells around each corner): for the transport r̂ × ∇ψ, the flux from a cell to its
+        // neighbour is ψ(right corner) − ψ(left corner). The fluxes of a cell then add up to
+        // zero exactly. Corners on a coast take ψ = 0 (walls), so nothing flows into land.
+        let corner = |cell: u32, j: u32, k: u32| {
+            if ocean[cell as usize] && ocean[j as usize] && ocean[k as usize] {
+                (streamfunction[cell as usize]
+                    + streamfunction[j as usize]
+                    + streamfunction[k as usize])
+                    / 3.0
+            } else {
+                0.0
+            }
+        };
         let fluxes = (0..n as u32)
             .map(|cell| {
                 if !ocean[cell as usize] {
                     return Vec::new();
                 }
-                let position = mesh.vertex(cell);
                 mesh.neighbors(cell)
                     .iter()
-                    .filter(|&&j| ocean[j as usize])
-                    .map(|&j| {
-                        let direction = (mesh.vertex(j) - position).normalize();
-                        let mean = 0.5 * (transport[cell as usize] + transport[j as usize]);
-                        (j, mean.dot(direction) * edge)
-                    })
+                    .zip(&self.corners[cell as usize])
+                    .filter(|&(&j, _)| ocean[j as usize])
+                    .map(|(&j, &(left, right))| (j, corner(cell, j, right) - corner(cell, j, left)))
                     .collect()
             })
             .collect();
@@ -239,5 +258,29 @@ mod tests {
         assert!(south < -5e6, "{south}");
         // The extreme of ψ lies in the west (western intensification).
         assert!(mean_at(30.0, -50.0, -20.0).abs() > mean_at(30.0, 20.0, 50.0).abs());
+        // The currents neither create nor destroy water, and carry no heat at a uniform
+        // temperature.
+        for fluxes in &gyres.fluxes {
+            let net: f64 = fluxes.iter().map(|(_, q)| q).sum();
+            assert!(net.abs() < 1.0, "{net} m³/s");
+        }
+        let mut heat = vec![0.0; mesh.len()];
+        gyres.heat_convergence(&vec![25.0; mesh.len()], 0.0, 0.5, 3990.0, &mut heat);
+        assert!(
+            heat.iter().all(|h| h.abs() < 1e7),
+            "{:e}",
+            heat.iter().fold(0.0f64, |m, h| m.max(h.abs()))
+        );
+        // The western boundary current carries warm water poleward: with warm water in the
+        // south, the northern half of the basin gains heat.
+        let temperature: Vec<f64> = (0..mesh.len() as u32)
+            .map(|c| 25.0 - 20.0 * mesh.vertex(c).z.asin().abs() / 1.0)
+            .collect();
+        gyres.heat_convergence(&temperature, 0.0, 0.5, 3990.0, &mut heat);
+        let gain: f64 = (0..mesh.len())
+            .filter(|&c| (35f64.to_radians().sin()..0.9).contains(&mesh.vertex(c as u32).z))
+            .map(|c| heat[c])
+            .sum();
+        assert!(gain > 0.0, "{gain:e} W");
     }
 }

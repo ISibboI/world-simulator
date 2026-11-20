@@ -746,16 +746,16 @@ impl TemperatureModel {
                             ocean_albedo[cell] + (ice_albedo - ocean_albedo[cell]) * ice_cover;
                         let (a, b) = radiation(self.ocean_surface[cell]);
                         // Net heating of the surface: `forcing − damping · T_surface`.
-                        let forcing = q * (1.0 - albedo) - a
-                            + transport
-                            + exchange * self.land[cell]
-                            + self.ocean_heat_convergence[cell];
+                        let forcing =
+                            q * (1.0 - albedo) - a + transport + exchange * self.land[cell];
+                        // Heat from the currents reaches the mixed layer, under ice its base.
+                        let currents = self.ocean_heat_convergence[cell];
                         let damping = b + local + exchange;
                         let (surface, enthalpy) = if enthalpy >= 0.0 {
                             // Open water: the mixed layer, implicit in its temperature.
                             let c = params.ocean_heat_capacity;
                             let t = params.freezing_temperature + enthalpy / c;
-                            let t = (t + dt / c * forcing) / (1.0 + dt / c * damping);
+                            let t = (t + dt / c * (forcing + currents)) / (1.0 + dt / c * damping);
                             // Cooling below the freezing point forms ice instead.
                             let next = c * (t - params.freezing_temperature);
                             (t.max(params.freezing_temperature), next)
@@ -766,7 +766,7 @@ impl TemperatureModel {
                             let t = ((conductance * params.freezing_temperature + forcing)
                                 / (conductance + damping))
                                 .min(0.0);
-                            let enthalpy = enthalpy + dt * (forcing - damping * t);
+                            let enthalpy = enthalpy + dt * (forcing - damping * t + currents);
                             // Thick ice drifts away and melts elsewhere.
                             let limit = -params.max_ice_thickness * params.ice_latent_heat;
                             (t, enthalpy.max(limit))
