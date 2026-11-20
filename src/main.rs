@@ -418,6 +418,34 @@ fn snapshot(
         statistics.events.undone_initiations[3],
     );
     log_sediment_reservoirs(&planet_statistics);
+    {
+        let field = simulation.dynamic_topography();
+        let (mut low, mut high) = (0.0f64, 0.0f64);
+        let (mut continental, mut oceanic, mut continental_abs) =
+            ((0.0, 0usize), (0.0, 0usize), 0.0);
+        for (cell, &h) in field.iter().enumerate() {
+            low = low.min(h);
+            high = high.max(h);
+            if simulation
+                .surface_crust(cell as u32)
+                .is_continental_origin()
+            {
+                continental.0 += h;
+                continental.1 += 1;
+                continental_abs += h.abs();
+            } else {
+                oceanic.0 += h;
+                oceanic.1 += 1;
+            }
+        }
+        info!(
+            "    dynamic topography (m, dry): {low:+.0} .. {high:+.0} | mean on continental crust \
+             {:+.0} (|h| {:.0}), elsewhere {:+.0}",
+            continental.0 / continental.1.max(1) as f64,
+            continental_abs / continental.1.max(1) as f64,
+            oceanic.0 / oceanic.1.max(1) as f64,
+        );
+    }
     // Crust mass budget since the last snapshot, in Gt/yr.
     let cell_area =
         4.0 * std::f64::consts::PI * EARTH_RADIUS * EARTH_RADIUS / simulation.mesh().len() as f64;
@@ -468,6 +496,7 @@ fn snapshot(
                 sea_level_budget.metamorphism,
                 previous_sea_level.metamorphism,
             ),
+            ("mantle", sea_level_budget.mantle, previous_sea_level.mantle),
         ];
         let parts: Vec<String> = terms
             .iter()
@@ -855,7 +884,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -874,7 +903,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
         writeln!(
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
-             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{}",
+             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1}",
             mesh.vertex(cell).z.asin().to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -900,6 +929,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             } else {
                 String::new()
             },
+            simulation.dynamic_topography()[cell as usize],
         )?;
     }
     file.flush()?;

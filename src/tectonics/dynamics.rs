@@ -485,6 +485,37 @@ impl Simulation {
     }
 }
 
+impl Simulation {
+    /// Where the slabs of the trench cells sink, with their mass flux in kg/s (see
+    /// [`mantle::MantleFlow::dynamic_topography`]). The slab sinks under the overriding plate,
+    /// [`MantleParams::slab_offset`] from the trench. Its excess mass per area is that of the
+    /// cooled oceanic lithosphere, which the depth–age curve expresses isostatically:
+    /// `(ρ_m − ρ_w) (d(age) − d(0))`, ~7 × 10⁶ kg/m² for old plates (cf. 2 ρ α ΔT √(κ t / π)).
+    pub(super) fn sinking_slabs(&self, boundaries: &[BoundaryCell]) -> Vec<(DVec3, f64)> {
+        let boundary_length = self.params.planet_radius * self.mesh.mean_edge_angle();
+        let offset = self.params.mantle.slab_offset / self.params.planet_radius;
+        boundaries
+            .iter()
+            .filter_map(|boundary| {
+                let BoundaryKind::Trench { slab_age } = boundary.kind else {
+                    return None;
+                };
+                let r = self.mesh.vertex(boundary.cell);
+                let relative = (self.plates[boundary.plate as usize].angular_velocity
+                    - self.plates[boundary.other as usize].angular_velocity)
+                    .cross(r)
+                    .dot(boundary.normal)
+                    * self.params.planet_radius
+                    / SECONDS_PER_MYR;
+                let excess = (crate::isostasy::MANTLE_DENSITY - crate::isostasy::WATER_DENSITY)
+                    * (crust::oceanic_depth(0.0) - crust::oceanic_depth(slab_age));
+                let position = (r * offset.cos() + boundary.normal * offset.sin()).normalize();
+                (relative > 0.0).then_some((position, relative * boundary_length * excess))
+            })
+            .collect()
+    }
+}
+
 fn outer(a: DVec3, b: DVec3) -> DMat3 {
     DMat3::from_cols(a * b.x, a * b.y, a * b.z)
 }

@@ -377,6 +377,10 @@ impl TectonicParams {
             "events.terrane_cooldown" => &mut self.events.terrane_cooldown,
             "events.min_breakup_area" => &mut self.events.min_breakup_area,
             "mantle.plume_interval" => &mut self.mantle.plume_interval,
+            "mantle.topography_response" => &mut self.mantle.topography_response,
+            "mantle.plume_swell_height" => &mut self.mantle.plume_swell_height,
+            "mantle.slab_offset" => &mut self.mantle.slab_offset,
+            "mantle.plume_swell_width" => &mut self.mantle.plume_swell_width,
             _ => anyhow::bail!("unknown or untunable tectonic parameter {name}"),
         };
         *field = value;
@@ -456,11 +460,18 @@ pub struct SeaLevelBudget {
     pub sharing: f64,
     /// Burial metamorphism (pores close, the column subsides).
     pub metamorphism: f64,
+    /// Changes of the dynamic topography (ocean basins deepen or shallow with the mantle flow).
+    pub mantle: f64,
 }
 
 impl SeaLevelBudget {
     pub fn total(&self) -> f64 {
-        self.tectonics + self.fluvial + self.coastal + self.sharing + self.metamorphism
+        self.tectonics
+            + self.fluvial
+            + self.coastal
+            + self.sharing
+            + self.metamorphism
+            + self.mantle
     }
 }
 
@@ -507,6 +518,9 @@ pub struct Simulation {
     polarities: polarity::Polarities,
     rng: ChaCha8Rng,
     mantle: mantle::MantleFlow,
+    /// Dynamic topography of every world cell (m, dry): the deflection of the surface by the
+    /// mantle flow below (see [`mantle::MantleFlow::dynamic_topography`]).
+    dynamic_topography: Vec<f64>,
     /// How uncovered cells were filled so far.
     gap_statistics: GapStatistics,
     trench_sediment: TrenchSediment,
@@ -679,7 +693,9 @@ impl Simulation {
             .collect();
 
         let mantle = mantle::MantleFlow::new(params.mantle.clone());
+        let dynamic_topography = vec![0.0; mesh.len()];
         let mut simulation = Self {
+            dynamic_topography,
             mesh,
             params,
             plates,
@@ -893,11 +909,30 @@ impl Simulation {
         self.collision_inflow += 0.5 * inflow * self.boundary_length_per_cell() * dt / 1e12;
 
         let subduction = self.subduction_rates(&boundaries);
-        self.mantle.step(dt, &subduction, &mut self.rng);
+        let slabs = self.sinking_slabs(&boundaries);
+        self.mantle.step(dt, &subduction, &slabs, &mut self.rng);
 
         let sea_level = self.solve_sea_level();
         self.sea_level_budget.tectonics += sea_level - self.sea_level;
         self.sea_level = sea_level;
+
+        self.dynamic_topography = self
+            .mantle
+            .dynamic_topography(&self.mesh, self.params.planet_radius);
+        let sea_level = self.solve_sea_level();
+        self.sea_level_budget.mantle += sea_level - self.sea_level;
+        self.sea_level = sea_level;
+    }
+
+    /// Dynamic topography of every world cell in metres (dry, without the water load).
+    pub fn dynamic_topography(&self) -> &[f64] {
+        &self.dynamic_topography
+    }
+
+    /// Dry elevation (without the water load, see [`crate::isostasy`]) of a world cell showing
+    /// `crust`: the crust's isostatic and thermal elevation plus the dynamic topography.
+    fn cell_dry_elevation(&self, cell: u32, crust: &Crust) -> f64 {
+        crust.dry_elevation(self.time) + self.dynamic_topography[cell as usize]
     }
 
     /// Areal mass (kg/m², summed over cells) of all crust, including hidden samples.
@@ -938,8 +973,9 @@ impl Simulation {
 
     /// Surface elevation (bedrock plus sediment) of a world cell relative to sea level in metres.
     pub fn surface_elevation(&self, cell: u32) -> f64 {
-        self.surface_crust(cell)
-            .surface_elevation(self.time, self.sea_level)
+        crate::isostasy::to_surface(
+            self.cell_dry_elevation(cell, &self.surface_crust(cell)) - self.sea_level,
+        )
     }
 
     /// The part of the sea level due to sediment: the sea level minus the one without any
@@ -961,10 +997,13 @@ impl Simulation {
         let (dry, pores): (Vec<f64>, Vec<f64>) = (0..self.mesh.len() as u32)
             .map(|cell| {
                 let crust = self.surface_crust(cell);
+                let dynamic = self.dynamic_topography[cell as usize];
                 if select(
                     cell,
                     &crust,
-                    crust.surface_elevation(self.time, self.sea_level),
+                    crate::isostasy::to_surface(
+                        crust.dry_elevation(self.time) + dynamic - self.sea_level,
+                    ),
                 ) {
                     let rest = if metasediment {
                         crust.basement()
@@ -972,13 +1011,13 @@ impl Simulation {
                         crust
                     };
                     (
-                        rest.dry_elevation(self.time)
+                        rest.dry_elevation(self.time) + dynamic
                             - crate::isostasy::sediment_dry_elevation(crust.sediment),
                         0.0,
                     )
                 } else {
                     (
-                        crust.dry_elevation(self.time),
+                        crust.dry_elevation(self.time) + dynamic,
                         crate::isostasy::sediment_pores(crust.sediment),
                     )
                 }
@@ -1034,7 +1073,7 @@ impl Simulation {
         let (dry, sediment): (Vec<f64>, Vec<f64>) = (0..self.mesh.len() as u32)
             .map(|cell| {
                 let crust = self.surface_crust(cell);
-                (crust.dry_elevation(self.time), crust.sediment)
+                (self.cell_dry_elevation(cell, &crust), crust.sediment)
             })
             .unzip();
         let cell_area =
@@ -1247,6 +1286,22 @@ mod tests {
 
     fn simulation(seed: u64) -> Simulation {
         Simulation::new(SphereMesh::icosphere(4), 8, TectonicParams::default(), seed)
+    }
+
+    #[test]
+    fn uniform_dynamic_topography_shifts_the_sea_level_only() {
+        let mut simulation = simulation(3);
+        let sea_level = simulation.solve_sea_level();
+        let sediment_part = simulation.sediment_sea_level();
+        let elevations = simulation.surface_elevations();
+        simulation.dynamic_topography = vec![250.0; simulation.mesh.len()];
+        let shifted = simulation.solve_sea_level();
+        assert!((shifted - sea_level - 250.0).abs() < 1e-6);
+        simulation.sea_level = shifted;
+        assert!((simulation.sediment_sea_level() - sediment_part).abs() < 1e-6);
+        for (cell, &before) in elevations.iter().enumerate() {
+            assert!((simulation.surface_elevation(cell as u32) - before).abs() < 1e-6);
+        }
     }
 
     #[test]
