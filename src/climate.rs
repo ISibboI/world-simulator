@@ -206,6 +206,12 @@ pub struct WaterCycle {
     pub precipitation: Vec<f64>,
     /// Annual evaporation from the ocean and evapotranspiration from land.
     pub evaporation: Vec<f64>,
+    /// Annual potential evaporation of land (zero over the ocean): the evaporation of open water
+    /// or a wet surface at the land temperature, which is also the evaporation of lakes.
+    pub potential_evaporation: Vec<f64>,
+    /// Annual runoff of land, `P − ET` from the Budyko curve with the current annual
+    /// precipitation and potential evaporation (zero over the ocean). It feeds rivers.
+    pub runoff: Vec<f64>,
     /// Latitude of the ITCZ (the thermal equator) in each solved month, in degrees.
     pub itcz: Vec<f64>,
     /// Linear solver iterations of each month in the last update (0 if not refreshed).
@@ -428,6 +434,29 @@ impl Climate {
             clipped: clipped / total.max(1e-30),
             ..WaterCycle::default()
         };
+        cycle.potential_evaporation = (0..cell_count)
+            .map(|cell| {
+                self.solved
+                    .iter()
+                    .map(|m| m.potential.get(cell).copied().unwrap_or(0.0))
+                    .sum::<f64>()
+                    / month_count as f64
+                    * to_metres_per_year
+            })
+            .collect();
+        cycle.runoff = (0..cell_count)
+            .map(|cell| {
+                if elevation[cell] < 0.0 {
+                    0.0
+                } else {
+                    budyko_runoff(
+                        cycle.precipitation[cell],
+                        cycle.potential_evaporation[cell],
+                        self.params.budyko_omega,
+                    )
+                }
+            })
+            .collect();
         let total_area: f64 = self.area.iter().sum();
         let area_mean = |field: &[f64]| {
             field

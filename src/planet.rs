@@ -5,7 +5,7 @@ use std::time::Instant;
 use tracing::{debug, debug_span};
 
 use crate::climate::{Climate, ClimateParams, WaterCycle};
-use crate::erosion::{CrustClass, ErosionParams, Surface, WaveErosion, erode};
+use crate::erosion::{CrustClass, ErosionParams, Hydrology, Surface, WaveErosion, erode};
 use crate::tectonics::{Crust, Simulation, Statistics};
 use crate::temperature::{TemperatureFields, TemperatureModel, TemperatureParams};
 
@@ -22,6 +22,8 @@ pub struct Planet {
     discharge: Vec<f64>,
     /// Sediment delivered to the oceans in the last step, in m³/yr.
     sediment_flux: f64,
+    /// Lakes and endorheic basins in the last step.
+    hydrology: Hydrology,
     /// Sediment piled above the delta top in overfilled basins so far (thickness over one cell,
     /// summed).
     sediment_overfill: f64,
@@ -71,7 +73,8 @@ pub struct PlanetStatistics {
     /// Global mean precipitation and evaporation in m/yr (equal when the water cycle is closed).
     pub global_precipitation: f64,
     pub global_evaporation: f64,
-    /// Mean runoff (precipitation minus evapotranspiration) of land in m/yr.
+    /// Mean runoff (precipitation minus evapotranspiration, which feeds the rivers) of land in
+    /// m/yr.
     pub land_runoff: f64,
     /// Latitude of the ITCZ in the solved months, in degrees.
     pub itcz: Vec<f64>,
@@ -81,6 +84,8 @@ pub struct PlanetStatistics {
     pub largest_river: f64,
     /// Sediment delivered to the oceans in m³/yr.
     pub sediment_flux: f64,
+    /// Lakes and endorheic basins in the last erosion step.
+    pub hydrology: Hydrology,
     /// Sediment piled above the delta top in overfilled basins so far (thickness over one cell,
     /// summed).
     pub sediment_overfill: f64,
@@ -182,6 +187,7 @@ impl Planet {
             precipitation: vec![0.0; cell_count],
             discharge: vec![0.0; cell_count],
             sediment_flux: 0.0,
+            hydrology: Hydrology::default(),
             sediment_overfill: 0.0,
             sediment_deposition: [0.0; 4],
             wave_erosion: WaveErosion::default(),
@@ -241,7 +247,10 @@ impl Planet {
                     sediment: &self.tectonics.sediment_thicknesses(),
                     bedrock_density: &self.tectonics.bedrock_densities(),
                     bedrock_isostatic_density: &self.tectonics.bedrock_isostatic_densities(),
+                    dense_crust: &self.tectonics.dense_crust_thicknesses(),
                     precipitation: &self.precipitation,
+                    runoff: &self.climate.water_cycle().runoff,
+                    potential_evaporation: &self.climate.water_cycle().potential_evaporation,
                     plate: &plate,
                     class: &class,
                     ocean_volume: self.tectonics.ocean_volume(),
@@ -265,6 +274,7 @@ impl Planet {
             );
             self.discharge = result.discharge;
             self.sediment_flux = result.sediment_to_ocean / dt_years;
+            self.hydrology = result.hydrology;
             self.sediment_overfill += result.sediment_overfill;
             self.sediment_delivered += result.sediment_to_ocean;
             let wave = &mut self.wave_erosion;
@@ -350,9 +360,7 @@ impl Planet {
         let cycle = self.climate.water_cycle();
         let global_precipitation = cycle.global_precipitation;
         let global_evaporation = cycle.global_evaporation;
-        let land_runoff = mean(&mut land.iter().copied(), &|c| {
-            self.precipitation[c] - cycle.evaporation[c]
-        });
+        let land_runoff = mean(&mut land.iter().copied(), &|c| cycle.runoff[c]);
         let arid_land_fraction = mean(&mut land.iter().copied(), &|c| {
             f64::from(u8::from(self.precipitation[c] < 0.25))
         });
@@ -404,6 +412,7 @@ impl Planet {
             clipped_precipitation: cycle.clipped,
             largest_river,
             sediment_flux: self.sediment_flux,
+            hydrology: self.hydrology,
             sediment_overfill: self.sediment_overfill,
             sediment_deposition: self.sediment_deposition,
             sediment_stock,

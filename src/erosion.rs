@@ -1,15 +1,18 @@
 //! Fluvial erosion, sediment transport and deposition.
 //!
 //! 1. **Drainage.** A priority flood from the ocean assigns every land cell a receiver, the cell
-//!    its water drains into. Water in closed basins (lakes) spills over the lowest pass, so all
-//!    rivers reach the ocean.
-//! 2. **Discharge.** Precipitation is accumulated downstream along the receivers.
+//!    its water drains into. Closed depressions are lakes, which drain over their lowest pass.
+//! 2. **Discharge.** Runoff (precipitation minus evapotranspiration) is accumulated downstream
+//!    along the receivers. Lakes evaporate at the potential rate: a lake rises until its
+//!    evaporation balances its inflow, and only spills if it reaches its pass first; otherwise
+//!    its basin is endorheic and its water and sediment stay in it.
 //! 3. **Incision.** Rivers cut into the land following the stream-power law
 //!    `E = K · Q^m · S`, solved implicitly (Braun & Willett, 2013), which is stable for any time
-//!    step. Rivers cannot cut below sea level, their base level. Loose sediment is removed before
-//!    bedrock. Removing bedrock thins the crust, which then rises isostatically, so the surface
-//!    only drops by a fraction of the removed thickness.
-//! 4. **Deposition.** Sediment is carried downstream. It fills lakes, and from river mouths it
+//!    step. Rivers cannot cut below the water surface they flow into (sea level or a lake), their
+//!    base level. Loose sediment is removed before bedrock. Removing bedrock thins the crust,
+//!    which then rises isostatically, so the surface only drops by a fraction of the removed
+//!    thickness; the implicit solve accounts for that rebound.
+//! 4. **Deposition.** Sediment is carried downstream. Lakes trap it, and from river mouths it
 //!    is routed onto continental margins, where Earth keeps most of its sediment: the shelf on
 //!    continental and transitional crust fills up to [`ErosionParams::shelf_depth`], the oceanic
 //!    crust next to it (by distance from the margin crust of the same plate) only up to the
@@ -106,6 +109,13 @@ pub struct ErosionParams {
     /// crystalline coasts.
     pub cliff_retreat_sediment: f64,
     pub cliff_retreat_bedrock: f64,
+    /// Whether rivers carry the runoff (`P − ET`); otherwise all precipitation (the model before
+    /// #7, for attribution).
+    pub runoff_discharge: bool,
+    /// Whether the implicit incision accounts for the isostatic rebound of the eroded column;
+    /// otherwise it assumes the surface drops by the removed thickness (the model before #7, for
+    /// attribution).
+    pub isostatic_incision: bool,
 }
 
 impl Default for ErosionParams {
@@ -141,6 +151,8 @@ impl Default for ErosionParams {
             fetch_rings: 2,
             cliff_retreat_sediment: 5e-3,
             cliff_retreat_bedrock: 3e-4,
+            runoff_discharge: true,
+            isostatic_incision: true,
         }
     }
 }
@@ -184,6 +196,14 @@ impl ErosionParams {
             }
             "prograde" => {
                 self.prograde = value != 0.0;
+                return Ok(());
+            }
+            "runoff_discharge" => {
+                self.runoff_discharge = value != 0.0;
+                return Ok(());
+            }
+            "isostatic_incision" => {
+                self.isostatic_incision = value != 0.0;
                 return Ok(());
             }
             "max_margin_cells" | "max_fan_cells" => {
@@ -238,8 +258,17 @@ pub struct Surface<'a> {
     /// Density giving the isostatic response of removing crust from the top (see
     /// [`crate::tectonics::Crust::removal_isostatic_density`]).
     pub bedrock_isostatic_density: &'a [f64],
+    /// Thickness (m) of the densified lower crust, which removal from the top thins first with
+    /// [`Self::bedrock_isostatic_density`]; below it, removal acts with
+    /// [`Self::bedrock_density`] (see [`crate::tectonics::Crust::dense_crust_thickness`]).
+    pub dense_crust: &'a [f64],
     /// Precipitation (m/yr).
     pub precipitation: &'a [f64],
+    /// Runoff of land (m/yr): the precipitation that is not evapotranspired, which feeds the
+    /// rivers.
+    pub runoff: &'a [f64],
+    /// Potential evaporation of land (m/yr), the evaporation of lakes.
+    pub potential_evaporation: &'a [f64],
     /// The plate the cell belongs to.
     pub plate: &'a [u32],
     /// The kind of crust.
@@ -257,6 +286,8 @@ pub struct ErosionResult {
     pub sediment_delta: Vec<f64>,
     /// Water discharge through each cell in m³/yr.
     pub discharge: Vec<f64>,
+    /// Lakes and endorheic basins.
+    pub hydrology: Hydrology,
     /// Total sediment delivered to the ocean, in m³.
     pub sediment_to_ocean: f64,
     /// Sediment piled above the delta top because the ocean within reach was full (thickness
@@ -269,6 +300,34 @@ pub struct ErosionResult {
     pub sea_level_change: SurfaceSeaLevel,
     /// Sediment moved by waves.
     pub wave: WaveErosion,
+}
+
+/// Water balance of the land in one step.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Hydrology {
+    /// Runoff of all land (m³/yr).
+    pub runoff: f64,
+    /// Water reaching the ocean (m³/yr): the runoff less the evaporation of lakes.
+    pub to_ocean: f64,
+    /// Evaporation of lakes in excess of the evapotranspiration of the land they cover (m³/yr).
+    pub lake_evaporation: f64,
+    /// Land cells whose water ends in an endorheic lake (cells).
+    pub endorheic_cells: f64,
+    /// Land covered by lakes, spilling or endorheic (cells, fractional).
+    pub lake_cells: f64,
+    /// Land cells.
+    pub land_cells: f64,
+    /// Sediment trapped in lakes (m³/yr, rock equivalent).
+    pub lake_sediment: f64,
+    /// Depressions (lakes or dry basins), those that do not spill, and those with more than one
+    /// local minimum (inner sills; their water is treated as one lake, a known simplification).
+    pub lakes: usize,
+    pub endorheic_lakes: usize,
+    pub nested_lakes: usize,
+    /// Potential evaporation of lake water summed over the covered cells (m/yr · cells).
+    pub lake_potential_evaporation: f64,
+    /// Endorheic land draining into single-cell depressions (cells).
+    pub endorheic_pit_cells: f64,
 }
 
 /// Sediment moved by waves in one step, as rock-equivalent thickness over one cell, summed.
@@ -296,7 +355,10 @@ pub fn erode(
         sediment,
         bedrock_density,
         bedrock_isostatic_density,
+        dense_crust,
         precipitation,
+        runoff,
+        potential_evaporation,
         plate,
         class,
         ocean_volume,
@@ -310,17 +372,91 @@ pub fn erode(
         filled,
         order,
     } = drainage(mesh, elevation);
+    let lakes = Lakes::new(&order, &receiver, &filled, elevation);
 
-    // Discharge, accumulated from the sources downstream.
+    // Discharge of the runoff, accumulated from the sources downstream. Lakes evaporate water:
+    // a lake whose evaporation at its spill level exceeds its inflow does not spill
+    // (endorheic), its water surface stays where evaporation balances the inflow.
     let mut discharge = vec![0.0; cell_count];
+    let mut hydrology = Hydrology::default();
     for cell in 0..cell_count {
         if !is_ocean(cell) {
-            discharge[cell] = precipitation[cell].max(0.0) * cell_area;
+            let source = if params.runoff_discharge {
+                runoff[cell]
+            } else {
+                precipitation[cell]
+            };
+            discharge[cell] = source.max(0.0) * cell_area;
+            hydrology.runoff += discharge[cell];
+            hydrology.land_cells += 1.0;
         }
     }
+    // Water surface of the cells covered by lakes (negative infinity elsewhere).
+    let mut water_level = vec![f64::NEG_INFINITY; cell_count];
+    let mut endorheic = vec![false; lakes.cells.len()];
     for &cell in order.iter().rev() {
-        if let Some(receiver) = receiver[cell as usize] {
-            discharge[receiver as usize] += discharge[cell as usize];
+        let cell = cell as usize;
+        if let Some(lake) = lakes.exit_of(cell) {
+            let balance = lake_balance(
+                &lakes.cells[lake],
+                elevation,
+                filled[cell],
+                discharge[cell],
+                |c| {
+                    // Open water evaporates at the potential rate instead of the land's
+                    // evapotranspiration.
+                    let evapotranspiration = (precipitation[c] - runoff[c]).max(0.0);
+                    (potential_evaporation[c] - evapotranspiration).max(0.0) * cell_area
+                },
+            );
+            for &member in &lakes.cells[lake][..balance.covered.ceil() as usize] {
+                water_level[member as usize] = balance.level;
+            }
+            endorheic[lake] = balance.endorheic;
+            hydrology.lakes += 1;
+            hydrology.endorheic_lakes += usize::from(balance.endorheic);
+            let members = &lakes.cells[lake];
+            let minima = members
+                .iter()
+                .filter(|&&m| {
+                    mesh.neighbors(m)
+                        .iter()
+                        .all(|&n| elevation[n as usize] > elevation[m as usize])
+                })
+                .count();
+            hydrology.nested_lakes += usize::from(minima > 1);
+            for (i, &member) in members.iter().enumerate() {
+                let covered = (balance.covered - i as f64).clamp(0.0, 1.0);
+                hydrology.lake_potential_evaporation +=
+                    covered * potential_evaporation[member as usize];
+            }
+            hydrology.lake_evaporation += balance.evaporation;
+            hydrology.lake_cells += balance.covered;
+            discharge[cell] -= balance.evaporation;
+        }
+        if let Some(receiver) = receiver[cell] {
+            if !is_ocean(cell) && is_ocean(receiver as usize) {
+                hydrology.to_ocean += discharge[cell];
+            }
+            discharge[receiver as usize] += discharge[cell];
+        }
+    }
+    // Land whose water ends in an endorheic lake: the lake itself and everything upstream.
+    // The endorheic lake that the water of each cell ends in.
+    let mut terminal = vec![NO_LAKE; cell_count];
+    for &cell in &order {
+        let cell = cell as usize;
+        let lake = lakes.lake[cell];
+        terminal[cell] = if lake != NO_LAKE && endorheic[lake as usize] {
+            lake
+        } else {
+            receiver[cell].map_or(NO_LAKE, |r| terminal[r as usize])
+        };
+        if terminal[cell] != NO_LAKE && !is_ocean(cell) {
+            hydrology.endorheic_cells += 1.0;
+            if lakes.cells[terminal[cell] as usize].len() == 1 {
+                hydrology.endorheic_pit_cells += 1.0;
+            }
         }
     }
 
@@ -334,43 +470,42 @@ pub fn erode(
         let Some(receiver) = receiver[cell] else {
             continue;
         };
-        // Rivers flowing into the sea cannot cut below sea level.
-        let receiver_elevation = new_elevation[receiver as usize].max(0.0);
-        if elevation[cell] <= receiver_elevation {
-            continue; // Lake or flat: no incision.
+        // Lake floors and the floors of endorheic basins collect sediment; they are not incised.
+        if lakes.lake[cell] != NO_LAKE {
+            continue;
+        }
+        // Rivers cannot cut below the water surface they flow into: the sea or a lake.
+        let receiver = receiver as usize;
+        let base = new_elevation[receiver].max(water_level[receiver]).max(0.0);
+        if elevation[cell] <= base {
+            continue; // Flat: no incision.
         }
         let distance = mesh
             .vertex(cell as u32)
-            .angle_between(mesh.vertex(receiver))
+            .angle_between(mesh.vertex(receiver as u32))
             * params.planet_radius;
-        let factor = |erodibility: f64, years: f64| {
-            erodibility * years * discharge[cell].powf(params.discharge_exponent) / distance
-        };
-        // Sediment erodes faster than bedrock. Cut through the sediment with its erodibility;
-        // if the cut goes through all of it, the rest of the step cuts the bedrock below.
-        let bulk = isostasy::sediment_bulk_thickness(sediment[cell]);
-        let factor_sediment = factor(
-            params.erodibility * params.sediment_erodibility_factor,
+        let rate = params.erodibility * discharge[cell].powf(params.discharge_exponent) / distance;
+        let Incision {
+            bulk: from_bulk,
+            bedrock: from_bedrock,
+        } = incise(
+            elevation[cell],
+            base,
+            sediment[cell],
+            &Bedrock {
+                dense: dense_crust[cell],
+                dense_density: bedrock_isostatic_density[cell],
+                density: bedrock_density[cell],
+            },
+            (rate * params.sediment_erodibility_factor, rate),
             dt_years,
+            params.isostatic_incision,
         );
-        let cut = elevation[cell]
-            - (elevation[cell] + factor_sediment * receiver_elevation) / (1.0 + factor_sediment);
-        let thickness = if cut <= bulk {
-            cut
-        } else {
-            let remaining_years = dt_years * (1.0 - bulk / cut);
-            let factor_bedrock = factor(params.erodibility, remaining_years);
-            let exposed = elevation[cell] - bulk;
-            let bedrock_cut =
-                exposed - (exposed + factor_bedrock * receiver_elevation) / (1.0 + factor_bedrock);
-            bulk + bedrock_cut.max(0.0)
-        };
 
-        // The top `thickness` metres are removed: sediment (bulk, compacted) first.
-        let from_bulk = thickness.min(bulk);
+        // The top of the column is removed: sediment (bulk, compacted) first.
+        let bulk = isostasy::sediment_bulk_thickness(sediment[cell]);
         let left = isostasy::sediment_for_bulk_thickness(bulk - from_bulk);
         let from_sediment = sediment[cell] - left;
-        let from_bedrock = thickness - from_bulk;
         sediment_delta[cell] -= from_sediment;
         bedrock_delta[cell] -= from_bedrock;
         // Eroded bedrock becomes sediment of the same rock mass.
@@ -379,10 +514,15 @@ pub fn erode(
         // The column rebounds isostatically, so the surface drops less than the removed
         // thickness.
         let without_sediment = isostasy::change_sediment(elevation[cell], sediment[cell], left);
+        let from_dense = from_bedrock.min(dense_crust[cell]);
         new_elevation[cell] = isostasy::add_layer(
-            without_sediment,
-            -from_bedrock,
-            bedrock_isostatic_density[cell],
+            isostasy::add_layer(
+                without_sediment,
+                -from_dense,
+                bedrock_isostatic_density[cell],
+            ),
+            -(from_bedrock - from_dense),
+            bedrock_density[cell],
         );
     }
 
@@ -400,7 +540,8 @@ pub fn erode(
         delta: sediment_delta,
     };
 
-    // Route sediment downstream, filling lakes on the way.
+    // Route sediment downstream. Lakes trap what their rivers bring (see `fill_lake`); what
+    // does not fit passes the outlet.
     let mut flux = produced;
     let mut delivered = vec![0.0; cell_count];
     // The last land cell of a river reaching each mouth (u32::MAX for none).
@@ -410,16 +551,16 @@ pub fn erode(
         if is_ocean(cell) {
             continue;
         }
-        let lake_room = if filled[cell] > elevation[cell] {
-            seabed.room(cell, filled[cell], f64::INFINITY)
-        } else {
-            0.0
-        };
-        let deposit = flux[cell].min(lake_room);
-        if deposit > 0.0 {
-            seabed.deposit(cell, deposit);
+        if let Some(lake) = lakes.exit_of(cell) {
+            // The pass may have been incised in this step.
+            let spill = receiver[cell].map_or(filled[cell], |pass| {
+                filled[cell].min(seabed.elevation[pass as usize])
+            });
+            let trapped = fill_lake(&mut seabed, &lakes.cells[lake], spill, flux[cell]);
+            hydrology.lake_sediment += trapped * cell_area / dt_years;
+            flux[cell] -= trapped;
         }
-        let remaining = flux[cell] - deposit;
+        let remaining = flux[cell];
         match receiver[cell] {
             Some(receiver) if is_ocean(receiver as usize) => {
                 delivered[receiver as usize] += remaining;
@@ -636,12 +777,267 @@ pub fn erode(
         bedrock_delta,
         sediment_delta: seabed.delta,
         discharge,
+        hydrology,
         sediment_to_ocean,
         sediment_overfill,
         deposited,
         sea_level_change: SurfaceSeaLevel { fluvial, coastal },
         wave,
     }
+}
+
+/// Thickness removed from the top of a column in one step of implicit stream-power incision.
+struct Incision {
+    /// Bulk (compacted) thickness of sediment.
+    bulk: f64,
+    /// Thickness of bedrock.
+    bedrock: f64,
+}
+
+/// Implicit stream-power incision `E = K Q^m S` (Braun & Willett, 2013) of a column whose
+/// surface is at `elevation` above the water surface `base` it drains to, over `dt` years, with
+/// the rate `K Q^m / L` (1/yr) of its sediment and of its bedrock in `rates`.
+///
+/// The slope is that of the surface at the end of the step, and the surface drops by much less
+/// than the removed thickness: the column rebounds isostatically (by ~85% for crust). The
+/// removed thickness `h` therefore solves `h = F (z(h) − z_r)` with `F = K Q^m dt / L` and the
+/// surface `z(h)` after removing `h`; for bedrock with the surface response `f` per metre this
+/// is `h = F (z − z_r) / (1 + F f)`. Sediment (more erodible, compacted) is cut first; when the
+/// cut goes through it, the rest of the step cuts the bedrock below.
+fn incise(
+    elevation: f64,
+    base: f64,
+    sediment: f64,
+    bedrock: &Bedrock,
+    (sediment_rate, bedrock_rate): (f64, f64),
+    dt: f64,
+    isostatic: bool,
+) -> Incision {
+    let bulk = isostasy::sediment_bulk_thickness(sediment);
+    let mut years = dt;
+    let mut surface = elevation;
+    if bulk > 0.0 {
+        let after = |cut: f64| {
+            if isostatic {
+                isostasy::change_sediment(
+                    elevation,
+                    sediment,
+                    isostasy::sediment_for_bulk_thickness((bulk - cut).max(0.0)),
+                )
+            } else {
+                elevation - cut
+            }
+        };
+        let factor = sediment_rate * dt;
+        let bare = after(bulk);
+        if bulk >= factor * (bare - base) {
+            // The step ends in the sediment: `cut − F (z(cut) − z_r)` grows with the cut.
+            let (mut low, mut high) = (0.0, bulk);
+            for _ in 0..50 {
+                let cut = 0.5 * (low + high);
+                if cut < factor * (after(cut) - base) {
+                    low = cut;
+                } else {
+                    high = cut;
+                }
+            }
+            return Incision {
+                bulk: low,
+                bedrock: 0.0,
+            };
+        }
+        // Time to cut through the sediment at the rate at its base (implicit).
+        years -= bulk / (sediment_rate * (bare - base));
+        surface = bare;
+    }
+    // The bedrock response is piecewise linear: the densified lower crust of thick orogens
+    // first, then normal crust.
+    let factor = bedrock_rate * years;
+    let response = |density: f64| {
+        if isostatic {
+            isostasy::dry_response(density).max(1e-3)
+        } else {
+            1.0
+        }
+    };
+    let dense_response = response(bedrock.dense_density);
+    let cut = factor * (surface - base) / (1.0 + factor * dense_response);
+    let cut = if cut <= bedrock.dense {
+        cut
+    } else {
+        // `h = F (z₁ − f (h − h₁) − z_r)` with the surface `z₁` after removing the dense part.
+        let normal = response(bedrock.density);
+        let below = surface - dense_response * bedrock.dense;
+        factor * (below + normal * bedrock.dense - base) / (1.0 + factor * normal)
+    };
+    Incision {
+        bulk,
+        bedrock: cut.max(0.0),
+    }
+}
+
+/// The crystalline crust below the sediment, as far as erosion from the top sees it.
+struct Bedrock {
+    /// Thickness (m) of the densified part that removal thins first.
+    dense: f64,
+    /// Density giving its isostatic response.
+    dense_density: f64,
+    /// Density of the crust below (and its isostatic response).
+    density: f64,
+}
+
+/// Marks cells that are not in a lake.
+const NO_LAKE: u32 = u32::MAX;
+
+/// Lakes are depressions of at least this depth (m) below their spill level; shallower
+/// irregularities (flat filled lake floors) are part of the river network.
+const LAKE_MIN_DEPTH: f64 = 1.0;
+
+/// The depressions of the drainage: connected land cells below their spill level.
+struct Lakes {
+    /// The lake of every cell, or [`NO_LAKE`].
+    lake: Vec<u32>,
+    /// The cells of every lake, from the lowest floor up.
+    cells: Vec<Vec<u32>>,
+    /// The cell of every lake through which its water leaves (its receiver is the pass).
+    exit: Vec<u32>,
+}
+
+impl Lakes {
+    fn new(order: &[u32], receiver: &[Option<u32>], filled: &[f64], elevation: &[f64]) -> Self {
+        let mut lake = vec![NO_LAKE; elevation.len()];
+        let mut cells: Vec<Vec<u32>> = Vec::new();
+        let mut exit = Vec::new();
+        // The flood reaches every depression through its pass, so every lake is a subtree of
+        // the receivers whose root (the exit) drains to the pass.
+        for &cell in order {
+            let c = cell as usize;
+            if elevation[c] < 0.0 || filled[c] - elevation[c] <= LAKE_MIN_DEPTH {
+                continue;
+            }
+            match receiver[c].map(|r| lake[r as usize]) {
+                Some(id) if id != NO_LAKE => {
+                    lake[c] = id;
+                    cells[id as usize].push(cell);
+                }
+                _ => {
+                    lake[c] = cells.len() as u32;
+                    cells.push(vec![cell]);
+                    exit.push(cell);
+                }
+            }
+        }
+        for members in &mut cells {
+            members.sort_by(|&a, &b| elevation[a as usize].total_cmp(&elevation[b as usize]));
+        }
+        Self { lake, cells, exit }
+    }
+
+    /// The lake whose exit is `cell`.
+    fn exit_of(&self, cell: usize) -> Option<usize> {
+        let lake = self.lake[cell];
+        (lake != NO_LAKE && self.exit[lake as usize] as usize == cell).then_some(lake as usize)
+    }
+}
+
+/// The water balance of a lake.
+#[derive(Debug)]
+struct LakeBalance {
+    /// Water surface (m).
+    level: f64,
+    /// Cells covered by water, from the lowest floor up (the last one possibly in part).
+    covered: f64,
+    /// Evaporation in excess of the land's evapotranspiration (m³/yr).
+    evaporation: f64,
+    /// Whether the lake does not spill.
+    endorheic: bool,
+}
+
+/// The water balance of a lake with the given `cells` (from the lowest floor up) and spill
+/// level `spill`, fed by `inflow` (m³/yr) of runoff, where open water over a cell evaporates
+/// `excess(cell)` m³/yr more than the land would (closed-basin lakes: Mason et al. 1994). The
+/// lake rises until its evaporation balances the inflow; if it reaches the spill level first,
+/// it spills the rest.
+fn lake_balance(
+    cells: &[u32],
+    elevation: &[f64],
+    spill: f64,
+    inflow: f64,
+    excess: impl Fn(usize) -> f64,
+) -> LakeBalance {
+    let mut evaporation = 0.0;
+    for (i, &cell) in cells.iter().enumerate() {
+        let loss = excess(cell as usize);
+        if evaporation + loss >= inflow {
+            // The water surface lies between this floor and the next one (or the spill level).
+            let fraction = if loss > 0.0 {
+                ((inflow - evaporation) / loss).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let floor = elevation[cell as usize];
+            let next = cells
+                .get(i + 1)
+                .map_or(spill, |&c| elevation[c as usize])
+                .min(spill);
+            return LakeBalance {
+                level: floor + fraction * (next - floor),
+                covered: i as f64 + fraction,
+                evaporation: inflow.max(0.0),
+                endorheic: true,
+            };
+        }
+        evaporation += loss;
+    }
+    LakeBalance {
+        level: spill,
+        covered: cells.len() as f64,
+        evaporation,
+        endorheic: false,
+    }
+}
+
+/// Deposits up to `amount` m (rock-equivalent thickness over one cell) of sediment in a lake:
+/// it settles on the lowest floors first and levels the lake floor up, at most to the spill
+/// level `spill` (lakes trap nearly all of their sediment; Brune 1953). Returns the amount
+/// deposited; the rest passes the outlet.
+fn fill_lake(seabed: &mut Seabed, cells: &[u32], spill: f64, amount: f64) -> f64 {
+    if amount <= 0.0 {
+        return 0.0;
+    }
+    let room = |seabed: &Seabed, level: f64| {
+        cells
+            .iter()
+            .map(|&c| seabed.room(c as usize, level, f64::INFINITY))
+            .sum::<f64>()
+    };
+    let level = if room(seabed, spill) <= amount {
+        spill
+    } else {
+        let mut low = cells
+            .iter()
+            .map(|&c| seabed.elevation[c as usize])
+            .fold(f64::INFINITY, f64::min);
+        let mut high = spill;
+        for _ in 0..50 {
+            let mid = 0.5 * (low + high);
+            if room(seabed, mid) <= amount {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        low
+    };
+    let mut deposited = 0.0;
+    for &cell in cells {
+        let thickness = seabed.room(cell as usize, level, f64::INFINITY);
+        if thickness > 0.0 {
+            seabed.deposit(cell as usize, thickness);
+            deposited += thickness;
+        }
+    }
+    deposited
 }
 
 /// Wave erosion of coasts (Sunamura 1992; Trenhaile 2000) at the sea level after the step's
@@ -1285,7 +1681,10 @@ mod tests {
                 sediment,
                 bedrock_density: &vec![2800.0; n],
                 bedrock_isostatic_density: &vec![2800.0; n],
+                dense_crust: &vec![0.0; n],
                 precipitation: &vec![precipitation; n],
+                runoff: &vec![precipitation; n],
+                potential_evaporation: &vec![0.0; n],
                 plate,
                 class,
                 ocean_volume: ocean_volume(elevation, sediment, params.planet_radius),
@@ -1461,6 +1860,193 @@ mod tests {
 
         // The pit collects sediment.
         assert!(result.sediment_delta[pit] > 0.0);
+    }
+
+    const CRUST: Bedrock = Bedrock {
+        dense: 0.0,
+        dense_density: 2800.0,
+        density: 2800.0,
+    };
+
+    #[test]
+    fn incision_through_dense_lower_crust_matches_the_crust_model() {
+        // 2 km of densified lower crust (response ~0.10 per m) above normal crust (0.15): a big
+        // river cuts through both, and the balance holds with the piecewise response.
+        let bedrock = Bedrock {
+            dense: 2000.0,
+            dense_density: 2970.0,
+            density: 2800.0,
+        };
+        let (elevation, base, factor) = (3000.0, 100.0, 50.0);
+        let cut = incise(
+            elevation,
+            base,
+            0.0,
+            &bedrock,
+            (2.0 * factor, factor),
+            1.0,
+            true,
+        );
+        assert!(cut.bedrock > bedrock.dense);
+        let after = isostasy::add_layer(
+            isostasy::add_layer(elevation, -bedrock.dense, bedrock.dense_density),
+            -(cut.bedrock - bedrock.dense),
+            bedrock.density,
+        );
+        assert!((cut.bedrock - factor * (after - base)).abs() < 1e-6);
+        assert!(after > base);
+        // A small cut stays in the dense part.
+        let small = incise(elevation, base, 0.0, &bedrock, (0.02, 0.01), 1.0, true);
+        let after = isostasy::add_layer(elevation, -small.bedrock, bedrock.dense_density);
+        assert!(small.bedrock < bedrock.dense);
+        assert!((small.bedrock - 0.01 * (after - base)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn incision_accounts_for_the_isostatic_rebound() {
+        // Bedrock: the removed thickness solves h = F (z(h) − z_r) with the surface after the
+        // rebound, so a big river (F = 10) removes ~4 km and lowers the surface to ~400 m,
+        // instead of removing ~0.9 km as if the surface dropped by the removed thickness.
+        let (elevation, base, factor) = (1000.0, 0.0, 10.0);
+        let cut = incise(
+            elevation,
+            base,
+            0.0,
+            &CRUST,
+            (2.0 * factor, factor),
+            1.0,
+            true,
+        );
+        let after = isostasy::add_layer(elevation, -cut.bedrock, 2800.0);
+        assert_eq!(cut.bulk, 0.0);
+        assert!((cut.bedrock - factor * (after - base)).abs() < 1e-6);
+        assert!((cut.bedrock - 3976.0).abs() < 1.0, "{}", cut.bedrock);
+        // A small stream (F ≪ 1) barely notices the rebound.
+        let small = incise(elevation, base, 0.0, &CRUST, (0.02, 0.01), 1.0, true);
+        assert!(
+            (small.bedrock - 0.01 * 1000.0).abs() < 0.2,
+            "{}",
+            small.bedrock
+        );
+
+        // Sediment: the step ends in the sediment and the same balance holds with the
+        // compacting column.
+        let sediment = 3000.0;
+        let cut = incise(elevation, base, sediment, &CRUST, (0.5, 0.25), 1.0, true);
+        assert_eq!(cut.bedrock, 0.0);
+        let bulk = isostasy::sediment_bulk_thickness(sediment);
+        let left = isostasy::sediment_for_bulk_thickness(bulk - cut.bulk);
+        let after = isostasy::change_sediment(elevation, sediment, left);
+        assert!(cut.bulk < bulk);
+        assert!((cut.bulk - 0.5 * (after - base)).abs() < 1e-6);
+
+        // Through thin sediment into bedrock: the surface never drops below the base level.
+        for factor in [0.1, 1.0, 10.0, 1e3] {
+            let cut = incise(
+                elevation,
+                200.0,
+                50.0,
+                &CRUST,
+                (2.0 * factor, factor),
+                1.0,
+                true,
+            );
+            let bulk = isostasy::sediment_bulk_thickness(50.0);
+            assert_eq!(cut.bulk, bulk);
+            let bare = isostasy::change_sediment(elevation, 50.0, 0.0);
+            let after = isostasy::add_layer(bare, -cut.bedrock, 2800.0);
+            assert!(after >= 200.0 - 1e-9 && after < bare, "{factor}: {after}");
+        }
+    }
+
+    #[test]
+    fn lakes_rise_until_evaporation_balances_the_inflow() {
+        let elevation = [100.0, 200.0, 300.0];
+        let cells = [0, 1, 2];
+        // Each cell evaporates 10 units as open water.
+        let balance = lake_balance(&cells, &elevation, 400.0, 15.0, |_| 10.0);
+        assert!(balance.endorheic);
+        assert!((balance.covered - 1.5).abs() < 1e-12);
+        assert!((balance.level - 250.0).abs() < 1e-9);
+        assert_eq!(balance.evaporation, 15.0);
+        // A wetter lake reaches its pass and spills the rest.
+        let balance = lake_balance(&cells, &elevation, 400.0, 45.0, |_| 10.0);
+        assert!(!balance.endorheic);
+        assert_eq!(balance.level, 400.0);
+        assert_eq!(balance.evaporation, 30.0);
+    }
+
+    /// One erosion step with uniform precipitation, runoff and potential evaporation (m/yr).
+    fn run_climate(
+        mesh: &SphereMesh,
+        elevation: &[f64],
+        (precipitation, runoff, potential): (f64, f64, f64),
+    ) -> ErosionResult {
+        let n = mesh.len();
+        let params = ErosionParams {
+            sediment_diffusivity: 0.0,
+            waves: false,
+            ..ErosionParams::default()
+        };
+        let sediment = vec![0.0; n];
+        erode(
+            mesh,
+            &Surface {
+                elevation,
+                sediment: &sediment,
+                bedrock_density: &vec![2800.0; n],
+                bedrock_isostatic_density: &vec![2800.0; n],
+                dense_crust: &vec![0.0; n],
+                precipitation: &vec![precipitation; n],
+                runoff: &vec![runoff; n],
+                potential_evaporation: &vec![potential; n],
+                plate: &vec![0; n],
+                class: &classes(elevation, -1000.0),
+                ocean_volume: ocean_volume(elevation, &sediment, params.planet_radius),
+            },
+            &params,
+            1e6,
+        )
+    }
+
+    #[test]
+    fn arid_closed_basins_keep_their_water_and_sediment() {
+        let mesh = SphereMesh::icosphere(4);
+        let mut elevation = island(&mesh);
+        // A closed basin on the flank, below its rim on all sides.
+        let pit = mesh.nearest(glam::DVec3::new(0.05, 0.0, 1.0).normalize()) as usize;
+        elevation[pit] -= 1500.0;
+        let cell_area = 4.0 * std::f64::consts::PI * 6.371e6f64.powi(2) / mesh.len() as f64;
+        let into_ocean = |result: &ErosionResult| -> f64 {
+            (0..mesh.len())
+                .filter(|&c| elevation[c] < 0.0)
+                .map(|c| result.discharge[c])
+                .sum()
+        };
+
+        // Humid: the lake evaporates a little and spills the rest.
+        let humid = run_climate(&mesh, &elevation, (1.0, 0.6, 0.5));
+        assert_eq!(humid.hydrology.endorheic_cells, 0.0);
+        assert!(humid.hydrology.lake_evaporation > 0.0);
+        let expected = humid.hydrology.runoff - humid.hydrology.lake_evaporation;
+        assert!((into_ocean(&humid) - expected).abs() / expected < 1e-9);
+        assert!((humid.hydrology.to_ocean - expected).abs() / expected < 1e-9);
+        assert!(humid.sediment_delta[pit] > 0.0);
+
+        // Arid: the basin keeps its water; its catchment is endorheic, the rest still drains.
+        let arid = run_climate(&mesh, &elevation, (0.2, 0.01, 2.0));
+        assert!(arid.hydrology.endorheic_cells >= 1.0);
+        assert!(arid.hydrology.lake_cells < 1.0);
+        let expected = arid.hydrology.runoff - arid.hydrology.lake_evaporation;
+        assert!((into_ocean(&arid) - expected).abs() / expected < 1e-9);
+        assert!(
+            (arid.hydrology.lake_evaporation - arid.hydrology.endorheic_cells * 0.01 * cell_area)
+                .abs()
+                < 1e-6 * arid.hydrology.lake_evaporation
+        );
+        // All the sediment its catchment produced stays in the basin.
+        assert!(arid.sediment_delta[pit] > 0.0);
+        assert!(arid.hydrology.lake_sediment > 0.0);
     }
 
     #[test]
