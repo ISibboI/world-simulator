@@ -749,6 +749,30 @@ impl Simulation {
     }
 }
 
+/// A boundary cell seen from its plate towards one other plate, for analysis.
+#[derive(Clone, Copy, Debug)]
+pub struct BoundaryRecord {
+    pub cell: u32,
+    pub plate: u32,
+    pub other: u32,
+    /// `t` where the plate subducts, `r` at a ridge flank, `c` at a collision, `o` otherwise
+    /// (including the overriding side of a trench).
+    pub kind: char,
+    /// Relative speed (cm/yr) of the plate towards the other plate across the boundary
+    /// (smoothed normal; positive where they converge) and along it.
+    pub convergence: f64,
+    pub strike_slip: f64,
+    /// The boundary segment covering the cell, the plate that overrides in it, and the length
+    /// (m) of its slab.
+    pub segment: Option<u32>,
+    pub overriding: Option<u32>,
+    pub slab_length: f64,
+    /// Age (Myr) and kind of the plate's crust at the cell.
+    pub age: f64,
+    pub oceanic: bool,
+    pub continental: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use glam::DVec3;
@@ -784,28 +808,4 @@ mod tests {
             }
         }
     }
-}
-
-/// A boundary cell seen from its plate towards one other plate, for analysis.
-#[derive(Clone, Copy, Debug)]
-pub struct BoundaryRecord {
-    pub cell: u32,
-    pub plate: u32,
-    pub other: u32,
-    /// `t` where the plate subducts, `r` at a ridge flank, `c` at a collision, `o` otherwise
-    /// (including the overriding side of a trench).
-    pub kind: char,
-    /// Relative speed (cm/yr) of the plate towards the other plate across the boundary
-    /// (smoothed normal; positive where they converge) and along it.
-    pub convergence: f64,
-    pub strike_slip: f64,
-    /// The boundary segment covering the cell, the plate that overrides in it, and the length
-    /// (m) of its slab.
-    pub segment: Option<u32>,
-    pub overriding: Option<u32>,
-    pub slab_length: f64,
-    /// Age (Myr) and kind of the plate's crust at the cell.
-    pub age: f64,
-    pub oceanic: bool,
-    pub continental: bool,
 }
