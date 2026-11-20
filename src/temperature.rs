@@ -129,6 +129,11 @@ pub struct TemperatureParams {
     pub radiation_a: f64,
     /// Increase of outgoing longwave radiation per kelvin in W/m²/K.
     pub radiation_b: f64,
+    /// Radiative forcing of greenhouse gases relative to today's (pre-industrial) atmosphere, in
+    /// W/m²: it lowers the outgoing longwave radiation to `A − F + B T`. 0 is today's
+    /// atmosphere, about 3.7 W/m² a doubling of CO₂ (Myhre et al., 1998); see
+    /// [`crate::presets`] for the forcing of a young planet under a faint Sun.
+    pub greenhouse_forcing: f64,
     /// Below this surface temperature (°C), a surface inversion forms: the air that emits to
     /// space stays warmer than the surface.
     pub inversion_temperature: f64,
@@ -217,6 +222,7 @@ impl Default for TemperatureParams {
             orbit: OrbitParams::default(),
             radiation_a: 203.3,
             radiation_b: 2.09,
+            greenhouse_forcing: 0.0,
             inversion_temperature: -5.0,
             inversion_strength: 0.0,
             heat_transport: 0.45,
@@ -258,6 +264,7 @@ impl TemperatureParams {
         let field = match name {
             "radiation_a" => &mut self.radiation_a,
             "radiation_b" => &mut self.radiation_b,
+            "greenhouse_forcing" => &mut self.greenhouse_forcing,
             "inversion_temperature" => &mut self.inversion_temperature,
             "inversion_strength" => &mut self.inversion_strength,
             "heat_transport" => &mut self.heat_transport,
@@ -513,17 +520,19 @@ impl TemperatureModel {
         };
         self.spun_up = true;
 
-        // Outgoing longwave radiation `A + B (T + inversion)`, linear in T on either side of the
-        // inversion temperature: (A, B) for a surface at `t`.
+        // Outgoing longwave radiation `A − F + B (T + inversion)`, linear in T on either side of
+        // the inversion temperature: (A − F, B) for a surface at `t`. The greenhouse forcing F is
+        // 0 by default, which leaves A exactly as it is.
+        let radiation_a = params.radiation_a - params.greenhouse_forcing;
         let radiation = |t: f64| {
             if t < params.inversion_temperature {
                 let k = params.inversion_strength;
                 (
-                    params.radiation_a + params.radiation_b * k * params.inversion_temperature,
+                    radiation_a + params.radiation_b * k * params.inversion_temperature,
                     params.radiation_b * (1.0 - k),
                 )
             } else {
-                (params.radiation_a, params.radiation_b)
+                (radiation_a, params.radiation_b)
             }
         };
         let ice_thickness = |enthalpy: f64| (-enthalpy / params.ice_latent_heat).max(0.0);

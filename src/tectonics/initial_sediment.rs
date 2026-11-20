@@ -60,6 +60,12 @@ pub struct InitialSedimentParams {
     /// Pelagic accumulation below the CCD (red clay, siliceous ooze; m/Myr): ~0.05–0.2
     /// g/cm²/kyr.
     pub clay_rate: f64,
+    /// Whether the pelagic sediment is biogenic, as on today's Earth: carbonate ooze of
+    /// coccoliths and planktic foraminifera (Jurassic and later; Ridgwell 2005) above the CCD,
+    /// siliceous ooze of radiolaria and diatoms below it. Without life (`false`, the abiotic
+    /// preset) the sea floor collects only red clay of wind-blown dust, volcanic ash and
+    /// hydrogenous precipitates at `clay_rate`, at any depth.
+    pub biogenic_pelagic: bool,
     /// Terrigenous accumulation on the sea floor at a passive margin (m/Myr; turbidites and
     /// hemipelagic mud of continental rises accumulate at tens to hundreds of m/Myr), decaying
     /// exponentially with the distance from the continental crust over `terrigenous_length` (m).
@@ -102,6 +108,7 @@ impl Default for InitialSedimentParams {
             ccd_depth: 4500.0,
             carbonate_rate: 4.0,
             clay_rate: 1.0,
+            biogenic_pelagic: true,
             terrigenous_rate: 40.0,
             terrigenous_length: 250e3,
             platform_thickness: 3000.0,
@@ -144,6 +151,9 @@ impl InitialSedimentParams {
     /// CCD until the age `ccd_age`.
     pub(super) fn pelagic(&self, age: f64, ccd_age: f64) -> f64 {
         let age = age.max(0.0);
+        if !self.biogenic_pelagic {
+            return self.clay_rate * age;
+        }
         self.carbonate_rate * age.min(ccd_age) + self.clay_rate * (age - ccd_age).max(0.0)
     }
 
@@ -411,6 +421,20 @@ mod tests {
             );
             assert!((1.5e8..6e8).contains(&oceanic), "oceanic {oceanic:e}");
         }
+    }
+
+    #[test]
+    fn abiotic_pelagic_sediment_is_clay_only() {
+        let biogenic = InitialSedimentParams::default();
+        let abiotic = InitialSedimentParams {
+            biogenic_pelagic: false,
+            ..InitialSedimentParams::default()
+        };
+        // Sea floor that lay above the CCD for 40 of its 100 Myr.
+        assert_eq!(biogenic.pelagic(100.0, 40.0), 4.0 * 40.0 + 1.0 * 60.0);
+        assert_eq!(abiotic.pelagic(100.0, 40.0), 100.0);
+        assert_eq!(abiotic.pelagic(100.0, f64::INFINITY), 100.0);
+        assert_eq!(abiotic.pelagic(-5.0, 0.0), 0.0);
     }
 
     #[test]

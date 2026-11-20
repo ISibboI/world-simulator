@@ -297,12 +297,17 @@ impl Default for TectonicParams {
 impl TectonicParams {
     /// Sets the tunable parameter `name` (the field name, with `events.` for
     /// [`PlateEventParams`] fields and `initial_sediment.` for [`InitialSedimentParams`]
-    /// fields; `initial_sediment.enabled` is off for 0 and on otherwise) to `value`.
+    /// fields; `initial_sediment.enabled` and `initial_sediment.biogenic_pelagic` are off for 0 and
+    /// on otherwise) to `value`.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
         let sediment = &mut self.initial_sediment;
         let field = match name {
             "initial_sediment.enabled" => {
                 sediment.enabled = value != 0.0;
+                return Ok(());
+            }
+            "initial_sediment.biogenic_pelagic" => {
+                sediment.biogenic_pelagic = value != 0.0;
                 return Ok(());
             }
             "initial_sediment.platform_emplacement" => {
