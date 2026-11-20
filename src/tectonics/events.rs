@@ -1100,7 +1100,7 @@ impl Simulation {
         for owner in contact {
             if let Some(crust) =
                 self.plates[owner.plate as usize].crust[owner.local as usize].as_mut()
-                && crust.is_continental_origin_column()
+                && crust.is_continental_origin()
             {
                 crust.orogeny = time;
             }

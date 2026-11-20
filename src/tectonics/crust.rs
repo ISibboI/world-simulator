@@ -72,7 +72,9 @@ pub struct Crust {
     pub metasediment: f64,
     /// Simulated time in Myr of the last orogeny that deformed this crust (continental
     /// collision, suturing, terrane accretion), or [`NO_OROGENY`]. Orogenic belts and sutures
-    /// stay weak zones of the lithosphere long after the orogeny (see `weak_zones`).
+    /// stay weak zones of the lithosphere long after the orogeny (see `weak_zones`). It is set
+    /// and passed on in mixtures only as continental lithosphere (see [`Crust::mix_orogeny`]);
+    /// the lithosphere keeps it when it is thinned later.
     pub orogeny: f64,
     /// Diagnostic tracer: the mass fraction of the sediment that belongs to the tracked cohort
     /// of continental cover (see `Simulation::start_cover_cohort`). Mixed by mass where
@@ -195,6 +197,20 @@ impl Crust {
     /// lithosphere (crustal flow, rifting).
     pub fn is_continental_origin_column(&self) -> bool {
         self.felsic > 0.5 && self.crust_resists_subduction()
+    }
+
+    /// Takes over the orogeny mark `orogeny` of crust mixed into this sample (see
+    /// [`Crust::orogeny`]): the latest of the two if the mixed sample is still continental
+    /// lithosphere ([`Crust::is_continental_origin`]), and none otherwise. The weakness of
+    /// orogenic belts lies in their deformed continental lithosphere (mantle fabric, faults); it
+    /// is carried with that lithosphere, but oceanic or transitional crust made from a mixture
+    /// starts unweakened.
+    pub(super) fn mix_orogeny(&mut self, orogeny: f64) {
+        self.orogeny = if self.is_continental_origin() {
+            self.orogeny.max(orogeny)
+        } else {
+            NO_OROGENY
+        };
     }
 
     /// Whether this is normal oceanic crust: thin and dense. Crust that is neither oceanic nor
@@ -459,6 +475,30 @@ mod tests {
             ..new_oceanic_crust(0.0)
         };
         assert!(pure.is_oceanic());
+    }
+
+    #[test]
+    fn only_continental_lithosphere_keeps_the_orogeny_mark() {
+        let belt = Crust {
+            thickness: 35_000.0,
+            density: CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+            metasediment: 0.0,
+            orogeny: 200.0,
+            cohort: 0.0,
+        };
+        let mut mixed = belt;
+        mixed.mix_orogeny(400.0);
+        assert_eq!(mixed.orogeny, 400.0);
+        // A metamorphosed wedge on oceanic basement is felsic and buoyant as a whole, but its
+        // lithosphere is oceanic: it does not carry the mark of a belt mixed into it.
+        let mut wedge = new_oceanic_crust(-100.0);
+        wedge.add_crust(15_000.0, METASEDIMENT_DENSITY, (1.0, 1.0), 75_000.0);
+        assert!(wedge.is_continental_origin_column() && wedge.is_oceanic());
+        wedge.mix_orogeny(400.0);
+        assert_eq!(wedge.orogeny, NO_OROGENY);
     }
 
     #[test]
