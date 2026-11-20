@@ -102,8 +102,10 @@ Significant:
 
 Not significant, but worth knowing:
 - **Shelf cells on oceanic crust: 2.0 → 4.9% of the shelf cells (seed range 2.6…11.2).** The
-  cones prograde into deep water. Real deltas do that (Niger, Mississippi, Amazon), but this is
-  the metric of the closed #8 (target 0).
+  cones prograde into deep water. Real deltas do that (the outer Niger delta lies on oceanic
+  crust), but this is the metric of the closed #8 (target 0). Measured afterwards: the coast
+  advances over deep water by 1–7 km per Myr on average, at the low end of the 1–100 km per Myr
+  of natural shelf edges; see [`../pr-59/delta-progradation.md`](../pr-59/delta-progradation.md).
 - Land 29.2 → 28.4% of the surface (t −1.0), mean land 573 → 527 m (t −1.0), flooded
   continental crust 32.3 → 32.2%. In `b1` the shifts were larger (land 27.5%, flooded 36.2%)
   but not robust per seed (paired t −1.4, half of it from seed 0).

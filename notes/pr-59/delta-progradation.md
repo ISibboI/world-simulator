@@ -106,14 +106,44 @@ then eroded like any sediment and carried on to the new mouth.
 - The model is the mass balance of progradation without its dynamics. At this resolution that
   is the right level: everything left out is smaller than a cell or faster than a step, except
   the two points below.
-- **Not checked: the rate.** Shelf-edge progradation in nature is 1–100 km per Myr. One cell
-  per step is ~110 km per Myr, the top of that range. I have not measured how fast the model's
-  coasts advance over deep water; the share of shelf cells on oceanic crust (2.0 → 4.9%, up to
-  11% in one seed) says it happens, not how fast.
+- **The rate was checked afterwards** (next section): 1–7 km per Myr on average over deep
+  water, against 1–100 km per Myr for natural shelf edges.
 - **Known difference: no front.** A real delta that reaches the shelf edge sheds much of its
   load down the slope as turbidity currents. In the model the fans are filled first and the
   cone gets what is left, so the order is reversed, and once the fans are at their graded
   surface nothing limits the cone but volume.
+
+## Measurement of the advance (added after the PR discussion)
+
+Logging-only diagnostic of every cone (no physics change; the runs reproduce the PR's), seeds
+0–3 × 500 Myr. "Deep" is a cell more than 1000 m below sea level before the cone; it counts as
+converted when the cone leaves it shallower than 200 m or as land.
+
+| | seed 0 | seed 1 | seed 2 | seed 3 |
+|---|---|---|---|---|
+| Cones per Myr | 32 | 21 | 57 | 31 |
+| … that put sediment into deep water | 35% | 37% | 41% | 53% |
+| … of those, converting a deep cell in that step | 1% | 2% | 2% | 1% |
+| Cone sediment that goes into deep cells | 23% | 23% | 26% | 29% |
+| Deep cells converted per Myr (whole planet) | 0.09 | 0.16 | 0.60 | 0.30 |
+| Advance per deep-touching cone, front one cell wide (km/Myr) | 0.9 | 2.2 | 2.8 | 1.1 |
+| Advance per deep-touching cone, by the distance of the converted cell from the mouth (km/Myr; upper bound) | 2.4 | 5.9 | 6.8 | 4.2 |
+| Mouths above 100 km/Myr by that upper bound (of mouths with ≥ 5 such steps) | 0.3% | 1.3% | 1.6% | 1.2% |
+
+- **The mean advance over deep water is 1–7 km per Myr**, at the low end of the 1–100 km per Myr
+  of natural shelf edges. A quarter of the cone sediment goes into deep cells, but a deep cell
+  takes many steps to fill.
+- The second measure is an upper bound: when the mouth lies in a shelf sea, the converted cell
+  is several cells from the mouth, but the shelf edge itself moved by one cell.
+- **There is a fast tail.** Half to two thirds of the converted deep cells come from rare cones
+  (1% of those touching deep water) with loads of 11–17 km·cells in one step, and 0.3–1.6% of
+  the mouths exceed 100 km per Myr by the upper-bound measure.
+- With "deep" taken as 200 m instead of 1000 m, the numbers are 3–4 times larger (mean
+  10–20 km per Myr by the upper bound), because shallow epicontinental seas fill quickly. Still
+  inside the range.
+
+**Conclusion: no change.** The advance is not too fast, so the delta front of the proposal
+below is not needed now. The fast tail would be the reason to revisit it.
 
 ## Proposal (not implemented)
 
