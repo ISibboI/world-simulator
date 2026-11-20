@@ -103,9 +103,52 @@ the common factor is the lake treatment. **The 500–1000 Myr slope target is no
 
 ## Independent results evaluation
 
-_To be added._
+An independent agent re-parsed the logs with its own script and got identical numbers. It
+confirmed the diagnosis:
+- Every cell above 6 km on `main` sits on crust thicker than 75 km (95–120 km at 400 Myr in
+  seeds 2, 3 and 7).
+- The branch without the cap still reaches 7.1 km, on 89 km crust.
+- `final` has no crust thicker than 75.0 km anywhere.
+
+**Verdict:**
+- **Closes #5.**
+- **Part of #7.** Runoff and the solver consistency are done. The endorheic share, the lake
+  share and the sediment-part slope miss their targets.
+
+Findings:
+- **F2 (pre-existing, not a regression).** Single land cells at the capped sediment column
+  (12.9 km rock-equivalent, 11 km bulk) stand 2–6 km above all their neighbours. Spikes more
+  than 2 km above all neighbours, over all snapshots: main 8, branch 11, final 4. The 6.5 km
+  cell of `final` s5 at 800 Myr is one of them. Stream-power incision cannot remove a peak that
+  has no upstream area. Possible sources: overfill on land, the 11 km metamorphism cap. This is
+  a follow-up.
+- **F3: the slope regression is mostly a delayed transient.**
+  - The sediment part is 42 m lower at 500 Myr (t −3.5) and the same at 1000 Myr (289 vs 283,
+    n.s.).
+  - Sediment to the ocean over 250–500 Myr is 3.42 vs 4.58 km³/yr (t −5.1). Later it is equal or
+    slightly higher.
+  - It is still rising over 700–1000 Myr (11.6 vs 1.3, t 2.2), so levelling off is not shown;
+    that needs 1500 Myr runs.
+  - Cause: the common lake part of #7 (lakes as base levels, trapping, endorheic retention).
+    Not the isostatic solve; runoff lowers it. The merge cap possibly contributes a little
+    (t 1.9 vs `branch`).
+- **F4.** About 45% of the endorheic area drains into single-cell pits, likely tectonic or
+  resampling noise. Real multi-cell endorheic land is ~6% (Earth 18–20%).
+  - Lakes overshoot at 3.1%. Lake evaporation is 1.6–4.9 × 10³ km³/yr, vs ~10³ on Earth.
+  - Lake PET of 1.1–1.8 m/yr is plausible.
+  - Nested lakes are a minor share.
+  - The snapshots look clean.
+- **F5.** Sediment to the ocean is ~4 km³/yr on both, half of Earth's 7–9; not caused by this
+  change.
 
 ## Open points / follow-ups
+
+- Recommended by the evaluation:
+  - 1500 Myr runs (4 seeds, main vs this branch), to see whether the sediment part levels off.
+  - Ignore single-cell pits in the drainage (minimum depression area or depth), then re-measure
+    the endorheic and lake shares.
+  - A new issue for the single-cell sediment spikes (F2).
+  - Sediment flux to the ocean ×2 short of Earth.
 
 - **Sediment-part slope over 500–1000 Myr: 12.8 m/100 Myr** (main 2.2; target ≤ 10). It is a
   slower fill to the same level, and the slope is still ~12 over 700–1000 Myr. Options:
