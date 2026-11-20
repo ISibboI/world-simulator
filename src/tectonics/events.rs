@@ -14,6 +14,7 @@ use tracing::debug;
 
 use super::dynamics::{BoundaryCell, BoundaryKind};
 use super::generation::random_unit_vector;
+use super::weak_zones::Break;
 use super::*;
 
 /// Parameters of plate birth and merging.
@@ -224,6 +225,14 @@ pub struct EventCounts {
     /// Splits along the weakest lithosphere (see [`super::weak_zones`]), and splits that fell
     /// back to a great circle because no cut along weak lithosphere divided the plate.
     pub weak_zone_splits: usize,
+    /// Splits along weak lithosphere found by cutting again after a part was too small, and plume
+    /// rifts whose break is two arms of a triple junction (the third arm failed).
+    pub recut_splits: usize,
+    pub junction_rifts: usize,
+    /// Continental cells on orogenic belts and all continental cells, on the boundaries that
+    /// rifts created and on the two rifted plates: rifts follow sutures if the first ratio is
+    /// higher than the second.
+    pub rift_suture_cells: [usize; 4],
     /// Sum of the root-mean-square distances (km) of new boundaries from their best-fitting
     /// great circle, and the number of splits measured: rifts, initiations.
     pub split_deviation_km: [f64; 2],
@@ -241,6 +250,14 @@ pub struct EventCounts {
     pub initiation_contact_km: f64,
     pub initiation_far_contact_km: f64,
 }
+
+/// Length (rad, ~2600 km) of the lines of cells from a plume into the middle of the two parts of
+/// a rift that move apart (tying the break to the plume; longer than the band of
+/// [`super::weak_zones`] in which the break forms).
+const SPINE_LENGTH: f64 = 0.4;
+
+/// How often a split along weak lithosphere that leaves a part too small is cut again.
+const MAX_RECUTS: usize = 3;
 
 /// Smallest connected age step (cells) that counts as a fracture zone.
 const MIN_FRACTURE_ZONE_CELLS: usize = 3;
@@ -265,9 +282,13 @@ enum SplitAnchor {
     /// Subduction initiation at an age step inside a plate: the old oceanic `cell` next to the
     /// younger oceanic cell `young`.
     FractureZone { cell: u32, young: u32 },
-    /// A plume rift from the cell `nucleus` above the plume; `cut` is a cell of the continent
-    /// the rift divides, if any.
-    Rift { nucleus: u32, cut: Option<u32> },
+    /// A plume rift from the cell `nucleus` above the plume with three arms in the tangent
+    /// directions `arms`; `cut` is a cell of the continent the rift divides, if any.
+    Rift {
+        nucleus: u32,
+        cut: Option<u32>,
+        arms: [DVec3; 3],
+    },
 }
 
 impl EventCounts {
@@ -434,17 +455,19 @@ impl Simulation {
             }
         } * cells;
         let min_new = params.min_plate_area * cells;
-        // A break along weak lithosphere that leaves a part too small falls back to the
-        // reference great circle.
+        // A break along weak lithosphere that leaves a part too small is cut again with the
+        // rigid block of that part reaching closer to the break, so that the part grows, up to
+        // `MAX_RECUTS` times; then the split does not happen.
         let mut failure = 0;
         let mut division = None;
-        let weak_first = params.weak_zone_splits > 0.0;
-        for weak in [weak_first, false] {
+        let weak = params.weak_zone_splits > 0.0;
+        let mut scale = [1.0, 1.0];
+        for attempt in 0..=MAX_RECUTS {
             let Some((new_side, great_circle)) =
-                self.local_split_piece(plate, normal, anchor, weak)
+                self.local_split_piece(plate, normal, anchor, weak, scale)
             else {
                 failure = 0;
-                continue;
+                break;
             };
             failure = 0;
             let piece: Vec<u32> = (0..self.mesh.len() as u32)
@@ -455,24 +478,26 @@ impl Simulation {
             } else if ((total - piece.len()) as f64) < min_old {
                 failure = 2;
             }
-            if failure > 0 {
-                debug!(
-                    plate,
-                    total,
-                    new = piece.len(),
-                    weak,
-                    great_circle,
-                    ?anchor,
-                    time = self.time,
-                    "Split leaves a part too small"
-                );
-            } else {
+            if failure == 0 {
+                if attempt > 0 {
+                    self.event_counts.recut_splits += 1;
+                }
                 division = Some((piece, great_circle));
                 break;
             }
+            debug!(
+                plate,
+                total,
+                new = piece.len(),
+                attempt,
+                ?anchor,
+                time = self.time,
+                "Split leaves a part too small"
+            );
             if great_circle {
                 break;
             }
+            scale[failure - 1] *= 0.5;
         }
         let Some((piece, great_circle)) = division else {
             if initiation {
@@ -482,12 +507,16 @@ impl Simulation {
         };
         let new_plate = self.split_plate_cells(plate, &piece)?;
         let kind = usize::from(initiation);
+        self.record_split_geometry(plate, new_plate, anchor);
         self.event_counts.split_deviation_km[kind] += self.boundary_deviation_km(plate, new_plate);
         self.event_counts.measured_splits[kind] += 1;
         if great_circle {
             self.event_counts.great_circle_splits += 1;
         } else {
             self.event_counts.weak_zone_splits += 1;
+            if !initiation {
+                self.event_counts.junction_rifts += 1;
+            }
         }
         Some(new_plate)
     }
@@ -517,6 +546,7 @@ impl Simulation {
         normal: DVec3,
         anchor: SplitAnchor,
         weak: bool,
+        scale: [f64; 2],
     ) -> Option<(Vec<bool>, bool)> {
         let cell_count = self.mesh.len();
         let in_plate = |cell: u32| self.owners[cell as usize].plate == plate;
@@ -577,15 +607,14 @@ impl Simulation {
             }
             SplitAnchor::Rift { .. } => None,
         };
-        let side = enclosed.or_else(|| {
-            if !weak {
-                return None;
-            }
-            let mut forced: Vec<(u32, bool)> = Vec::new();
+        let side = if enclosed.is_some() || !weak {
+            enclosed
+        } else {
             match anchor {
                 SplitAnchor::Margin { cell } => {
                     // The margin's continent on the new side, the ocean along the margin on the
                     // old (subducting) side.
+                    let mut forced: Vec<(u32, bool)> = Vec::new();
                     for &neighbor in self.mesh.neighbors(cell) {
                         if component[neighbor as usize] != u32::MAX {
                             forced.push((neighbor, true));
@@ -603,30 +632,80 @@ impl Simulation {
                             .map(|other| (other, false)),
                     );
                     forced.push((cell, false));
+                    let geometry = Break::Circle { normal };
+                    self.weak_zone_cut(plate, &geometry, scale, &forced, &rigid)
+                        .map(|(side, _)| side)
                 }
                 SplitAnchor::FractureZone { cell, young } => {
-                    forced.push((cell, false));
-                    forced.push((young, true));
+                    // The plate breaks along the age step: its old side subducts below its
+                    // young side.
+                    let mut forced = vec![(cell, false), (young, true)];
+                    forced.extend(self.fracture_zone_cells(cell));
+                    let geometry = Break::Circle { normal };
+                    self.weak_zone_cut(plate, &geometry, scale, &forced, &rigid)
+                        .map(|(side, _)| side)
                 }
-                SplitAnchor::Rift { nucleus, .. } => {
-                    // The rift runs through the plume.
+                SplitAnchor::Rift { nucleus, arms, .. } => {
+                    // Three rift arms grow from the plume; the weakest two become the break
+                    // through the plume, the third fails (an aulacogen).
                     let origin = self.mesh.vertex(nucleus);
-                    for &neighbor in self.mesh.neighbors(nucleus) {
-                        if in_plate(neighbor) {
-                            let side = (self.mesh.vertex(neighbor) - origin).dot(normal) > 0.0;
-                            forced.push((neighbor, side));
-                        }
-                    }
+                    [(0, 1), (1, 2), (2, 0)]
+                        .into_iter()
+                        .filter_map(|(first, second)| {
+                            let geometry = Break::Junction {
+                                nucleus: origin,
+                                arms: [arms[first], arms[second]],
+                            };
+                            // The plume's neighbours by sector, tied to the rigid blocks
+                            // along the bisectors of the two parts (so that the break runs
+                            // through the plume, not around a pocket next to it).
+                            let bisector = (arms[first] + arms[second]).normalize_or_zero();
+                            let spine = |direction: DVec3, other: u32| {
+                                let normal = origin.cross(direction).normalize_or_zero();
+                                let r = self.mesh.vertex(other);
+                                r.dot(direction) > 0.0
+                                    && r.dot(normal).abs() < self.mesh.mean_edge_angle()
+                                    && r.angle_between(origin) <= SPINE_LENGTH
+                            };
+                            let forced: Vec<(u32, bool)> = (0..cell_count as u32)
+                                .filter(|&other| in_plate(other))
+                                .filter_map(|other| {
+                                    if self.mesh.neighbors(nucleus).contains(&other) {
+                                        Some((other, geometry.place(self.mesh.vertex(other)).0))
+                                    } else if spine(bisector, other) {
+                                        Some((other, true))
+                                    } else if spine(-bisector, other) {
+                                        Some((other, false))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            self.weak_zone_cut(plate, &geometry, scale, &forced, &rigid)
+                        })
+                        // The weakest break among those that leave both parts large enough
+                        // (else the weakest; the area test cuts it again).
+                        .min_by(|a, b| {
+                            let small = |side: &[bool]| {
+                                let positive = side.iter().filter(|&&s| s).count();
+                                let total = (0..cell_count).filter(|&c| in_plate(c as u32)).count();
+                                let min = self.params.events.min_plate_area * cell_count as f64;
+                                (positive as f64) < min || ((total - positive) as f64) < min
+                            };
+                            small(&a.0).cmp(&small(&b.0)).then(a.1.total_cmp(&b.1))
+                        })
+                        .map(|(side, _)| side)
                 }
             }
-            self.weak_zone_cut(plate, normal, &forced, &rigid)
-        });
-        let great_circle = side.is_none();
-        let side = side.unwrap_or_else(|| {
+        };
+        let great_circle = !weak && side.is_none();
+        let side = if great_circle {
             (0..cell_count as u32)
                 .map(|cell| self.mesh.vertex(cell).dot(normal) > 0.0)
                 .collect()
-        });
+        } else {
+            side?
+        };
         // The side holding most cells of each component.
         let mut counts = vec![(0usize, 0usize); component_count as usize];
         for cell in 0..cell_count {
@@ -800,6 +879,47 @@ impl Simulation {
         (region, sizes)
     }
 
+    /// Diagnostics of a new boundary between plates `a` and `b` (cells of `b` next to `a`): for
+    /// rifts, how many of its continental cells and of all continental cells of both plates
+    /// lie on orogenic belts (whether rifts follow sutures); the boundary cells at debug level.
+    fn record_split_geometry(&mut self, a: u32, b: u32, anchor: SplitAnchor) {
+        let boundary: Vec<u32> = (0..self.mesh.len() as u32)
+            .filter(|&cell| {
+                self.owners[cell as usize].plate == b
+                    && self
+                        .mesh
+                        .neighbors(cell)
+                        .iter()
+                        .any(|&neighbor| self.owners[neighbor as usize].plate == a)
+            })
+            .collect();
+        debug!(?anchor, ?boundary, time = self.time, "New plate boundary");
+        if !matches!(anchor, SplitAnchor::Rift { .. }) {
+            return;
+        }
+        let mut counts = [0usize; 4];
+        for cell in 0..self.mesh.len() as u32 {
+            let plate = self.owners[cell as usize].plate;
+            if plate != a && plate != b {
+                continue;
+            }
+            let crust = self.surface_crust(cell);
+            if !crust.is_continental_origin() {
+                continue;
+            }
+            let suture = usize::from(crust.orogeny > NO_OROGENY);
+            counts[2] += suture;
+            counts[3] += 1;
+            if boundary.binary_search(&cell).is_ok() {
+                counts[0] += suture;
+                counts[1] += 1;
+            }
+        }
+        for (total, count) in self.event_counts.rift_suture_cells.iter_mut().zip(counts) {
+            *total += count;
+        }
+    }
+
     /// Root-mean-square distance (km) of the boundary between plates `a` and `b` (cells of `b`
     /// next to `a`) from its best-fitting great circle: ~0 for a straight cut.
     fn boundary_deviation_km(&self, a: u32, b: u32) -> f64 {
@@ -834,6 +954,58 @@ impl Simulation {
         let mean_square =
             cells.iter().map(|r| r.dot(normal).powi(2)).sum::<f64>() / cells.len() as f64;
         mean_square.sqrt() * self.params.planet_radius / 1000.0
+    }
+
+    /// The fracture zone through the old oceanic `cell`: the connected old oceanic cells of its
+    /// plate next to oceanic crust of the plate at least
+    /// [`PlateEventParams::initiation_age_contrast`] younger (old side: false), and those
+    /// younger cells (young side: true).
+    fn fracture_zone_cells(&self, cell: u32) -> Vec<(u32, bool)> {
+        let plate = self.owners[cell as usize].plate;
+        let contrast = self.params.events.initiation_age_contrast;
+        let younger = |old: u32| -> Vec<u32> {
+            let age = self.surface_crust(old).age(self.time);
+            self.mesh
+                .neighbors(old)
+                .iter()
+                .copied()
+                .filter(|&neighbor| {
+                    let crust = self.surface_crust(neighbor);
+                    self.owners[neighbor as usize].plate == plate
+                        && crust.is_oceanic()
+                        && crust.age(self.time) + contrast <= age
+                })
+                .collect()
+        };
+        let mut side = vec![None; self.mesh.len()];
+        let mut seen = vec![false; self.mesh.len()];
+        seen[cell as usize] = true;
+        let mut stack = vec![cell];
+        while let Some(old) = stack.pop() {
+            let young = younger(old);
+            if young.is_empty()
+                || !self.surface_crust(old).is_oceanic()
+                || side[old as usize] == Some(true)
+            {
+                continue;
+            }
+            side[old as usize] = Some(false);
+            for young in young {
+                if side[young as usize].is_none() {
+                    side[young as usize] = Some(true);
+                }
+            }
+            for &neighbor in self.mesh.neighbors(old) {
+                if !seen[neighbor as usize] && self.owners[neighbor as usize].plate == plate {
+                    seen[neighbor as usize] = true;
+                    stack.push(neighbor);
+                }
+            }
+        }
+        side.into_iter()
+            .enumerate()
+            .filter_map(|(cell, side)| side.map(|side| (cell as u32, side)))
+            .collect()
     }
 
     /// The connected cells of the plate of `cell` that `passable` allows, from `cell`.
@@ -882,6 +1054,41 @@ impl Simulation {
             }
         }
         (total, far)
+    }
+
+    /// Marks the crust along the contact of plates `a` and `b` (cells of either next to the
+    /// other; on `a` only cells in `only`, if given) as a suture: an orogenic belt formed now
+    /// (see [`Crust::orogeny`]).
+    fn mark_suture(&mut self, a: u32, b: u32, only: Option<&[bool]>) {
+        let time = self.time;
+        let selected = |cell: u32| only.is_none_or(|only| only[cell as usize]);
+        let contact: Vec<Ownership> = (0..self.mesh.len() as u32)
+            .filter(|&cell| {
+                let plate = self.owners[cell as usize].plate;
+                let neighbors = self.mesh.neighbors(cell);
+                if plate == a {
+                    selected(cell)
+                        && neighbors
+                            .iter()
+                            .any(|&neighbor| self.owners[neighbor as usize].plate == b)
+                } else if plate == b {
+                    neighbors.iter().any(|&neighbor| {
+                        self.owners[neighbor as usize].plate == a && selected(neighbor)
+                    })
+                } else {
+                    false
+                }
+            })
+            .map(|cell| self.owners[cell as usize])
+            .collect();
+        for owner in contact {
+            if let Some(crust) =
+                self.plates[owner.plate as usize].crust[owner.local as usize].as_mut()
+                && crust.is_continental_origin_column()
+            {
+                crust.orogeny = time;
+            }
+        }
     }
 
     /// Merges `absorbed` into `into` and records the continental crust lost.
@@ -949,9 +1156,13 @@ impl Simulation {
             if normal == DVec3::ZERO {
                 continue;
             }
+            // Three arms 120° apart, one of them along the circle towards the continent.
+            let first = normal.cross(position).normalize_or_zero();
+            let turn = DQuat::from_axis_angle(position, 2.0 * std::f64::consts::FRAC_PI_3);
             let anchor = SplitAnchor::Rift {
                 nucleus: cell,
                 cut: continent,
+                arms: [first, turn * first, turn * turn * first],
             };
             if let Some(new_plate) = self.split_locally(plate, normal, anchor) {
                 self.event_counts.rifts += 1;
@@ -1462,6 +1673,7 @@ impl Simulation {
                 (b, a)
             };
             debug!(into, absorbed, time = self.time, "Plates sutured");
+            self.mark_suture(into, absorbed, None);
             self.merge_and_record(into, absorbed, Merge::Suture);
             self.event_counts.sutures += 1;
         }
@@ -1655,6 +1867,7 @@ impl Simulation {
             .filter(|&cell| moving[cell as usize])
             .collect();
         let positions: Vec<DVec3> = terrane.iter().map(|&cell| self.mesh.vertex(cell)).collect();
+        self.mark_suture(from, to, Some(&moving));
         let Some(new_plate) = self.split_plate_cells(from, &terrane) else {
             return 0;
         };
@@ -1765,6 +1978,7 @@ mod tests {
                     sediment: 0.0,
                     felsic: 1.0,
                     metasediment: 0.0,
+                    orogeny: NO_OROGENY,
                 }
             } else {
                 new_oceanic_crust(-ocean_age)
@@ -1972,6 +2186,7 @@ mod tests {
                     sediment: 0.0,
                     felsic: 1.0,
                     metasediment: 0.0,
+                    orogeny: NO_OROGENY,
                 }
             } else {
                 new_oceanic_crust(-250.0)
@@ -2031,6 +2246,7 @@ mod tests {
                     sediment: 0.0,
                     felsic: 1.0,
                     metasediment: 0.0,
+                    orogeny: NO_OROGENY,
                 }
             });
         }
@@ -2158,9 +2374,9 @@ mod tests {
     fn plume_rifts_cut_only_the_nearby_continent() {
         for seed in 0..8 {
             let mut simulation = two_continents(TectonicParams::default(), seed);
-            // A plume just inside the +x continent.
+            // A plume inside the +x continent.
             simulation.mantle.insert_plume(Plume {
-                position: DVec3::new(0.8, 0.0, 0.6).normalize(),
+                position: DVec3::new(0.95, 0.0, 0.3).normalize(),
                 age: 50.0,
                 lifetime: 200.0,
                 peak_flux: 5e-3,
@@ -2171,6 +2387,37 @@ mod tests {
             assert_eq!(plates_of_continent(&simulation, DVec3::X).len(), 2);
             assert_eq!(plates_of_continent(&simulation, DVec3::Y).len(), 1);
             assert!(simulation.event_counts.rift_contact_km > 0.0);
+        }
+    }
+
+    #[test]
+    fn plume_rifts_run_through_the_plume() {
+        for seed in 0..4 {
+            let mut simulation = two_continents(TectonicParams::default(), seed);
+            // Another plate around -z, so that the rift can end at plate boundaries.
+            let cap: Vec<u32> = (0..simulation.mesh.len() as u32)
+                .filter(|&cell| simulation.mesh.vertex(cell).z < -0.8)
+                .collect();
+            simulation.split_plate_cells(0, &cap).unwrap();
+            simulation.polarities.clear();
+            let position = DVec3::new(0.95, 0.0, 0.3).normalize();
+            simulation.mantle.insert_plume(Plume {
+                position,
+                age: 50.0,
+                lifetime: 200.0,
+                peak_flux: 5e-3,
+                has_rifted: false,
+            });
+            simulation.rift_above_plumes();
+            assert_eq!(simulation.event_counts.rifts, 1, "seed {seed}");
+            assert_eq!(simulation.event_counts.junction_rifts, 1, "seed {seed}");
+            let plume = simulation.mesh.nearest(position);
+            let plate = simulation.owners[plume as usize].plate;
+            // The new boundary passes next to the plume.
+            let near = (0..simulation.mesh.len() as u32)
+                .filter(|&cell| simulation.mesh.vertex(cell).angle_between(position) < 0.13)
+                .any(|cell| simulation.owners[cell as usize].plate != plate);
+            assert!(near, "seed {seed}");
         }
     }
 
@@ -2250,6 +2497,7 @@ mod tests {
             sediment: 0.0,
             felsic: 1.0,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         };
         let micro = |r: DVec3| r.x > 0.8 && r.z < 0.0 && r.z > -0.12;
         for (local, crust) in simulation.plates[0].crust.iter_mut().enumerate() {
@@ -2370,6 +2618,7 @@ mod tests {
                     sediment: 0.0,
                     felsic: 1.0,
                     metasediment: 0.0,
+                    orogeny: NO_OROGENY,
                 };
             }
         }

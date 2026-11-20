@@ -701,6 +701,7 @@ mod tests {
             sediment: 0.0,
             felsic: 1.0,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         }
     }
 

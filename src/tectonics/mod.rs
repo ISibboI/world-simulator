@@ -614,6 +614,7 @@ impl Simulation {
                     sediment: 0.0,
                     felsic: 1.0,
                     metasediment: 0.0,
+                    orogeny: NO_OROGENY,
                 }
             } else {
                 new_oceanic_crust(-ocean_age[cell])
@@ -1323,6 +1324,7 @@ mod tests {
             sediment: 0.0,
             felsic: 1.0,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         };
         // Normal continental crust stands a few hundred metres above sea level, doubly
         // thickened crust forms high plateaus like Tibet, thinned crust forms shelves.
@@ -1346,6 +1348,7 @@ mod tests {
                         sediment: 0.0,
                         felsic: 1.0,
                         metasediment: 0.0,
+                        orogeny: NO_OROGENY,
                     };
                     let elevation = crust.dry_elevation(0.0);
                     // At least 0.5 m per 100 m of crust (the thermal uplift fading out over the
@@ -1373,6 +1376,7 @@ mod tests {
                     sediment: 0.0,
                     felsic: 1.0,
                     metasediment: 0.0,
+                    orogeny: NO_OROGENY,
                 };
                 assert!(arc.buoyancy(0.0) > new_oceanic_crust(0.0).buoyancy(0.0));
             }
@@ -1388,6 +1392,7 @@ mod tests {
             sediment: 0.0,
             felsic: 1.0,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         };
         assert!(
             (continent(0.0).surface_elevation(0.0, 0.0)
@@ -1407,6 +1412,7 @@ mod tests {
                 sediment: 0.0,
                 felsic: 1.0,
                 metasediment: 0.0,
+                orogeny: NO_OROGENY,
             };
             let removed = 10.0;
             let thinner = Crust {
@@ -1435,6 +1441,7 @@ mod tests {
             sediment: 0.0,
             felsic: 1.0,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         };
         assert!(!eroded.is_oceanic());
         assert!(!eroded.is_continental());

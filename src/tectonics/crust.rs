@@ -70,7 +70,14 @@ pub struct Crust {
     /// [`Crust::felsic`], mixed by mass. Metasediment is felsic, so it never exceeds
     /// [`Crust::felsic`].
     pub metasediment: f64,
+    /// Simulated time in Myr of the last orogeny that deformed this crust (continental
+    /// collision, suturing, terrane accretion), or [`NO_OROGENY`]. Orogenic belts and sutures
+    /// stay weak zones of the lithosphere long after the orogeny (see `weak_zones`).
+    pub orogeny: f64,
 }
+
+/// [`Crust::orogeny`] of crust that never went through an orogeny in the simulation.
+pub const NO_OROGENY: f64 = f64::NEG_INFINITY;
 
 impl Crust {
     /// Age of the lithosphere in Myr at the simulated time `time` (Myr).
@@ -362,6 +369,7 @@ pub(super) fn new_oceanic_crust(time: f64) -> Crust {
         sediment: 0.0,
         felsic: 0.0,
         metasediment: 0.0,
+        orogeny: NO_OROGENY,
     }
 }
 
@@ -421,6 +429,7 @@ mod tests {
             sediment: 0.0,
             felsic: 1.0,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         };
         assert!(!margin.resists_subduction());
         margin.add_crust(8000.0, METASEDIMENT_DENSITY, (1.0, 1.0), 75_000.0);
@@ -445,6 +454,7 @@ mod tests {
             sediment: 0.0,
             felsic: 1.0,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         };
         assert!(!margin.resists_subduction() && !margin.is_continental_origin());
         let wedged = Crust {

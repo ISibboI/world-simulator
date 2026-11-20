@@ -317,6 +317,7 @@ mod tests {
                             c.density.to_bits(),
                             c.birth.to_bits(),
                             c.sediment.to_bits(),
+                            c.orogeny.to_bits(),
                         ]
                     })
                 };

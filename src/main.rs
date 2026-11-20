@@ -359,7 +359,7 @@ fn snapshot(
         "    trenches {:.0} km, ridges {:.0} km, collisions {:.0} km ({:.0} converging, {:.0} diverging) | slab pull {:.2e} N, ridge push {:.2e} N | \
          rifts {}, initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
          blocked splits {}, terranes {} ({} cells, {} slab break-offs) | continental contacts made by rifts {:.0} km ({:.0} far), by initiations {:.0} km ({:.0} far) | \
-         splits along weak zones {}, along great circles {}, boundary deviation from a great circle: rifts {:.0} km, initiations {:.0} km | \
+         splits along weak zones {} ({} cut again, {} rift triple junctions; rift boundaries on sutures {:.0}% of their continental cells vs {:.0}% of the rifted plates), along great circles {}, boundary deviation from a great circle: rifts {:.0} km, initiations {:.0} km | \
          fracture-zone initiations {}, failed initiations (no division/overriding/subducting part too small) {}/{}/{}, \
          undone initiations (suture/capture/piece/terrane) {}/{}/{}/{}",
         statistics.trench_length,
@@ -390,6 +390,12 @@ fn snapshot(
         statistics.events.initiation_contact_km,
         statistics.events.initiation_far_contact_km,
         statistics.events.weak_zone_splits,
+        statistics.events.recut_splits,
+        statistics.events.junction_rifts,
+        100.0 * statistics.events.rift_suture_cells[0] as f64
+            / statistics.events.rift_suture_cells[1].max(1) as f64,
+        100.0 * statistics.events.rift_suture_cells[2] as f64
+            / statistics.events.rift_suture_cells[3].max(1) as f64,
         statistics.events.great_circle_splits,
         statistics.events.split_deviation_km[0]
             / statistics.events.measured_splits[0].max(1) as f64,
@@ -808,7 +814,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -827,7 +833,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
         writeln!(
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
-             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4}",
+             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{}",
             mesh.vertex(cell).z.asin().to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -848,6 +854,11 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             planet.water_cycle().evaporation[cell as usize],
             month_precipitation(0, cell),
             month_precipitation(6, cell),
+            if crust.orogeny > tectonics::NO_OROGENY {
+                format!("{:.1}", crust.orogeny)
+            } else {
+                String::new()
+            },
         )?;
     }
     file.flush()?;
