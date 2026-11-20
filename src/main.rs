@@ -658,8 +658,8 @@ fn snapshot(
     );
     info!(
         "    crust mass (Gt): continental {:.3e}, transitional {:.3e}, oceanic {:.3e}, \
-         sediment {:.3e}, felsic {:.3e}, hidden {:.3e} | sediment overfill {:.0} km·cells, \
-         metamorphosed {:.3e} (on other crust {:.3e})",
+         sediment {:.3e}, felsic {:.3e}, hidden {:.3e} | sediment overfill {:.0} km·cells (terminal fans and \
+         deltas {:.0} km·cells), metamorphosed {:.3e} (on other crust {:.3e})",
         statistics.continental_mass,
         statistics.transitional_mass,
         statistics.oceanic_mass,
@@ -667,6 +667,7 @@ fn snapshot(
         statistics.felsic_mass,
         statistics.hidden_mass,
         planet_statistics.sediment_overfill / 1000.0,
+        planet_statistics.terminal_fans / 1000.0,
         statistics.metamorphosed.0 + statistics.metamorphosed.1,
         statistics.metamorphosed.1,
     );

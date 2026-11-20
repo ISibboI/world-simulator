@@ -27,6 +27,9 @@ pub struct Planet {
     /// Sediment piled above the delta top in overfilled basins so far (thickness over one cell,
     /// summed).
     sediment_overfill: f64,
+    /// Sediment built into terminal fans and prograding deltas so far (thickness over one cell,
+    /// summed).
+    terminal_fans: f64,
     /// Sediment deposited in the ocean per zone in the last step, in m³/yr.
     sediment_deposition: [f64; 4],
     /// Sediment moved by waves so far (rock-equivalent thickness over one cell, summed).
@@ -89,6 +92,9 @@ pub struct PlanetStatistics {
     /// Sediment piled above the delta top in overfilled basins so far (thickness over one cell,
     /// summed).
     pub sediment_overfill: f64,
+    /// Sediment built into terminal fans and prograding deltas so far (thickness over one cell,
+    /// summed).
+    pub terminal_fans: f64,
     /// Sediment deposited in the ocean in the last step per [`crate::erosion::Zone`] (shelf,
     /// slope, rise, fan) in m³/yr.
     pub sediment_deposition: [f64; 4],
@@ -189,6 +195,7 @@ impl Planet {
             sediment_flux: 0.0,
             hydrology: Hydrology::default(),
             sediment_overfill: 0.0,
+            terminal_fans: 0.0,
             sediment_deposition: [0.0; 4],
             wave_erosion: WaveErosion::default(),
             sediment_delivered: 0.0,
@@ -276,6 +283,7 @@ impl Planet {
             self.sediment_flux = result.sediment_to_ocean / dt_years;
             self.hydrology = result.hydrology;
             self.sediment_overfill += result.sediment_overfill;
+            self.terminal_fans += result.terminal_fan;
             self.sediment_delivered += result.sediment_to_ocean;
             let wave = &mut self.wave_erosion;
             wave.cliff_sediment += result.wave.cliff_sediment;
@@ -414,6 +422,7 @@ impl Planet {
             sediment_flux: self.sediment_flux,
             hydrology: self.hydrology,
             sediment_overfill: self.sediment_overfill,
+            terminal_fans: self.terminal_fans,
             sediment_deposition: self.sediment_deposition,
             sediment_stock,
             sediment_reservoirs: self.sediment_reservoirs(&elevation),
