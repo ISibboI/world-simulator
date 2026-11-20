@@ -65,9 +65,11 @@ the land drains into them as endorheic basins (of 11.3% endorheic in total).
    - The leftover of a mouth becomes a cone around the mouth whose surface falls with
      `alluvial_slope` (2 × 10⁻⁴, ~22 m per cell; megafans and delta plains fall by 10⁻⁴–10⁻³:
      Kosi, Okavango, Taquari, Pilcomayo; Leier et al. 2005; Hartley et al. 2010).
-   - The cone covers land and shelf (a full shelf sea becomes land: the delta progrades). It
-     does not cross deep water, which the fan pass fills. Its height is the one that holds the
-     amount, with the isostatic response of each column.
+   - The cone spreads through the cells it covers, land and sea (a full shelf sea becomes
+     land: the delta progrades). Its height is the one that holds the amount, with the
+     isostatic response of each column. (As first implemented it stopped at deep water and
+     covered lows behind higher ground; both were changed after the results evaluation, see
+     [`results.md`](results.md).)
    - Nothing is piled on one cell any more. The overfill counter stays, for the case that a
      cone exceeds its search radius (64 rings).
    - Not done: a transport threshold for incision. Sediment of a cone is eroded again like any
