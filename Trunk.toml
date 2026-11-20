@@ -1,0 +1,8 @@
+# Web version: `trunk serve` for local testing, `trunk build --release` for the site in dist/.
+[build]
+target = "web/index.html"
+dist = "dist"
+# Relative URLs, so the site works under any path (GitHub Pages serves it at /world-simulator/).
+public_url = "./"
+# Fixed file names, because web/worker.js imports the module by name.
+filehash = false

@@ -15,7 +15,7 @@ This is a plan only. Nothing is implemented yet. The decisions for Sebastian are
   `WebRunner`, and egui-wgpu enables both the `webgpu` and `webgl` (WebGL2 fallback) backends
   by default. The shader only uses a uniform buffer, a vec3/vec3/vec4 vertex layout and a
   diffuse light, so it is safe for WebGL2.
-- **`cargo check --target wasm32-unknown-unknown`** (experiments in `agent-scratch/wasm-exp/`):
+- **`cargo check --target wasm32-unknown-unknown`** (throw-away experiments, not kept):
   1. With the current `Cargo.toml` it fails in **`getrandom 0.4`**, which `rand 0.10` pulls in
      through its default features (`thread_rng`/`sys_rng`). The simulation only uses seeded
      `ChaCha8Rng` (`tectonics/mod.rs`, `generation.rs`, `initial_sediment.rs`, …), so
@@ -259,21 +259,20 @@ an independent agent reviews this plan before M0 starts.
 
 ## 9. Decisions for Sebastian
 
-- **D1 Simulation in a Web Worker** (recommended) vs. stepping on the main thread with a page
-  that freezes during each step. Neither uses wasm threads.
-- **D2 Web defaults:** subdivisions 5 on the web (recommended; ~0.3 s/step) or the desktop
-  default 6 (~0.5–1 s/step, ~1.6 MB per update).
+- **D1 decided (Sebastian, 2026-11-20):** the simulation runs in a Web Worker; the GUI must
+  not freeze.
+- **D2 decided:** subdivisions 5 is the web default.
 - **D3 decided (Sebastian, 2026-11-20):** the web version reads the parameters from URL query
   parameters (`?seed=3&subdivisions=5`, same clap definition as the CLI). A GUI panel for
   choosing parameters and restarting goes to a separate issue, #61 (desktop and web, shared
   code). Its initial values still come from the CLI or URL. The desktop viewer's only input
   today is click-and-drag rotation.
-- **D4 Deploy trigger:** every push to `main` (recommended) or only tagged releases or a
-  manual trigger.
-- **D5 Enable Pages:** set Settings → Pages → Source to "GitHub Actions" when M3 lands.
+- **D4 decided:** `main` is protected; every push to `main` (including merged PRs) redeploys.
+  PRs only build the site, without deploying it.
+- **D5 done:** Sebastian set Pages → Source to "GitHub Actions".
 - **D6 decided (Sebastian, 2026-11-20):** seeds must reproduce the same simulation
   **on the web** (run to run, across browsers and machines). Desktop must be deterministic as
   an algorithm, but math-library differences don't matter, and web and desktop needn't
   match. So there is no `libm` switch; see §4 for what keeps the web build deterministic.
 
-Still open before M0 can start: **D1, D2, D4, D5**.
+All decisions are made (2026-11-20); implementation M0–M3 follows.

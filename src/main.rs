@@ -1,3 +1,7 @@
+// On the web, the snapshot images and dumps are not written, so their code is unused there; the
+// native build still checks for dead code.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 mod climate;
 mod erosion;
 mod isostasy;
@@ -10,14 +14,19 @@ mod sphere;
 mod tectonics;
 mod temperature;
 mod viewer;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
-use std::io::IsTerminal;
 use std::path::PathBuf;
-use std::time::Instant;
+
+use web_time::Instant;
 
 use anyhow::{Context, ensure};
 use clap::Parser;
-use tracing::{debug, error, info, warn};
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::{debug, error};
+use tracing::{info, warn};
+#[cfg(not(target_arch = "wasm32"))]
 use tracing_subscriber::EnvFilter;
 
 use crate::erosion::WaveErosion;
@@ -44,7 +53,7 @@ struct Cli {
     seed: u64,
 
     /// Icosphere subdivisions. The planet has 10 * 4^n + 2 cells.
-    #[arg(long, default_value_t = 6)]
+    #[arg(long, default_value_t = DEFAULT_SUBDIVISIONS)]
     subdivisions: u32,
 
     /// Number of tectonic plates.
@@ -143,9 +152,19 @@ struct Cli {
     overrides: Vec<String>,
 }
 
+/// Default icosphere subdivisions: 6 on the desktop, 5 on the web, where the simulation runs about
+/// 1.5× slower and 6 would take about a second per step.
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_SUBDIVISIONS: u32 = 6;
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_SUBDIVISIONS: u32 = 5;
+
 /// Logs to stderr, filtered by `RUST_LOG` (default: `info`). Also captures `log` records of
 /// dependencies.
+#[cfg(not(target_arch = "wasm32"))]
 fn init_logging() {
+    use std::io::IsTerminal;
+
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -156,9 +175,49 @@ fn init_logging() {
 
 const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     init_logging();
+    let planet = build_planet(&cli)?;
+    std::fs::create_dir_all(&cli.output)
+        .with_context(|| format!("creating output directory {}", cli.output.display()))?;
+
+    if cli.headless {
+        return simulate(planet, &cli, |_| {});
+    }
+
+    let mesh = planet.tectonics().mesh();
+    let (vertex_count, faces) = (mesh.len(), mesh.faces().to_vec());
+    viewer::run(vertex_count, faces, move |updates, wake_up| {
+        std::thread::spawn(move || {
+            let publish = |planet: &Planet| {
+                let vertices =
+                    viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
+                let update = viewer::SurfaceUpdate {
+                    time: planet.tectonics().time(),
+                    vertices: std::sync::Arc::new(vertices),
+                };
+                // Sending fails once the window was closed; the process then exits anyway.
+                if updates.send(update).is_ok() {
+                    wake_up();
+                }
+            };
+            if let Err(error) = simulate(planet, &cli, publish) {
+                error!("Simulation failed: {error:#}");
+            }
+        });
+    })
+}
+
+/// On the web, the same binary is the page (3D view) and the simulation worker; see [`web`].
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    web::start();
+}
+
+/// Checks the parameters and creates the initial planet.
+fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
     ensure!(
         cli.subdivisions <= 8,
         "at most 8 subdivisions are supported"
@@ -167,8 +226,6 @@ fn main() -> anyhow::Result<()> {
     ensure!(cli.dt > 0.0, "the time step must be positive");
     ensure!(cli.duration >= 0.0, "the duration must not be negative");
     ensure!(cli.width >= 2, "the image width must be at least 2");
-    std::fs::create_dir_all(&cli.output)
-        .with_context(|| format!("creating output directory {}", cli.output.display()))?;
 
     let mesh = SphereMesh::icosphere(cli.subdivisions);
     info!(cells = mesh.len(), "Created planet mesh");
@@ -214,32 +271,7 @@ fn main() -> anyhow::Result<()> {
     let erosion = (!cli.no_erosion).then_some(erosion);
     let mut planet = Planet::new(simulation, climate, temperature, erosion, EARTH_RADIUS);
     planet.track_cover_cohort_from(cli.cover_cohort);
-
-    if cli.headless {
-        return simulate(planet, &cli, |_| {});
-    }
-
-    let mesh = planet.tectonics().mesh();
-    let (vertex_count, faces) = (mesh.len(), mesh.faces().to_vec());
-    viewer::run(vertex_count, faces, move |updates, wake_up| {
-        std::thread::spawn(move || {
-            let publish = |planet: &Planet| {
-                let vertices =
-                    viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
-                let update = viewer::SurfaceUpdate {
-                    time: planet.tectonics().time(),
-                    vertices: std::sync::Arc::new(vertices),
-                };
-                // Sending fails once the window was closed; the process then exits anyway.
-                if updates.send(update).is_ok() {
-                    wake_up();
-                }
-            };
-            if let Err(error) = simulate(planet, &cli, publish) {
-                error!("Simulation failed: {error:#}");
-            }
-        });
-    })
+    Ok(planet)
 }
 
 /// Runs the simulation, writing snapshots and calling `on_step` with the initial state and after
@@ -775,6 +807,18 @@ fn snapshot(
         planet_statistics.gyre_transport,
     );
 
+    #[cfg(not(target_arch = "wasm32"))]
+    write_snapshot_files(planet, cli)?;
+    #[cfg(target_arch = "wasm32")]
+    let _ = cli;
+    Ok(())
+}
+
+/// Writes the snapshot images (and with `--cell-dump` the cell and mesh CSVs) into `--output`.
+/// Not on the web, which has no file system.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_snapshot_files(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
+    let simulation = planet.tectonics();
     let time = simulation.time().round() as u64;
     if cli.cell_dump {
         let path = cli.output.join(format!("cells_{time:05}.csv"));
@@ -880,6 +924,7 @@ struct PreviousSnapshot {
 /// number of cells showing the same sample, whether the cell is at a coast, precipitation (m/yr),
 /// discharge (m³/yr), longitude (°), the annual mean, January and July surface temperatures
 /// (°C), evaporation or evapotranspiration (m/yr), and January and July precipitation (m/yr).
+#[cfg(not(target_arch = "wasm32"))]
 fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Write;
     let simulation = planet.tectonics();
@@ -958,6 +1003,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
 }
 
 /// Writes the mesh (cell, position, neighbours separated by `;`) for analysing cell dumps.
+#[cfg(not(target_arch = "wasm32"))]
 fn write_mesh_dump(mesh: &sphere::SphereMesh, path: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Write;
     let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);

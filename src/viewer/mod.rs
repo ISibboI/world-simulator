@@ -4,8 +4,8 @@
 //! lets later user interface elements be drawn on top of the 3D view. The planet itself is
 //! drawn with wgpu through an egui paint callback (see [`renderer`]).
 //!
-//! The simulation runs on a separate thread and sends new surface meshes to the window through a
-//! channel.
+//! The simulation runs on a separate thread (in a Web Worker on the web, see `crate::web`) and
+//! sends new surface meshes to the view through a channel.
 
 mod renderer;
 
@@ -14,15 +14,19 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use eframe::egui;
 use glam::Vec3;
-use tracing::info;
 
 use crate::planet::Planet;
 use crate::render;
-use renderer::{PlanetCallback, Uniforms, Vertex};
+#[cfg(target_arch = "wasm32")]
+pub use renderer::Vertex;
+#[cfg(not(target_arch = "wasm32"))]
+use renderer::Vertex;
+use renderer::{PlanetCallback, Uniforms};
 
 /// Bits of the depth buffer requested from eframe; must match [`renderer::DEPTH_FORMAT`].
 const DEPTH_BUFFER_BITS: u8 = 32;
-/// Multisample anti-aliasing samples.
+/// Multisample anti-aliasing samples (desktop only; the web painter does not multisample).
+#[cfg(not(target_arch = "wasm32"))]
 const MSAA_SAMPLES: u16 = 4;
 /// Vertical field of view of the camera in radians.
 const FIELD_OF_VIEW: f32 = 0.6;
@@ -86,10 +90,33 @@ pub fn surface_vertices(planet: &Planet, exaggeration: f64, river_threshold: f64
         .collect()
 }
 
+/// Called once the view exists, with a sender for surface updates and a callback that wakes up the
+/// view; it should start the simulation (on another thread, or in a Web Worker on the web).
+pub type StartSimulation = Box<dyn FnOnce(Sender<SurfaceUpdate>, Box<dyn Fn() + Send>)>;
+
+/// Creates the viewer app; shared by the desktop window and the web page.
+fn app_creator(
+    vertex_count: usize,
+    faces: Vec<[u32; 3]>,
+    msaa_samples: u16,
+    start_simulation: StartSimulation,
+) -> eframe::AppCreator<'static> {
+    Box::new(move |creation_context| {
+        let render_state = creation_context
+            .wgpu_render_state
+            .as_ref()
+            .ok_or("the wgpu renderer is not available")?;
+        renderer::initialize(render_state, vertex_count, &faces, u32::from(msaa_samples));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let context = creation_context.egui_ctx.clone();
+        start_simulation(sender, Box::new(move || context.request_repaint()));
+        Ok(Box::new(Viewer::new(receiver)))
+    })
+}
+
 /// Opens the 3D view and blocks until the window is closed.
-///
-/// `start_simulation` is called once the window exists, with a sender for surface updates and a
-/// callback that wakes up the window; it should start the simulation on another thread.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run(
     vertex_count: usize,
     faces: Vec<[u32; 3]>,
@@ -108,22 +135,38 @@ pub fn run(
     eframe::run_native(
         "World Simulator",
         options,
-        Box::new(move |creation_context| {
-            let render_state = creation_context
-                .wgpu_render_state
-                .as_ref()
-                .ok_or("the wgpu renderer is not available")?;
-            renderer::initialize(render_state, vertex_count, &faces, u32::from(MSAA_SAMPLES));
-
-            let (sender, receiver) = std::sync::mpsc::channel();
-            let context = creation_context.egui_ctx.clone();
-            start_simulation(sender, Box::new(move || context.request_repaint()));
-            Ok(Box::new(Viewer::new(receiver)))
-        }),
+        app_creator(
+            vertex_count,
+            faces,
+            MSAA_SAMPLES,
+            Box::new(start_simulation),
+        ),
     )
     .map_err(|error| anyhow::anyhow!("failed to run the 3D view: {error}"))?;
-    info!("3D view closed");
+    tracing::info!("3D view closed");
     Ok(())
+}
+
+/// Starts the 3D view in `canvas` of the web page. eframe's web painter does not multisample.
+#[cfg(target_arch = "wasm32")]
+pub async fn run_web(
+    canvas: web_sys::HtmlCanvasElement,
+    vertex_count: usize,
+    faces: Vec<[u32; 3]>,
+    start_simulation: StartSimulation,
+) -> anyhow::Result<()> {
+    let options = eframe::WebOptions {
+        depth_buffer: DEPTH_BUFFER_BITS,
+        ..Default::default()
+    };
+    eframe::WebRunner::new()
+        .start(
+            canvas,
+            options,
+            app_creator(vertex_count, faces, 1, start_simulation),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to start the 3D view: {error:?}"))
 }
 
 struct Viewer {

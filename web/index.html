@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>World Simulator</title>
+    <!-- The simulator (src/web.rs); the same module also runs the simulation in worker.js. -->
+    <link data-trunk rel="rust" href="../Cargo.toml" data-bin="world-simulator" data-wasm-opt="3">
+    <link data-trunk rel="copy-file" href="worker.js">
+    <style>
+        html, body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            background: #05050f;
+            color: #c8c8d0;
+            font-family: sans-serif;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            touch-action: none;
+        }
+        #status {
+            position: absolute;
+            top: 1em;
+            left: 1em;
+            right: 1em;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="world_simulator"></canvas>
+    <div id="status">Loading…</div>
+</body>
+</html>
