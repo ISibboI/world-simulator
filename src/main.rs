@@ -3,6 +3,7 @@ mod erosion;
 mod isostasy;
 mod ocean;
 mod planet;
+mod presets;
 mod render;
 mod sparse;
 mod sphere;
@@ -19,15 +20,13 @@ use clap::Parser;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::climate::ClimateParams;
-use crate::erosion::{ErosionParams, WaveErosion};
+use crate::erosion::WaveErosion;
 use crate::planet::{Planet, PlanetStatistics};
+use crate::presets::{Biosphere, Epoch, Parameters};
 use crate::sphere::SphereMesh;
 use crate::tectonics::{
-    InitialConfiguration, MassLedger, MaterialBudget, SeaLevelBudget, Simulation, TectonicParams,
-    TrenchSediment,
+    InitialConfiguration, MassLedger, MaterialBudget, SeaLevelBudget, Simulation, TrenchSediment,
 };
-use crate::temperature::TemperatureParams;
 
 /// The planet radius in metres; used for erosion, climate and to report linear speeds.
 const EARTH_RADIUS: f64 = 6.371e6;
@@ -113,10 +112,28 @@ struct Cli {
     #[arg(long)]
     cell_dump: bool,
 
+    /// Life on the planet, as far as the parameters see it: `modern` is today's vegetated Earth
+    /// with a biogenic ocean, `abiotic` a planet without life (bare land, no transpiration,
+    /// braided rivers, no biogenic pelagic sediment). See `presets::Biosphere`.
+    #[arg(long, value_enum, default_value_t = Biosphere::Modern)]
+    biosphere: Biosphere,
+
+    /// Time of the planet's history in Ga before present (0 is today, 3.5 the Archean): sets the
+    /// solar constant of the fainter young Sun and, unless `--co2` is given, a greenhouse forcing
+    /// that offsets it. See `presets::Epoch`.
+    #[arg(long, default_value_t = 0.0)]
+    epoch: f64,
+
+    /// CO₂ relative to the pre-industrial 280 ppm; the greenhouse forcing becomes
+    /// 5.35 ln(ratio) W/m² instead of the default of the epoch.
+    #[arg(long)]
+    co2: Option<f64>,
+
     /// Overrides a tectonic parameter for calibration, e.g. `--set basal_drag=8e14`, or an
     /// erosion, climate or temperature parameter with the prefix `erosion.`, `climate.` or
     /// `temperature.`; can be repeated. See `TectonicParams::set`, `ErosionParams::set`,
-    /// `ClimateParams::set` and `TemperatureParams::set` for the names.
+    /// `ClimateParams::set` and `TemperatureParams::set` for the names. Overrides are applied
+    /// after the presets (`--biosphere`, `--epoch`, `--co2`).
     #[arg(long = "set", value_name = "NAME=VALUE")]
     overrides: Vec<String>,
 }
@@ -150,20 +167,20 @@ fn main() -> anyhow::Result<()> {
 
     let mesh = SphereMesh::icosphere(cli.subdivisions);
     info!(cells = mesh.len(), "Created planet mesh");
-    let mut params = TectonicParams {
-        continental_fraction: cli.continental_fraction,
-        initial: cli.initial,
-        ..TectonicParams::default()
-    };
+    let epoch = Epoch::new(cli.epoch, cli.co2)?;
+    if cli.co2.is_some_and(|co2| co2 > 30.0) {
+        warn!(
+            "the logarithmic CO₂ forcing (Myhre et al., 1998) holds up to a few tens of times the \
+             pre-industrial CO₂; above that it underestimates the forcing (Byrne & Goldblatt, 2014)"
+        );
+    }
+    let mut parameters = Parameters::new(EARTH_RADIUS, cli.biosphere, epoch);
+    let params = &mut parameters.tectonics;
+    params.continental_fraction = cli.continental_fraction;
+    params.initial = cli.initial;
     params.matching.verify = cli.verify_matching;
     params.initial_sediment.enabled = !cli.no_initial_sediment;
     params.track_material_budget = cli.material_budget;
-    let mut erosion = ErosionParams {
-        planet_radius: EARTH_RADIUS,
-        ..ErosionParams::default()
-    };
-    let mut climate = ClimateParams::default();
-    let mut temperature = TemperatureParams::default();
     for assignment in &cli.overrides {
         let (name, value) = assignment
             .split_once('=')
@@ -171,17 +188,23 @@ fn main() -> anyhow::Result<()> {
         let value: f64 = value
             .parse()
             .with_context(|| format!("parsing the value of {name}"))?;
-        if let Some(name) = name.strip_prefix("erosion.") {
-            erosion.set(name, value)?;
-        } else if let Some(name) = name.strip_prefix("climate.") {
-            climate.set(name, value)?;
-        } else if let Some(name) = name.strip_prefix("temperature.") {
-            temperature.set(name, value)?;
-        } else {
-            params.set(name, value)?;
-        }
+        parameters.set(name, value)?;
         info!(name, value, "Overrode parameter");
     }
+    info!(
+        biosphere = ?cli.biosphere,
+        epoch_ga = cli.epoch,
+        solar_constant = parameters.temperature.orbit.solar_constant,
+        greenhouse_forcing = parameters.temperature.greenhouse_forcing,
+        "Planet presets (after the overrides; `--set temperature.solar_constant` does not \
+         change the greenhouse forcing)"
+    );
+    let Parameters {
+        tectonics: params,
+        erosion,
+        climate,
+        temperature,
+    } = parameters;
     let simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
     let erosion = (!cli.no_erosion).then_some(erosion);
     let planet = Planet::new(simulation, climate, temperature, erosion, EARTH_RADIUS);
