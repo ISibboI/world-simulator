@@ -11,32 +11,40 @@
 //!
 //! with absorbed sunlight `Q (1 - α)`, outgoing longwave radiation `A + B T` (Budyko, 1969),
 //! poleward heat transport by diffusion `D ∇²T` (Sellers, 1969; North, 1975), and the heat
-//! capacity `C` of the ocean mixed layer or of land. Permanent sea ice forms where the annual
-//! mean temperature of the previous year is low (Budyko's criterion), which avoids the runaway
-//! cooling that seasonal snow albedo causes in energy balance models; ice sheets also need
-//! snowfall. Most of the transport acts on the means of
-//! latitude bands (the one-dimensional model of North, 1975), and only a weak part acts as
-//! two-dimensional diffusion between neighbouring cells. Applying the full transport
-//! two-dimensionally would tie the temperature of land to the surrounding ocean over thousands of
-//! kilometres within a season, suppressing continental climates. Snow and sea ice raise the albedo `α`
-//! (ice-albedo feedback). Land has a much smaller heat capacity than the ocean (the air column,
-//! about 1e7 J/m²/K), so continental
-//! interiors get hot summers and cold winters.
+//! capacity `C`. Most of the transport acts on the means of latitude bands (the one-dimensional
+//! model of North, 1975), and only a weak part acts as two-dimensional diffusion between
+//! neighbouring cells; applying the full transport two-dimensionally would tie the temperature of
+//! land to the surrounding ocean over thousands of kilometres within a season.
+//!
+//! Every cell has a **land surface** and an **ocean column**, coupled through the air above them.
+//! Land has a small heat capacity (the air column, about 1e7 J/m²/K), so continental interiors get
+//! hot summers and cold winters; ice sheets form on land below an annual mean of −10 °C if it
+//! snows enough (Budyko's criterion, scaled by snowfall).
+//!
+//! The ocean column follows Wagner & Eisenman (2015): its enthalpy is either the heat of the
+//! mixed layer above the freezing point (open water) or the latent heat of sea ice. Ice insulates
+//! the ocean, so its surface cools far below freezing in winter, from the balance of conduction
+//! through the ice and the surface fluxes; in summer the surface stays at the melting point while
+//! the ice melts. Sea ice is bright, melting ice less so, and the open ocean of high latitudes is
+//! already bright from clouds and low sun (the planetary albedo is `a + b P₂(sin φ)`), which masks
+//! much of the contrast to sea ice.
+//!
+//! **Ocean currents** carry heat in the ocean columns: the shallow overturning cells of the
+//! subtropics (poleward Ekman transport under the trade winds, returning in the thermocline) as a
+//! zonal transport, and the wind-driven gyres with their western boundary currents (see
+//! [`crate::ocean`]).
 //!
 //! Over cold surfaces, the air that radiates to space lies above a surface inversion and stays
-//! warmer than the surface, which the transport of heat from lower latitudes maintains. The
-//! linear law `A + B T`, fitted to Earth's mid and low latitudes, would underestimate the outgoing
-//! radiation there (by about 10 W/m² over the Arctic Ocean, 20 W/m² over Antarctica). Below the
-//! inversion temperature `T_i`, the emitting air is taken to be warmer than the surface by
-//! `k (T_i − T)`, so the outgoing radiation is `A + B (T + k (T_i − T))`. This is off by default
-//! (`k = 0`): with k ≈ 1/3, as fitted to the observed outgoing radiation, the weaker radiative
-//! damping of cold climates lets the ice-albedo feedback run away into a snowball for some
-//! continental configurations. Sea-ice thermodynamics (thin, insulating ice that holds the summer
-//! surface at the melting point) would be needed first.
+//! warmer than the surface. The linear law `A + B T`, fitted to Earth's mid and low latitudes,
+//! underestimates the outgoing radiation there (by about 10 W/m² over the Arctic Ocean, 20 W/m²
+//! over Antarctica). Below the inversion temperature `T_i`, the emitting air can be taken to be
+//! warmer than the surface by `k (T_i − T)`. This is off by default (`k = 0`): with k ≈ 1/3, the
+//! weaker radiative damping of cold climates moves the solar constant at which the planet falls
+//! into a snowball from about 91% to about 94% of today's.
 //!
-//! The model evolves the sea-level temperature on a coarse icosphere, since temperature varies
-//! smoothly. Surface temperatures on the fine mesh are interpolated and lowered with elevation
-//! according to the lapse rate.
+//! The model evolves sea-level temperatures on a coarse icosphere, since temperature varies
+//! smoothly. Surface temperatures on the fine mesh are interpolated from the land or the ocean
+//! surface, depending on the fine cell, and lowered with elevation according to the lapse rate.
 
 use std::f64::consts::{PI, TAU};
 
@@ -150,7 +158,8 @@ pub struct TemperatureParams {
     pub max_ice_thickness: f64,
     /// Wind-driven ocean heat transport by the shallow subtropical overturning cells: poleward
     /// Ekman transport under the trade winds, returning equatorward in the thermocline at the
-    /// temperature of the water subducted at this latitude (degrees).
+    /// temperature of the water subducted at this latitude (degrees) in late winter, when the
+    /// mixed layer is deepest.
     pub subduction_latitude: f64,
     /// Friction (1/s) that limits the Ekman transport near the equator, where f vanishes.
     pub equatorial_friction: f64,
@@ -353,6 +362,10 @@ pub struct TemperatureModel {
     /// ocean.
     ocean_heat_convergence: Vec<f64>,
     gyre_model: crate::ocean::GyreModel,
+    /// Temperature of the water subducted into the thermocline in the south and the north: the
+    /// sea surface at the subduction latitude in late winter, when the mixed layer is deepest,
+    /// in the previous year.
+    subduction_temperature: [f64; 2],
     spun_up: bool,
     fields: TemperatureFields,
 }
@@ -420,6 +433,7 @@ impl TemperatureModel {
             previous_annual_land: vec![15.0; count],
             ocean_heat_convergence: vec![0.0; count],
             gyre_model,
+            subduction_temperature: [15.0; 2],
             spun_up: false,
             fields: TemperatureFields::default(),
         }
@@ -636,7 +650,7 @@ impl TemperatureModel {
                         let surface = 0.5 * (band_sst[b] + band_sst[b + 1]);
                         let heat = WATER_HEAT_CAPACITY
                             * mass
-                            * (surface - band_sst[subduction[hemisphere]]);
+                            * (surface - self.subduction_temperature[hemisphere]);
                         band_ocean_flux[b] -= heat;
                         band_ocean_flux[b + 1] += heat;
                         ocean_transport_sum[b] += heat;
@@ -776,6 +790,20 @@ impl TemperatureModel {
                 }
             }
             let steps_per_year = (seasons * params.substeps_per_season) as f64;
+            for (hemisphere, &band) in subduction.iter().enumerate() {
+                self.subduction_temperature[hemisphere] = seasonal_ocean
+                    .iter()
+                    .map(|season| {
+                        let (sum, weight) = (0..coarse_count)
+                            .filter(|&cell| self.band[cell] == band)
+                            .fold((0.0, 0.0), |(sum, weight), cell| {
+                                let w = 1.0 - land_fraction[cell];
+                                (sum + w * season[cell], weight + w)
+                            });
+                        sum / weight.max(1e-9)
+                    })
+                    .fold(f64::INFINITY, f64::min);
+            }
             for (previous, &sum) in self.previous_annual_land.iter_mut().zip(&annual_land) {
                 *previous = sum / steps_per_year;
             }
@@ -1142,7 +1170,7 @@ mod tests {
         assert!(july > -8.0, "July {july}");
         assert!(mean_where(&arctic, &|c| fields.ice[c]) > 0.5);
         assert!(mean_where(&|l: f64| l.abs() < 30.0, &|c| fields.ice[c]) < 0.01);
-        // The ocean carries heat poleward in both hemispheres, about 0.5–3 PW at 10–20°.
+        // The ocean carries heat poleward in both hemispheres (an ocean planet: up to ~4 PW).
         let ocean = |latitude: f64| {
             fields
                 .meridional_transport
@@ -1151,8 +1179,8 @@ mod tests {
                 .map(|t| t.2 * EARTH_RADIUS * EARTH_RADIUS / 1e15)
                 .unwrap()
         };
-        assert!((0.5..3.0).contains(&ocean(15.0)), "{}", ocean(15.0));
-        assert!((-3.0..-0.5).contains(&ocean(-15.0)), "{}", ocean(-15.0));
+        assert!((0.5..4.0).contains(&ocean(15.0)), "{}", ocean(15.0));
+        assert!((-4.0..-0.5).contains(&ocean(-15.0)), "{}", ocean(-15.0));
     }
 }
 
@@ -1201,40 +1229,6 @@ mod probe {
                 line += &format!(" {percent}%: {global:.1}°C/{:.0}%", 100.0 * ice);
             }
             eprintln!("SWEEP {file}:{line}");
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn probe_aquaplanet() {
-        let mesh = SphereMesh::icosphere(4);
-        let elevation = vec![-4000.0; mesh.len()];
-        let params = TemperatureParams {
-            spin_up_years: 1,
-            ..TemperatureParams::default()
-        };
-        let mut model = TemperatureModel::new(&mesh, params);
-        for year in 0..30 {
-            model.update(&elevation, None);
-            let f = model.fields();
-            let lat = |c: usize| mesh.vertex(c as u32).z.asin().to_degrees().abs();
-            let band = |a: f64, b: f64, field: &dyn Fn(usize) -> f64| {
-                let cells: Vec<usize> = (0..mesh.len())
-                    .filter(|&c| (a..b).contains(&lat(c)))
-                    .collect();
-                cells.iter().map(|&c| field(c)).sum::<f64>() / cells.len() as f64
-            };
-            eprintln!(
-                "year {year}: T 0-10 {:.1} 30-40 {:.1} 50-60 {:.1} 70-90 {:.1} | ice 50-60 {:.2} 70-90 {:.2} | Jan/Jul 70-90 {:.1}/{:.1}",
-                band(0.0, 10.0, &|c| f.annual_mean[c]),
-                band(30.0, 40.0, &|c| f.annual_mean[c]),
-                band(50.0, 60.0, &|c| f.annual_mean[c]),
-                band(70.0, 90.1, &|c| f.annual_mean[c]),
-                band(50.0, 60.0, &|c| f.ice[c]),
-                band(70.0, 90.1, &|c| f.ice[c]),
-                band(70.0, 90.1, &|c| f.monthly[0][c]),
-                band(70.0, 90.1, &|c| f.monthly[6][c]),
-            );
         }
     }
 }
