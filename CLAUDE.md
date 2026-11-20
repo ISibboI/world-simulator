@@ -4,21 +4,23 @@ A Rust binary that simulates a planet, starting with plate tectonics on a sphere
 
 ## Issue and progress tracking
 
-Issues, plans, progress and results are tracked on **GitHub**
-(https://github.com/ISibboI/world-simulator/issues), not in local files:
+Issues are tracked on **GitHub** (https://github.com/ISibboI/world-simulator/issues); new
+problems, ideas and tasks become new GitHub issues. Start work on an issue or PR by reading it on
+GitHub (`gh issue view N --comments`, `gh pr view N --comments`) and follow its links into
+`notes/` from there.
 
-- New problems, ideas and tasks become new GitHub issues.
-- Plans go into the issue body or a plan comment on the issue (revised plans as new comments).
-- Progress and results go into issue comments and PR descriptions (what was done, decisions and
-  their reasons, measurements, open questions).
+GitHub issues, PRs and comments carry only what matters to the user: brief answers to his
+requests, a short summary of what changed, key results, caveats, decisions he must make, and
+links. Plans, plan reviews, method write-ups, long result tables and other large prose go into
+`notes/issue-<N>/` (or `notes/pr-<N>/` for work requested only on a PR), e.g. `plan.md`,
+`results.md`, committed on the task's branch and linked from the issue or PR as
+`https://github.com/ISibboI/world-simulator/blob/<branch-or-main>/notes/issue-<N>/<file>`.
 
-[notes/](notes/) is a **read-only archive** (frozen as of 2026-11-19) of the old issues, plans
-(`notes/plans/`), research (`notes/research/`), session logs (`notes/sessions/`) and the project
-summary. Read it for context. `notes/ISSUES.md` maps the old notes issue numbers to GitHub
-numbers; cite issues as "issue 13 (#14)" where the old number is still in use, or just "#N".
-When old material becomes relevant, move it to the GitHub issue (as text or a comment) instead
-of editing or extending the archive. **Do not create new local notes**: no new session logs,
-plan or research files, and no new entries in `notes/SUMMARY.md`.
+The older files in [notes/](notes/) (old issues, `notes/plans/`, `notes/research/`,
+`notes/sessions/` and the project summary) are an archive (as of 2026-11-19): read them for
+context, but do not extend them. `notes/ISSUES.md` maps the old notes issue numbers to GitHub
+numbers; cite issues as "issue 13 (#14)" where the old number is still in use, or just "#N". No
+session logs and no new entries in `notes/SUMMARY.md` or `notes/ISSUES.md`.
 
 The archived summary is imported below as background: its overview and architecture describe
 the code as of 2026-11-19, and its "Current plan" is still the order of work until its items
@@ -31,7 +33,8 @@ superseded by this section. Its still-binding user preferences are under "Workin
 ## Working conventions
 
 - Before working on an issue, have an independent agent review the plan; get independent
-  evaluations of the results.
+  evaluations of the results. Plan, review and results go to `notes/issue-<N>/`, with a short
+  summary and link on GitHub.
 - Calibrate only as far as needed to confirm soundness; prefer fixing physics over tuning.
 - Efficiency before parallelism: the simulation is single-threaded by choice.
 - Logging uses `tracing`; use its macros, never `println!`, for console output.
