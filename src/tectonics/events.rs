@@ -229,6 +229,9 @@ pub struct EventCounts {
     /// rifts whose break is two arms of a triple junction (the third arm failed).
     pub recut_splits: usize,
     pub junction_rifts: usize,
+    /// Passive-margin initiations whose whole ocean region broke off along its coasts because no
+    /// break along weak lithosphere left both parts large enough.
+    pub coastal_splits: usize,
     /// Continental cells on orogenic belts and all continental cells, on the boundaries that
     /// rifts created and on the two rifted plates: rifts follow sutures if the first ratio is
     /// higher than the second.
@@ -462,7 +465,15 @@ impl Simulation {
         let mut division = None;
         let weak = params.weak_zone_splits > 0.0;
         let mut scale = [1.0, 1.0];
-        for attempt in 0..=MAX_RECUTS {
+        for attempt in 0..=MAX_RECUTS + 1 {
+            if attempt == MAX_RECUTS + 1 {
+                // Last resort at a passive margin: the plate breaks along the continent–ocean
+                // transitions, the weak zone of a margin: the whole ocean region subducts.
+                if !weak || !matches!(anchor, SplitAnchor::Margin { .. }) {
+                    break;
+                }
+                scale = [0.0, 0.0];
+            }
             let Some((new_side, great_circle)) =
                 self.local_split_piece(plate, normal, anchor, weak, scale)
             else {
@@ -479,7 +490,9 @@ impl Simulation {
                 failure = 2;
             }
             if failure == 0 {
-                if attempt > 0 {
+                if scale == [0.0, 0.0] {
+                    self.event_counts.coastal_splits += 1;
+                } else if attempt > 0 {
                     self.event_counts.recut_splits += 1;
                 }
                 division = Some((piece, great_circle));
@@ -594,10 +607,13 @@ impl Simulation {
             .map(|&id| if id == cut { u32::MAX } else { id })
             .collect();
         let enclosed = match anchor {
-            // An ocean region without contact to other plates breaks off along its coast.
+            // An ocean region without contact to other plates breaks off along its coast, and so
+            // does the ocean region of a margin as a last resort (`scale` zero, see
+            // `split_locally`).
             SplitAnchor::Margin { cell } | SplitAnchor::FractureZone { cell, .. } => {
                 let region = self.own_region(cell, &passable);
-                (!region.iter().any(|&other| self.at_plate_boundary(other))).then(|| {
+                let coastal = scale == [0.0, 0.0];
+                (coastal || !region.iter().any(|&other| self.at_plate_boundary(other))).then(|| {
                     let mut side = vec![true; cell_count];
                     for &other in &region {
                         side[other as usize] = false;
