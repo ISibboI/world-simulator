@@ -119,6 +119,12 @@ pub struct Statistics {
     pub segments: usize,
     pub slab_segments: usize,
     pub mean_slab_length: f64,
+    /// Length (km) of trenches whose slab is shorter than
+    /// [`TectonicParams::self_sustaining_slab_length`] (incipient subduction), and the mean
+    /// convergence there and at the other trenches (cm/yr).
+    pub incipient_trench_length: f64,
+    pub incipient_convergence: f64,
+    pub mature_convergence: f64,
     /// Segment events so far.
     pub segment_events: super::polarity::SegmentStatistics,
     /// Area fraction of the oceanic crust per 20 Myr age bin (the last bin is ≥ 200 Myr).
@@ -458,6 +464,8 @@ impl Simulation {
             (0.0, 0.0, 0.0, 0.0);
         let boundaries = self.boundary_cells();
         let (mut trench_cells, mut trench_slab) = (0usize, 0.0);
+        // Cells and summed convergence (rad/Myr) of incipient and mature trenches.
+        let mut by_stage = [(0usize, 0.0); 2];
         let mut accretionary_trench_length = 0.0;
         let (mut collision_length, mut collision_converging, mut collision_diverging) =
             (0.0, 0.0, 0.0);
@@ -473,7 +481,12 @@ impl Simulation {
                     let segment = boundary
                         .segment
                         .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id));
-                    trench_slab += segment.map_or(0.0, |segment| segment.slab_length);
+                    let slab = segment.map_or(0.0, |segment| segment.slab_length);
+                    trench_slab += slab;
+                    let stage =
+                        &mut by_stage[usize::from(slab >= self.params.self_sustaining_slab_length)];
+                    stage.0 += 1;
+                    stage.1 += boundary.convergence;
                     if segment.is_some_and(|segment| segment.accretionary) {
                         accretionary_trench_length += boundary_length;
                     }
@@ -664,6 +677,15 @@ impl Simulation {
             segments: self.polarities.segments().count(),
             slab_segments: slabs.len(),
             mean_slab_length: trench_slab / trench_cells.max(1) as f64 / 1000.0,
+            incipient_trench_length: by_stage[0].0 as f64 * boundary_length,
+            incipient_convergence: by_stage[0].1 / by_stage[0].0.max(1) as f64
+                * self.params.planet_radius
+                * 100.0
+                / 1e6,
+            mature_convergence: by_stage[1].1 / by_stage[1].0.max(1) as f64
+                * self.params.planet_radius
+                * 100.0
+                / 1e6,
             segment_events: self.polarities.statistics.clone(),
             age_histogram,
             speed_p99,

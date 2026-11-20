@@ -641,12 +641,15 @@ fn snapshot(
     });
     let segments = &statistics.segment_events;
     info!(
-        "    segments {} ({} with slab; slab at trenches {:.0} km) | created {}, merged {}, expired {}, \
+        "    segments {} ({} with slab; slab at trenches {:.0} km; incipient trenches {:.0} km converging at {:.1} cm/yr, others at {:.1} cm/yr) | created {}, merged {}, expired {}, \
          flips {}, continental overrides {}, initiation segments {} ({} grew to 300 km), \
          failed initiations {}",
         statistics.segments,
         statistics.slab_segments,
         statistics.mean_slab_length,
+        statistics.incipient_trench_length,
+        statistics.incipient_convergence,
+        statistics.mature_convergence,
         segments.created,
         segments.merged,
         segments.expired,

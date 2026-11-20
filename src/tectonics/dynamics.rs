@@ -240,10 +240,44 @@ impl Simulation {
             .collect();
         let mut active = vec![true; collisions.len()];
 
+        // Subduction initiation resistance: a plate that has not yet built a slab resists being
+        // bent and thrust under its neighbour with a plastic strength (see
+        // [`TectonicParams::initiation_resistance`]). The force opposes the convergence with a
+        // fixed magnitude; in the linear system it is an effective viscous coupling
+        // `strength / speed` from the last solve (Picard iteration), capped for slow contacts,
+        // which are locked.
+        let nascent: Vec<(&BoundaryCell, DVec3, f64)> = boundaries
+            .iter()
+            .zip(&normals)
+            .filter_map(|(boundary, &normal)| {
+                let strength = self.initiation_strength(boundary);
+                (strength > 0.0).then_some((boundary, normal, strength))
+            })
+            .collect();
+        // m/s; contacts slower than this are locked viscously.
+        let locked_speed = params.locked_convergence / 100.0 / (SECONDS_PER_MYR / 1e6);
+        let mut nascent_coupling: Vec<f64> = nascent
+            .iter()
+            .map(|&(_, _, strength)| strength / locked_speed)
+            .collect();
+
         let mut omega = vec![DVec3::ZERO; plate_count];
         let mut converged = false;
         for _ in 0..MAX_ACTIVE_SET_ITERATIONS {
             let mut matrix = base.clone();
+            for (&(boundary, normal, _), &coupling) in nascent.iter().zip(&nascent_coupling) {
+                if coupling <= 0.0 {
+                    continue;
+                }
+                let r = self.mesh.vertex(boundary.cell);
+                let m = r.cross(normal);
+                let block = outer(m, m) * (coupling * radius * radius);
+                let (p, q) = (boundary.plate as usize, boundary.other as usize);
+                add_block(&mut matrix, size, p, p, block);
+                add_block(&mut matrix, size, q, q, block);
+                add_block(&mut matrix, size, p, q, -block);
+                add_block(&mut matrix, size, q, p, -block);
+            }
             for ((boundary, normal), _) in collisions
                 .iter()
                 .zip(&active)
@@ -290,6 +324,28 @@ impl Simulation {
                     changed = true;
                 }
             }
+            // The effective coupling of the yielding contacts follows the new speeds.
+            for (&(boundary, normal, strength), coupling) in
+                nascent.iter().zip(nascent_coupling.iter_mut())
+            {
+                let r = self.mesh.vertex(boundary.cell);
+                let speed = (omega[boundary.plate as usize] - omega[boundary.other as usize])
+                    .cross(r)
+                    .dot(normal)
+                    * radius;
+                let target = if speed > 0.0 {
+                    strength / speed.max(locked_speed)
+                } else {
+                    0.0
+                };
+                // Damped, so that the iteration does not flip between locked and free.
+                let next = 0.5 * (*coupling + target);
+                let scale = strength / locked_speed;
+                if (next - *coupling).abs() > 0.02 * scale.max(*coupling) {
+                    changed = true;
+                }
+                *coupling = next;
+            }
             if !changed {
                 converged = true;
                 break;
@@ -314,10 +370,7 @@ impl Simulation {
         let boundary_length = params.planet_radius * self.mesh.mean_edge_angle();
         match boundary.kind {
             BoundaryKind::Trench { slab_age } => {
-                let thickness_factor = (slab_age.min(params.slab_pull_max_age)
-                    / params.slab_pull_reference_age)
-                    .max(0.0)
-                    .sqrt();
+                let thickness_factor = self.slab_buoyancy_factor(slab_age).max(0.0);
                 let length_factor = self.slab_length_factor(boundary);
                 boundary.normal
                     * (params.slab_pull * thickness_factor * length_factor * boundary_length)
@@ -383,6 +436,45 @@ impl Simulation {
         // cm/yr → m/s.
         let speed = params.slab_sinking_speed / 100.0 / (SECONDS_PER_MYR / 1e6);
         params.slab_pull * length_factor * boundary_length / speed
+    }
+
+    /// Net negative buoyancy of a slab of the given age (Myr) relative to one of the reference
+    /// age. The thermal contraction of the lithosphere grows with the square root of its age,
+    /// against the constant positive buoyancy of its basaltic crust and depleted mantle:
+    /// lithosphere younger than [`TectonicParams::neutral_buoyancy_age`] is lighter than the
+    /// asthenosphere (negative factor) and resists subduction (Cloos 1993; Oxburgh & Parmentier
+    /// 1977).
+    pub(super) fn slab_buoyancy_factor(&self, slab_age: f64) -> f64 {
+        let params = &self.params;
+        let thermal = |age: f64| (age.max(0.0) / params.slab_pull_reference_age).sqrt();
+        let neutral = thermal(params.neutral_buoyancy_age);
+        (thermal(slab_age.min(params.slab_pull_max_age)) - neutral) / (1.0 - neutral)
+    }
+
+    /// Strength (N per boundary cell) with which the plate resists starting to subduct at a
+    /// boundary cell: zero away from trenches, [`TectonicParams::initiation_resistance`] per
+    /// metre for a trench without slab, falling to zero as the slab reaches its full length.
+    pub(super) fn initiation_strength(&self, boundary: &BoundaryCell) -> f64 {
+        let params = &self.params;
+        let BoundaryKind::Trench { slab_age } = boundary.kind else {
+            return 0.0;
+        };
+        let developed = (self.slab_length(boundary) / params.self_sustaining_slab_length).min(1.0);
+        // Buoyant young lithosphere resists being pushed down, like the slab pull it grows with
+        // the length of the slab.
+        let buoyant = params.slab_pull
+            * (-self.slab_buoyancy_factor(slab_age)).max(0.0)
+            * self.slab_length_factor(boundary);
+        (params.initiation_resistance * (1.0 - developed) + buoyant)
+            * self.boundary_length_per_cell()
+    }
+
+    /// Length (m) of the slab below the trench at a boundary cell.
+    pub(super) fn slab_length(&self, boundary: &BoundaryCell) -> f64 {
+        boundary
+            .segment
+            .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id))
+            .map_or(0.0, |segment| segment.slab_length)
     }
 
     /// Fraction of the full slab length that has sunk below the trench at a boundary cell.
@@ -700,6 +792,96 @@ mod tests {
         let mut free = one_sided_trench(params);
         free.update_plate_velocities(&mantle);
         assert!(mean_trench_convergence(&free) * 637.1 > 10.0 * speed);
+    }
+
+    #[test]
+    fn young_lithosphere_is_buoyant_and_old_lithosphere_pulls() {
+        let simulation = one_sided_trench(TectonicParams::default());
+        let params = &simulation.params;
+        assert!(simulation.slab_buoyancy_factor(0.0) < 0.0);
+        assert!(simulation.slab_buoyancy_factor(0.5 * params.neutral_buoyancy_age) < 0.0);
+        assert!(
+            simulation
+                .slab_buoyancy_factor(params.neutral_buoyancy_age)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (simulation.slab_buoyancy_factor(params.slab_pull_reference_age) - 1.0).abs() < 1e-12
+        );
+        let mut previous = f64::NEG_INFINITY;
+        for age in [0.0, 5.0, 10.0, 20.0, 50.0, 100.0] {
+            let factor = simulation.slab_buoyancy_factor(age);
+            assert!(factor > previous, "{age}");
+            previous = factor;
+        }
+    }
+
+    /// [`one_sided_trench`] with plate 0's ocean of the given age and slab length, moving as
+    /// the mantle below plate 0 drags it at `mantle_speed` cm/yr (the mantle below plate 1
+    /// rests), with the given slab pull and initiation resistance. Returns the mean convergence
+    /// at the trench in cm/yr.
+    fn dragged_convergence(
+        (age, slab_length): (f64, f64),
+        (slab_pull, resistance): (f64, f64),
+        mantle_speed: f64,
+        neutral_buoyancy_age: f64,
+    ) -> f64 {
+        let mut params = TectonicParams::default();
+        params.neutral_buoyancy_age = neutral_buoyancy_age;
+        params.initiation_resistance = 0.0;
+        params.slab_pull = 0.0;
+        let mut simulation = one_sided_trench(params);
+        simulation.polarities.clear();
+        simulation.seed_subduction((0, 1), 1, slab_length);
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            if !crust.is_continental() {
+                *crust = new_oceanic_crust(-age);
+            }
+        }
+        // The mantle below plate 0 flows in the +x direction (m/s).
+        let mantle: Vec<DVec3> = (0..simulation.mesh.len() as u32)
+            .map(|cell| {
+                let r = simulation.mesh.vertex(cell);
+                if simulation.owners[cell as usize].plate == 0 {
+                    (DVec3::X - r * r.x) * mantle_speed / 100.0 / (SECONDS_PER_MYR / 1e6)
+                } else {
+                    DVec3::ZERO
+                }
+            })
+            .collect();
+        // First without pull and resistance, so that the boundary is classified with the
+        // plates moving.
+        simulation.update_plate_velocities(&mantle);
+        simulation.params.slab_pull = slab_pull;
+        simulation.params.initiation_resistance = resistance;
+        simulation.update_plate_velocities(&mantle);
+        mean_trench_convergence(&simulation) * 637.1
+    }
+
+    #[test]
+    fn plates_without_a_slab_resist_starting_to_subduct() {
+        let strength = TectonicParams::default().initiation_resistance;
+        let pull = TectonicParams::default().slab_pull;
+        // Old lithosphere without a slab, pushed by a slow mantle flow: with the resistance it
+        // converges much more slowly.
+        let free = dragged_convergence((100.0, 0.0), (0.0, 0.0), 3.0, 10.0);
+        let resisted = dragged_convergence((100.0, 0.0), (0.0, strength), 3.0, 10.0);
+        assert!(free > 0.5, "{free}");
+        assert!(resisted < 0.5 * free, "{resisted} {free}");
+        // A much stronger push overcomes the strength: the contact yields.
+        let free = dragged_convergence((100.0, 0.0), (0.0, 0.0), 60.0, 10.0);
+        let yielding = dragged_convergence((100.0, 0.0), (0.0, strength), 60.0, 10.0);
+        assert!(yielding > 0.5 * free, "{yielding} {free}");
+        // A developed slab of old lithosphere does not resist.
+        let free = dragged_convergence((100.0, 600e3), (0.0, 0.0), 3.0, 10.0);
+        let mature = dragged_convergence((100.0, 600e3), (0.0, strength), 3.0, 10.0);
+        assert!((mature - free).abs() < 0.15 * free, "{mature} {free}");
+        // A developed slab of very young lithosphere is buoyant: it resists being pushed down
+        // further. Without the buoyancy (neutral at age zero) it would not.
+        let neutral = dragged_convergence((2.0, 600e3), (pull, 0.0), 3.0, 0.0);
+        let buoyant = dragged_convergence((2.0, 600e3), (pull, 0.0), 3.0, 10.0);
+        assert!(buoyant < 0.7 * neutral, "{buoyant} {neutral}");
     }
 
     #[test]
