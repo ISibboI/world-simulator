@@ -733,7 +733,7 @@ struct PreviousSnapshot {
 /// thickness (m), crust class (0 continental origin, 1 transitional, 2 oceanic), plate, age (Myr),
 /// number of cells showing the same sample, whether the cell is at a coast, precipitation (m/yr),
 /// discharge (m³/yr), longitude (°), the annual mean, January and July surface temperatures
-/// (°C), and evaporation or evapotranspiration (m/yr).
+/// (°C), evaporation or evapotranspiration (m/yr), and January and July precipitation (m/yr).
 fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Write;
     let simulation = planet.tectonics();
@@ -741,6 +741,16 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     let cell_count = mesh.len() as u32;
     let elevation = simulation.surface_elevations();
     let temperature = planet.temperature();
+    // Precipitation of the solved month nearest to `month` (0 = January).
+    let cycle = planet.water_cycle();
+    let month_precipitation = |month: usize, cell: u32| {
+        let solved = cycle.monthly_precipitation.len().max(1);
+        let slot = (month * solved / 12).min(solved - 1);
+        cycle
+            .monthly_precipitation
+            .get(slot)
+            .map_or(0.0, |p| p[cell as usize])
+    };
     let mut shown = std::collections::HashMap::new();
     for cell in 0..cell_count {
         *shown.entry(simulation.owner(cell)).or_insert(0u32) += 1;
@@ -749,7 +759,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -768,7 +778,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
         writeln!(
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
-             {:.3},{:.2},{:.2},{:.2},{:.4}",
+             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4}",
             mesh.vertex(cell).z.asin().to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -787,6 +797,8 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             temperature.monthly[0][cell as usize],
             temperature.monthly[6][cell as usize],
             planet.water_cycle().evaporation[cell as usize],
+            month_precipitation(0, cell),
+            month_precipitation(6, cell),
         )?;
     }
     file.flush()?;

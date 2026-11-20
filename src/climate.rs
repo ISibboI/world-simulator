@@ -99,12 +99,17 @@ pub struct ClimateParams {
     /// reduce surface temperatures to sea level.
     pub lapse_rate: f64,
     /// Depth (m) of the boundary layer whose temperature anomaly sets the surface pressure of the
-    /// thermally driven winds; 0 disables them.
+    /// thermally driven winds; 0 (the default) disables them. At the coarse resolution of the
+    /// temperature model (~440 km), 1500 m gave strong along-shore flows, doubled the arid land
+    /// and pulled the storm tracks to 35°, so the monsoons come from the thermal equator per
+    /// longitude instead.
     pub thermal_wind_depth: f64,
     /// Damping time (days) of the thermally driven winds by friction.
     pub thermal_wind_damping: f64,
     /// Largest speed (m/s) of the thermally driven winds.
     pub max_thermal_wind: f64,
+    /// Width (degrees) of the equatorial band where the thermally driven winds fade out.
+    pub thermal_wind_equator: f64,
     /// Number of months per year for which the budget is solved, evenly spaced from January; must
     /// divide 12.
     pub months: usize,
@@ -135,9 +140,10 @@ impl Default for ClimateParams {
             hadley_width: 15.0,
             polar_width: 15.0,
             lapse_rate: 0.0065,
-            thermal_wind_depth: 1500.0,
+            thermal_wind_depth: 0.0,
             thermal_wind_damping: 1.5,
             max_thermal_wind: 10.0,
+            thermal_wind_equator: 10.0,
             months: 4,
             spin_up_iterations: 40,
             update_iterations: 6,
@@ -167,6 +173,7 @@ impl ClimateParams {
             "thermal_wind_depth" => &mut self.thermal_wind_depth,
             "thermal_wind_damping" => &mut self.thermal_wind_damping,
             "max_thermal_wind" => &mut self.max_thermal_wind,
+            "thermal_wind_equator" => &mut self.thermal_wind_equator,
             "tolerance" => &mut self.tolerance,
             "months" | "spin_up_iterations" | "update_iterations" | "months_per_update" => {
                 anyhow::ensure!(value >= 1.0, "{name} must be at least 1");
@@ -203,6 +210,8 @@ pub struct WaterCycle {
     /// Precipitation that came out negative where the solve had not converged and was set to
     /// zero, relative to the total precipitation.
     pub clipped: f64,
+    /// Precipitation (m/yr) of every solved month.
+    pub monthly_precipitation: Vec<Vec<f64>>,
     /// Area-weighted global means of precipitation and evaporation in m/yr.
     pub global_precipitation: f64,
     pub global_evaporation: f64,
@@ -325,7 +334,12 @@ impl Climate {
 
     /// Solves the water cycle for the given surface elevation (m, sea level 0), monthly surface
     /// temperatures (°C; month 0 is January) and the thermal equator of each month (degrees).
-    pub fn update(&mut self, elevation: &[f64], monthly_temperature: &[Vec<f64>], itcz: &[f64]) {
+    pub fn update(
+        &mut self,
+        elevation: &[f64],
+        monthly_temperature: &[Vec<f64>],
+        itcz: &[Vec<f64>],
+    ) {
         let cell_count = elevation.len();
         let month_count = self.params.months;
         let months: Vec<usize> = (0..month_count).map(|m| m * 12 / month_count).collect();
@@ -355,7 +369,7 @@ impl Climate {
         let mut iterations = vec![0; month_count];
         for _ in 0..rounds {
             for &slot in &slots {
-                let thermal_equator = itcz.get(months[slot]).copied().unwrap_or(0.0);
+                let thermal_equator: &[f64] = itcz.get(months[slot]).map_or(&[0.0], |s| s);
                 let mut input = self.month_inputs(
                     elevation,
                     &monthly_temperature[months[slot]],
@@ -363,7 +377,8 @@ impl Climate {
                     slot,
                 );
                 self.solved[slot].potential = input.potential.clone();
-                self.solved[slot].itcz = thermal_equator;
+                self.solved[slot].itcz =
+                    thermal_equator.iter().sum::<f64>() / thermal_equator.len() as f64;
                 self.set_evapotranspiration(elevation, slot, &mut input);
                 let (precipitation, used, clipped) = self.solve_month(&input, slot, max_newton);
                 iterations[slot] = used;
@@ -418,6 +433,16 @@ impl Climate {
                 .sum::<f64>()
                 / total_area
         };
+        cycle.monthly_precipitation = self
+            .solved
+            .iter()
+            .map(|m| {
+                m.precipitation
+                    .iter()
+                    .map(|p| p * to_metres_per_year)
+                    .collect()
+            })
+            .collect();
         cycle.global_precipitation = area_mean(&cycle.precipitation);
         cycle.global_evaporation = area_mean(&cycle.evaporation);
         self.cycle = cycle;
@@ -429,7 +454,7 @@ impl Climate {
         &self,
         elevation: &[f64],
         temperature: &[f64],
-        thermal_equator: f64,
+        thermal_equator: &[f64],
         slot: usize,
     ) -> Month {
         let params = &self.params;
@@ -441,8 +466,23 @@ impl Climate {
             |cell: usize| temperature[cell] + params.lapse_rate * elevation[cell].max(0.0);
         let column_temperature = self.zonal_mean(&sea_level);
         let thermal = self.thermal_wind(&sea_level, &column_temperature);
+        // The thermal equator over every cell, interpolated between the sectors of longitude.
+        let local_equator: Vec<f64> = self
+            .position
+            .iter()
+            .map(|p| {
+                let sectors = thermal_equator.len();
+                let x = (p.y.atan2(p.x) + std::f64::consts::PI) / std::f64::consts::TAU
+                    * sectors as f64
+                    - 0.5;
+                let lower = x.floor();
+                let f = x - lower;
+                let index = |i: f64| (i as i64).rem_euclid(sectors as i64) as usize;
+                thermal_equator[index(lower)] * (1.0 - f) + thermal_equator[index(lower + 1.0)] * f
+            })
+            .collect();
         let wind: Vec<DVec3> = (0..cell_count)
-            .map(|cell| low_level_wind(self.position[cell], thermal_equator) + thermal[cell])
+            .map(|cell| low_level_wind(self.position[cell], local_equator[cell]) + thermal[cell])
             .collect();
 
         let vapour = &self.vapour[slot];
@@ -479,7 +519,8 @@ impl Climate {
         let diffusivity = self
             .position
             .iter()
-            .map(|position| {
+            .zip(&local_equator)
+            .map(|(position, &thermal_equator)| {
                 let latitude = position.z.clamp(-1.0, 1.0).asin().to_degrees();
                 let distance =
                     circulation_latitude(latitude, thermal_equator) / params.hadley_width;
@@ -557,8 +598,13 @@ impl Climate {
                 let gradient = gradient - position * gradient.dot(position);
                 let force = gradient * GRAVITY * params.thermal_wind_depth / 288.0;
                 let coriolis = 2.0 * EARTH_ROTATION * position.z;
+                // Near the equator, where the balance would give unbounded winds, the convergence
+                // into the ITCZ (which follows the local thermal equator) takes over.
+                let latitude = position.z.clamp(-1.0, 1.0).asin().to_degrees();
+                let fade = 1.0 - (-(latitude / params.thermal_wind_equator).powi(2)).exp();
                 let wind = (force * friction - position.cross(force) * coriolis)
-                    / (friction * friction + coriolis * coriolis);
+                    / (friction * friction + coriolis * coriolis)
+                    * fade;
                 // Without the cumulus friction of the deep tropics, the balance overestimates the
                 // winds near the equator; real monsoon flows reach about 10 m/s.
                 let speed = wind.length();
@@ -1032,7 +1078,7 @@ mod tests {
     fn solve(mesh: &SphereMesh, elevation: &[f64]) -> (Climate, Vec<f64>, Vec<f64>) {
         let mut climate = Climate::new(mesh, RADIUS, ClimateParams::default());
         let monthly = vec![temperatures(mesh, elevation); 12];
-        climate.update(elevation, &monthly, &[0.0; 12]);
+        climate.update(elevation, &monthly, &vec![vec![0.0]; 12]);
         let precipitation = climate.water_cycle().precipitation.clone();
         let evaporation = climate.water_cycle().evaporation.clone();
         (climate, precipitation, evaporation)
@@ -1069,12 +1115,41 @@ mod tests {
     }
 
     #[test]
+    fn summer_continents_draw_air_in() {
+        let mesh = SphereMesh::icosphere(5);
+        let params = ClimateParams {
+            thermal_wind_depth: 1500.0,
+            ..ClimateParams::default()
+        };
+        let climate = Climate::new(&mesh, RADIUS, params);
+        // A warm anomaly of 10 K centred at 20°N, 0°E with a radius of about 2000 km.
+        let centre = DVec3::new(20f64.to_radians().cos(), 0.0, 20f64.to_radians().sin());
+        let anomaly =
+            |c: usize| 10.0 * (-(climate.position[c].angle_between(centre) / 0.3).powi(2)).exp();
+        let wind = climate.thermal_wind(&anomaly, &vec![0.0; mesh.len()]);
+        // Inflow: the wind points towards the centre on its flanks.
+        let mut inflow = 0.0;
+        let mut count = 0.0;
+        for c in 0..mesh.len() {
+            let distance = climate.position[c].angle_between(centre);
+            if (0.25..0.4).contains(&distance) {
+                let towards = (centre - climate.position[c]).normalize();
+                inflow += wind[c].dot(towards);
+                count += 1.0;
+            }
+        }
+        let inflow = inflow / count;
+        assert!((0.2..5.0).contains(&inflow), "{inflow}");
+        assert!(wind.iter().all(|w| w.length() <= 10.0 + 1e-9));
+    }
+
+    #[test]
     fn rain_belt_follows_the_thermal_equator() {
         let mesh = SphereMesh::icosphere(5);
         let ocean = vec![-4000.0; mesh.len()];
         let mut climate = Climate::new(&mesh, RADIUS, ClimateParams::default());
         let monthly = vec![temperatures(&mesh, &ocean); 12];
-        climate.update(&ocean, &monthly, &[10.0; 12]);
+        climate.update(&ocean, &monthly, &vec![vec![10.0]; 12]);
         let precipitation = &climate.water_cycle().precipitation;
         let mean_at = |from: f64, to: f64| {
             let cells: Vec<f64> = (0..mesh.len())

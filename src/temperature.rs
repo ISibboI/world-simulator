@@ -283,6 +283,8 @@ impl TemperatureParams {
 }
 
 const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
+/// Number of longitude sectors of the thermal equator.
+pub const THERMAL_EQUATOR_SECTORS: usize = 24;
 /// The model assumes an Earth-sized planet for the ocean heat transport.
 const EARTH_RADIUS: f64 = 6.371e6;
 /// Angular velocity of the rotation in rad/s.
@@ -297,9 +299,10 @@ pub struct TemperatureFields {
     pub annual_mean: Vec<f64>,
     /// Mean surface temperature of each month; month 0 starts at perihelion (early January).
     pub monthly: Vec<Vec<f64>>,
-    /// Latitude (degrees) of the maximum of the zonal-mean sea-level temperature in each month
-    /// (the thermal equator).
-    pub thermal_equator: Vec<f64>,
+    /// Latitude (degrees) of the maximum of the sea-level temperature in each month (the thermal
+    /// equator), for [`THERMAL_EQUATOR_SECTORS`] sectors of longitude from 180°W eastwards: over a
+    /// summer continent it lies further poleward than over the ocean (monsoons).
+    pub thermal_equator: Vec<Vec<f64>>,
     /// Permanent ice cover (sea ice, ice sheets), 0 to 1, as the albedo of the last year saw it.
     pub ice: Vec<f64>,
     /// Annual mean northward heat transport across the band interfaces in the last year: latitude
@@ -837,7 +840,15 @@ impl TemperatureModel {
 
         let thermal_equator = monthly_coarse
             .iter()
-            .map(|month| self.thermal_equator(month))
+            .map(|month| {
+                (0..THERMAL_EQUATOR_SECTORS)
+                    .map(|sector| {
+                        let centre =
+                            (sector as f64 + 0.5) / THERMAL_EQUATOR_SECTORS as f64 * TAU - PI;
+                        self.thermal_equator(month, centre)
+                    })
+                    .collect()
+            })
             .collect();
 
         self.fields = TemperatureFields {
@@ -864,18 +875,22 @@ impl TemperatureModel {
         };
     }
 
-    /// The latitude (degrees) between 30°S and 30°N where the zonal mean of a coarse field,
-    /// smoothed with a Gaussian of 5° width, is largest.
-    fn thermal_equator(&self, field: &[f64]) -> f64 {
-        // Zonal means in bins of 0.5° between 60°S and 60°N, then smoothed.
+    /// The latitude (degrees) between 30°S and 30°N where the mean of a coarse field over the
+    /// longitudes around `longitude` (radians; weighted with a Gaussian of 30° width), smoothed
+    /// with a Gaussian of 5° width in latitude, is largest.
+    fn thermal_equator(&self, field: &[f64], longitude: f64) -> f64 {
+        // Means in bins of 0.5° between 60°S and 60°N, then smoothed.
         const BINS: usize = 240;
         let mut sum = [0.0; BINS];
         let mut count = [0.0; BINS];
-        for (&latitude, &value) in self.coarse_latitude.iter().zip(field) {
+        for (cell, (&latitude, &value)) in self.coarse_latitude.iter().zip(field).enumerate() {
             let position = (latitude.to_degrees() + 60.0) * 2.0;
             if (0.0..BINS as f64).contains(&position) {
-                sum[position as usize] += value;
-                count[position as usize] += 1.0;
+                let p = self.coarse.vertex(cell as u32);
+                let difference = (p.y.atan2(p.x) - longitude + PI).rem_euclid(TAU) - PI;
+                let weight = (-(difference / 30f64.to_radians()).powi(2)).exp();
+                sum[position as usize] += weight * value;
+                count[position as usize] += weight;
             }
         }
         let smoothed = |bin: usize| {
@@ -1105,6 +1120,40 @@ mod tests {
         let without = polar(0.0);
         assert!(with < without - 0.5, "{with} vs {without}");
     }
+
+    #[test]
+    fn sea_ice_has_a_seasonal_cycle_and_ocean_carries_heat_poleward() {
+        let mesh = SphereMesh::icosphere(4);
+        let elevation = vec![-4000.0; mesh.len()];
+        let mut model = TemperatureModel::new(&mesh, TemperatureParams::default());
+        model.update(&elevation, None);
+        let fields = model.fields();
+        let mean_where = |filter: &dyn Fn(f64) -> bool, field: &dyn Fn(usize) -> f64| {
+            let cells: Vec<usize> = (0..mesh.len())
+                .filter(|&c| filter(mesh.vertex(c as u32).z.asin().to_degrees()))
+                .collect();
+            cells.iter().map(|&c| field(c)).sum::<f64>() / cells.len() as f64
+        };
+        // Polar ocean: ice all year, cold winters, summers near the melting point.
+        let arctic = |l: f64| l > 75.0;
+        let january = mean_where(&arctic, &|c| fields.monthly[0][c]);
+        let july = mean_where(&arctic, &|c| fields.monthly[6][c]);
+        assert!(july - january > 15.0, "January {january}, July {july}");
+        assert!(july > -8.0, "July {july}");
+        assert!(mean_where(&arctic, &|c| fields.ice[c]) > 0.5);
+        assert!(mean_where(&|l: f64| l.abs() < 30.0, &|c| fields.ice[c]) < 0.01);
+        // The ocean carries heat poleward in both hemispheres, about 0.5–3 PW at 10–20°.
+        let ocean = |latitude: f64| {
+            fields
+                .meridional_transport
+                .iter()
+                .min_by(|a, b| (a.0 - latitude).abs().total_cmp(&(b.0 - latitude).abs()))
+                .map(|t| t.2 * EARTH_RADIUS * EARTH_RADIUS / 1e15)
+                .unwrap()
+        };
+        assert!((0.5..3.0).contains(&ocean(15.0)), "{}", ocean(15.0));
+        assert!((-3.0..-0.5).contains(&ocean(-15.0)), "{}", ocean(-15.0));
+    }
 }
 
 #[cfg(test)]
@@ -1132,7 +1181,14 @@ mod probe {
                 elevation.push(fields[e].parse::<f64>().unwrap());
                 precipitation.push(fields[p].parse::<f64>().unwrap());
             }
-            let mut model = TemperatureModel::new(&mesh, TemperatureParams::default());
+            let mut params = TemperatureParams::default();
+            if let Ok(overrides) = std::env::var("SWEEP_SET") {
+                for assignment in overrides.split(',') {
+                    let (name, value) = assignment.split_once('=').unwrap();
+                    params.set(name, value.parse().unwrap()).unwrap();
+                }
+            }
+            let mut model = TemperatureModel::new(&mesh, params);
             let mut line = String::new();
             for percent in [100, 98, 96, 94, 92, 90, 92, 94, 96, 98, 100] {
                 model.params.orbit.solar_constant = 1361.0 * percent as f64 / 100.0;
