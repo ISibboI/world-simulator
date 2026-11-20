@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::erosion::WaveErosion;
-use crate::planet::{Planet, PlanetStatistics};
+use crate::planet::{CoverTurnover, Planet, PlanetStatistics};
 use crate::presets::{Biosphere, Epoch, Parameters};
 use crate::sphere::SphereMesh;
 use crate::tectonics::{
@@ -106,6 +106,11 @@ struct Cli {
     /// Measure the budget of felsic crust and sediment per step phase (slower).
     #[arg(long)]
     material_budget: bool,
+
+    /// Time (Myr) from which the continental sedimentary cover is tracked as a cohort, to log
+    /// how long it is preserved (its half-life).
+    #[arg(long, default_value_t = 500.0)]
+    cover_cohort: f64,
 
     /// Write the state of every cell (elevation, sediment, crust) as CSV with each snapshot,
     /// for analysis.
@@ -207,7 +212,8 @@ fn main() -> anyhow::Result<()> {
     } = parameters;
     let simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
     let erosion = (!cli.no_erosion).then_some(erosion);
-    let planet = Planet::new(simulation, climate, temperature, erosion, EARTH_RADIUS);
+    let mut planet = Planet::new(simulation, climate, temperature, erosion, EARTH_RADIUS);
+    planet.track_cover_cohort_from(cli.cover_cohort);
 
     if cli.headless {
         return simulate(planet, &cli, |_| {});
@@ -429,6 +435,7 @@ fn snapshot(
         trench_sediment: previous_trench,
         wave_erosion: previous_wave,
         sediment_delivered: previous_delivered,
+        cover_turnover: previous_cover,
         sea_level_budget: previous_sea_level,
         metamorphosed: previous_metamorphosed,
     }) = previous_ledger.as_ref()
@@ -502,6 +509,37 @@ fn snapshot(
             (trench.metasediment_accreted - previous_trench.metasediment_accreted) / years,
             (trench.metasediment_subducted - previous_trench.metasediment_subducted) / years,
         );
+        // Turnover of the continental sedimentary cover: its stock over what leaves it (gross
+        // removal by surface processes, net per cell and step, and burial metamorphism).
+        let cover = &planet_statistics.cover_turnover;
+        let cover_eroded = rate(cover.eroded, previous_cover.eroded);
+        let cover_burial = (statistics.metamorphosed.0 - previous_metamorphosed.0) / years;
+        let cover_stock = planet_statistics.sediment_stock[0];
+        info!(
+            "    continental cover: stock {:.3e} Gt | surface processes eroded {:.2}, deposited \
+             {:.2} Gt/yr | turnover half-life {:.0} Myr",
+            cover_stock,
+            cover_eroded,
+            rate(cover.deposited, previous_cover.deposited),
+            std::f64::consts::LN_2 * cover_stock / (cover_eroded + cover_burial).max(1e-9) / 1e6,
+        );
+        if let Some(cohort) = &planet_statistics.cover_cohort {
+            let elapsed = statistics.time - cohort.start;
+            let left = cohort.on_continents / cohort.initial.max(1e-9);
+            info!(
+                "    cover cohort of {:.0} Myr: {:.3e} Gt, {:.1}% left on continental crust \
+                 ({:.1}% as sediment anywhere), preservation half-life {:.0} Myr",
+                cohort.start,
+                cohort.initial,
+                100.0 * left,
+                100.0 * cohort.anywhere / cohort.initial.max(1e-9),
+                if elapsed > 0.0 && left < 1.0 {
+                    elapsed * std::f64::consts::LN_2 / -left.max(1e-12).ln()
+                } else {
+                    f64::INFINITY
+                },
+            );
+        }
         info!(
             "    collision stacking (Gt/yr): {:.1} stacked, {:.1} carried in by convergence",
             (statistics.ledger.collision_stacked - previous.collision_stacked) * cell_area
@@ -569,6 +607,7 @@ fn snapshot(
         metamorphosed: statistics.metamorphosed,
         wave_erosion: planet_statistics.wave_erosion,
         sediment_delivered: planet_statistics.sediment_delivered,
+        cover_turnover: planet_statistics.cover_turnover,
     });
     let segments = &statistics.segment_events;
     info!(
@@ -782,6 +821,7 @@ struct PreviousSnapshot {
     metamorphosed: (f64, f64),
     wave_erosion: WaveErosion,
     sediment_delivered: f64,
+    cover_turnover: CoverTurnover,
 }
 
 /// Writes one CSV row per cell: latitude (°), surface elevation (m), rock-equivalent and bulk

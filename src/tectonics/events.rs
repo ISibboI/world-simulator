@@ -1995,6 +1995,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    cohort: 0.0,
                 }
             } else {
                 new_oceanic_crust(-ocean_age)
@@ -2203,6 +2204,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    cohort: 0.0,
                 }
             } else {
                 new_oceanic_crust(-250.0)
@@ -2263,6 +2265,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    cohort: 0.0,
                 }
             });
         }
@@ -2514,6 +2517,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         };
         let micro = |r: DVec3| r.x > 0.8 && r.z < 0.0 && r.z > -0.12;
         for (local, crust) in simulation.plates[0].crust.iter_mut().enumerate() {
@@ -2635,6 +2639,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    cohort: 0.0,
                 };
             }
         }

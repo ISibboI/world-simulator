@@ -615,6 +615,7 @@ impl Simulation {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    cohort: 0.0,
                 }
             } else {
                 new_oceanic_crust(-ocean_age[cell])
@@ -1166,7 +1167,12 @@ impl Simulation {
             if new_sediment < 0.0 {
                 new_thickness += new_sediment * SEDIMENT_ROCK_DENSITY / crust.density;
             }
-            crust.sediment = new_sediment.max(0.0);
+            if sediment > 0.0 {
+                // New deposits are new rock: they do not belong to the cover cohort.
+                crust.add_sediment(sediment, 0.0);
+            } else {
+                crust.sediment = new_sediment.max(0.0);
+            }
             // Erosion removes crust from the top; deposition never adds crystalline crust.
             crust.thin_from_top(new_thickness.max(0.0));
             change += crust.mass() - before;
@@ -1189,6 +1195,38 @@ impl Simulation {
         let sea_level = self.solve_sea_level();
         self.sea_level_budget.metamorphism += sea_level - self.sea_level;
         self.sea_level = sea_level;
+    }
+
+    /// Starts tracking the continental sedimentary cover as a cohort (see [`Crust::cohort`]):
+    /// all sediment now on crust whose basement is of continental origin belongs to it, nothing
+    /// else does. Returns the cohort's mass in Gt.
+    pub fn start_cover_cohort(&mut self) -> f64 {
+        for crust in self
+            .plates
+            .iter_mut()
+            .flat_map(|plate| plate.crust.iter_mut().flatten())
+        {
+            crust.cohort = f64::from(u8::from(crust.basement().is_continental_origin()));
+        }
+        self.cover_cohort().0
+    }
+
+    /// Mass (Gt, all samples including hidden ones) of the cover cohort (see
+    /// [`Simulation::start_cover_cohort`]) still on crust whose basement is of continental
+    /// origin, and still sediment anywhere.
+    pub fn cover_cohort(&self) -> (f64, f64) {
+        let cell_area =
+            4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
+        let to_gt = cell_area * SEDIMENT_ROCK_DENSITY / 1e12;
+        let mut masses = (0.0, 0.0);
+        for crust in self.plates.iter().flat_map(|p| p.crust.iter().flatten()) {
+            let mass = crust.sediment * crust.cohort * to_gt;
+            if crust.basement().is_continental_origin() {
+                masses.0 += mass;
+            }
+            masses.1 += mass;
+        }
+        masses
     }
 
     /// The changes of the sea level so far per process, and the remainder of the actual change
@@ -1325,6 +1363,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         };
         // Normal continental crust stands a few hundred metres above sea level, doubly
         // thickened crust forms high plateaus like Tibet, thinned crust forms shelves.
@@ -1349,6 +1388,7 @@ mod tests {
                         felsic: 1.0,
                         metasediment: 0.0,
                         orogeny: NO_OROGENY,
+                        cohort: 0.0,
                     };
                     let elevation = crust.dry_elevation(0.0);
                     // At least 0.5 m per 100 m of crust (the thermal uplift fading out over the
@@ -1377,6 +1417,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    cohort: 0.0,
                 };
                 assert!(arc.buoyancy(0.0) > new_oceanic_crust(0.0).buoyancy(0.0));
             }
@@ -1393,6 +1434,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         };
         assert!(
             (continent(0.0).surface_elevation(0.0, 0.0)
@@ -1413,6 +1455,7 @@ mod tests {
                 felsic: 1.0,
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
+                cohort: 0.0,
             };
             let removed = 10.0;
             let thinner = Crust {
@@ -1442,6 +1485,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         };
         assert!(!eroded.is_oceanic());
         assert!(!eroded.is_continental());
