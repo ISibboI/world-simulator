@@ -339,12 +339,16 @@ fn snapshot(
         .collect();
     info!(
         "    ocean area by age (% per 20 Myr): {} | ≥ 200 Myr {:.1}% ({:.0}% at continents) | \
+         sea floor: mean age {:.1} Myr, ≥ 200 Myr {:.2}%, filled ≥ 200 Myr {:.2}% of the surface | \
          plates > 1%: {}, \
          boundary ratio {:.2} | old passive margins {:.0} km, {:.3} initiations/Myr, \
          induced {:.3}/Myr",
         histogram.join(" "),
         100.0 * statistics.ancient_ocean_fraction,
         100.0 * statistics.ancient_ocean_at_continents,
+        statistics.sea_floor_mean_age,
+        100.0 * statistics.ancient_sea_floor_fraction,
+        100.0 * statistics.ancient_filled_fraction,
         statistics.plates_above_one_percent,
         statistics.boundary_ratio,
         statistics.old_margin_length,
@@ -354,7 +358,10 @@ fn snapshot(
     info!(
         "    trenches {:.0} km, ridges {:.0} km, collisions {:.0} km ({:.0} converging, {:.0} diverging) | slab pull {:.2e} N, ridge push {:.2e} N | \
          rifts {}, initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
-         blocked splits {}, terranes {} ({} cells, {} slab break-offs) | continental contacts made by rifts {:.0} km ({:.0} far), by initiations {:.0} km ({:.0} far)",
+         blocked splits {}, terranes {} ({} cells, {} slab break-offs) | continental contacts made by rifts {:.0} km ({:.0} far), by initiations {:.0} km ({:.0} far) | \
+         splits along weak zones {} ({} cut again, {} along the coast, {} rift triple junctions; rift boundaries on sutures {:.0}% of their continental cells vs {:.0}% of the rifted plates), along great circles {}, boundary deviation from a great circle: rifts {:.0} km, initiations {:.0} km | \
+         fracture-zone initiations {}, failed initiations (no division/overriding/subducting part too small) {}/{}/{}, \
+         undone initiations (suture/capture/piece/terrane) {}/{}/{}/{}",
         statistics.trench_length,
         statistics.ridge_length,
         statistics.collision_length,
@@ -382,6 +389,27 @@ fn snapshot(
         statistics.events.rift_far_contact_km,
         statistics.events.initiation_contact_km,
         statistics.events.initiation_far_contact_km,
+        statistics.events.weak_zone_splits,
+        statistics.events.recut_splits,
+        statistics.events.coastal_splits,
+        statistics.events.junction_rifts,
+        100.0 * statistics.events.rift_suture_cells[0] as f64
+            / statistics.events.rift_suture_cells[1].max(1) as f64,
+        100.0 * statistics.events.rift_suture_cells[2] as f64
+            / statistics.events.rift_suture_cells[3].max(1) as f64,
+        statistics.events.great_circle_splits,
+        statistics.events.split_deviation_km[0]
+            / statistics.events.measured_splits[0].max(1) as f64,
+        statistics.events.split_deviation_km[1]
+            / statistics.events.measured_splits[1].max(1) as f64,
+        statistics.events.fracture_zone_initiations,
+        statistics.events.failed_initiation_reasons[0],
+        statistics.events.failed_initiation_reasons[1],
+        statistics.events.failed_initiation_reasons[2],
+        statistics.events.undone_initiations[0],
+        statistics.events.undone_initiations[1],
+        statistics.events.undone_initiations[2],
+        statistics.events.undone_initiations[3],
     );
     log_sediment_reservoirs(&planet_statistics);
     // Crust mass budget since the last snapshot, in Gt/yr.
@@ -662,6 +690,11 @@ fn snapshot(
     if cli.cell_dump {
         let path = cli.output.join(format!("cells_{time:05}.csv"));
         write_cell_dump(planet, &path).with_context(|| format!("writing {}", path.display()))?;
+        let path = cli.output.join("mesh.csv");
+        if !path.exists() {
+            write_mesh_dump(simulation.mesh(), &path)
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
     }
     for (name, image) in [
         (
@@ -782,7 +815,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -801,7 +834,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
         writeln!(
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
-             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4}",
+             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{}",
             mesh.vertex(cell).z.asin().to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -822,6 +855,32 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             planet.water_cycle().evaporation[cell as usize],
             month_precipitation(0, cell),
             month_precipitation(6, cell),
+            if crust.orogeny > tectonics::NO_OROGENY {
+                format!("{:.1}", crust.orogeny)
+            } else {
+                String::new()
+            },
+        )?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
+/// Writes the mesh (cell, position, neighbours separated by `;`) for analysing cell dumps.
+fn write_mesh_dump(mesh: &sphere::SphereMesh, path: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(file, "cell,x,y,z,neighbors")?;
+    for cell in 0..mesh.len() as u32 {
+        let r = mesh.vertex(cell);
+        let neighbors: Vec<String> = mesh.neighbors(cell).iter().map(u32::to_string).collect();
+        writeln!(
+            file,
+            "{cell},{:.6},{:.6},{:.6},{}",
+            r.x,
+            r.y,
+            r.z,
+            neighbors.join(";")
         )?;
     }
     file.flush()?;

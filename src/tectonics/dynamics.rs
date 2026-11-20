@@ -617,6 +617,7 @@ mod tests {
                             sediment: 0.0,
                             felsic: 1.0,
                             metasediment: 0.0,
+                            orogeny: NO_OROGENY,
                         }
                     } else {
                         new_oceanic_crust(-100.0)
@@ -715,6 +716,7 @@ mod tests {
                     sediment: 0.0,
                     felsic: 1.0,
                     metasediment: 0.0,
+                    orogeny: NO_OROGENY,
                 };
             }
         }
@@ -817,6 +819,7 @@ mod tests {
                 sediment: 0.0,
                 felsic: 1.0,
                 metasediment: 0.0,
+                orogeny: NO_OROGENY,
             };
         }
         simulation.split_plate(0, DVec3::Z).unwrap();

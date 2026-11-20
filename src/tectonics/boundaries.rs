@@ -704,6 +704,7 @@ impl Simulation {
             }
             // Distribute along the profile, then spill what did not fit outwards, nearest first.
             let mut leftover = 0.0;
+            let time = self.time;
             for &(owner, weight) in &reached {
                 let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
                     .as_mut()
@@ -719,6 +720,14 @@ impl Simulation {
                 );
                 change += crust.mass() - before;
                 leftover += share - fitting;
+                // Crust thickened by a continental collision is an orogenic belt.
+                if addition.kind == AdditionKind::Collision
+                    && fitting > 0.0
+                    && crust.is_continental_origin_column()
+                    && crust.thickness > OROGENIC_THICKNESS
+                {
+                    crust.orogeny = time;
+                }
             }
             for &(owner, _) in &reached {
                 if leftover <= 0.0 {
@@ -748,6 +757,10 @@ pub(super) struct ResolvedBoundaries {
     /// Number of continental collision events per plate pair.
     pub(super) collisions: HashMap<(u32, u32), u32>,
 }
+
+/// Continental crust thicker than this (m) after receiving crust stacked in a collision counts as
+/// an orogenic belt (see [`Crust::orogeny`]): normal continental crust is ~35 km thick.
+const OROGENIC_THICKNESS: f64 = 35e3;
 
 /// A crust sample overridden by another plate at a cell.
 struct LostContact {
@@ -989,10 +1002,12 @@ fn stretch_rift(
     // Mass-weighted thickness and thermal fraction of the donors after stretching (repeated
     // stretching compounds in the donors).
     let (mut donor_thickness, mut donor_heat) = (0.0, 0.0);
+    let mut orogeny = NO_OROGENY;
     for (&(donor, _), &share) in donors.iter().zip(&shares) {
         let crust = plate.crust[donor as usize]
             .as_mut()
             .expect("donors have crust");
+        orogeny = orogeny.max(crust.orogeny);
         let beta = 1.0 / (1.0 - share);
         let fraction = 1.0 - (1.0 - thermal_fraction(crust.age(time))) / beta;
         if let Some(age) = age_for_thermal_fraction(fraction) {
@@ -1019,6 +1034,7 @@ fn stretch_rift(
         sediment,
         felsic: felsic / mass.max(1e-9),
         metasediment: metasediment / mass.max(1e-9),
+        orogeny,
     });
     true
 }
@@ -1075,10 +1091,12 @@ fn heal_gap(
     let (mut thickness, mut mass, mut sediment, mut felsic) = (0.0, 0.0, 0.0, 0.0);
     let mut metasediment = 0.0;
     let mut birth = f64::NEG_INFINITY;
+    let mut orogeny = NO_OROGENY;
     for &neighbor in &neighbors {
         let crust = plate.crust[neighbor as usize]
             .as_mut()
             .expect("enclosed by crust");
+        orogeny = orogeny.max(crust.orogeny);
         let given = crust.thickness * share;
         thickness += given;
         mass += given * crust.density;
@@ -1096,6 +1114,7 @@ fn heal_gap(
         sediment,
         felsic: felsic / mass.max(1e-9),
         metasediment: metasediment / mass.max(1e-9),
+        orogeny,
     });
     plate.consumed[local as usize] = false;
     statistics.enclosed_fills += 1;
@@ -1208,6 +1227,7 @@ mod tests {
                             sediment: 0.0,
                             felsic: 1.0,
                             metasediment: 0.0,
+                            orogeny: NO_OROGENY,
                         };
                         assert!(crust.resists_subduction() && !crust.is_continental());
                     } else if plate == 1 && continental_upper_plate && z < 0.3 {
@@ -1218,6 +1238,7 @@ mod tests {
                             sediment: 0.0,
                             felsic: 1.0,
                             metasediment: 0.0,
+                            orogeny: NO_OROGENY,
                         };
                     }
                 }
@@ -1344,6 +1365,7 @@ mod tests {
                 sediment: 8000.0,
                 felsic: 1.0,
                 metasediment: 0.0,
+                orogeny: NO_OROGENY,
             };
         }
         if let Some(upper) = upper {
@@ -1377,6 +1399,7 @@ mod tests {
             sediment: 0.0,
             felsic: 0.4,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         };
         assert!(!arc.is_oceanic() && !arc.resists_subduction());
         // Most of it: after the segment flips (sustained arrival), the arc plate subducts.
@@ -1393,6 +1416,7 @@ mod tests {
             sediment: 0.0,
             felsic: 1.0,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         };
         let ledger = wedged_margin_arriving_at_a_trench(Some(continent));
         assert_eq!(ledger.subducted_transitional, 0.0, "{ledger:?}");
@@ -1465,6 +1489,7 @@ mod tests {
                 sediment: 0.0,
                 felsic: 1.0,
                 metasediment: 0.0,
+                orogeny: NO_OROGENY,
             };
         }
         simulation
@@ -1582,6 +1607,7 @@ mod tests {
             sediment: 0.0,
             felsic: 1.0,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         });
         simulation.crustal_flow(5.0);
         assert_eq!(simulation.surface_crust(cell).thickness, 70_000.0);

@@ -47,6 +47,7 @@ mod matching;
 mod polarity;
 mod statistics;
 mod topology;
+mod weak_zones;
 
 pub use boundaries::{GapStatistics, TrenchSediment};
 pub use crust::*;
@@ -355,6 +356,9 @@ impl TectonicParams {
             "erosive_convergence" => &mut self.erosive_convergence,
             "trench_fill_time" => &mut self.trench_fill_time,
             "events.initiation_age" => &mut self.events.initiation_age,
+            "events.min_subducting_area" => &mut self.events.min_subducting_area,
+            "events.fracture_zone_initiation" => &mut self.events.fracture_zone_initiation,
+            "events.weak_zone_splits" => &mut self.events.weak_zone_splits,
             "events.invasion_waiting_time" => &mut self.events.invasion_waiting_time,
             "events.invasion_reach" => &mut self.events.invasion_reach,
             "events.initiation_full_age" => &mut self.events.initiation_full_age,
@@ -397,6 +401,9 @@ pub struct Plate {
     tracked: Option<matching::TrackedCrust>,
     /// The rotation at the last matching.
     matched_rotation: DQuat,
+    /// When a subduction initiation inside a plate split this plate from its partner (both
+    /// parts carry it), for tracking initiations that are undone by merging the parts again.
+    initiated_at: Option<f64>,
 }
 
 /// Initial ocean ages with Earth's roughly triangular age–area distribution: the oceanic cells
@@ -585,6 +592,7 @@ impl Simulation {
                 consumed: vec![false; cell_count],
                 tracked: None,
                 matched_rotation: DQuat::IDENTITY,
+                initiated_at: None,
             })
             .collect();
 
@@ -606,6 +614,7 @@ impl Simulation {
                     sediment: 0.0,
                     felsic: 1.0,
                     metasediment: 0.0,
+                    orogeny: NO_OROGENY,
                 }
             } else {
                 new_oceanic_crust(-ocean_age[cell])
@@ -789,17 +798,23 @@ impl Simulation {
             .expect("owners always point to existing crust")
     }
 
-    /// Advances the simulation by `dt` Myr, splitting it into substeps such that no plate moves
-    /// more than [`TectonicParams::max_substep_movement`] cells per substep.
+    /// Advances the simulation by `dt` Myr, splitting it into substeps such that no cell moves
+    /// more than [`TectonicParams::max_substep_movement`] cell spacings per substep.
     pub fn step(&mut self, dt: f64) {
         let mantle_velocity = self
             .mantle
             .velocities(&self.mesh, self.params.planet_radius);
         self.update_plate_velocities(&mantle_velocity);
-        let max_angle = self
-            .plates
-            .iter()
-            .map(|plate| plate.angular_velocity.length() * dt)
+        // The farthest any cell moves (a small plate turning about a pole inside it moves its
+        // cells much less than its angular speed suggests).
+        let max_angle = (0..self.mesh.len() as u32)
+            .map(|cell| {
+                self.plates[self.owners[cell as usize].plate as usize]
+                    .angular_velocity
+                    .cross(self.mesh.vertex(cell))
+                    .length()
+                    * dt
+            })
             .fold(0.0, f64::max);
         let max_substep_angle = self.params.max_substep_movement * self.mesh.mean_edge_angle();
         let substeps = (max_angle / max_substep_angle).ceil().max(1.0) as usize;
@@ -1309,6 +1324,7 @@ mod tests {
             sediment: 0.0,
             felsic: 1.0,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         };
         // Normal continental crust stands a few hundred metres above sea level, doubly
         // thickened crust forms high plateaus like Tibet, thinned crust forms shelves.
@@ -1332,6 +1348,7 @@ mod tests {
                         sediment: 0.0,
                         felsic: 1.0,
                         metasediment: 0.0,
+                        orogeny: NO_OROGENY,
                     };
                     let elevation = crust.dry_elevation(0.0);
                     // At least 0.5 m per 100 m of crust (the thermal uplift fading out over the
@@ -1359,6 +1376,7 @@ mod tests {
                     sediment: 0.0,
                     felsic: 1.0,
                     metasediment: 0.0,
+                    orogeny: NO_OROGENY,
                 };
                 assert!(arc.buoyancy(0.0) > new_oceanic_crust(0.0).buoyancy(0.0));
             }
@@ -1374,6 +1392,7 @@ mod tests {
             sediment: 0.0,
             felsic: 1.0,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         };
         assert!(
             (continent(0.0).surface_elevation(0.0, 0.0)
@@ -1393,6 +1412,7 @@ mod tests {
                 sediment: 0.0,
                 felsic: 1.0,
                 metasediment: 0.0,
+                orogeny: NO_OROGENY,
             };
             let removed = 10.0;
             let thinner = Crust {
@@ -1421,6 +1441,7 @@ mod tests {
             sediment: 0.0,
             felsic: 1.0,
             metasediment: 0.0,
+            orogeny: NO_OROGENY,
         };
         assert!(!eroded.is_oceanic());
         assert!(!eroded.is_continental());
