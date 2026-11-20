@@ -339,7 +339,7 @@ impl Simulation {
                 oceanic_ages.push(age);
                 oceanic_speed += speed;
             }
-            let elevation = crust.surface_elevation(self.time, self.sea_level);
+            let elevation = self.surface_elevation(cell);
             if crust.is_oceanic() {
                 let age = crust.age(self.time);
                 if elevation < 0.0 {

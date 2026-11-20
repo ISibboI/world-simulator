@@ -702,6 +702,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         }
     }
 

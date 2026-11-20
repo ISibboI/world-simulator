@@ -16,6 +16,14 @@
 //! the antipode instead of converging there into a phantom sink. Sinks work the same way with
 //! negative flux. The plates feel
 //! this flow through basal drag (see [`super::dynamics`]).
+//!
+//! The same density anomalies deflect the surface: **dynamic topography**
+//! `h = −σ_rr / (Δρ g)` (Hager et al. 1985; Gurnis 1990; Flament et al. 2013). Sunken slabs
+//! (the mass excess of the cold lithosphere, remembered like the downwellings) pull the surface
+//! down over a width of about their depth; plume heads ponding below the lithosphere lift it in
+//! swells. The field lives in the mantle frame, so plates move over it: continental interiors
+//! rise and fall by a few hundred metres over 10–100 Myr, and rivers strip the cover of uplifted
+//! platforms (see [`MantleFlow::dynamic_topography`]).
 
 use glam::DVec3;
 use rand::{Rng, RngExt};
@@ -23,6 +31,9 @@ use rand::{Rng, RngExt};
 use crate::sphere::SphereMesh;
 
 use super::generation::random_unit_vector;
+use crate::isostasy::MANTLE_DENSITY;
+
+const SECONDS_PER_MYR: f64 = 1e6 * 365.25 * 24.0 * 3600.0;
 
 /// Parameters of the mantle flow.
 #[derive(Clone, Debug)]
@@ -47,6 +58,41 @@ pub struct MantleParams {
     /// Number of random candidate locations for a new plume, of which the one farthest from
     /// downwellings is taken.
     pub plume_candidates: usize,
+    /// Subdivisions of the grid that collects the mass of sunken slabs.
+    pub slab_grid_subdivisions: u32,
+    /// Horizontal distance in metres from the trench, under the overriding plate, at which the
+    /// slab's mass sinks: the reach of a slab dipping 45° to the base of the upper mantle
+    /// (660 km).
+    pub slab_offset: f64,
+    /// Depth stages a sunken slab passes through (see [`SlabStage`]), from the top. Slabs sink
+    /// at ~5 cm/yr through the upper mantle and ~1.2 cm/yr through the lower mantle (van der
+    /// Meer et al. 2010); below ~2000 km the surface hardly feels them.
+    pub slab_stages: Vec<SlabStage>,
+    /// Scales the slab part of the dynamic topography (1 = physical, 0 disables it, for
+    /// comparison runs).
+    pub topography_response: f64,
+    /// Dry height in metres of the swell above a plume at the top of the range of
+    /// [`MantleParams::plume_flux`]: the buoyancy of a ponded plume head, α ΔT L with
+    /// α = 3 × 10⁻⁵ K⁻¹, ΔT ≈ 150 K and L ≈ 150 km (hotspot swells are 0.5–1.5 km high under
+    /// water, i.e. ~0.35–1 km dry; Crough 1983; Sleep 1990). Weaker plumes lift less. Zero
+    /// disables plume swells.
+    pub plume_swell_height: f64,
+    /// Standard deviation in metres of a plume swell (swell half-widths 500–1000 km).
+    pub plume_swell_width: f64,
+}
+
+/// A depth range of the mantle that sunken slabs pass through.
+#[derive(Clone, Debug)]
+pub struct SlabStage {
+    /// Mean time in Myr a slab spends in the range (its thickness over the sinking speed).
+    pub residence: f64,
+    /// Fraction of the slab's weight that the surface supports by its deflection, the rest
+    /// being supported deeper (core–mantle boundary, viscous lower mantle): the surface
+    /// response kernel for a viscosity increase at 660 km, which falls with depth from ~0.7 in
+    /// the upper mantle to ~0.2 at mid-mantle depths (Hager 1984; Richards & Hager 1984).
+    pub response: f64,
+    /// Standard deviation in metres of the surface deflection: about the depth of the load.
+    pub width: f64,
 }
 
 impl Default for MantleParams {
@@ -61,6 +107,31 @@ impl Default for MantleParams {
             plume_flux: (2e-3, 6e-3),
             core_radius: 0.1,
             plume_candidates: 16,
+            slab_grid_subdivisions: 3,
+            slab_offset: 660e3,
+            slab_stages: vec![
+                // 0–660 km at ~5 cm/yr; spread over the slab's own horizontal reach.
+                SlabStage {
+                    residence: 13.0,
+                    response: 0.5,
+                    width: 600e3,
+                },
+                // 660–1200 km at ~1.2 cm/yr.
+                SlabStage {
+                    residence: 45.0,
+                    response: 0.4,
+                    width: 900e3,
+                },
+                // 1200–2000 km.
+                SlabStage {
+                    residence: 67.0,
+                    response: 0.2,
+                    width: 1500e3,
+                },
+            ],
+            topography_response: 1.0,
+            plume_swell_height: 650.0,
+            plume_swell_width: 450e3,
         }
     }
 }
@@ -89,6 +160,9 @@ impl Plume {
     }
 }
 
+/// Grid cells with their interpolation weights.
+type Weights = Vec<(u32, f64)>;
+
 pub struct MantleFlow {
     params: MantleParams,
     grid: SphereMesh,
@@ -97,18 +171,30 @@ pub struct MantleFlow {
     plumes: Vec<Plume>,
     /// Evaluation grid and, per cell of the simulation mesh, its nearest evaluation cell.
     evaluation: Option<(SphereMesh, Vec<u32>)>,
+    /// Grid collecting sunken slabs, and the mass (kg) of the slabs remembered in each cell.
+    slab_grid: SphereMesh,
+    /// Per slab stage, per grid cell.
+    slab_mass: Vec<Vec<f64>>,
+    /// Interpolation from the evaluation grid to the cells of the simulation mesh: per cell,
+    /// evaluation cells and their weights.
+    interpolation: Option<(SphereMesh, Vec<Weights>)>,
 }
 
 impl MantleFlow {
     pub fn new(params: MantleParams) -> Self {
         let grid = SphereMesh::icosphere(params.grid_subdivisions);
         let downwelling = vec![0.0; grid.len()];
+        let slab_grid = SphereMesh::icosphere(params.slab_grid_subdivisions);
+        let slab_mass = vec![vec![0.0; slab_grid.len()]; params.slab_stages.len()];
         Self {
             params,
             grid,
             downwelling,
             plumes: Vec::new(),
             evaluation: None,
+            slab_grid,
+            slab_mass,
+            interpolation: None,
         }
     }
 
@@ -127,10 +213,46 @@ impl MantleFlow {
     }
 
     /// Advances the mantle by `dt` Myr. `subduction` lists the positions of trench segments with
-    /// their subduction rate in m²/s.
-    pub fn step(&mut self, dt: f64, subduction: &[(DVec3, f64)], rng: &mut impl Rng) {
+    /// their subduction rate in m²/s, `slabs` where their slabs sink (under the overriding plate)
+    /// with their mass flux in kg/s.
+    pub fn step(
+        &mut self,
+        dt: f64,
+        subduction: &[(DVec3, f64)],
+        slabs: &[(DVec3, f64)],
+        rng: &mut impl Rng,
+    ) {
         let params = &self.params;
         let keep = (-dt / params.slab_memory).exp();
+        // Slabs pass through the depth stages: each stage hands on the share of its mass that
+        // sank out of it during the step (mass-conserving), the last one loses it to depths the
+        // surface does not feel.
+        let mut handed_on: Option<Vec<f64>> = None;
+        for (stage, masses) in params.slab_stages.iter().zip(&mut self.slab_mass) {
+            let leave = 1.0 - (-dt / stage.residence).exp();
+            let outflow: Vec<f64> = masses.iter().map(|m| m * leave).collect();
+            for (mass, out) in masses.iter_mut().zip(&outflow) {
+                *mass -= out;
+            }
+            if let Some(inflow) = &handed_on {
+                for (mass, inflow) in masses.iter_mut().zip(inflow) {
+                    *mass += inflow;
+                }
+            }
+            handed_on = Some(outflow);
+        }
+        if let Some(top) = self.slab_mass.first_mut() {
+            let seconds = dt * SECONDS_PER_MYR;
+            let mut hint = 0;
+            for &(position, flux) in slabs {
+                // Spread over the nearest grid vertex and its neighbours, so a migrating trench
+                // moves the load smoothly.
+                hint = self.slab_grid.nearest_from(position, hint);
+                for (cell, weight) in tent_weights(&self.slab_grid, hint, position) {
+                    top[cell as usize] += flux * seconds * weight;
+                }
+            }
+        }
         for downwelling in &mut self.downwelling {
             *downwelling *= keep;
         }
@@ -214,6 +336,81 @@ impl MantleFlow {
             .collect()
     }
 
+    /// Dynamic topography in metres (dry, i.e. without the water load) at every cell of `mesh`:
+    /// depressions above sunken slabs and swells above plumes, with zero mean over the sphere
+    /// (the mantle's mass is conserved; the return flow lifts the rest broadly). Evaluated on the
+    /// evaluation grid and interpolated smoothly to the cells.
+    pub fn dynamic_topography(&mut self, mesh: &SphereMesh, planet_radius: f64) -> Vec<f64> {
+        let params = &self.params;
+        if (params.topography_response == 0.0 || params.slab_stages.is_empty())
+            && params.plume_swell_height == 0.0
+        {
+            return vec![0.0; mesh.len()];
+        }
+        let stale = self
+            .interpolation
+            .as_ref()
+            .is_none_or(|(_, weights)| weights.len() != mesh.len());
+        if stale {
+            let grid =
+                SphereMesh::icosphere(params.evaluation_subdivisions.min(mesh.subdivisions()));
+            let weights = interpolation_weights(&grid, mesh);
+            self.interpolation = Some((grid, weights));
+        }
+        let (grid, weights) = self.interpolation.as_ref().expect("interpolation exists");
+        // Loads: sunken slabs pull down by f · M K(θ) / ρ_m with a normalised Gaussian K.
+        let mut sources: Vec<(DVec3, f64, f64)> = Vec::new();
+        for (stage, masses) in params.slab_stages.iter().zip(&self.slab_mass) {
+            let scale = -params.topography_response * stage.response
+                / (MANTLE_DENSITY * 2.0 * std::f64::consts::PI * stage.width.powi(2));
+            sources.extend(
+                (0..self.slab_grid.len() as u32)
+                    .filter(|&cell| masses[cell as usize] > 0.0 && scale != 0.0)
+                    .map(|cell| {
+                        (
+                            self.slab_grid.vertex(cell),
+                            scale * masses[cell as usize],
+                            stage.width / planet_radius,
+                        )
+                    }),
+            );
+        }
+        let peak_flux = params.plume_flux.1.max(1e-12);
+        sources.extend(self.plumes.iter().map(|plume| {
+            (
+                plume.position,
+                params.plume_swell_height * plume.flux() / peak_flux,
+                params.plume_swell_width / planet_radius,
+            )
+        }));
+        let coarse: Vec<f64> = (0..grid.len() as u32)
+            .map(|cell| {
+                let r = grid.vertex(cell);
+                sources
+                    .iter()
+                    .map(|&(position, height, width)| {
+                        // θ² ≈ 2 (1 − cos θ), cut off beyond 4 widths.
+                        let angle_squared = 2.0 * (1.0 - r.dot(position));
+                        if angle_squared > 16.0 * width * width {
+                            0.0
+                        } else {
+                            height * (-angle_squared / (2.0 * width * width)).exp()
+                        }
+                    })
+                    .sum()
+            })
+            .collect();
+        let mut field: Vec<f64> = weights
+            .iter()
+            .map(|cell| cell.iter().map(|&(c, w)| w * coarse[c as usize]).sum())
+            .collect();
+        let mean = field.iter().sum::<f64>() / field.len().max(1) as f64;
+        for value in &mut field {
+            *value -= mean;
+        }
+        field
+    }
+
     /// Evaluates the flow at every cell of `mesh`.
     fn evaluate(&self, mesh: &SphereMesh, planet_radius: f64) -> Vec<DVec3> {
         // Sources (positive flux) and sinks (negative flux).
@@ -247,6 +444,39 @@ impl MantleFlow {
             })
             .collect()
     }
+}
+
+/// Weights that interpolate a field on `grid` to the cells of `mesh`: tent weights over the
+/// nearest grid vertex and its neighbours, normalised, so the result has no steps at the edges
+/// between grid cells.
+fn interpolation_weights(grid: &SphereMesh, mesh: &SphereMesh) -> Vec<Weights> {
+    let mut hint = 0;
+    (0..mesh.len() as u32)
+        .map(|cell| {
+            let r = mesh.vertex(cell);
+            hint = grid.nearest_from(r, hint);
+            tent_weights(grid, hint, r)
+        })
+        .collect()
+}
+
+/// Normalised tent weights of the grid vertex `nearest` (the one nearest to `r`) and its
+/// neighbours at the position `r`.
+fn tent_weights(grid: &SphereMesh, nearest: u32, r: DVec3) -> Weights {
+    let reach = 1.5 * grid.mean_edge_angle();
+    let mut weights: Vec<(u32, f64)> = std::iter::once(nearest)
+        .chain(grid.neighbors(nearest).iter().copied())
+        .map(|c| {
+            let angle = grid.vertex(c).angle_between(r);
+            (c, (1.0 - angle / reach).max(0.0).powi(2))
+        })
+        .filter(|&(_, w)| w > 0.0)
+        .collect();
+    let total: f64 = weights.iter().map(|&(_, w)| w).sum();
+    for (_, w) in &mut weights {
+        *w /= total;
+    }
+    weights
 }
 
 /// Radial speed factor of [`radial_speed_per_sine`] at the angular distance `angle`, for tests.
@@ -283,7 +513,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(1);
         // A long-lived trench at +x.
         for _ in 0..200 {
-            mantle.step(1.0, &[(DVec3::X, 0.05)], &mut rng);
+            mantle.step(1.0, &[(DVec3::X, 0.05)], &[], &mut rng);
         }
         mantle.plumes.clear();
         mantle.plumes.push(Plume {
@@ -346,12 +576,68 @@ mod tests {
     }
 
     #[test]
+    fn slabs_depress_and_plumes_lift_the_surface() {
+        let mesh = SphereMesh::icosphere(6);
+        let mut mantle = MantleFlow::new(MantleParams::default());
+        let mut rng = ChaCha8Rng::seed_from_u64(3);
+        // 5000 km of trench at 5 cm/yr subducting old lithosphere (7e6 kg/m²) at +x.
+        // The trench runs along a meridian through +x, ±2500 km, in 51 segments.
+        let flux = 5e6 * 0.05 / (365.25 * 24.0 * 3600.0) * 7e6;
+        let slabs: Vec<(DVec3, f64)> = (-25..=25)
+            .map(|i| {
+                let angle = f64::from(i) * 100e3 / 6.371e6;
+                (DVec3::new(angle.cos(), 0.0, angle.sin()), flux / 51.0)
+            })
+            .collect();
+        for _ in 0..300 {
+            mantle.step(1.0, &[], &slabs, &mut rng);
+        }
+        // The slab mass approaches the steady state flux × total residence.
+        let total: f64 = mantle.slab_mass.iter().flatten().sum();
+        let residence: f64 = mantle.params.slab_stages.iter().map(|s| s.residence).sum();
+        let expected = flux * residence * SECONDS_PER_MYR;
+        assert!(
+            (total / expected - 1.0).abs() < 0.05,
+            "{total} vs {expected}"
+        );
+        mantle.plumes.clear();
+        mantle.plumes.push(Plume {
+            position: -DVec3::X,
+            age: 50.0,
+            lifetime: 200.0,
+            peak_flux: 6e-3,
+            has_rifted: false,
+        });
+        let field = mantle.dynamic_topography(&mesh, 6.371e6);
+        let at = |target: DVec3| field[mesh.nearest_from(target, 0) as usize];
+        let mean = field.iter().sum::<f64>() / field.len() as f64;
+        assert!(mean.abs() < 1e-6);
+        // Hundreds of metres down over the slabs, up over the plume.
+        assert!(
+            (-1500.0..-300.0).contains(&at(DVec3::X)),
+            "{}",
+            at(DVec3::X)
+        );
+        assert!(
+            (300.0..1000.0).contains(&at(-DVec3::X)),
+            "{}",
+            at(-DVec3::X)
+        );
+        // Smooth at the cell scale (~110 km): no steps from the coarse evaluation grid.
+        for cell in 0..mesh.len() as u32 {
+            for &n in mesh.neighbors(cell) {
+                assert!((field[cell as usize] - field[n as usize]).abs() < 150.0);
+            }
+        }
+    }
+
+    #[test]
     fn plumes_are_born_and_die() {
         let mut mantle = MantleFlow::new(MantleParams::default());
         let mut rng = ChaCha8Rng::seed_from_u64(2);
         let mut counts = Vec::new();
         for _ in 0..1000 {
-            mantle.step(1.0, &[], &mut rng);
+            mantle.step(1.0, &[], &[], &mut rng);
             counts.push(mantle.plumes().len());
         }
         let mean = counts[300..].iter().sum::<usize>() as f64 / 700.0;

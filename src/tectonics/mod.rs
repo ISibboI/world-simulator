@@ -377,6 +377,10 @@ impl TectonicParams {
             "events.terrane_cooldown" => &mut self.events.terrane_cooldown,
             "events.min_breakup_area" => &mut self.events.min_breakup_area,
             "mantle.plume_interval" => &mut self.mantle.plume_interval,
+            "mantle.topography_response" => &mut self.mantle.topography_response,
+            "mantle.plume_swell_height" => &mut self.mantle.plume_swell_height,
+            "mantle.slab_offset" => &mut self.mantle.slab_offset,
+            "mantle.plume_swell_width" => &mut self.mantle.plume_swell_width,
             _ => anyhow::bail!("unknown or untunable tectonic parameter {name}"),
         };
         *field = value;
@@ -456,11 +460,18 @@ pub struct SeaLevelBudget {
     pub sharing: f64,
     /// Burial metamorphism (pores close, the column subsides).
     pub metamorphism: f64,
+    /// Changes of the dynamic topography (ocean basins deepen or shallow with the mantle flow).
+    pub mantle: f64,
 }
 
 impl SeaLevelBudget {
     pub fn total(&self) -> f64 {
-        self.tectonics + self.fluvial + self.coastal + self.sharing + self.metamorphism
+        self.tectonics
+            + self.fluvial
+            + self.coastal
+            + self.sharing
+            + self.metamorphism
+            + self.mantle
     }
 }
 
@@ -507,6 +518,9 @@ pub struct Simulation {
     polarities: polarity::Polarities,
     rng: ChaCha8Rng,
     mantle: mantle::MantleFlow,
+    /// Dynamic topography of every world cell (m, dry): the deflection of the surface by the
+    /// mantle flow below (see [`mantle::MantleFlow::dynamic_topography`]).
+    dynamic_topography: Vec<f64>,
     /// How uncovered cells were filled so far.
     gap_statistics: GapStatistics,
     trench_sediment: TrenchSediment,
@@ -615,6 +629,7 @@ impl Simulation {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    cohort: 0.0,
                 }
             } else {
                 new_oceanic_crust(-ocean_age[cell])
@@ -678,7 +693,9 @@ impl Simulation {
             .collect();
 
         let mantle = mantle::MantleFlow::new(params.mantle.clone());
+        let dynamic_topography = vec![0.0; mesh.len()];
         let mut simulation = Self {
+            dynamic_topography,
             mesh,
             params,
             plates,
@@ -892,11 +909,30 @@ impl Simulation {
         self.collision_inflow += 0.5 * inflow * self.boundary_length_per_cell() * dt / 1e12;
 
         let subduction = self.subduction_rates(&boundaries);
-        self.mantle.step(dt, &subduction, &mut self.rng);
+        let slabs = self.sinking_slabs(&boundaries);
+        self.mantle.step(dt, &subduction, &slabs, &mut self.rng);
 
         let sea_level = self.solve_sea_level();
         self.sea_level_budget.tectonics += sea_level - self.sea_level;
         self.sea_level = sea_level;
+
+        self.dynamic_topography = self
+            .mantle
+            .dynamic_topography(&self.mesh, self.params.planet_radius);
+        let sea_level = self.solve_sea_level();
+        self.sea_level_budget.mantle += sea_level - self.sea_level;
+        self.sea_level = sea_level;
+    }
+
+    /// Dynamic topography of every world cell in metres (dry, without the water load).
+    pub fn dynamic_topography(&self) -> &[f64] {
+        &self.dynamic_topography
+    }
+
+    /// Dry elevation (without the water load, see [`crate::isostasy`]) of a world cell showing
+    /// `crust`: the crust's isostatic and thermal elevation plus the dynamic topography.
+    fn cell_dry_elevation(&self, cell: u32, crust: &Crust) -> f64 {
+        crust.dry_elevation(self.time) + self.dynamic_topography[cell as usize]
     }
 
     /// Areal mass (kg/m², summed over cells) of all crust, including hidden samples.
@@ -937,8 +973,9 @@ impl Simulation {
 
     /// Surface elevation (bedrock plus sediment) of a world cell relative to sea level in metres.
     pub fn surface_elevation(&self, cell: u32) -> f64 {
-        self.surface_crust(cell)
-            .surface_elevation(self.time, self.sea_level)
+        crate::isostasy::to_surface(
+            self.cell_dry_elevation(cell, &self.surface_crust(cell)) - self.sea_level,
+        )
     }
 
     /// The part of the sea level due to sediment: the sea level minus the one without any
@@ -960,10 +997,13 @@ impl Simulation {
         let (dry, pores): (Vec<f64>, Vec<f64>) = (0..self.mesh.len() as u32)
             .map(|cell| {
                 let crust = self.surface_crust(cell);
+                let dynamic = self.dynamic_topography[cell as usize];
                 if select(
                     cell,
                     &crust,
-                    crust.surface_elevation(self.time, self.sea_level),
+                    crate::isostasy::to_surface(
+                        crust.dry_elevation(self.time) + dynamic - self.sea_level,
+                    ),
                 ) {
                     let rest = if metasediment {
                         crust.basement()
@@ -971,13 +1011,13 @@ impl Simulation {
                         crust
                     };
                     (
-                        rest.dry_elevation(self.time)
+                        rest.dry_elevation(self.time) + dynamic
                             - crate::isostasy::sediment_dry_elevation(crust.sediment),
                         0.0,
                     )
                 } else {
                     (
-                        crust.dry_elevation(self.time),
+                        crust.dry_elevation(self.time) + dynamic,
                         crate::isostasy::sediment_pores(crust.sediment),
                     )
                 }
@@ -1033,7 +1073,7 @@ impl Simulation {
         let (dry, sediment): (Vec<f64>, Vec<f64>) = (0..self.mesh.len() as u32)
             .map(|cell| {
                 let crust = self.surface_crust(cell);
-                (crust.dry_elevation(self.time), crust.sediment)
+                (self.cell_dry_elevation(cell, &crust), crust.sediment)
             })
             .unzip();
         let cell_area =
@@ -1166,7 +1206,12 @@ impl Simulation {
             if new_sediment < 0.0 {
                 new_thickness += new_sediment * SEDIMENT_ROCK_DENSITY / crust.density;
             }
-            crust.sediment = new_sediment.max(0.0);
+            if sediment > 0.0 {
+                // New deposits are new rock: they do not belong to the cover cohort.
+                crust.add_sediment(sediment, 0.0);
+            } else {
+                crust.sediment = new_sediment.max(0.0);
+            }
             // Erosion removes crust from the top; deposition never adds crystalline crust.
             crust.thin_from_top(new_thickness.max(0.0));
             change += crust.mass() - before;
@@ -1191,6 +1236,38 @@ impl Simulation {
         self.sea_level = sea_level;
     }
 
+    /// Starts tracking the continental sedimentary cover as a cohort (see [`Crust::cohort`]):
+    /// all sediment now on crust whose basement is of continental origin belongs to it, nothing
+    /// else does. Returns the cohort's mass in Gt.
+    pub fn start_cover_cohort(&mut self) -> f64 {
+        for crust in self
+            .plates
+            .iter_mut()
+            .flat_map(|plate| plate.crust.iter_mut().flatten())
+        {
+            crust.cohort = f64::from(u8::from(crust.basement().is_continental_origin()));
+        }
+        self.cover_cohort().0
+    }
+
+    /// Mass (Gt, all samples including hidden ones) of the cover cohort (see
+    /// [`Simulation::start_cover_cohort`]) still on crust whose basement is of continental
+    /// origin, and still sediment anywhere.
+    pub fn cover_cohort(&self) -> (f64, f64) {
+        let cell_area =
+            4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
+        let to_gt = cell_area * SEDIMENT_ROCK_DENSITY / 1e12;
+        let mut masses = (0.0, 0.0);
+        for crust in self.plates.iter().flat_map(|p| p.crust.iter().flatten()) {
+            let mass = crust.sediment * crust.cohort * to_gt;
+            if crust.basement().is_continental_origin() {
+                masses.0 += mass;
+            }
+            masses.1 += mass;
+        }
+        masses
+    }
+
     /// The changes of the sea level so far per process, and the remainder of the actual change
     /// since the start that they do not explain (zero up to rounding).
     pub fn sea_level_budget(&self) -> (SeaLevelBudget, f64) {
@@ -1209,6 +1286,22 @@ mod tests {
 
     fn simulation(seed: u64) -> Simulation {
         Simulation::new(SphereMesh::icosphere(4), 8, TectonicParams::default(), seed)
+    }
+
+    #[test]
+    fn uniform_dynamic_topography_shifts_the_sea_level_only() {
+        let mut simulation = simulation(3);
+        let sea_level = simulation.solve_sea_level();
+        let sediment_part = simulation.sediment_sea_level();
+        let elevations = simulation.surface_elevations();
+        simulation.dynamic_topography = vec![250.0; simulation.mesh.len()];
+        let shifted = simulation.solve_sea_level();
+        assert!((shifted - sea_level - 250.0).abs() < 1e-6);
+        simulation.sea_level = shifted;
+        assert!((simulation.sediment_sea_level() - sediment_part).abs() < 1e-6);
+        for (cell, &before) in elevations.iter().enumerate() {
+            assert!((simulation.surface_elevation(cell as u32) - before).abs() < 1e-6);
+        }
     }
 
     #[test]
@@ -1325,6 +1418,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         };
         // Normal continental crust stands a few hundred metres above sea level, doubly
         // thickened crust forms high plateaus like Tibet, thinned crust forms shelves.
@@ -1349,6 +1443,7 @@ mod tests {
                         felsic: 1.0,
                         metasediment: 0.0,
                         orogeny: NO_OROGENY,
+                        cohort: 0.0,
                     };
                     let elevation = crust.dry_elevation(0.0);
                     // At least 0.5 m per 100 m of crust (the thermal uplift fading out over the
@@ -1377,6 +1472,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    cohort: 0.0,
                 };
                 assert!(arc.buoyancy(0.0) > new_oceanic_crust(0.0).buoyancy(0.0));
             }
@@ -1393,6 +1489,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         };
         assert!(
             (continent(0.0).surface_elevation(0.0, 0.0)
@@ -1413,6 +1510,7 @@ mod tests {
                 felsic: 1.0,
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
+                cohort: 0.0,
             };
             let removed = 10.0;
             let thinner = Crust {
@@ -1442,6 +1540,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         };
         assert!(!eroded.is_oceanic());
         assert!(!eroded.is_continental());

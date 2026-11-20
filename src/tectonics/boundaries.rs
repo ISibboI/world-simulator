@@ -998,7 +998,7 @@ fn stretch_rift(
         return false;
     }
     let (mut thickness, mut mass, mut felsic, mut sediment) = (0.0, 0.0, 0.0, 0.0);
-    let mut metasediment = 0.0;
+    let (mut metasediment, mut cohort) = (0.0, 0.0);
     // Mass-weighted thickness and thermal fraction of the donors after stretching (repeated
     // stretching compounds in the donors).
     let (mut donor_thickness, mut donor_heat) = (0.0, 0.0);
@@ -1021,6 +1021,7 @@ fn stretch_rift(
         donor_thickness += given * crust.density * (crust.thickness - given);
         donor_heat += given * crust.density * fraction;
         sediment += crust.sediment * share;
+        cohort += crust.sediment * share * crust.cohort;
         crust.thickness -= given;
         crust.sediment -= crust.sediment * share;
     }
@@ -1035,6 +1036,7 @@ fn stretch_rift(
         felsic: felsic / mass.max(1e-9),
         metasediment: metasediment / mass.max(1e-9),
         orogeny,
+        cohort: cohort / sediment.max(1e-9),
     });
     true
 }
@@ -1089,7 +1091,7 @@ fn heal_gap(
     // oceanic crust ancient).
     let share = 1.0 / (neighbors.len() + 1) as f64;
     let (mut thickness, mut mass, mut sediment, mut felsic) = (0.0, 0.0, 0.0, 0.0);
-    let mut metasediment = 0.0;
+    let (mut metasediment, mut cohort) = (0.0, 0.0);
     let mut birth = f64::NEG_INFINITY;
     let mut orogeny = NO_OROGENY;
     for &neighbor in &neighbors {
@@ -1104,6 +1106,7 @@ fn heal_gap(
         metasediment += given * crust.density * crust.metasediment;
         birth = birth.max(crust.birth);
         sediment += crust.sediment * share;
+        cohort += crust.sediment * share * crust.cohort;
         crust.thickness -= given;
         crust.sediment -= crust.sediment * share;
     }
@@ -1115,6 +1118,7 @@ fn heal_gap(
         felsic: felsic / mass.max(1e-9),
         metasediment: metasediment / mass.max(1e-9),
         orogeny,
+        cohort: cohort / sediment.max(1e-9),
     });
     plate.consumed[local as usize] = false;
     statistics.enclosed_fills += 1;
@@ -1228,6 +1232,7 @@ mod tests {
                             felsic: 1.0,
                             metasediment: 0.0,
                             orogeny: NO_OROGENY,
+                            cohort: 0.0,
                         };
                         assert!(crust.resists_subduction() && !crust.is_continental());
                     } else if plate == 1 && continental_upper_plate && z < 0.3 {
@@ -1239,6 +1244,7 @@ mod tests {
                             felsic: 1.0,
                             metasediment: 0.0,
                             orogeny: NO_OROGENY,
+                            cohort: 0.0,
                         };
                     }
                 }
@@ -1366,6 +1372,7 @@ mod tests {
                 felsic: 1.0,
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
+                cohort: 0.0,
             };
         }
         if let Some(upper) = upper {
@@ -1400,6 +1407,7 @@ mod tests {
             felsic: 0.4,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         };
         assert!(!arc.is_oceanic() && !arc.resists_subduction());
         // Most of it: after the segment flips (sustained arrival), the arc plate subducts.
@@ -1417,6 +1425,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         };
         let ledger = wedged_margin_arriving_at_a_trench(Some(continent));
         assert_eq!(ledger.subducted_transitional, 0.0, "{ledger:?}");
@@ -1490,6 +1499,7 @@ mod tests {
                 felsic: 1.0,
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
+                cohort: 0.0,
             };
         }
         simulation
@@ -1608,6 +1618,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         });
         simulation.crustal_flow(5.0);
         assert_eq!(simulation.surface_crust(cell).thickness, 70_000.0);

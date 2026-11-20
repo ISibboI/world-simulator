@@ -31,6 +31,32 @@ pub struct Planet {
     wave_erosion: WaveErosion,
     /// Sediment delivered to the oceans so far (m³).
     sediment_delivered: f64,
+    /// Sediment that surface processes removed from and added to cells of crust of continental
+    /// origin so far (rock-equivalent thickness over one cell, summed; net per cell and step).
+    cover_turnover: CoverTurnover,
+    /// When to start tracking the continental cover as a cohort (Myr), and once started, the
+    /// time and the cohort's initial mass (Gt).
+    cover_cohort_time: f64,
+    cover_cohort: Option<(f64, f64)>,
+}
+
+/// The continental cover of [`CoverCohort::start`] and how much of it is left (Gt).
+#[derive(Clone, Copy, Debug)]
+pub struct CoverCohort {
+    pub start: f64,
+    pub initial: f64,
+    /// Left as sediment on crust whose basement is of continental origin.
+    pub on_continents: f64,
+    /// Left as sediment anywhere.
+    pub anywhere: f64,
+}
+
+/// Gross sediment turnover on crust of continental origin (the continental sedimentary cover)
+/// by surface processes: what left and what arrived at its cells, net per cell and step.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CoverTurnover {
+    pub eroded: f64,
+    pub deposited: f64,
 }
 
 /// Statistics of the planet, extending the tectonic statistics.
@@ -85,6 +111,11 @@ pub struct PlanetStatistics {
     pub wave_erosion: WaveErosion,
     /// Sediment delivered to the oceans by rivers so far, in Gt.
     pub sediment_delivered: f64,
+    /// Sediment removed from and added to the continental cover by surface processes so far,
+    /// in Gt.
+    pub cover_turnover: CoverTurnover,
+    /// The tracked cohort of continental cover, once started.
+    pub cover_cohort: Option<CoverCohort>,
 }
 
 /// The part of the sea level (m) due to the sediment of groups of cells (see
@@ -155,9 +186,18 @@ impl Planet {
             sediment_deposition: [0.0; 4],
             wave_erosion: WaveErosion::default(),
             sediment_delivered: 0.0,
+            cover_turnover: CoverTurnover::default(),
+            cover_cohort_time: f64::INFINITY,
+            cover_cohort: None,
         };
         planet.update_water_cycle(&planet.tectonics.surface_elevations());
         planet
+    }
+
+    /// Starts tracking the continental cover as a cohort at the simulated time `time` (Myr), to
+    /// measure how long it is preserved (see [`Simulation::start_cover_cohort`]).
+    pub fn track_cover_cohort_from(&mut self, time: f64) {
+        self.cover_cohort_time = time;
     }
 
     pub fn tectonics(&self) -> &Simulation {
@@ -209,6 +249,15 @@ impl Planet {
                 params,
                 dt_years,
             );
+            for (delta, class) in result.sediment_delta.iter().zip(&class) {
+                if *class == CrustClass::Continental {
+                    if *delta < 0.0 {
+                        self.cover_turnover.eroded -= delta;
+                    } else {
+                        self.cover_turnover.deposited += delta;
+                    }
+                }
+            }
             self.tectonics.apply_surface_changes(
                 &result.bedrock_delta,
                 &result.sediment_delta,
@@ -225,6 +274,10 @@ impl Planet {
             wave.stayed += result.wave.stayed;
             let cell_area = self.cell_area();
             self.sediment_deposition = result.deposited.map(|d| d * cell_area / dt_years);
+        }
+        if self.cover_cohort.is_none() && self.tectonics.time() >= self.cover_cohort_time - 1e-9 {
+            let mass = self.tectonics.start_cover_cohort();
+            self.cover_cohort = Some((self.tectonics.time(), mass));
         }
         debug!(
             ?tectonics_time,
@@ -367,6 +420,22 @@ impl Planet {
             },
             sediment_delivered: self.sediment_delivered * crate::isostasy::SEDIMENT_ROCK_DENSITY
                 / 1e12,
+            cover_cohort: self.cover_cohort.map(|(start, initial)| {
+                let (on_continents, anywhere) = self.tectonics.cover_cohort();
+                CoverCohort {
+                    start,
+                    initial,
+                    on_continents,
+                    anywhere,
+                }
+            }),
+            cover_turnover: {
+                let to_gt = cell_area * crate::isostasy::SEDIMENT_ROCK_DENSITY / 1e12;
+                CoverTurnover {
+                    eroded: self.cover_turnover.eroded * to_gt,
+                    deposited: self.cover_turnover.deposited * to_gt,
+                }
+            },
         }
     }
 

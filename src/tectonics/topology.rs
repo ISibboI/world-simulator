@@ -64,7 +64,7 @@ fn spread_crust(mesh: &SphereMesh, plate: &mut Plate, target: u32, crust: Crust)
             / mass.max(1e-9);
         receiver.thickness += added;
         receiver.density = mass / receiver.thickness.max(1e-9);
-        receiver.sediment += crust.sediment * share;
+        receiver.add_sediment(crust.sediment * share, crust.cohort);
         receiver.orogeny = receiver.orogeny.max(crust.orogeny);
     }
 }

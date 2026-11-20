@@ -74,6 +74,10 @@ pub struct Crust {
     /// collision, suturing, terrane accretion), or [`NO_OROGENY`]. Orogenic belts and sutures
     /// stay weak zones of the lithosphere long after the orogeny (see `weak_zones`).
     pub orogeny: f64,
+    /// Diagnostic tracer: the mass fraction of the sediment that belongs to the tracked cohort
+    /// of continental cover (see `Simulation::start_cover_cohort`). Mixed by mass where
+    /// sediment is added; removal takes it in proportion (a well-mixed column).
+    pub cohort: f64,
 }
 
 /// [`Crust::orogeny`] of crust that never went through an orogeny in the simulation.
@@ -262,6 +266,16 @@ impl Crust {
         };
     }
 
+    /// Adds `sediment` (rock-equivalent m) carrying the cohort fraction `cohort` (see
+    /// [`Crust::cohort`]).
+    pub(crate) fn add_sediment(&mut self, sediment: f64, cohort: f64) {
+        let total = self.sediment + sediment;
+        if total > 0.0 {
+            self.cohort = (self.sediment * self.cohort + sediment * cohort) / total;
+        }
+        self.sediment = total;
+    }
+
     /// Areal mass (kg/m²) of the felsic part of the crystalline crust.
     pub fn felsic_mass(&self) -> f64 {
         self.thickness * self.density * self.felsic
@@ -370,6 +384,7 @@ pub(super) fn new_oceanic_crust(time: f64) -> Crust {
         felsic: 0.0,
         metasediment: 0.0,
         orogeny: NO_OROGENY,
+        cohort: 0.0,
     }
 }
 
@@ -430,6 +445,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         };
         assert!(!margin.resists_subduction());
         margin.add_crust(8000.0, METASEDIMENT_DENSITY, (1.0, 1.0), 75_000.0);
@@ -455,6 +471,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            cohort: 0.0,
         };
         assert!(!margin.resists_subduction() && !margin.is_continental_origin());
         let wedged = Crust {
