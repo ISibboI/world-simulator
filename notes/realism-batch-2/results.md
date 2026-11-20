@@ -28,8 +28,8 @@ the seed scatter.
 | Dynamic topography minimum (m; #37) | −1932 | −1976 | −0.4 |
 | Runtime (s) | 689 (563…808) | 567 (523…595) | −3.9 |
 
-The runtime difference is load on the machine during the `main` runs (another task was
-building), not the code: the branch adds solves.
+The runtime difference is probably load on the machine during the `main` runs (another task
+was using cores at the time; not verified). The branch adds solves, so it cannot be faster.
 
 ## Why so little
 
@@ -44,9 +44,9 @@ building), not the code: the branch adds solves.
   driven by mature slabs elsewhere, with forces an order of magnitude above the resistance
   (slab pull 2 × 10¹³ N/m against 3 × 10¹² N/m), so the resistance slows them but does not
   stop them.
-- **Buoyant slabs are rare by the time they matter.** Young lithosphere at a trench almost
-  always follows older lithosphere of the same plate into a full-length slab, whose deep part
-  pulls.
+- **Buoyant slabs are probably rare** (an inference, not measured): the buoyancy only
+  outweighs the pull while the slab is shorter than ~150 km, and only 8% of the trench length
+  is in that state.
 
 So #42's premise ("nothing resists subduction initiation") was true, and fixing it is right,
 but it does not shape the planet. The cause of the trench length and the production is in the
