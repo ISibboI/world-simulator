@@ -223,10 +223,9 @@ pub struct EventCounts {
     /// Splits along the weakest lithosphere (see [`super::weak_zones`]), and splits that fell
     /// back to a great circle because no cut along weak lithosphere divided the plate.
     pub weak_zone_splits: usize,
-    /// Splits along weak lithosphere found by cutting again after a part was too small, and plume
-    /// rifts whose new boundary passes within half the plume head's radius of the plume (the
-    /// break found the plume's weakened lithosphere; it is not tied to it).
+    /// Splits along weak lithosphere found by cutting again after a part was too small.
     pub recut_splits: usize,
+    /// Plume rifts whose new boundary passes within half the plume head's radius of the plume.
     pub head_rifts: usize,
     /// Passive-margin initiations whose whole ocean region broke off along its coasts because no
     /// break along weak lithosphere left both parts large enough.
@@ -2470,6 +2469,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: if suture { -500.0 } else { NO_OROGENY },
+                    cohort: 0.0,
                 });
             }
             let caps: Vec<u32> = (0..simulation.mesh.len() as u32)
