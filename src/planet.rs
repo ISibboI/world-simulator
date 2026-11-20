@@ -1,6 +1,6 @@
 //! The planet: tectonics coupled with the water cycle and erosion.
 
-use std::time::Instant;
+use web_time::Instant;
 
 use tracing::{debug, debug_span};
 

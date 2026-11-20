@@ -57,7 +57,13 @@ superseded by this section. Its still-binding user preferences are under "Workin
 
 - Toolchain pinned in `rust-toolchain.toml`; CI in `.github/workflows/ci.yml` runs fmt, check
   (all and default features), clippy (pinned/stable/beta/nightly), test, doc and a
-  Windows/macOS check, with warnings denied.
+  Windows/macOS check and a wasm32 check/clippy of the web version, with warnings denied;
+  `.github/workflows/pages.yml` builds the web version and deploys it to GitHub Pages from
+  `main`.
+- Web version (`src/web.rs`, `web/`, `Trunk.toml`): the same viewer and simulation in the
+  browser, the simulation in a Web Worker, parameters as URL query parameters. Build or serve
+  it with `trunk build --release` / `trunk serve`. Keep `cfg(target_arch = "wasm32")` gates
+  confined to entry points and file output; see `notes/issue-60/results.md`.
 - Run CI checks locally with `CARGO_BUILD_WARNINGS=deny` set.
 - Run the simulation: `cargo run --release -- --help`; snapshots go to `output/` (ignored by
   git).
