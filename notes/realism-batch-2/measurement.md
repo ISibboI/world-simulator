@@ -26,8 +26,11 @@ cause of the high sea-floor production (#32). This note measures what is.
 | … of them slab-attached | **9.5** (7.2…11.2) | **5** (Pacific, Australia, Nazca, Sunda, Philippine Sea) |
 | Surface on plates with an own-trench share < 2% / 2–10% / ≥ 10% | 16 / 35 / 49% | 18 / 45 / 37% |
 | Boundary between two plates that are both not slab-attached | **9%** (5…13) | **48%** |
-| … median relative speed there (cm/yr) | 6.2 | 1.5 |
-| Boundary with one / both plates slab-attached | 53 / 38% | 39 / 12% |
+| … median relative speed there (cm/yr); share slower than 2 cm/yr | 3.5 (1.9…5.3); 34% | 1.5; 59% |
+| Boundary with one plate slab-attached | 53% | 39% |
+| … median relative speed; share slower than 2 cm/yr | 6.6; 3% | 5.5; 22% |
+| Boundary with both plates slab-attached | 38% | 12% |
+| … median relative speed; share slower than 2 cm/yr | 8.3; 2% | 6.0; 14% |
 | Boundary slower than 2 cm/yr | 5.5% | 39% |
 | Median relative speed (cm/yr) | 6.8 | 3.0 |
 | Trench length (10³ km) | 113–125 | 51 |
@@ -38,12 +41,20 @@ cause of the high sea-floor production (#32). This note measures what is.
 Reading:
 - Speeds per class are Earth-like. So is the split of the surface between the classes
   (49% on slab-attached plates against 37%).
-- The difference is the **number** of slab-attached plates (9.5 against 5) and that plates
-  without slabs **do not border each other**. On Earth half of the boundary length lies between
-  such plates (the Atlantic, Indian-Ocean and Arctic ridges, Africa–Eurasia, the Americas), and
-  that is where the slow boundaries are.
-- The 10% threshold matters: Africa, Antarctica and the Americas have own-trench shares of
-  3–6%. The threshold-free statement is the speed distribution.
+- The main difference is the **mix**: plates without slabs **rarely border each other** (9% of
+  the boundary against 48%). On Earth half of the boundary length lies between such plates
+  (the Atlantic, Indian-Ocean and Arctic ridges, Africa–Eurasia, the Americas), and that is
+  where the slow boundaries are.
+- Within each class the model is faster than Earth by a factor of 1.2–2.3, and has fewer slow
+  stretches. Boundaries between slab-free plates are the slowest in the model too (3.5 cm/yr).
+- The threshold of 10% matters for the plate count but not for the conclusion (results
+  evaluation, [`review-results.md`](review-results.md)): slab-attached plates in the model
+  against Earth are 11.0 / 8 at 5%, 9.5 / 5 at 10% and 7.9 / 3 at 20%; the boundary share
+  between slab-free plates is 3.8 / 26%, 9 / 48% and 19 / 68%. So "5–7 times less boundary
+  between slab-free plates" is the robust statement; "twice as many slab-attached plates"
+  holds at 10% only. Earth is a single snapshot.
+- An earlier version of this table gave 6.2 cm/yr for the boundaries between slab-free plates.
+  That was a bug in the analysis script (one key for three classes); the evaluation found it.
 
 ## 2. What is subducted
 
@@ -114,8 +125,8 @@ overridden again within a step or two. Mass is conserved (the ledger closes); it
 ## Conclusions
 
 1. No single rule or parameter explains the factor of ~2 in trench length and production. The
-   model's plates are organised differently from today's Earth: twice as many plates carry
-   slabs, and slab-free plates do not border each other.
+   model's plates are organised differently from today's Earth: more plates carry slabs, and
+   slab-free plates rarely border each other.
 2. Two physical gaps were found and are fixed in this batch (see [`plan.md`](plan.md)): young
    lithosphere is not buoyant, and nothing resists the start of subduction.
 3. #14 is a different thing than its title says: old oceanic basement under passive margins.

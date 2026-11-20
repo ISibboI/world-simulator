@@ -49,6 +49,8 @@ _2026-11-20. Measurement: [`measurement.md`](measurement.md). Issues: #42, #32 (
    converging contact and no opening contact is coupled (finding 1: the first version tested
    the coupling with an absolute tolerance and could leave 2–3 times the strength). Contacts
    slower than `locked_convergence` (0.1 cm/yr) are locked viscously.
+   The loop may take up to 100 solves (20 left a fifth of the solves unsettled); the log
+   counts solves that do not settle.
 4. **Slabs grow only above `min_trench_convergence`** (0.1 cm/yr); a creeping, locked contact
    builds no slab and an existing one decays (finding 3).
 5. Diagnostics: length of incipient trenches (slab < 150 km) and the convergence there and at
