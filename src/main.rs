@@ -545,7 +545,8 @@ fn snapshot(
         let cover_burial = (statistics.metamorphosed.0 - previous_metamorphosed.0) / years;
         let cover_stock = planet_statistics.sediment_stock[0];
         info!(
-            "    continental cover: stock {:.3e} Gt | surface processes eroded {:.2}, deposited \
+            "    continental cover: stock {:.3e} Gt | surface processes (net per cell and step, a lower \
+             bound of the gross turnover) eroded {:.2}, deposited \
              {:.2} Gt/yr | turnover half-life {:.0} Myr",
             cover_stock,
             cover_eroded,
