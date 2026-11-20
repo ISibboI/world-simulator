@@ -1,8 +1,10 @@
 mod climate;
 mod erosion;
 mod isostasy;
+mod ocean;
 mod planet;
 mod render;
+mod sparse;
 mod sphere;
 mod tectonics;
 mod temperature;
@@ -112,8 +114,9 @@ struct Cli {
     cell_dump: bool,
 
     /// Overrides a tectonic parameter for calibration, e.g. `--set basal_drag=8e14`, or an
-    /// erosion parameter with the prefix `erosion.`; can be repeated. See `TectonicParams::set`
-    /// and `ErosionParams::set` for the names.
+    /// erosion, climate or temperature parameter with the prefix `erosion.`, `climate.` or
+    /// `temperature.`; can be repeated. See `TectonicParams::set`, `ErosionParams::set`,
+    /// `ClimateParams::set` and `TemperatureParams::set` for the names.
     #[arg(long = "set", value_name = "NAME=VALUE")]
     overrides: Vec<String>,
 }
@@ -159,6 +162,8 @@ fn main() -> anyhow::Result<()> {
         planet_radius: EARTH_RADIUS,
         ..ErosionParams::default()
     };
+    let mut climate = ClimateParams::default();
+    let mut temperature = TemperatureParams::default();
     for assignment in &cli.overrides {
         let (name, value) = assignment
             .split_once('=')
@@ -168,6 +173,10 @@ fn main() -> anyhow::Result<()> {
             .with_context(|| format!("parsing the value of {name}"))?;
         if let Some(name) = name.strip_prefix("erosion.") {
             erosion.set(name, value)?;
+        } else if let Some(name) = name.strip_prefix("climate.") {
+            climate.set(name, value)?;
+        } else if let Some(name) = name.strip_prefix("temperature.") {
+            temperature.set(name, value)?;
         } else {
             params.set(name, value)?;
         }
@@ -175,13 +184,7 @@ fn main() -> anyhow::Result<()> {
     }
     let simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
     let erosion = (!cli.no_erosion).then_some(erosion);
-    let planet = Planet::new(
-        simulation,
-        ClimateParams::default(),
-        TemperatureParams::default(),
-        erosion,
-        EARTH_RADIUS,
-    );
+    let planet = Planet::new(simulation, climate, temperature, erosion, EARTH_RADIUS);
 
     if cli.headless {
         return simulate(planet, &cli, |_| {});
@@ -589,10 +592,23 @@ fn snapshot(
         100.0 * statistics.continental_masses.largest_share,
     );
     info!(
-        "    land precipitation {:4.2} m/yr | largest river {:8.0} m³/s | \
+        "    land precipitation {:4.2} m/yr (20–60° {:4.2} m/yr, {:.0}% of land below 0.25 m/yr), \
+         runoff {:4.2} m/yr | global precipitation {:4.2}, evaporation {:4.2} m/yr (clipped {:.2}%) | ITCZ {:?}° | \
+         largest river {:8.0} m³/s | \
          sediment to ocean {:5.1} km³/yr (shelf {:.1}, slope {:.1}, rise {:.1}, fan {:.1}) | \
          sediment stock (Gt) continental {:.3e}, transitional {:.3e}, oceanic {:.3e}",
         planet_statistics.mean_land_precipitation,
+        planet_statistics.midlatitude_land_precipitation,
+        100.0 * planet_statistics.arid_land_fraction,
+        planet_statistics.land_runoff,
+        planet_statistics.global_precipitation,
+        planet_statistics.global_evaporation,
+        100.0 * planet_statistics.clipped_precipitation,
+        planet_statistics
+            .itcz
+            .iter()
+            .map(|l| l.round() as i64)
+            .collect::<Vec<_>>(),
         planet_statistics.largest_river / SECONDS_PER_YEAR,
         planet_statistics.sediment_flux / 1e9,
         planet_statistics.sediment_deposition[0] / 1e9,
@@ -605,12 +621,18 @@ fn snapshot(
     );
     info!(
         "    temperature global {:5.1} °C, equator {:5.1} °C, poles {:6.1} °C | \
-         land seasonal range {:4.1} K | permanently frozen {:4.1}%",
+         land seasonal range {:4.1} K | permanently frozen {:4.1}% | heat transport {:+.1}/{:+.1} PW \
+         (ocean at 20°N {:+.1}, 20°S {:+.1}) | gyres {:.0} Sv",
         planet_statistics.global_temperature,
         planet_statistics.equatorial_temperature,
         planet_statistics.polar_temperature,
         planet_statistics.land_seasonal_range,
         100.0 * planet_statistics.frozen_fraction,
+        planet_statistics.heat_transport[0],
+        planet_statistics.heat_transport[1],
+        planet_statistics.heat_transport[2],
+        planet_statistics.heat_transport[3],
+        planet_statistics.gyre_transport,
     );
 
     let time = simulation.time().round() as u64;
@@ -709,14 +731,26 @@ struct PreviousSnapshot {
 /// Writes one CSV row per cell: latitude (°), surface elevation (m), rock-equivalent and bulk
 /// sediment thickness (m), crust thickness (m), density, felsic fraction and metasediment
 /// thickness (m), crust class (0 continental origin, 1 transitional, 2 oceanic), plate, age (Myr),
-/// number of cells showing the same sample, whether the cell is at a coast, precipitation (m/yr)
-/// and discharge (m³/yr).
+/// number of cells showing the same sample, whether the cell is at a coast, precipitation (m/yr),
+/// discharge (m³/yr), longitude (°), the annual mean, January and July surface temperatures
+/// (°C), evaporation or evapotranspiration (m/yr), and January and July precipitation (m/yr).
 fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Write;
     let simulation = planet.tectonics();
     let mesh = simulation.mesh();
     let cell_count = mesh.len() as u32;
     let elevation = simulation.surface_elevations();
+    let temperature = planet.temperature();
+    // Precipitation of the solved month nearest to `month` (0 = January).
+    let cycle = planet.water_cycle();
+    let month_precipitation = |month: usize, cell: u32| {
+        let solved = cycle.monthly_precipitation.len().max(1);
+        let slot = (month * solved / 12).min(solved - 1);
+        cycle
+            .monthly_precipitation
+            .get(slot)
+            .map_or(0.0, |p| p[cell as usize])
+    };
     let mut shown = std::collections::HashMap::new();
     for cell in 0..cell_count {
         *shown.entry(simulation.owner(cell)).or_insert(0u32) += 1;
@@ -724,7 +758,8 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
     writeln!(
         file,
-        "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge"
+        "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -742,7 +777,8 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             .any(|&m| (elevation[m as usize] < 0.0) != (e < 0.0));
         writeln!(
             file,
-            "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e}",
+            "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
+             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4}",
             mesh.vertex(cell).z.asin().to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -756,6 +792,13 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             u8::from(coast),
             planet.precipitation()[cell as usize],
             planet.discharge()[cell as usize],
+            mesh.vertex(cell).y.atan2(mesh.vertex(cell).x).to_degrees(),
+            temperature.annual_mean[cell as usize],
+            temperature.monthly[0][cell as usize],
+            temperature.monthly[6][cell as usize],
+            planet.water_cycle().evaporation[cell as usize],
+            month_precipitation(0, cell),
+            month_precipitation(6, cell),
         )?;
     }
     file.flush()?;
