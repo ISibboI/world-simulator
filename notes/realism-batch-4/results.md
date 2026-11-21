@@ -51,7 +51,7 @@ Share of continental cells (mean of 8 seeds, %), by time:
   no measurable runtime.
 - Whether ~45% of the continental area being orogenic after 1000 Myr is plausible: on Earth
   roughly a third of the continental crust has a Phanerozoic (< 540 Myr) tectonothermal age
-  (e.g. Artemieva 2006); the simulation marks ~29% in 500 Myr. Plausible for an Earth-like
+  (order of magnitude from global tectonothermal-age maps, e.g. Artemieva 2006; not re-derived here); the simulation marks ~29% in 500 Myr. Plausible for an Earth-like
   planet. The mark is permanent, so the share keeps rising towards saturation in longer
   runs, and the contrast between belts and cratons shrinks with it; that is a property of
   "weak for good" (`SUTURE_WEAKENING`), not of the mixing, and not changed here.
@@ -106,9 +106,9 @@ rifts the two sides are anchored at the cells next to the plume.
   real planet either (it sits on a ridge or a margin); at one cell from the edge this is at
   grid scale and left as it is.
 - Fewer rifts in total (−18 to −20% in the debug-line count; in the log statistic 2.66 →
-  2.35 per 100 Myr, t = −1.5, inside the seed range 1.6–3.3): splits whose plume-side piece is
-  smaller than the minimum plate area now fail instead of being replaced by a break
-  somewhere else in the plate. Rifts no longer appear far from any plume for this reason.
+  2.35 per 100 Myr, t = −1.5, inside the seed range 1.6–3.3). Probable reason (inferred from
+  the code, not counted): splits whose plume-side piece is smaller than the minimum plate
+  area now fail instead of being replaced by a break somewhere else in the plate.
 - Not done: the near-field angle metric the issue asks for. The angle measurement lives in
   the analysis of PR #50 (branch `agent/issue-30`), not on main; with the boundary now at
   the plume it can be added there.
