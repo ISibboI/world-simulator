@@ -70,10 +70,17 @@ pub(super) struct BoundaryCell {
 
 impl Simulation {
     /// Finds all boundary cells and classifies them with the current plate velocities.
+    ///
+    /// The boundary normal of a cell is the smoothed one (see [`Self::smoothed_normals`]): the
+    /// direction to the neighbouring cells of the other plate zig-zags by ±30° and more around
+    /// the boundary, which made strike-slip contacts look partly converging (spurious trenches)
+    /// and partly opening (spurious ridges).
     pub(super) fn boundary_cells(&self) -> Vec<BoundaryCell> {
         let params = &self.params;
         let min_convergence = params.min_trench_convergence / (params.planet_radius * 100.0 / 1e6);
         let mut result = Vec::new();
+        // Per boundary cell: a neighbouring cell of the other plate.
+        let mut neighbors = Vec::new();
         let rotations = self.rotations();
         // Per other plate: summed direction towards it and one representative neighbour.
         let mut towards: Vec<(u32, DVec3, u32)> = Vec::new();
@@ -93,61 +100,131 @@ impl Simulation {
                     None => towards.push((other, direction, neighbor)),
                 }
             }
-            if towards.is_empty() {
-                continue;
-            }
-
-            let crust = self.surface_crust(cell);
-            let velocity = self.plates[owner.plate as usize]
-                .angular_velocity
-                .cross(position);
             for &(other, direction, neighbor) in &towards {
                 // Project onto the tangent plane.
                 let normal = (direction - position * direction.dot(position)).normalize_or_zero();
                 if normal == DVec3::ZERO {
                     continue;
                 }
-                let other_crust = self.surface_crust(neighbor);
-                let other_velocity = self.plates[other as usize].angular_velocity.cross(position);
-                let convergence = (velocity - other_velocity).dot(normal);
-                let segment = self
-                    .polarities
-                    .segment_at(owner.plate, other, position, &rotations);
-                // A polarity only says which plate would subduct if the plates converge. A trench
-                // needs convergence, or an existing slab where the plates do not clearly diverge
-                // (hysteresis: a slab keeps pulling while the plates are nearly at rest).
-                let subducts_here = segment.is_some_and(|segment| {
-                    segment.overriding == other
-                        && (convergence > min_convergence
-                            || (segment.slab_length > 0.0 && convergence > -min_convergence))
-                });
-
-                let kind = if crust.resists_subduction() && other_crust.resists_subduction() {
-                    BoundaryKind::Collision
-                } else if subducts_here && !crust.resists_subduction() {
-                    BoundaryKind::Trench {
-                        slab_age: crust.age(self.time),
-                    }
-                } else if convergence < 0.0
-                    && !crust.is_continental()
-                    && crust.age(self.time) <= params.ridge_age
-                {
-                    BoundaryKind::Ridge
-                } else {
-                    BoundaryKind::Other
-                };
                 result.push(BoundaryCell {
                     cell,
                     plate: owner.plate,
                     other,
                     normal,
-                    convergence,
-                    kind,
-                    segment: segment.map(|segment| segment.id),
+                    convergence: 0.0,
+                    kind: BoundaryKind::Other,
+                    segment: None,
                 });
+                neighbors.push(neighbor);
             }
         }
+
+        let normals = self.smoothed_normals(&result);
+        for ((boundary, smoothed), &neighbor) in result.iter_mut().zip(normals).zip(&neighbors) {
+            // Slivers and one-cell necks, where the centroids of the two plates lie on the wrong
+            // sides, keep the direction to the neighbours.
+            if smoothed.dot(boundary.normal) > 0.0 {
+                boundary.normal = smoothed;
+            }
+            let position = self.mesh.vertex(boundary.cell);
+            let crust = self.surface_crust(boundary.cell);
+            let other_crust = self.surface_crust(neighbor);
+            let relative = (self.plates[boundary.plate as usize].angular_velocity
+                - self.plates[boundary.other as usize].angular_velocity)
+                .cross(position);
+            let convergence = relative.dot(boundary.normal);
+            let segment =
+                self.polarities
+                    .segment_at(boundary.plate, boundary.other, position, &rotations);
+            // A polarity only says which plate would subduct if the plates converge. A trench
+            // needs a segment that subducts (converging, not nearly along strike) and convergence
+            // at the cell, or an existing slab where the plates do not clearly diverge
+            // (hysteresis: a slab keeps pulling while the plates are nearly at rest, and while it
+            // decays after subduction stopped).
+            let subducts_here = segment.is_some_and(|segment| {
+                segment.overriding == boundary.other
+                    && ((segment.subducting && convergence > min_convergence)
+                        || (segment.slab_length > 0.0 && convergence > -min_convergence))
+            });
+
+            boundary.kind = if crust.resists_subduction() && other_crust.resists_subduction() {
+                BoundaryKind::Collision
+            } else if subducts_here && !crust.resists_subduction() {
+                BoundaryKind::Trench {
+                    slab_age: crust.age(self.time),
+                }
+            } else if convergence < 0.0
+                && !crust.is_continental()
+                && crust.age(self.time) <= params.ridge_age
+            {
+                BoundaryKind::Ridge
+            } else {
+                BoundaryKind::Other
+            };
+            boundary.convergence = convergence;
+            boundary.segment = segment.map(|segment| segment.id);
+        }
         result
+    }
+
+    /// Evaluates the motion across every boundary segment with the current plate velocities (see
+    /// [`polarity::Segment::rate`]) and whether its lower plate subducts there (see
+    /// [`polarity::Segment::subducting`]). `boundaries` are the current [`Self::boundary_cells`].
+    /// Returns whether any segment started or stopped subducting. With `record`, segments whose
+    /// slab was decaying and that subduct again are counted (once per step: the velocity solve
+    /// records, the slab update does not).
+    pub(super) fn update_segment_motion(
+        &mut self,
+        boundaries: &[BoundaryCell],
+        record: bool,
+    ) -> bool {
+        // Per segment id: Σ normal convergence, Σ |strike-slip|, cells.
+        let mut sums: HashMap<u32, (f64, f64, usize)> = HashMap::default();
+        for boundary in boundaries {
+            let Some(id) = boundary.segment else {
+                continue;
+            };
+            let Some(segment) = self.polarities.segment(boundary.plate, boundary.other, id) else {
+                continue;
+            };
+            if segment.overriding != boundary.other
+                || self.surface_crust(boundary.cell).resists_subduction()
+            {
+                continue;
+            }
+            let r = self.mesh.vertex(boundary.cell);
+            let relative = (self.plates[boundary.plate as usize].angular_velocity
+                - self.plates[boundary.other as usize].angular_velocity)
+                .cross(r);
+            let entry = sums.entry(id).or_default();
+            entry.0 += relative.dot(boundary.normal);
+            entry.1 += relative.dot(r.cross(boundary.normal)).abs();
+            entry.2 += 1;
+        }
+        let params = &self.params;
+        let min_convergence = params.min_trench_convergence / (params.planet_radius * 100.0 / 1e6);
+        let obliquity = params.min_trench_obliquity.to_radians().tan();
+        let polarity::Polarities {
+            pairs, statistics, ..
+        } = &mut self.polarities;
+        let mut changed = false;
+        for segment in pairs.values_mut().flat_map(|pair| pair.segments.iter_mut()) {
+            let (rate, strike_rate) = match sums.get(&segment.id) {
+                Some(&(normal, strike, count)) if count > 0 => {
+                    (normal / count as f64, strike / count as f64)
+                }
+                _ => (0.0, 0.0),
+            };
+            let subducting = rate > min_convergence && rate >= obliquity * strike_rate;
+            if record && subducting && !segment.subducting && segment.slab_length > 0.0 {
+                statistics.resumed_subductions += 1;
+            }
+            changed |= subducting != segment.subducting;
+            segment.rate = rate;
+            segment.strike_rate = strike_rate;
+            segment.subducting = subducting;
+        }
+        changed
     }
 
     /// Computes the angular velocities of all plates from the balance of torques, given the
@@ -211,10 +288,10 @@ impl Simulation {
 
         // Boundary shear coupling: the force −k ((v_p − v_q) · t) t on p (and the opposite on q)
         // with the strike t = r × n gives, since (ω × r) · t = −ω · n, the torque
-        // −k R² n nᵀ (ω_p − ω_q). Each side of a boundary contributes half, with the smoothed
+        // −k R² n nᵀ (ω_p − ω_q). Each side of a boundary contributes half, with the (smoothed)
         // boundary normal n of its cell.
         let length_per_cell = self.boundary_length_per_cell();
-        let normals = self.smoothed_normals(&boundaries);
+        let normals: Vec<DVec3> = boundaries.iter().map(|boundary| boundary.normal).collect();
         for (boundary, &normal) in boundaries.iter().zip(&normals) {
             let k = 0.5 * params.basal_drag * params.boundary_coupling_width * length_per_cell;
             if k <= 0.0 {
@@ -232,8 +309,8 @@ impl Simulation {
         // torque −k R² m mᵀ (ω_p − ω_q) with m = r × n. Per boundary cell, it is as strong as the
         // basal drag under `collision_resistance` cells.
         let coupling = params.collision_resistance * params.basal_drag * cell_area;
-        // With the smoothed normals: the raw ones scatter by ~20°, which made strike-slip
-        // contacts look half converging and resisted along strike.
+        // With the smoothed normals (see `boundary_cells`): the raw ones scatter by ~20°, which
+        // made strike-slip contacts look half converging and resisted along strike.
         let collisions: Vec<(&BoundaryCell, DVec3)> = boundaries
             .iter()
             .zip(&normals)
@@ -373,6 +450,7 @@ impl Simulation {
         for (plate, omega) in self.plates.iter_mut().zip(omega) {
             plate.angular_velocity = omega * SECONDS_PER_MYR;
         }
+        self.update_segment_motion(&boundaries, true);
     }
 }
 
@@ -382,7 +460,7 @@ impl Simulation {
     /// length of slab that has already sunk; ridge push at ridges.
     pub(super) fn boundary_force(&self, boundary: &BoundaryCell) -> DVec3 {
         let params = &self.params;
-        let boundary_length = params.planet_radius * self.mesh.mean_edge_angle();
+        let boundary_length = self.boundary_length_per_cell();
         match boundary.kind {
             BoundaryKind::Trench { slab_age } => {
                 let buoyancy = self.slab_buoyancy(slab_age, self.slab_length(boundary));
@@ -444,7 +522,7 @@ impl Simulation {
         if !matches!(boundary.kind, BoundaryKind::Trench { .. }) {
             return 0.0;
         }
-        let boundary_length = params.planet_radius * self.mesh.mean_edge_angle();
+        let boundary_length = self.boundary_length_per_cell();
         let length_factor = self.slab_length_factor(boundary);
         // cm/yr → m/s.
         let speed = params.slab_sinking_speed / 100.0 / (SECONDS_PER_MYR / 1e6);
@@ -486,7 +564,7 @@ impl Simulation {
     ///   [`Self::slab_buoyancy`]).
     pub(super) fn initiation_strength(&self, boundary: &BoundaryCell) -> f64 {
         let params = &self.params;
-        let boundary_length = params.planet_radius * self.mesh.mean_edge_angle();
+        let boundary_length = self.boundary_length_per_cell();
         let segment = boundary
             .segment
             .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id));
@@ -533,30 +611,32 @@ impl Simulation {
         (slab_length / self.params.max_slab_length).clamp(0.0, 1.0)
     }
 
-    /// Updates the length of slab below each subduction zone: it grows with the convergence at
-    /// the trench (up to the length of an upper-mantle slab) and decays when subduction stops
-    /// (the slab sinks or breaks off; below [`TectonicParams::min_slab_length`] it is gone).
-    /// `boundaries` are the current [`Self::boundary_cells`].
+    /// Updates the length of slab below each subduction zone: it grows with the convergence
+    /// across the segment where its lower plate subducts (up to the length of an upper-mantle
+    /// slab) and decays where it does not (the slab sinks or breaks off; below
+    /// [`TectonicParams::min_slab_length`] it is gone). The convergence is the segment's net
+    /// motion over its lower plate's boundary cells (see [`Self::update_segment_motion`]), so
+    /// that a contact moving along strike does not keep a slab through cells whose normal happens
+    /// to point into the motion. `boundaries` are the current [`Self::boundary_cells`].
     ///
-    /// Returns whether a slab appeared or disappeared, which changes the classification of
-    /// boundary cells (see [`Self::boundary_cells`]).
+    /// Returns whether a slab appeared or disappeared, or a segment started or stopped
+    /// subducting, which changes the classification of boundary cells (see
+    /// [`Self::boundary_cells`]).
     pub(super) fn update_slab_lengths(&mut self, dt: f64, boundaries: &[BoundaryCell]) -> bool {
+        let mut slabs_changed = self.update_segment_motion(boundaries, false);
+        // Segments with boundary cells of their lower plate (subducting or not) are in contact.
+        let in_contact: HashSet<u32> = boundaries
+            .iter()
+            .filter_map(|boundary| {
+                let id = boundary.segment?;
+                let segment = self
+                    .polarities
+                    .segment(boundary.plate, boundary.other, id)?;
+                (segment.overriding == boundary.other).then_some(id)
+            })
+            .collect();
         let params = &self.params;
-        // A locked contact that creeps builds no slab.
-        let min_convergence = params.min_trench_convergence / (params.planet_radius * 100.0 / 1e6);
-        // Mean convergence at the trench cells of each segment, in m/Myr.
-        let mut convergence: HashMap<u32, (f64, usize)> = HashMap::default();
-        for boundary in boundaries {
-            if let (BoundaryKind::Trench { .. }, Some(id)) = (boundary.kind, boundary.segment)
-                && boundary.convergence > min_convergence
-            {
-                let entry = convergence.entry(id).or_default();
-                entry.0 += boundary.convergence * params.planet_radius;
-                entry.1 += 1;
-            }
-        }
         let decay = (-dt / params.slab_decay_time).exp();
-        let mut slabs_changed = false;
         let polarity::Polarities {
             pairs, statistics, ..
         } = &mut self.polarities;
@@ -572,30 +652,30 @@ impl Simulation {
                     segment.fill += (squares / sediment - segment.fill) * rate;
                     segment.fill_time = self.time;
                 }
-                match convergence.get(&segment.id) {
-                    Some(&(sum, count)) if count > 0 => {
-                        // Accretionary or erosive margin, with hysteresis between the two
-                        // convergence thresholds (m/Myr → cm/yr).
-                        let rate = sum / count as f64 * 1e-4;
-                        if segment.fill <= params.subduction_channel_thickness
-                            || rate > params.erosive_convergence
-                        {
-                            segment.accretionary = false;
-                        } else if rate < params.accretionary_convergence {
-                            segment.accretionary = true;
-                        }
-                        // A trench keeps the segment in contact, also without overlap.
-                        segment.last_contact = segment.last_contact.max(self.time);
-                        segment.slab_length = (segment.slab_length + sum / count as f64 * dt)
-                            .min(params.max_slab_length);
-                        polarity::Polarities::note_slab_growth(statistics, segment);
+                if in_contact.contains(&segment.id) {
+                    // Accretionary or erosive margin, with hysteresis between the two
+                    // convergence thresholds (rad/Myr → cm/yr).
+                    let rate = segment.rate * params.planet_radius * 1e-4;
+                    if segment.fill <= params.subduction_channel_thickness
+                        || rate > params.erosive_convergence
+                    {
+                        segment.accretionary = false;
+                    } else if rate < params.accretionary_convergence {
+                        segment.accretionary = true;
                     }
-                    _ => {
-                        segment.slab_length *= decay;
-                        // A slab remnant this short has broken off: the trench is gone.
-                        if segment.slab_length < params.min_slab_length {
-                            segment.slab_length = 0.0;
-                        }
+                    // A boundary keeps the segment in contact, also without overlap.
+                    segment.last_contact = segment.last_contact.max(self.time);
+                }
+                if segment.subducting {
+                    segment.slab_length = (segment.slab_length
+                        + segment.rate * params.planet_radius * dt)
+                        .min(params.max_slab_length);
+                    polarity::Polarities::note_slab_growth(statistics, segment);
+                } else {
+                    segment.slab_length *= decay;
+                    // A slab remnant this short has broken off: the trench is gone.
+                    if segment.slab_length < params.min_slab_length {
+                        segment.slab_length = 0.0;
                     }
                 }
                 slabs_changed |= had_slab != (segment.slab_length > 0.0);
@@ -608,7 +688,7 @@ impl Simulation {
     /// length, in m²/s), which feed the mantle downwellings. `boundaries` are the current
     /// [`Self::boundary_cells`].
     pub(super) fn subduction_rates(&self, boundaries: &[BoundaryCell]) -> Vec<(DVec3, f64)> {
-        let boundary_length = self.params.planet_radius * self.mesh.mean_edge_angle();
+        let boundary_length = self.boundary_length_per_cell();
         boundaries
             .iter()
             .filter(|boundary| matches!(boundary.kind, BoundaryKind::Trench { .. }))
@@ -633,7 +713,7 @@ impl Simulation {
     /// cooled oceanic lithosphere, which the depth–age curve expresses isostatically:
     /// `(ρ_m − ρ_w) (d(age) − d(0))`, ~7 × 10⁶ kg/m² for old plates (cf. 2 ρ α ΔT √(κ t / π)).
     pub(super) fn sinking_slabs(&self, boundaries: &[BoundaryCell]) -> Vec<(DVec3, f64)> {
-        let boundary_length = self.params.planet_radius * self.mesh.mean_edge_angle();
+        let boundary_length = self.boundary_length_per_cell();
         let offset = self.params.mantle.slab_offset / self.params.planet_radius;
         boundaries
             .iter()
@@ -1005,6 +1085,182 @@ mod tests {
                 .polarities
                 .segments()
                 .all(|segment| segment.slab_length == 0.0)
+        );
+    }
+
+    /// 1 cm/yr as an angular speed (rad/Myr) on the default planet.
+    const CM_PER_YEAR: f64 = 1.0 / 637.1;
+
+    #[test]
+    fn boundary_normals_follow_the_boundary_not_the_mesh() {
+        // Pure strike-slip along the zig-zag equator of the icosphere.
+        let mut simulation = hemispheres(0.0, 4);
+        simulation.plates[0].angular_velocity = DVec3::Z * (5.0 * CM_PER_YEAR);
+        simulation.plates[1].angular_velocity = DVec3::ZERO;
+        let boundaries = simulation.boundary_cells();
+        assert!(!boundaries.is_empty());
+        let max = boundaries
+            .iter()
+            .map(|b| b.convergence.abs())
+            .fold(0.0, f64::max);
+        let mean =
+            boundaries.iter().map(|b| b.convergence.abs()).sum::<f64>() / boundaries.len() as f64;
+        // The raw normals (towards the neighbours) are up to ~30° off and more.
+        assert!(mean < 0.1 * 5.0 * CM_PER_YEAR, "{mean}");
+        assert!(max < 0.3 * 5.0 * CM_PER_YEAR, "{max}");
+        assert!(boundaries.iter().all(|b| b.kind == BoundaryKind::Other));
+    }
+
+    /// The two hemispheres of [`hemispheres`] with plate 0 subducting under plate 1 (slab of
+    /// `slab_length`) and plate 0 moving at 5 cm/yr at `angle` degrees from the strike of the
+    /// boundary near +y, towards plate 1.
+    fn oblique_contact(angle: f64, slab_length: f64) -> Simulation {
+        let mut simulation = hemispheres(0.0, 4);
+        simulation.seed_subduction((0, 1), 1, slab_length);
+        let speed = 5.0 * CM_PER_YEAR;
+        let (along, across) = (angle.to_radians().cos(), angle.to_radians().sin());
+        // Near +y, the rotation about z moves along the equator, the one about x across it.
+        simulation.plates[1].angular_velocity = DVec3::ZERO;
+        simulation.plates[0].angular_velocity = (DVec3::Z * along + DVec3::X * across) * speed;
+        if simulation.segment_near(DVec3::Y).rate < 0.0 {
+            simulation.plates[0].angular_velocity = (DVec3::Z * along - DVec3::X * across) * speed;
+        }
+        simulation
+    }
+
+    impl Simulation {
+        /// The segment of plates 0 and 1 closest to the world position `r`, with its motion
+        /// evaluated for the current plate velocities.
+        fn segment_near(&mut self, r: DVec3) -> polarity::Segment {
+            let boundaries = self.boundary_cells();
+            self.update_segment_motion(&boundaries, false);
+            let rotations = self.rotations();
+            self.polarities
+                .segment_at(0, 1, r, &rotations)
+                .expect("a segment covers the position")
+                .clone()
+        }
+    }
+
+    #[test]
+    fn contacts_close_to_strike_do_not_subduct() {
+        for (angle, subducts) in [(12.0, false), (45.0, true)] {
+            let mut simulation = oblique_contact(angle, 0.0);
+            let segment = simulation.segment_near(DVec3::Y);
+            let measured = (segment.rate / segment.strike_rate).atan().to_degrees();
+            assert!((measured - angle).abs() < 5.0, "{angle}: {measured}");
+            assert_eq!(segment.subducting, subducts, "{angle}");
+            for _ in 0..5 {
+                let boundaries = simulation.boundary_cells();
+                simulation.update_slab_lengths(1.0, &boundaries);
+            }
+            let segment = simulation.segment_near(DVec3::Y);
+            // The slab grows with the normal convergence, ~3.5 cm/yr = 35 km/Myr at 45°.
+            if subducts {
+                assert!(segment.slab_length > 100e3, "{}", segment.slab_length);
+            } else {
+                assert_eq!(segment.slab_length, 0.0);
+            }
+            // Converging cells near +y are trenches only where the segment subducts.
+            let trenches_near = simulation
+                .boundary_cells()
+                .iter()
+                .filter(|b| b.segment == Some(segment.id))
+                .filter(|b| matches!(b.kind, BoundaryKind::Trench { .. }))
+                .count();
+            assert_eq!(trenches_near > 0, subducts, "{angle}: {trenches_near}");
+        }
+    }
+
+    #[test]
+    fn strike_slip_slabs_decay_and_stop_being_trenches() {
+        let mut simulation = oblique_contact(0.0, 600e3);
+        let trenches = |simulation: &Simulation| {
+            simulation
+                .boundary_cells()
+                .iter()
+                .filter(|b| matches!(b.kind, BoundaryKind::Trench { .. }))
+                .count()
+        };
+        assert!(trenches(&simulation) > 0);
+        for _ in 0..60 {
+            let boundaries = simulation.boundary_cells();
+            simulation.update_slab_lengths(1.0, &boundaries);
+        }
+        assert!(
+            simulation
+                .polarities
+                .segments()
+                .all(|segment| segment.slab_length == 0.0)
+        );
+        assert_eq!(trenches(&simulation), 0);
+    }
+
+    #[test]
+    fn strike_slip_slabs_decay_with_solved_velocities() {
+        // The mantle drags plate 0 along the boundary; the slabs' pull (symmetric around the
+        // whole boundary) does not make the contact converge.
+        let mut simulation = oblique_contact(0.0, 600e3);
+        let omega = DVec3::Z * 1e-15;
+        let mantle: Vec<DVec3> = (0..simulation.mesh.len() as u32)
+            .map(|cell| {
+                if simulation.owners[cell as usize].plate == 0 {
+                    omega.cross(simulation.mesh.vertex(cell)) * simulation.params.planet_radius
+                } else {
+                    DVec3::ZERO
+                }
+            })
+            .collect();
+        for _ in 0..60 {
+            simulation.update_plate_velocities(&mantle);
+            let boundaries = simulation.boundary_cells();
+            simulation.update_slab_lengths(1.0, &boundaries);
+        }
+        assert!(
+            simulation
+                .polarities
+                .segments()
+                .all(|segment| segment.slab_length == 0.0)
+        );
+    }
+
+    #[test]
+    fn slab_pull_per_boundary_length_matches_the_parameter() {
+        // A trench along the whole equator: the summed slab pull on plate 0 per unit of
+        // boundary length is `slab_pull` × the slab's buoyancy, on two meshes. (With the length
+        // of a mesh edge per cell instead of the boundary length per cell, it was ~10% more.)
+        let pull_per_length = |subdivisions: u32| {
+            let mut simulation = hemispheres(0.0, subdivisions);
+            simulation.seed_subduction((0, 1), 1, 600e3);
+            simulation.plates[0].angular_velocity = DVec3::ZERO;
+            simulation.plates[1].angular_velocity = DVec3::ZERO;
+            let boundaries = simulation.boundary_cells();
+            let force: f64 = boundaries
+                .iter()
+                .filter(|b| b.plate == 0)
+                .map(|b| simulation.boundary_force(b).length())
+                .sum();
+            let expected = simulation.params.slab_pull * simulation.slab_buoyancy(50.0, 600e3);
+            // The equator is 2πR long.
+            force / (2.0 * std::f64::consts::PI * simulation.params.planet_radius) / expected
+        };
+        for subdivisions in [4, 5] {
+            let ratio = pull_per_length(subdivisions);
+            assert!((ratio - 1.0).abs() < 0.06, "{subdivisions}: {ratio}");
+        }
+    }
+
+    #[test]
+    fn segments_rotating_about_a_pole_inside_them_do_not_subduct() {
+        // Plate 0 rotates about the axis through +y: near +y, one half of the segment converges,
+        // the other opens.
+        let mut simulation = oblique_contact(45.0, 0.0);
+        simulation.plates[0].angular_velocity = DVec3::Y * (5.0 * CM_PER_YEAR / 0.1);
+        let segment = simulation.segment_near(DVec3::Y);
+        assert!(
+            !segment.subducting,
+            "{} {}",
+            segment.rate, segment.strike_rate
         );
     }
 

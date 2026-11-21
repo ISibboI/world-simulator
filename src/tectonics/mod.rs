@@ -184,6 +184,12 @@ pub struct TectonicParams {
     /// Plates must converge at least this fast (cm/yr) for a new trench to act (an existing slab
     /// keeps acting until the plates diverge faster than this).
     pub min_trench_convergence: f64,
+    /// Smallest angle (degrees) between the relative motion and the strike of a boundary segment
+    /// at which its lower plate subducts. Closer to the strike, the normal component cannot feed
+    /// a slab: the contact is a transform (western Aleutians, Queen Charlotte margin), and a slab
+    /// already there decays and breaks off (see [`Self::slab_decay_time`]). 20° is also the
+    /// tolerance with which PB2002 (Bird 2003) classes boundaries as strike-slip.
+    pub min_trench_obliquity: f64,
     /// Resistance (N per metre of boundary) of oceanic lithosphere to starting to subduct: the
     /// plate must be bent and a new thrust fault must break through it before a slab pulls. It
     /// opposes convergence at trenches without a slab and fades as the slab grows to
@@ -289,6 +295,7 @@ impl Default for TectonicParams {
             slab_pull_max_age: 120.0,
             min_spreading_rate: 0.5,
             min_trench_convergence: 0.1,
+            min_trench_obliquity: 20.0,
             min_stretching_rate: 0.15,
             rift_width: 200e3,
             breakup_thickness: 15e3,
@@ -361,6 +368,8 @@ impl TectonicParams {
             "neutral_buoyancy_age" => &mut self.neutral_buoyancy_age,
             "self_sustaining_slab_length" => &mut self.self_sustaining_slab_length,
             "locked_convergence" => &mut self.locked_convergence,
+            "min_trench_convergence" => &mut self.min_trench_convergence,
+            "min_trench_obliquity" => &mut self.min_trench_obliquity,
             "collapse_diffusivity" => &mut self.collapse_diffusivity,
             "boundary_coupling_width" => &mut self.boundary_coupling_width,
             "slab_pull" => &mut self.slab_pull,
@@ -397,6 +406,7 @@ impl TectonicParams {
             "events.min_oceanic_rift_area" => &mut self.events.min_oceanic_rift_area,
             "events.rift_continent_radius" => &mut self.events.rift_continent_radius,
             "events.suture_time" => &mut self.events.suture_time,
+            "events.suture_convergence" => &mut self.events.suture_convergence,
             "events.suture_trench_ratio" => &mut self.events.suture_trench_ratio,
             "events.terrane_accretion_time" => &mut self.events.terrane_accretion_time,
             "events.terrane_max_area" => &mut self.events.terrane_max_area,

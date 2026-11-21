@@ -229,7 +229,7 @@ impl Simulation {
         // rad/Myr → m/s
         let to_m_per_s = radius / (1e6 * 365.25 * 24.0 * 3600.0);
         let slow = 2.0 / 100.0 / (radius / 1e6);
-        let normals = self.smoothed_normals(boundaries);
+        let normals: Vec<glam::DVec3> = boundaries.iter().map(|boundary| boundary.normal).collect();
         let mut speeds = Vec::with_capacity(boundaries.len());
         let (mut cos_sum, mut normal, mut strike, mut shear_power, mut pull_power) =
             (0.0, 0usize, 0usize, 0.0, 0.0);
@@ -307,7 +307,7 @@ impl Simulation {
     /// The boundary cells with their kinematics, for analysis (see [`BoundaryRecord`]).
     pub fn boundary_records(&self) -> Vec<BoundaryRecord> {
         let boundaries = self.boundary_cells();
-        let normals = self.smoothed_normals(&boundaries);
+        let normals: Vec<glam::DVec3> = boundaries.iter().map(|boundary| boundary.normal).collect();
         // rad/Myr → cm/yr.
         let speed = self.params.planet_radius * 100.0 / 1e6;
         boundaries
