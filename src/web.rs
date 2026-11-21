@@ -5,7 +5,8 @@
 //! loads it again in a module worker. [`start`] tells them apart by their global scope. The
 //! parameters are the command-line options, given as URL query parameters
 //! (`?seed=3&subdivisions=5&no-erosion&set=basal_drag=8e14`, see [`crate::query`]); the worker
-//! gets the same query string. It sends a surface update after every step as
+//! gets the same query string. It sends `{ generating: true }` before it builds the planet, then a
+//! surface update after every step as
 //! `{ time, vertices, cells }` (the vertices, the attributes of the cells as
 //! [`viewer::CellInfo`]s, and with the first update also `faces`, the triangles), with the buffers
 //! transferred rather than copied, or `{ error }` if the simulation fails. A restart from the
@@ -31,7 +32,8 @@ use crate::{Cli, build_planet, simulate};
 
 /// Id of the canvas in `web/index.html`.
 const CANVAS_ID: &str = "world_simulator";
-/// Id of the element in `web/index.html` that shows the loading state and errors.
+/// Id of the element in `web/index.html` that shows the loading state and errors until the
+/// view exists (the view then shows its own banner, see `viewer::banner`).
 const STATUS_ID: &str = "status";
 /// Script of the simulation worker, relative to the page.
 const WORKER_SCRIPT: &str = "./worker.js";
@@ -150,7 +152,6 @@ async fn run_page() -> anyhow::Result<()> {
         .dyn_into::<web_sys::HtmlCanvasElement>()
         .map_err(|_| anyhow!("#{CANVAS_ID} is not a canvas"))?;
 
-    show_status("Starting the simulation…");
     let mut running: Option<RunningWorker> = None;
     let mut first = true;
     viewer::run_web(
@@ -163,19 +164,19 @@ async fn run_page() -> anyhow::Result<()> {
             }
             let query = args_to_query(&launch.args);
             if !std::mem::take(&mut first) {
-                show_status("");
                 replace_query(&query);
             }
             match start_worker(&query, events.clone(), wake_up) {
                 Ok(worker) => running = Some(worker),
                 Err(error) => {
                     error!("{error:#}");
-                    show_status(&format!("{error:#}"));
-                    // The panel shows it too (the view repaints on its next input).
+                    // Shown in the banner and the panel.
                     let _ = events.send(SimulationEvent::Failed(format!("{error:#}")));
                 }
             }
         }),
+        // The view shows the state in its banner from its first frame on.
+        Box::new(|| show_status("")),
     )
     .await?;
     Ok(())
@@ -239,8 +240,11 @@ fn start_worker(
         Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             let data = event.data();
             if let Some(message) = get(&data, "error").as_string() {
-                show_status(&format!("Simulation failed: {message}"));
                 send(SimulationEvent::Failed(message));
+                return;
+            }
+            if get(&data, "generating").is_truthy() {
+                send(SimulationEvent::Generating);
                 return;
             }
             let (Some(time), Ok(buffer), Ok(cell_buffer)) = (
@@ -283,9 +287,6 @@ fn start_worker(
                     indices.copy_to(bytemuck::cast_slice_mut(&mut faces));
                     Arc::new(faces)
                 });
-            if time == 0.0 {
-                show_status("");
-            }
             if let Ok(document) = document() {
                 document.set_title(&format!("World Simulator — {time:.0} Myr"));
             }
@@ -303,7 +304,6 @@ fn start_worker(
         Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |event: web_sys::ErrorEvent| {
             let message = event.message();
             error!("Simulation worker error: {message}");
-            show_status(&format!("Simulation failed: {message}"));
             if events.send(SimulationEvent::Failed(message)).is_ok() {
                 wake_up();
             }
@@ -323,6 +323,11 @@ fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()>
     let search = scope.location().search();
     let Launch { cli, .. } = parse_query(&search)?;
     info!(?search, "Simulation worker started");
+    let message = js_sys::Object::new();
+    set(&message, "generating", &true.into());
+    if let Err(error) = scope.post_message(&message) {
+        error!("Could not send the state to the page: {error:?}");
+    }
     let planet = build_planet(&cli)?;
     let mut first_update = true;
     let publish = |planet: &Planet| {

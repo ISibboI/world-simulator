@@ -56,6 +56,8 @@ pub struct SimulationStatus<'a> {
     pub duration: f64,
     /// Why the simulation failed, if it did.
     pub failure: Option<&'a str>,
+    /// What the simulation does until its first update (see `banner::starting_text`).
+    pub starting: &'a str,
 }
 
 /// How an option is edited.
@@ -288,7 +290,9 @@ impl ParameterPanel {
                     .max_height((bottom - screen.top() - 10.0 * MARGIN).max(100.0))
                     .show(ui, |ui| launch = self.contents(ui, status));
             });
-        self.open = Some(open);
+        // On narrow screens the panel covers most of the view: close it on a restart, so the
+        // status banner behind it is seen.
+        self.open = Some(open && !(launch.is_some() && screen.width() < NARROW_SCREEN));
         launch
     }
 
@@ -302,7 +306,7 @@ impl ParameterPanel {
                 ui.label(format!("t = {time:.0} of {:.0} Myr", status.duration));
             }
             (None, None) => {
-                ui.label("Starting the simulation…");
+                ui.label(status.starting);
             }
         }
         ui.separator();
@@ -568,6 +572,7 @@ mod tests {
             time: Some(10.0),
             duration: 500.0,
             failure: None,
+            starting: "Starting the simulation…",
         };
         let mut launch = None;
         run(&ctx, egui::RawInput::default(), |ui| {

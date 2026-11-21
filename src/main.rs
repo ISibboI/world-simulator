@@ -196,38 +196,35 @@ const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     init_logging();
-    let planet = build_planet(&cli)?;
-    std::fs::create_dir_all(&cli.output)
-        .with_context(|| format!("creating output directory {}", cli.output.display()))?;
 
     if cli.headless {
+        let planet = build_planet(&cli)?;
+        std::fs::create_dir_all(&cli.output)
+            .with_context(|| format!("creating output directory {}", cli.output.display()))?;
         return simulate(planet, &cli, |_| ControlFlow::Continue(()));
     }
 
+    // Wrong options end the program before the window opens; the window then shows the status
+    // banner while the simulation thread builds the initial planet.
+    cli.validate()?;
     // The parameter panel starts from the command line as given.
     let args = std::env::args_os()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
-    viewer::run(
-        viewer::Launch { cli, args },
-        simulation_thread_launcher(planet),
-    )
+    viewer::run(viewer::Launch { cli, args }, simulation_thread_launcher())
 }
 
-/// Starts the simulations of the 3D view on a thread each: the first one with the planet built
-/// at start-up, later ones (restarts from the parameter panel) with a new planet. A restarted
-/// simulation first waits for the previous thread to end, so only one simulation runs at a time.
-/// The previous simulation stops after its current step, because the view no longer receives
-/// its updates.
+/// Starts the simulations of the 3D view on a thread each, which builds its planet and runs
+/// it. A restarted simulation first waits for the previous thread to end, so only one
+/// simulation runs at a time. The previous simulation stops after its current step, because the
+/// view no longer receives its updates.
 #[cfg(not(target_arch = "wasm32"))]
-fn simulation_thread_launcher(planet: Planet) -> viewer::StartSimulation {
+fn simulation_thread_launcher() -> viewer::StartSimulation {
     use viewer::SimulationEvent;
 
-    let mut initial_planet = Some(planet);
     // The thread of the latest simulation and its cancellation flag.
     let mut previous: Option<(std::thread::JoinHandle<()>, Arc<AtomicBool>)> = None;
     Box::new(move |launch, events, wake_up| {
-        let planet = initial_planet.take();
         let previous_thread = previous.take().map(|(thread, cancelled)| {
             cancelled.store(true, Ordering::Relaxed);
             thread
@@ -251,7 +248,7 @@ fn simulation_thread_launcher(planet: Planet) -> viewer::StartSimulation {
                     }
                 };
                 let run = std::panic::AssertUnwindSafe(|| {
-                    run_simulation_thread(planet, &launch.cli, &cancelled, &events, &*wake_up)
+                    run_simulation_thread(&launch.cli, &cancelled, &events, &*wake_up)
                 });
                 match std::panic::catch_unwind(run) {
                     Ok(Ok(())) => {}
@@ -271,11 +268,10 @@ fn simulation_thread_launcher(planet: Planet) -> viewer::StartSimulation {
     })
 }
 
-/// Runs one simulation of the 3D view: with the `planet` built at start-up, or with a new one.
-/// It stops early once `cancelled` is set or the view no longer receives its updates.
+/// Runs one simulation of the 3D view, from building its planet on. It stops early once
+/// `cancelled` is set or the view no longer receives its updates.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_simulation_thread(
-    planet: Option<Planet>,
     cli: &Cli,
     cancelled: &AtomicBool,
     events: &std::sync::mpsc::Sender<viewer::SimulationEvent>,
@@ -283,14 +279,12 @@ fn run_simulation_thread(
 ) -> anyhow::Result<()> {
     use viewer::{SimulationEvent, SurfaceUpdate};
 
-    let planet = match planet {
-        Some(planet) => planet,
-        None => {
-            std::fs::create_dir_all(&cli.output)
-                .with_context(|| format!("creating output directory {}", cli.output.display()))?;
-            build_planet(cli)?
-        }
-    };
+    if events.send(SimulationEvent::Generating).is_ok() {
+        wake_up();
+    }
+    std::fs::create_dir_all(&cli.output)
+        .with_context(|| format!("creating output directory {}", cli.output.display()))?;
+    let planet = build_planet(cli)?;
     let mut first_update = true;
     simulate(planet, cli, |planet: &Planet| {
         if cancelled.load(Ordering::Relaxed) {
