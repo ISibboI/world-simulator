@@ -1088,11 +1088,15 @@ fn stretch_rift(
     // stretching compounds in the donors).
     let (mut donor_thickness, mut donor_heat) = (0.0, 0.0);
     let (mut orogeny, mut orogenic) = (NO_OROGENY, 0.0);
+    // A plume's heating is kept as a reset of the strength age (the latest of the donors'); it
+    // does not enter the heat budget of the stretching, which follows `birth`.
+    let mut reheated = NO_REHEATING;
     for (&(donor, _), &share) in donors.iter().zip(&shares) {
         let crust = plate.crust[donor as usize]
             .as_mut()
             .expect("donors have crust");
         orogeny = orogeny.max(crust.orogeny);
+        reheated = reheated.max(crust.reheated);
         orogenic += crust.thickness * share * crust.density * crust.orogenic;
         let beta = 1.0 / (1.0 - share);
         let fraction = 1.0 - (1.0 - thermal_fraction(crust.age(time))) / beta;
@@ -1123,6 +1127,7 @@ fn stretch_rift(
         metasediment: metasediment / mass.max(1e-9),
         orogeny: NO_OROGENY,
         orogenic: 0.0,
+        reheated,
         cohort: cohort / sediment.max(1e-9),
     };
     crust.mix_orogeny(orogeny, orogenic / mass.max(1e-9));
@@ -1183,11 +1188,13 @@ fn heal_gap(
     let (mut metasediment, mut cohort) = (0.0, 0.0);
     let mut birth = f64::NEG_INFINITY;
     let (mut orogeny, mut orogenic) = (NO_OROGENY, 0.0);
+    let mut reheated = NO_REHEATING;
     for &neighbor in &neighbors {
         let crust = plate.crust[neighbor as usize]
             .as_mut()
             .expect("enclosed by crust");
         orogeny = orogeny.max(crust.orogeny);
+        reheated = reheated.max(crust.reheated);
         orogenic += crust.thickness * share * crust.density * crust.orogenic;
         let given = crust.thickness * share;
         thickness += given;
@@ -1209,6 +1216,7 @@ fn heal_gap(
         metasediment: metasediment / mass.max(1e-9),
         orogeny: NO_OROGENY,
         orogenic: 0.0,
+        reheated,
         cohort: cohort / sediment.max(1e-9),
     };
     crust.mix_orogeny(orogeny, orogenic / mass.max(1e-9));
@@ -1332,6 +1340,7 @@ mod tests {
                             metasediment: 0.0,
                             orogeny: NO_OROGENY,
                             orogenic: 0.0,
+                            reheated: NO_REHEATING,
                             cohort: 0.0,
                         };
                         assert!(crust.resists_subduction() && !crust.is_continental());
@@ -1345,6 +1354,7 @@ mod tests {
                             metasediment: 0.0,
                             orogeny: NO_OROGENY,
                             orogenic: 0.0,
+                            reheated: NO_REHEATING,
                             cohort: 0.0,
                         };
                     }
@@ -1397,6 +1407,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: 400.0,
             orogenic: 1.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         }
     }
@@ -1530,6 +1541,7 @@ mod tests {
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
+                reheated: NO_REHEATING,
                 cohort: 0.0,
             };
         }
@@ -1566,6 +1578,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         assert!(!arc.is_oceanic() && !arc.resists_subduction());
@@ -1585,6 +1598,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         let ledger = wedged_margin_arriving_at_a_trench(Some(continent));
@@ -1662,6 +1676,7 @@ mod tests {
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
+                reheated: NO_REHEATING,
                 cohort: 0.0,
             };
         }
@@ -1722,6 +1737,11 @@ mod tests {
             .as_mut()
             .unwrap()
             .mark_orogeny(-300.0);
+        // The belt sample was also heated by a plume: the new sample takes the latest reset.
+        simulation.plates[0].crust[marked as usize]
+            .as_mut()
+            .unwrap()
+            .reheat(-10.0, 25.0);
         simulation.plates[0].crust[local as usize] = None;
         let orogenic_mass = |simulation: &Simulation| -> f64 {
             simulation.plates[0]
@@ -1743,6 +1763,7 @@ mod tests {
         let crust = |vertex: u32| simulation.plates[0].crust[vertex as usize].unwrap();
         let stretched = crust(local);
         assert_eq!(stretched.orogeny, -300.0);
+        assert_eq!(stretched.reheated, -35.0);
         assert!(
             stretched.orogenic > 0.0 && stretched.orogenic < 0.5,
             "{}",
@@ -1853,6 +1874,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         });
         simulation.crustal_flow(5.0);
@@ -2022,6 +2044,11 @@ mod tests {
             .as_mut()
             .unwrap()
             .mark_orogeny(-300.0);
+        // The belt sample was also heated by a plume: the new sample takes the latest reset.
+        simulation.plates[0].crust[marked as usize]
+            .as_mut()
+            .unwrap()
+            .reheat(-10.0, 25.0);
         simulation.plates[0].crust[local as usize] = None;
         let orogenic_mass = |simulation: &Simulation| -> f64 {
             simulation.plates[0]
@@ -2047,6 +2074,7 @@ mod tests {
         let neighbours = simulation.mesh.neighbors(local).len() as f64;
         let filled = simulation.plates[0].crust[local as usize].unwrap();
         assert_eq!(filled.orogeny, -300.0);
+        assert_eq!(filled.reheated, -35.0);
         assert!((filled.orogenic - 1.0 / neighbours).abs() < 1e-12);
         assert_eq!(
             simulation.plates[0].crust[marked as usize]
@@ -2302,6 +2330,7 @@ mod tests {
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
+                reheated: NO_REHEATING,
                 cohort: 0.0,
             };
         }

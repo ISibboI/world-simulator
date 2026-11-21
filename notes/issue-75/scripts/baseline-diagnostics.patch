@@ -1,0 +1,161 @@
+From 481b577d10c886822b1bf4d254b4bd2c0bf500ba Mon Sep 17 00:00:00 2001
+From: "isibboi-agent[bot]"
+ <358801926+isibboi-agent[bot]@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 17:22:46 +0200
+Subject: [PATCH] Diagnostics only: rift belt statistics (baseline for #75/#53)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/main.rs             | 17 +++++++++++++
+ src/tectonics/events.rs | 55 ++++++++++++++++++++++++++++++++++++++++-
+ src/tectonics/mod.rs    |  2 +-
+ 3 files changed, 72 insertions(+), 2 deletions(-)
+
+diff --git a/src/main.rs b/src/main.rs
+index 37540a7..b0fdbaa 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -449,6 +449,23 @@ fn snapshot(
+         statistics.events.undone_initiations[2],
+         statistics.events.undone_initiations[3],
+     );
++    let events = &statistics.events;
++    info!(
++        "    rift belts (continental cells, boundary/plates): ever marked {}/{} of {}/{}, orogenic weakening {:.1}/{:.1}, weak (≥ {}) {}/{} | \
++         plume rifts failed {}, break vs plate motion |cos| {:.3} over {} rifts",
++        events.rift_suture_cells[0],
++        events.rift_suture_cells[2],
++        events.rift_suture_cells[1],
++        events.rift_suture_cells[3],
++        events.rift_orogenic[0],
++        events.rift_orogenic[1],
++        tectonics::WEAK_BELT_THRESHOLD,
++        events.rift_weak_cells[0],
++        events.rift_weak_cells[1],
++        events.failed_plume_rifts,
++        events.rift_motion_alignment.0 / events.rift_motion_alignment.1.max(1) as f64,
++        events.rift_motion_alignment.1,
++    );
+     log_sediment_reservoirs(&planet_statistics);
+     {
+         let field = simulation.dynamic_topography();
+diff --git a/src/tectonics/events.rs b/src/tectonics/events.rs
+index d31120f..83f1fd8 100644
+--- a/src/tectonics/events.rs
++++ b/src/tectonics/events.rs
+@@ -249,6 +249,20 @@ pub struct EventCounts {
+     /// rifts created and on the two rifted plates: rifts follow sutures if the first ratio is
+     /// higher than the second.
+     pub rift_suture_cells: [usize; 4],
++    /// Sums of the remaining orogenic weakening ([`Crust::orogenic`]) over the continental
++    /// cells counted in [`EventCounts::rift_suture_cells`]: on the rift boundaries, in the
++    /// rifted plates.
++    pub rift_orogenic: [f64; 2],
++    /// Continental cells with an orogenic weakening of at least [`WEAK_BELT_THRESHOLD`]: on the
++    /// rift boundaries, in the rifted plates.
++    pub rift_weak_cells: [usize; 2],
++    /// Sum over plume rifts of |cos| of the angle between the plate's motion at the plume and
++    /// the direction from the plume to the new boundary cells within half a plume head radius
++    /// (mean over those cells), and the number of rifts measured: a random orientation gives a
++    /// mean of 2/π, breaks along the plate's motion 1.
++    pub rift_motion_alignment: (f64, usize),
++    /// Plumes that tried to rift a plate but found no division.
++    pub failed_plume_rifts: usize,
+     /// Sum of the root-mean-square distances (km) of new boundaries from their best-fitting
+     /// great circle, and the number of splits measured: rifts, initiations.
+     pub split_deviation_km: [f64; 2],
+@@ -287,6 +301,10 @@ const MIN_FRACTURE_ZONE_CELLS: usize = 3;
+ /// Initiations whose two parts merge again within this many Myr count as undone.
+ const UNDONE_INITIATION_TIME: f64 = 50.0;
+ 
++/// Orogenic weakening ([`Crust::orogenic`]) from which a continental cell counts as part of a
++/// weak belt in the rift statistics: a strength of at most ~0.8 of undeformed lithosphere.
++pub const WEAK_BELT_THRESHOLD: f64 = 0.25;
++
+ /// Why two plates merge.
+ #[derive(Clone, Copy, Debug)]
+ enum Merge {
+@@ -990,6 +1008,8 @@ impl Simulation {
+             "Rift boundary distance from the plume"
+         );
+         let mut counts = [0usize; 4];
++        let mut orogenic = [0.0; 2];
++        let mut weak = [0usize; 2];
+         for cell in 0..self.mesh.len() as u32 {
+             let plate = self.owners[cell as usize].plate;
+             if plate != a && plate != b {
+@@ -1000,16 +1020,45 @@ impl Simulation {
+                 continue;
+             }
+             let suture = usize::from(crust.orogeny > NO_OROGENY);
++            let belt = usize::from(crust.orogenic >= WEAK_BELT_THRESHOLD);
+             counts[2] += suture;
+             counts[3] += 1;
++            orogenic[1] += crust.orogenic;
++            weak[1] += belt;
+             if boundary.binary_search(&cell).is_ok() {
+                 counts[0] += suture;
+                 counts[1] += 1;
++                orogenic[0] += crust.orogenic;
++                weak[0] += belt;
+             }
+         }
+         for (total, count) in self.event_counts.rift_suture_cells.iter_mut().zip(counts) {
+             *total += count;
+         }
++        for i in 0..2 {
++            self.event_counts.rift_orogenic[i] += orogenic[i];
++            self.event_counts.rift_weak_cells[i] += weak[i];
++        }
++        // Orientation of the break near the plume relative to the plate's motion there.
++        let motion = self.plates[a as usize].angular_velocity.cross(origin);
++        if motion.length() > 0.0 {
++            let motion = motion.normalize();
++            let (sum, count) = boundary
++                .iter()
++                .map(|&cell| self.mesh.vertex(cell))
++                .filter(|r| {
++                    let angle = r.angle_between(origin);
++                    angle > 0.0 && angle <= 0.5 * PLUME_HEAD_RADIUS
++                })
++                .fold((0.0, 0usize), |(sum, count), r| {
++                    let direction = (r - origin * r.dot(origin)).normalize_or_zero();
++                    (sum + direction.dot(motion).abs(), count + 1)
++                });
++            if count > 0 {
++                self.event_counts.rift_motion_alignment.0 += sum / count as f64;
++                self.event_counts.rift_motion_alignment.1 += 1;
++            }
++        }
+     }
+ 
+     /// Root-mean-square distance (km) of the boundary between plates `a` and `b` (cells of `b`
+@@ -1260,7 +1309,11 @@ impl Simulation {
+                 nucleus: cell,
+                 cut: continent,
+             };
+-            if let Some(new_plate) = self.split_locally(plate, normal, anchor) {
++            let split = self.split_locally(plate, normal, anchor);
++            if split.is_none() {
++                self.event_counts.failed_plume_rifts += 1;
++            }
++            if let Some(new_plate) = split {
+                 self.event_counts.rifts += 1;
+                 let (total, far) = self.split_contact_km(plate, new_plate, position);
+                 self.event_counts.rift_contact_km += total;
+diff --git a/src/tectonics/mod.rs b/src/tectonics/mod.rs
+index 14c3f99..45b4334 100644
+--- a/src/tectonics/mod.rs
++++ b/src/tectonics/mod.rs
+@@ -51,7 +51,7 @@ mod weak_zones;
+ 
+ pub use boundaries::{GapStatistics, TrenchSediment};
+ pub use crust::*;
+-pub use events::{EventCounts, PlateEventParams};
++pub use events::{EventCounts, PlateEventParams, WEAK_BELT_THRESHOLD};
+ pub use generation::InitialConfiguration;
+ pub use initial_sediment::{InitialSedimentParams, PlatformEmplacement};
+ pub use ledger::MassLedger;
+-- 
+2.47.3
+

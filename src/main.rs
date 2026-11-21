@@ -585,6 +585,23 @@ fn snapshot(
         statistics.events.undone_initiations[2],
         statistics.events.undone_initiations[3],
     );
+    let events = &statistics.events;
+    info!(
+        "    rift belts (continental cells, boundary/plates): ever marked {}/{} of {}/{}, orogenic weakening {:.1}/{:.1}, weak (≥ {}) {}/{} | \
+         plume rifts failed {}, break vs plate motion |cos| {:.3} over {} rifts",
+        events.rift_suture_cells[0],
+        events.rift_suture_cells[2],
+        events.rift_suture_cells[1],
+        events.rift_suture_cells[3],
+        events.rift_orogenic[0],
+        events.rift_orogenic[1],
+        tectonics::WEAK_BELT_THRESHOLD,
+        events.rift_weak_cells[0],
+        events.rift_weak_cells[1],
+        events.failed_plume_rifts,
+        events.rift_motion_alignment.0 / events.rift_motion_alignment.1.max(1) as f64,
+        events.rift_motion_alignment.1,
+    );
     log_sediment_reservoirs(&planet_statistics);
     {
         let field = simulation.dynamic_topography();
@@ -1105,7 +1122,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -1124,7 +1141,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
         writeln!(
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
-             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3}",
+             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3}",
             mesh.vertex(cell).z.asin().to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -1152,6 +1169,8 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             },
             simulation.dynamic_topography()[cell as usize],
             crust.orogenic,
+            crust.strength_age(simulation.time()).min(1e4),
+            simulation.lithosphere_strength(cell),
         )?;
     }
     file.flush()?;

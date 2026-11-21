@@ -46,7 +46,8 @@ fn free_vertex(mesh: &SphereMesh, plate: &Plate, target: u32, position: DVec3) -
 /// spills when merging plates.
 const SPILL_RINGS: usize = 12;
 
-/// Adds `thickness` m of `crust` (its density and tracers) to `receiver`, mixing by mass.
+/// Adds `thickness` m of `crust` (its density and tracers) to `receiver`, mixing by mass. The
+/// receiver keeps its lithosphere: its `birth` and its plume reheating ([`Crust::reheated`]).
 fn add_crystalline(receiver: &mut Crust, thickness: f64, crust: &Crust) {
     if thickness <= 0.0 {
         return;
@@ -463,6 +464,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: 400.0,
             orogenic: 1.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         // A sample of an orogenic belt spread over sea floor: the mixtures stay oceanic or
@@ -478,6 +480,7 @@ mod tests {
             plate.crust[vertex as usize] = Some(Crust {
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
+                reheated: NO_REHEATING,
                 ..suture
             });
         }
