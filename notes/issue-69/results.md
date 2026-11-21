@@ -129,7 +129,7 @@ Slower plates and less sea-floor production go towards Earth (production ~1.9× 
 3.4 km²/yr), at the price of slightly older sea floor (still within the range of earlier
 batches). With ~70 metrics, a few |t| > 2 are expected by chance.
 
-Runtime: see below (paired local seed).
+Runtime, paired on this machine (seed 0, 1000 Myr, same flags, run at the same time): `main` 498 s, branch (`full`) 486 s: no measurable cost (one extra BFS ring and a strength call per reached cell per collision addition; one more plastic term per collision cell in the velocity solve).
 
 ## The suture threshold
 
