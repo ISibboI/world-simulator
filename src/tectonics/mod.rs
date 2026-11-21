@@ -510,7 +510,7 @@ pub struct MaterialBudget {
 
 /// Changes of the sea level (m, as an offset of dry elevations) so far per process. Each term is
 /// the difference between two exact solves of the sea level (see
-/// [`crate::isostasy::sea_level_for_volume_with_passes`]).
+/// [`crate::sea::sea_level`]).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SeaLevelBudget {
     /// Plate tectonics: motion, ageing and subsidence of the sea floor, subduction, accretion,
@@ -1173,7 +1173,7 @@ impl Simulation {
 
     /// The part of [`TectonicParams::ocean_volume`] (m³) that the ocean does not hold because
     /// the sea level stands at a pass into a basin it cannot fill (see
-    /// [`crate::isostasy::sea_level_for_volume_with_passes`]); zero otherwise.
+    /// [`crate::sea::sea_level`]); zero otherwise.
     pub fn sea_level_deficit(&self) -> f64 {
         self.solve_sea_level_with_deficit().deficit
     }

@@ -235,7 +235,7 @@ pub struct SeaLevel {
     pub level: f64,
     /// The part of the volume (m³) that the ocean does not hold at this level: non-zero only
     /// when the level stands at a pass (or at a cell whose pores fill) and the volume would
-    /// spill over it into a basin it cannot fill (see [`sea_level_for_volume_with_passes`]).
+    /// spill over it into a basin it cannot fill (see [`crate::sea::sea_level`]).
     pub deficit: f64,
 }
 
@@ -254,6 +254,8 @@ pub struct SeaLevel {
 /// volume falls into such a jump, the sea level is that pass: the sea stands at the sill, and
 /// the water that would spill into the basin is not represented (the returned deficit). A
 /// volume of zero gives the lowest pass; a volume beyond all cells floods the planet.
+/// [`crate::sea::sea_level`] solves the same while it floods the passes.
+#[cfg(test)]
 pub fn sea_level_for_volume_with_passes(
     dry_elevations: &[f64],
     passes: &[f64],
