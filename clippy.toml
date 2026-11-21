@@ -111,6 +111,9 @@ disallowed-types = [
     { path = "std::collections::HashSet", reason = "use `crate::hash::HashSet` (see src/hash.rs)" },
     { path = "std::hash::RandomState", reason = "randomly seeded; use `crate::hash::Fx64BuildHasher`" },
     { path = "std::collections::hash_map::DefaultHasher", reason = "not guaranteed stable; use `crate::hash::Fx64Hasher`" },
-    { path = "rustc_hash::FxHasher", reason = "depends on the pointer width; use `crate::hash::Fx64Hasher`" },
-    { path = "rustc_hash::FxBuildHasher", reason = "depends on the pointer width; use `crate::hash::Fx64BuildHasher`" },
+    # `allow-invalid`: rustc-hash is only a dev-dependency (and an indirect one of egui).
+    { path = "rustc_hash::FxHasher", reason = "depends on the pointer width; use `crate::hash::Fx64Hasher`", allow-invalid = true },
+    { path = "rustc_hash::FxBuildHasher", reason = "depends on the pointer width; use `crate::hash::Fx64BuildHasher`", allow-invalid = true },
+    { path = "rustc_hash::FxHashMap", reason = "depends on the pointer width; use `crate::hash::HashMap`", allow-invalid = true },
+    { path = "rustc_hash::FxHashSet", reason = "depends on the pointer width; use `crate::hash::HashSet`", allow-invalid = true },
 ]

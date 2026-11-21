@@ -80,7 +80,11 @@ superseded by this section. Its still-binding user preferences are under "Workin
   `state hash` to compare runs. Transcendental math (`sin`, `exp`, `ln`, `atan2`, `powf`,
   glam's `angle_between`, …) must go through `src/math.rs`; Clippy (`clippy.toml`,
   `disallowed_methods`) rejects the direct calls outside it and the 3D view. See
-  `notes/issue-79/`.
+  `notes/issue-79/`. Hash maps and sets are `crate::hash::{HashMap, HashSet}` (same hashes on
+  wasm32 and 64-bit; Clippy's `disallowed_types` rejects std's and `rustc_hash`'s); their
+  iteration order still differs between platforms, so iterate in a defined order (sorted keys
+  or values) wherever the order could reach a result, a log line or a file. See
+  `notes/issue-87/`.
 - **Experiments (simulation runs, seed sweeps, diagnostic builds) run on the server `tktie`**
   (`ssh tktie`, 8 cores, NixOS), not on this machine, so that this machine stays free for
   gaming. Leave 2 cores free on the server (at most 6 runs at once). Keep the server's files in

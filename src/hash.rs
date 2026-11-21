@@ -12,7 +12,11 @@
 //! `isize` too, signed values sign-extended), so the same key gives the same hash everywhere. For
 //! the integer keys of this crate (`u32`, `u64`, tuples and structs of them, enum discriminants)
 //! the hashes are exactly those of `rustc-hash` on 64-bit targets, so a native run is unchanged.
-//! Byte strings (not used as keys here) get a simple portable hash of their 8-byte words.
+//! Byte strings (not used as keys here) get a simple portable hash of their 8-byte words. One
+//! limit no hasher can lift: std hashes slices and arrays of integers (`[usize]`, `Vec<u32>`,
+//! `[u64; 2]`) as their raw native bytes, so keys containing a `[usize]` or `Vec<usize>` still
+//! hash differently on 32- and 64-bit (and integer slices depend on the byte order); use fixed
+//! width integers or tuples in keys.
 //!
 //! Identical hashes do not guarantee an identical iteration order: std's hash table probes in
 //! groups of 16 slots with SSE2 (x86-64) and of 8 slots elsewhere (wasm32, ARM), so entries that
