@@ -37,7 +37,10 @@ stands on orogenic lithosphere.
 - Cell dump: new column `orogenic`.
 
 This is option 2 of the issue. Option 1 (majority rule, no new field) keeps a binary mark and
-so still gains or loses weakened lithosphere at every mixing; option 2 conserves it. Cost: one
+so still gains or loses weakened lithosphere at every mixing; option 2 conserves it where
+samples are mixed with each other (crust added on top of a sample, e.g. arc magma or sediment
+turned to rock, leaves the share of the lithosphere below unchanged, so the product of share
+and crust mass is not a conserved quantity in general). Cost: one
 `f64` per crust sample.
 
 Not changed: additions on top of a sample (arc crust, metamorphosed sediment, stacked collision
