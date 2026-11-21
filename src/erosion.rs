@@ -308,7 +308,7 @@ pub struct Surface<'a> {
     /// The kind of crust.
     pub class: &'a [CrustClass],
     /// Volume of the ocean (m³), to solve the sea level (see
-    /// [`isostasy::sea_level_for_volume_with_pores`]) as sediment fills it.
+    /// [`sea::sea_level`]) as sediment fills it.
     pub ocean_volume: f64,
 }
 
