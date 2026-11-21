@@ -612,6 +612,7 @@ impl eframe::App for Viewer {
             time: self.time,
             duration: self.duration,
             failure: self.failure.as_deref(),
+            restarted: self.runs > 1,
         };
         if let Some(launch) = self.parameters.show(ui.ctx(), &status, cell_panel) {
             tracing::info!(args = ?launch.args, "Restarting the simulation");
