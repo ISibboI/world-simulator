@@ -1,138 +1,168 @@
 # #42 follow-up results: diffuse convergent zones
 
-_2026-11-21. Plan: [`plan.md`](plan.md) (with its revisions after the [plan review](review-plan.md)).
-`main` (288f9cf, = #63 merged) against the branch, 8 seeds (0–7) × 1000 Myr, default parameters,
-`--headless --cell-dump --width 256 --snapshot-interval 50`. Mean over seeds (seed range) of the
-means over the snapshots of 500–1000 Myr; counters per 100 Myr over 500–1000 Myr; Welch t, n = 8
-(|t| ≳ 2.1 ≈ p < 0.05 for one pre-named metric; with ~100 metrics, a few |t| > 2 are expected by
-chance). Scripts: `~/tasks/issue-42/scripts/` on tktie (`compare.py`, `contacts2.py`,
-`plates.py`, `tlist.py`). The `main` runs reproduce batch 2's final numbers exactly (production
-5.68 km²/yr, slab pull 1.28–1.29 × 10²¹ N) and the PR #63 reply's contact table (87.1 / 12.9%)._
+_2026-11-21. Plan: [`plan.md`](plan.md) (with its revisions after the [plan review](review-plan.md)),
+results evaluation of the first measurement: [`review-results.md`](review-results.md).
+Final measurement: `main` at e53b5f3 (#63 and #68 merged) against the branch rebased onto it,
+8 seeds (0–7) × 1000 Myr, default parameters, `--headless --cell-dump --width 256
+--snapshot-interval 50`, both sets run at the same time on the same machine. Mean over seeds (seed
+range) of the means over the snapshots of 500–1000 Myr; counters per 100 Myr; Welch t, n = 8
+(|t| ≳ 2.1 ≈ p < 0.05 for one pre-named metric; with ~100 metrics a few |t| > 2 occur by chance).
+Scripts on tktie: `~/tasks/issue-42/scripts/` (`compare.py` log metrics, `contacts2.py` contact
+classes, `plates.py` plate structure, `tlist.py`), `~/tasks/issue-42/tmp/eval/why.py` (from the
+results evaluation)._
 
 ## Result in one sentence
 
-The new boundary state exists and behaves as intended (slow, slab-free, mass-conserving
-shortening that localises into a trench when it yields), but it covers **~1.5% of the converging
-oceanic contacts**, not Earth's ~25%: almost all oceanic contacts in the model are driven above
-the strength of the plate, and that is not something the state machine changes.
+The new boundary state works as intended (slab-free, mass-conserving shortening at 0.3–0.5 cm/yr
+that localises into a trench when it yields), and it takes over most of the contacts that `main`
+locks; but it is **~1% of the converging oceanic contacts**, the trench length does not change,
+and on the current `main` (after #68) the "non-trench" share of converging ocean–ocean contacts is
+already 21%, so #42's literal question was largely answered by #68.
 
-## The contacts (headline)
+## Contacts (headline)
 
-Rows = boundary cells seen from their plate, smoothed normals. "A" is the metric of the reply on
-PR #63; "B" classifies by boundary state the rows where oceanic crust is the lower plate (or has no
-segment), locked rows (|v| ≤ 0.1 cm/yr) included.
-
-| | main | branch | t |
-|---|---|---|---|
-| A. ocean–ocean, converging > 0.1 cm/yr: part of a trench (%) | 87.1 (86.1…88.5) | **84.6** (83.4…85.8) | −5.8 |
-| A. … no trench (%) | 12.9 | **15.4** | +5.8 |
-| A. ocean–ocean + ocean–continent: no trench (%) | 13.6 | 15.2 | +2.4 |
-| B. ocean–ocean lower side: trench (%) | 86.1 | 83.6 | −4.2 |
-| B. … **diffuse zone** (%) | 0 | **1.50** (0.94…2.18) | |
-| B. … other / no segment (%) | 13.9 | 14.9 | +1.7 |
-| B. … locked (%) | 3.8 | 2.9 | −3.3 |
-| B. ocean–ocean + ocean–continent: diffuse zone (%) | 0 | 1.72 (0.53…2.79) | |
-| Diffuse-zone length (log, 10³ km; Earth's OCB 17.4) | — | 2.1 (0.7…3.2) | |
-| Convergence of diffuse rows, quartiles (cm/yr; Earth's OCB 0.38 / 0.67 / 1.38) | — | 0.28 / 0.47 / 0.69 | |
-| Shortening per diffuse segment, mean / max (km) | — | 26 / 89 | |
-| Crust stacked by shortening (Gt/yr; subducted oceanic crust 125–129) | — | 0.53 | |
-| Localisations (diffuse → trench) per 100 Myr | — | 71 | |
-| … crust stacked by segments that localised within 2 Myr of creation (Gt/yr) | — | 0.05 | |
-
-- The "other / no segment" rows (~14%) are on `main` too. They are lower-side rows of trench
-  segments whose own raw cell normal does not converge (the zig-zag artefact of batch 2 and #43),
-  untouched here.
-- Diffuse rows converge at 0.3–0.7 cm/yr, like Earth's oceanic convergent boundaries (OCB), but
-  the speed is bounded by `diffuse_convergence` = 1 cm/yr by construction and validates nothing
-  above it.
-- 9% of the stacked crust is transient (zones that localise within 2 Myr), the rest belongs to
-  zones that shorten for longer.
-
-## Plate dynamics
+Rows = boundary cells seen from their plate, with the smoothed normals. "A" is the metric of the
+reply on PR #63. "B" classifies by boundary state the rows where oceanic crust is the lower plate
+of a segment (or has no segment and converges), locked rows (|v| ≤ 0.1 cm/yr) included.
 
 | | main | branch | t |
 |---|---|---|---|
-| Incipient trenches (slab < 150 km; 10³ km) | 11.1 | **8.1** | −3.0 |
-| … convergence there (log, raw normals; cm/yr) | 1.86 | 2.19 | +5.8 |
-| Trench length with slab < 150 km (%, dump) | 9.0 | 7.0 | −2.7 |
-| Trench convergence slower than 2 cm/yr (% of trench) | 22.6 | 19.2 | −2.7 |
-| Trench length (10³ km) | 122 (109…132) | 114 (105…135) | −1.7 |
-| Slab pull (10²¹ N) | 1.28 | 1.23 | −1.4 |
-| Sea-floor production, kinematic (km²/yr) | 5.68 (5.10…6.21) | 5.48 (4.99…6.04) | −1.2 |
-| Mean sea-floor age (Myr) | 54.1 | 56.4 | +1.1 |
-| Median relative speed (cm/yr) | 6.50 | 6.46 | −0.3 |
-| Boundary slower than 2 cm/yr (%) | 8.2 | 7.2 | −1.6 |
-| Subduction flux of crust younger than 20 Myr (%) | 23.8 | 24.1 | +0.2 |
-| Surface on slab-attached plates (own mature trench ≥ 10% of boundary; %) | 48.3 | **41.9** | −3.3 |
-| Boundary between two slab-attached plates (%) | 38.0 | 31.9 | −2.4 |
-| Boundary between two slab-free plates (%; Earth 48) | 11.8 | 12.9 | +1.0 |
-| Continental crust on slab-attached plates (%) | 15.3 | 7.2 | −2.2 |
-| Initiation segments / of them grown to 300 km (per 100 Myr) | 28.8 / 22.7 | 24.9 / 20.2 | −1.4 / −1.1 |
+| A. ocean–ocean converging rows: part of a trench (%) | 78.7 (76.4…81.9) | 80.7 (77.5…83.8) | +2.1 |
+| A. … no trench (%) (`main` before #68: 12.9) | **21.3** | 19.3 | −2.1 |
+| B. ocean–ocean lower side: trench (%) | 76.7 | 80.0 | +3.3 |
+| B. … **diffuse zone** (%) | 0 | **1.00** (0.54…1.70) | |
+| B. … locked (%) | 5.2 | **3.0** | −9.1 |
+| B. … other (locked or diverging rows of segments, no segment) (%) | 23.3 | 19.0 | −4.1 |
+| B. … rows per snapshot: all / trench | 514 / 394 | 496 / 397 | −0.3 |
+| B. ocean–ocean + ocean–continent: diffuse zone (%) | 0 | 0.77 (0.18…1.57) | |
+| Diffuse-zone length (log, 10³ km; Earth's OCB 17.4) | — | 1.1 (0.1…3.2) | |
+| Convergence at diffuse zones (log, smoothed normals; cm/yr; Earth's OCB median 0.67) | — | 0.33 | |
+| Shortening per diffuse segment, mean / max (km) | — | 57 / 246 | |
+| Crust stacked by shortening (Gt/yr; subducted oceanic crust 132) | — | 0.33 | |
+| Localisations (diffuse → trench) per 100 Myr | — | 70 | |
 
-The slow incipient trenches of `main` (slab-free contacts that converged a little and so counted
-as trenches) are now diffuse zones; the ones that remain converge faster. Fewer plates count as
-slab-attached. Everything else moves by less than its seed scatter.
+- **The trench rows stay the same in number** (394 → 397 per snapshot); the trench *share* rises
+  because the other lower-side rows fall by a fifth, mostly the locked ones: a contact that
+  `main` locks below 0.1 cm/yr now creeps (up to `diffuse_convergence`) and either stays a
+  diffuse zone or yields and localises. That is the intended physics; it does not create more
+  trench length (112 → 111 × 10³ km, t −0.2).
+- Diffuse rows converge at 0.3–0.5 cm/yr, like Earth's oceanic convergent boundaries (OCB, median
+  0.67 cm/yr), but the speed is bounded by `diffuse_convergence` = 1 cm/yr by construction.
+- Diffuse segments with a mean rate ≤ 0.1 cm/yr are classified "other", so the diffuse *state*
+  covers somewhat more than the 1% of rows (results evaluation, finding 5: ~0.7 points more in
+  the first measurement).
+- Grid: the zones are one or a few cells wide (~110 km), while Earth's diffuse zones are
+  hundreds to a thousand km wide. The shortening is stacked over the collision profile
+  (4 rings), not distributed over the true width. Accepted as a grid effect.
 
-## Guard rails
+### Where diffuse zones occur
 
-| | main | branch | t |
-|---|---|---|---|
-| Sea floor ≥ 200 Myr (%) | 3.5 | 4.0 | +1.3 |
-| Sediment part of the sea level (m) / slope (m per 100 Myr) | 265 / 11.9 | 267 / 9.7 | +0.2 / −0.5 |
-| Mean land (m) | 545 | 464 | −1.8 |
-| Highest point (m) | 4567 | 4108 | **−2.1** |
-| Crust thicker than 50 km (% of continental) | 2.0 | 1.0 | **−2.2** |
-| Collision length (10³ km) | 13.7 | 10.3 | **−2.0** |
-| Collision stacking (Gt/yr) | 15.0 | 10.7 | −1.8 |
-| Flooded continental crust (%) | 33.7 | 35.6 | +0.7 |
-| Continental area (%) | 35.1 | 36.0 | +2.1 |
-| Permanently frozen (%) / global temperature (°C) | 11.4 / 14.5 | 9.8 / 15.2 | −2.8 / +1.9 |
-| Dynamic topography minimum (m; #37) | −2014 | −1928 | +0.7 |
-| Oceanic-origin crust (felsic < 0.3) thicker than 12 / 17 km (% of surface) | 0.22 / 0.00 | 0.27 / 0.02 | +1.8 / +4.2 |
-| Mass ledger residual | below the log's 0.005 Gt/yr | same | |
-| Unsettled velocity solves | 0 | 0 | |
-| Plates ≥ 1% / plates born per 100 Myr | 14.0 / 13.3 | 13.4 / 11.7 | −0.6 / −1.6 |
+Converging or locked oceanic lower-side rows by slab attachment of the two plates (own mature
+trench on ≥ 10% of the plate's boundary), branch:
 
-**The relief guard rails move:** less collision length, less thick crust, lower peaks, and
-(through the lower relief) less permanent ice and a slightly warmer planet. TODO: attribution
-(ablation below).
-
-## Sensitivities (seeds 0–2; compared with the same seeds of the branch)
-
-| | main | branch | events resisted (`initiation_displacement` = 0) | `diffuse_convergence` = 0.5 | strength 10¹³ N/m |
+| plate pair | share of the rows | trench | diffuse | other | share of all diffuse rows |
 |---|---|---|---|---|---|
-| ocean–ocean diffuse (% of lower-side rows) | 0 | 1.5 | 1.9 | 0.8 | **3.8** |
-| ocean–ocean no trench (A, %) | 13.1 | 15.7 | 16.2 | 14.4 | 18.7 |
-| Trench length (10³ km) | 129 | 107 | 118 | 120 | 111 |
-| Production (km²/yr) | 5.99 | 5.15 | 5.57 | 5.53 | 5.22 |
-| Initiation segments grown to 300 km per 100 Myr | 21.9 | 22.2 | 18.7 | 22.5 | 21.7 |
-| Highest point (m) / crust > 50 km (%) | 4892 / 3.1 | 3937 / 0.5 | 4270 / 0.9 | 4525 / 1.8 | 4412 / 1.4 |
+| both slab-attached | 25% | 87% | 0.5% | 12% | 15% |
+| own attached, other free | 63% | 94% | 0.3% | 6% | 23% |
+| own free, other attached | 5% | 74% | 1.0% | 25% | 6% |
+| **both slab-free** | **7%** | 69% | **6.0%** | 25% | **55%** |
 
-- Seeds 0–2 react more strongly than the 8-seed mean (production −14% there against −3.5% over
-  8 seeds); compare the columns with each other, not with the 8-seed table.
-- **Resisting the events** (option 1b of the plan review) lowers successful initiations by ~15%
-  (n.s. on 3 seeds) and adds little diffuse length. It would need the hazards reinterpreted as
-  attempt rates, and failed passive-margin splits are not merged back. Not recommended.
-- **A slower creep** (0.5 cm/yr, the Central Indian Basin's rate) halves the diffuse share: more
-  contacts yield.
-- **A stronger plate** (10¹³ N/m, the upper end for intact lithosphere; Mueller & Phillips 1991)
-  gives 3.8%. Even then the model stays far from Earth's ~25% OCB share. The strength is a
-  calibration lever, not a fix; it is shown only to answer how far this mechanism can go.
+Diffuse zones form where neither plate is pulled by its own slabs, which is where the force
+across a contact can stay below the strength. In the model such pairs carry only 7% of these
+rows (and 17–19% of all boundary length, Earth 48%).
 
-## Runtime
+## Plate dynamics and guard rails
 
-TODO (paired timing).
+| | main | branch | t |
+|---|---|---|---|
+| Trench length (10³ km) | 112 | 111 | −0.2 |
+| Incipient trenches (slab < 150 km; 10³ km) | 13.1 | 11.5 | −0.9 |
+| … convergence there (cm/yr) | 2.05 | **2.48** | +5.5 |
+| Slab pull (10²¹ N) | 1.09 | 1.11 | +0.6 |
+| Sea-floor production, kinematic (km²/yr) | 6.02 | 6.10 | +0.5 |
+| Median relative speed (cm/yr) | 5.97 | 6.31 | +1.4 |
+| Boundary slower than 2 cm/yr (%) | 13.6 | 11.7 | −0.7 |
+| Ridge flank rows opening slower than 2 cm/yr (%) | 19.1 | 15.3 | −2.2 |
+| Surface on slab-attached plates (%) | 43.4 | 44.7 | +0.6 |
+| Boundary between two slab-free plates (%) | 19.1 | 17.1 | −0.6 |
+| Subduction flux of crust younger than 20 Myr (%) | 22.6 | 22.4 | −0.1 |
+| Initiation segments / of them grown to 300 km (per 100 Myr) | 25.1 / 17.3 | 20.9 / 14.5 | −1.2 / −1.1 |
+| Mean sea-floor age (Myr) | 53.6 | 51.0 | −1.5 |
+| **Sea floor ≥ 200 Myr (%)** (#14) | 3.22 | **2.35** | −2.3 |
+| Ancient sea floor: within 300 km of its plate's continent / shallower than 2 km / sediment (%, %, km) | 71 / 46 / 7.0 | 82 / 61 / 9.0 | +3.0 / +4.0 / +5.2 |
+| Mean land / highest point (m) | 809 / 4910 | 805 / 5048 | −0.0 / +0.4 |
+| Crust thicker than 50 km (% of continental) | 4.3 | 4.5 | +0.2 |
+| Collision length (10³ km) / collision stacking (Gt/yr) | 22.1 / 17.9 | 22.1 / 19.5 | −0.0 / +0.3 |
+| Sediment part of the sea level (m) / slope (m per 100 Myr) | 226 / 8.4 | 242 / 13.8 | +1.6 / +1.2 |
+| Burial metamorphism on continental crust (Gt/yr) | 0.11 | 0.15 | +2.3 |
+| Permanently frozen (%) / global temperature (°C) | 11.3 / 14.1 | 11.1 / 14.1 | −0.2 / −0.0 |
+| Dynamic topography minimum (m; #37) | −2031 | −2223 | −1.3 |
+| Oceanic-origin crust (felsic < 0.3) thicker than 12 / 17 km (% of surface) | 0.19 / 0.00 | 0.26 / 0.02 | +2.2 / +3.9 |
+| Unsettled velocity solves | 0 | 0 | |
+| Runtime, 8 seeds run concurrently (s) | 730 | 682 | −1.4 |
 
-## Why so little
+- The incipient trenches that remain converge faster: slow slab-free contacts are now diffuse
+  zones, and re-segmented pieces next to a trench inherit its thrust (results evaluation,
+  finding 3) and so feel no strength.
+- The old sea floor shrinks by a quarter and what remains is more clearly passive-margin
+  basement (near continents, shallow, under thick sediment), the #14 picture.
+- No relief guard rail moves. Thickened oceanic crust stays rare (0.26% of the surface above
+  12 km against 0.19%; 0.02% above 17 km). The sediment part of the sea level is 16 m higher
+  (t +1.6), within the seed scatter.
+- Runtime: no cost (the two sets ran side by side; the unpaired difference is −7%).
 
-In the force balance almost every converging oceanic contact is pushed harder than
-3 × 10¹² N/m: slab pull of 2 × 10¹³ N/m per metre of mature trench, transmitted by rigid plates,
-overwhelms the strength of a contact as soon as the plate on its other side is slab-attached.
-Only contacts between plates without that forcing creep. The diffuse state therefore takes over
-what #63 locked (locked share −0.9 points) plus the slowest incipient trenches. Earth's diffuse
-zones are mostly *inside* intact lithosphere or between slab-free plates (Central Indian Basin,
-Gorringe, Macquarie); the model has few slab-free plate pairs (13% of the boundary against 48%)
-and every contact is a plate boundary. So the remaining gap is the plate organisation of #32/#43,
-which the #43 agent is now working on (smoothed-normal trench test, slab break-off under
-strike-slip, driving of slab-free plates). Once fewer plates are slab-attached, more contacts
-should fall below the strength and become diffuse zones with this change.
+## History: the first measurement and what it changed
+
+The first measurement (branch before the rebase against `main` before #68; 8 seeds) found the same
+small diffuse share (1.5% of ocean–ocean lower-side rows) but also a shift of the relief guard
+rails (collision length −25%, highest point −460 m, crust > 50 km −50%, t ≈ −2). The independent
+results evaluation ([`review-results.md`](review-results.md)) traced candidates; an ablation
+(3 seeds) showed that the cause was a side change, the full initiation strength on the oceanic
+side of segment-less ocean–continent contacts (it slowed oceans converging on continents and so
+continental collisions). It was outside #42's scope and was reverted. The evaluation also found:
+- a bug: a new segment inherited its neighbour's thrust even with the opposite polarity → fixed
+  (and tested);
+- stacking of oceanic crust onto continental margins at ocean–continent diffuse zones → the crust
+  now goes onto the oceanic side (tested);
+- missing counters → the log now reports the crust subducted at diffuse zones not yet seen by a
+  velocity solve and the number of thrusts with displacement ≥ 150 km but a shorter slab.
+
+Sensitivities of the first version (seeds 0–2, compared with the branch on the same seeds; the
+seeds are high-production seeds of `main`, so all variants look lower than `main` there):
+
+| | branch | events resisted (`initiation_displacement` = 0) | `diffuse_convergence` = 0.5 | strength 10¹³ N/m |
+|---|---|---|---|---|
+| ocean–ocean diffuse (% of lower-side rows) | 1.5 | 1.9 | 0.8 | 3.8 |
+| ocean–ocean no trench (A, %) | 15.7 | 16.2 | 14.4 | 18.7 |
+| Initiation segments grown to 300 km per 100 Myr | 22.2 | 18.7 | 22.5 | 21.7 |
+
+- Resisting the events (option 1b of the plan review) costs ~15% of the successful initiations
+  and adds little diffuse length; it would need the hazards reinterpreted as attempt rates and
+  failed passive-margin splits merged back. Not recommended; the default keeps events as
+  completed initiations.
+- A slower creep (0.5 cm/yr) halves the diffuse share; a 3× stronger plate (the upper end for
+  intact lithosphere, Mueller & Phillips 1991) gives 3.8%. Even then the model stays far from
+  Earth's OCB share. The strength is a calibration lever, shown only to answer how far this
+  mechanism can go.
+
+## Why so little, and the comparison with Earth
+
+Rigid plates transmit the slab pull of every attached plate to all its contacts, which then exceed
+the strength of 3 × 10¹² N/m and localise. Only contacts between plates without that forcing
+creep, and those are rare in the model (table above). On Earth, diffuse zones form where the force
+transmitted across the zone stays below the strength, often inside a composite plate
+(India–Australia–Capricorn, Central Indian Basin) or between slowly converging slab-free plates
+(Gorringe, Nubia–Eurasia). PB2002's OCB is 25% of oceanic convergent length (OCB/(OCB+SUB), a
+quarter of it inside Bird's orogens); in the model ~1% of the converging oceanic lower-side rows
+are diffuse zones and another ~10–19% are rows of segments that are neither trench nor diffuse
+(oblique, locked or diverging parts of segments since #68). The remaining gap is the plate
+organisation of #32/#43 and the rigid-plate approximation (deformable margins and non-rigid plates
+are separate follow-up issues), not the boundary state machine.
+
+## Relation to #68 (merged)
+
+#68 decides per segment whether it subducts (smoothed-normal convergence, not nearly along
+strike); this change adds whether it has a thrust at all. The two combine as: a segment is a
+trench where it is localised and subducting, a diffuse zone where it is not localised but
+converges (`subducting`), and slabs and the displacement on the thrust grow only on localised,
+subducting segments. The yield test uses #68's per-segment motion.
