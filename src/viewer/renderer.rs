@@ -1,11 +1,13 @@
-//! GPU resources and the egui paint callback that draws the planet with wgpu, and the outline
-//! of the cell under the pointer on top of it.
+//! GPU resources and the egui paint callback that draws the planet with wgpu, the overlay of
+//! the render mode (arrows) and the outline of the cell under the pointer on top of it.
 
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use eframe::egui_wgpu::{self, wgpu};
 use wgpu::util::DeviceExt;
+
+use super::arrows::OverlayVertex;
 
 /// Format of the depth buffer requested from eframe; must match [`super::DEPTH_BUFFER_BITS`].
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -59,6 +61,11 @@ struct PlanetResources {
     line_count: u32,
     /// The mesh of the running simulation, once its first surface arrived.
     mesh: Option<MeshBuffers>,
+    overlay_pipeline: wgpu::RenderPipeline,
+    /// The overlay last uploaded: its buffer, [`Overlay::id`] and number of vertices.
+    overlay: Option<(wgpu::Buffer, u64, u32)>,
+    /// Whether this frame has an overlay.
+    overlay_shown: bool,
 }
 
 /// Vertex and index buffers of the planet mesh. They are replaced when a simulation with
@@ -178,6 +185,13 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
         mapped_at_creation: false,
     });
 
+    let overlay_pipeline = overlay_pipeline(
+        device,
+        &pipeline_layout,
+        render_state.target_format,
+        msaa_samples,
+    );
+
     let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet uniforms"),
         size: std::mem::size_of::<Uniforms>() as wgpu::BufferAddress,
@@ -204,7 +218,60 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
             line_buffer,
             line_count: 0,
             mesh: None,
+            overlay_pipeline,
+            overlay: None,
+            overlay_shown: false,
         });
+}
+
+/// The pipeline of the overlay: [`OverlayVertex`] triangles, depth-tested against the planet
+/// (mountains in front hide them) without writing depth, so that they are drawn in their order
+/// (borders first, see `arrows::triangles`).
+fn overlay_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    target_format: wgpu::TextureFormat,
+    msaa_samples: u32,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("overlay.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("planet overlay"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<OverlayVertex>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: msaa_samples,
+            ..Default::default()
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(target_format.into())],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// The pipeline of [`LineSegment`]s: one instance per segment, drawn as a quad of six vertices
@@ -272,10 +339,19 @@ pub struct Surface {
     pub vertices: Arc<Vec<Vertex>>,
 }
 
+/// Triangles drawn over the planet by the render mode (arrows). Like [`Surface`], it is passed
+/// with every frame and uploaded only when its id changes.
+#[derive(Clone)]
+pub struct Overlay {
+    pub id: u64,
+    pub vertices: Arc<Vec<OverlayVertex>>,
+}
+
 /// Draws the planet into the area of an egui widget.
 pub struct PlanetCallback {
     pub uniforms: Uniforms,
     pub surface: Option<Surface>,
+    pub overlay: Option<Overlay>,
     /// Lines to draw over the planet, at most [`MAX_LINE_SEGMENTS`] (the rest are dropped).
     pub lines: Vec<LineSegment>,
 }
@@ -302,6 +378,28 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
             queue.write_buffer(&resources.line_buffer, 0, bytemuck::cast_slice(lines));
         }
         resources.line_count = lines.len() as u32;
+        resources.overlay_shown = false;
+        if let Some(overlay) = self.overlay.as_ref().filter(|o| !o.vertices.is_empty()) {
+            let bytes: &[u8] = bytemuck::cast_slice(overlay.vertices.as_slice());
+            let fits = |buffer: &wgpu::Buffer| buffer.size() >= bytes.len() as u64;
+            match &mut resources.overlay {
+                Some((_, id, _)) if *id == overlay.id => {}
+                Some((buffer, id, count)) if fits(buffer) => {
+                    queue.write_buffer(buffer, 0, bytes);
+                    *id = overlay.id;
+                    *count = overlay.vertices.len() as u32;
+                }
+                _ => {
+                    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("planet overlay"),
+                        contents: bytes,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                    resources.overlay = Some((buffer, overlay.id, overlay.vertices.len() as u32));
+                }
+            }
+            resources.overlay_shown = true;
+        }
         let Some(surface) = &self.surface else {
             return Vec::new();
         };
@@ -350,6 +448,13 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
         render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+        if resources.overlay_shown
+            && let Some((buffer, _, count)) = &resources.overlay
+        {
+            render_pass.set_pipeline(&resources.overlay_pipeline);
+            render_pass.set_vertex_buffer(0, buffer.slice(..));
+            render_pass.draw(0..*count, 0..1);
+        }
         if resources.line_count > 0 {
             render_pass.set_pipeline(&resources.line_pipeline);
             render_pass.set_vertex_buffer(0, resources.line_buffer.slice(..));

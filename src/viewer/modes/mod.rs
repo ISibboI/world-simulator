@@ -1,0 +1,460 @@
+//! Render modes of the 3D view: what the planet's colours and overlays show.
+//!
+//! A mode is a [`RenderMode`]: it names the extra [`Layers`] it needs from the simulation, may
+//! colour the cells ([`RenderMode::colors`], from the [`CellInfo`]s every update carries and the
+//! requested layers), may draw arrows ([`RenderMode::arrows`], see [`super::arrows`]), and
+//! describes itself in a [`Legend`]. The topographic mode, the default, keeps the colours the
+//! simulation computes with the vertices (`render::surface_color`), so it looks exactly as
+//! before modes existed.
+//!
+//! The active mode is chosen in the mode switcher ([`switcher`]), on the command line
+//! (`--render-mode`) or in the URL of the web version (`?render-mode=…`); the web version also
+//! remembers it in the local storage (URL > stored > default, see [`initial`]).
+//!
+//! Adding a mode: a variant of [`RenderModeId`] (its clap name is the name in the command line
+//! and the URL), a type implementing [`RenderMode`] in its own file, and its lines in
+//! [`RenderModeId::mode`] and [`RenderModeId::name`]. A mode that needs data beyond
+//! [`CellInfo`] adds a [`super::fields::Layer`].
+
+mod plate_motion;
+pub mod switcher;
+mod topographic;
+
+use clap::ValueEnum;
+use glam::Vec3;
+
+use super::CellInfo;
+use super::arrows::{ArrowStyle, Sample, base_point};
+use super::fields::{Fields, Layer, Layers};
+use super::renderer::Vertex;
+use crate::sphere::SphereMesh;
+
+/// The render modes, by their names on the command line and in the URL.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum RenderModeId {
+    /// Elevation colours with rivers and permanent ice.
+    #[default]
+    Topographic,
+    /// Plate velocities as arrows over the topographic colours.
+    PlateMotion,
+}
+
+impl RenderModeId {
+    /// The mode's behaviour.
+    pub fn mode(self) -> &'static dyn RenderMode {
+        match self {
+            RenderModeId::Topographic => &topographic::Topographic,
+            RenderModeId::PlateMotion => &plate_motion::PlateMotion,
+        }
+    }
+
+    /// The layers the mode needs beyond [`CellInfo`].
+    pub fn layers(self) -> Layers {
+        self.mode().layers()
+    }
+
+    /// Every mode, in the order of the switcher.
+    pub fn all() -> &'static [RenderModeId] {
+        Self::value_variants()
+    }
+
+    /// The name on the command line, in the URL and in the local storage (clap's name of the
+    /// variant, which a test checks; clap only lends its names).
+    pub fn name(self) -> &'static str {
+        match self {
+            RenderModeId::Topographic => "topographic",
+            RenderModeId::PlateMotion => "plate-motion",
+        }
+    }
+
+    /// The mode of a name, if there is one.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // Used by the web version.
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::from_str(name.trim(), false).ok()
+    }
+}
+
+/// What a mode gets to colour the planet and to place its arrows.
+pub struct ModeData<'a> {
+    /// The mesh with the directions of the cells.
+    pub mesh: &'a SphereMesh,
+    /// The displayed vertices of the cells (with the topographic colours).
+    pub vertices: &'a [Vertex],
+    #[allow(dead_code)] // For the scalar modes to come (#94, #95, #98–#100); see the tests.
+    pub cells: &'a [CellInfo],
+    /// The requested layers, as far as they arrived.
+    pub fields: &'a Fields,
+    /// Evenly spread cells for arrows, and their spacing in planet radii.
+    pub arrow_cells: &'a [u32],
+    pub arrow_spacing: f64,
+}
+
+impl ModeData<'_> {
+    /// The displayed position of a vertex.
+    pub fn position(&self, vertex: u32) -> Vec3 {
+        self.vertices
+            .get(vertex as usize)
+            .map_or(Vec3::ZERO, |vertex| Vec3::from(vertex.position))
+    }
+
+    /// Arrows of a 3-component layer at [`ModeData::arrow_cells`], or `None` while the layer has
+    /// not arrived.
+    pub fn vector_samples(&self, layer: Layer) -> Option<Vec<Sample>> {
+        self.fields.get(layer)?;
+        Some(
+            self.arrow_cells
+                .iter()
+                .filter_map(|&cell| {
+                    let vector = self.fields.vector(layer, cell)?;
+                    Some(Sample {
+                        base: base_point(self.mesh, cell, |vertex| self.position(vertex)),
+                        vector: vector.as_dvec3(),
+                    })
+                })
+                .collect(),
+        )
+    }
+}
+
+/// A render mode. Everything but the legend is optional.
+pub trait RenderMode: Sync {
+    /// The name in the switcher.
+    fn label(&self) -> &'static str;
+
+    /// The layers the mode needs beyond [`CellInfo`].
+    fn layers(&self) -> Layers {
+        Layers::NONE
+    }
+
+    /// The colour of every cell (sRGB with alpha, 0 to 1, like [`Vertex::color`]), or `None`
+    /// to keep the topographic colours.
+    fn colors(&self, _data: &ModeData) -> Option<Vec<[f32; 4]>> {
+        None
+    }
+
+    /// Arrows to draw over the planet with their style, if any.
+    fn arrows(&self, _data: &ModeData) -> Option<(Vec<Sample>, ArrowStyle)> {
+        None
+    }
+
+    /// The legend, given the spacing of the arrows in planet radii (for an arrow scale).
+    fn legend(&self, arrow_spacing: f64) -> Legend;
+}
+
+/// What the legend of a mode shows; drawn by [`switcher`].
+#[derive(Debug, Clone, Default)]
+pub struct Legend {
+    /// One or two sentences about what the mode shows.
+    pub description: &'static str,
+    /// A colour bar with its unit.
+    pub scale: Option<ColorScale>,
+    /// Colours with a meaning of their own (rivers, ice, …).
+    pub swatches: Vec<Swatch>,
+    /// The meaning of the arrows' length.
+    pub arrows: Option<ArrowScale>,
+}
+
+/// A colour with its label.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Swatch {
+    pub color: [u8; 3],
+    pub label: &'static str,
+}
+
+/// Arrows of known magnitudes, drawn in the legend at their size on the planet's front.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArrowScale {
+    /// Magnitudes in `unit` with the lengths and shaft widths of their arrows in planet radii.
+    pub examples: Vec<(f64, f64, f64)>,
+    pub unit: &'static str,
+    /// The colour of the arrows.
+    pub color: [f32; 4],
+}
+
+impl ArrowScale {
+    /// The arrows of `magnitudes` in a style.
+    pub fn new(style: &ArrowStyle, magnitudes: &[f64], unit: &'static str) -> Self {
+        Self {
+            examples: magnitudes
+                .iter()
+                .map(|&magnitude| (magnitude, style.length(magnitude), style.width(magnitude)))
+                .collect(),
+            unit,
+            color: style.color,
+        }
+    }
+}
+
+/// A continuous colour scale: colours at values, interpolated linearly between them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColorScale {
+    /// Values with their colours, sorted by value; at least two.
+    pub stops: Vec<(f64, [u8; 3])>,
+    /// What the values are, with their unit, e.g. "Elevation (km)".
+    pub title: &'static str,
+    /// Values labelled under the bar, with their labels.
+    pub ticks: Vec<(f64, &'static str)>,
+}
+
+impl ColorScale {
+    #[allow(dead_code)] // For the scalar modes to come (#94, #95, #98–#100); see the tests.
+    /// The colour of a value, clamped to the range of the scale; `None` for NaN.
+    pub fn color(&self, value: f64) -> Option<[u8; 3]> {
+        let (first, last) = (self.stops.first()?, self.stops.last()?);
+        if value.is_nan() {
+            return None;
+        }
+        if value <= first.0 {
+            return Some(first.1);
+        }
+        if value >= last.0 {
+            return Some(last.1);
+        }
+        let upper = self.stops.iter().position(|&(stop, _)| stop >= value)?;
+        let (low, low_color) = self.stops[upper - 1];
+        let (high, high_color) = self.stops[upper];
+        let t = if high > low {
+            (value - low) / (high - low)
+        } else {
+            1.0
+        };
+        Some(std::array::from_fn(|i| {
+            let (a, b) = (f64::from(low_color[i]), f64::from(high_color[i]));
+            (a + (b - a) * t).round() as u8
+        }))
+    }
+
+    /// The range of the scale.
+    pub fn range(&self) -> (f64, f64) {
+        match (self.stops.first(), self.stops.last()) {
+            (Some(first), Some(last)) => (first.0, last.0),
+            _ => (0.0, 1.0),
+        }
+    }
+
+    #[allow(dead_code)] // For the scalar modes to come (#94, #95, #98–#100); see the tests.
+    /// The colours of a per-cell value for [`RenderMode::colors`]: `missing` where the value is
+    /// NaN.
+    pub fn colors(&self, values: impl Iterator<Item = f32>, missing: [u8; 3]) -> Vec<[f32; 4]> {
+        values
+            .map(|value| rgba(self.color(f64::from(value)).unwrap_or(missing)))
+            .collect()
+    }
+}
+
+/// An 8-bit sRGB colour as a vertex colour.
+#[allow(dead_code)] // For the scalar modes to come (#94, #95, #98–#100); see the tests.
+pub fn rgba([r, g, b]: [u8; 3]) -> [f32; 4] {
+    [r, g, b, 255].map(|channel| f32::from(channel) / 255.0)
+}
+
+/// `vertices` with the colours of a mode, or `None` if the counts differ.
+pub fn recolored(vertices: &[Vertex], colors: &[[f32; 4]]) -> Option<Vec<Vertex>> {
+    (vertices.len() == colors.len()).then(|| {
+        vertices
+            .iter()
+            .zip(colors)
+            .map(|(vertex, &color)| Vertex { color, ..*vertex })
+            .collect()
+    })
+}
+
+/// Key of the remembered mode in the local storage of the web page.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // Used by the web version.
+pub const STORAGE_KEY: &str = "world-simulator.render-mode";
+
+/// The mode the view starts with: the one in the URL (or on the command line), else the one
+/// remembered from the last visit (if it is a valid name), else the default.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // Used by the web version.
+pub fn initial(given: Option<RenderModeId>, stored: Option<&str>) -> RenderModeId {
+    given
+        .or_else(|| stored.and_then(RenderModeId::parse))
+        .unwrap_or_default()
+}
+
+/// What to remember of a mode the user chose: its name, or nothing (forget) for the default.
+pub fn to_store(mode: RenderModeId) -> Option<&'static str> {
+    (mode != RenderModeId::default()).then(|| mode.name())
+}
+
+/// The name of the option on the command line and in the URL.
+pub const OPTION: &str = "render-mode";
+
+/// Command-line arguments (after the program name, as `--name=value`) with the render mode
+/// replaced: `--render-mode=…` for any but the default, which is left out, so that the URL of
+/// the web page names only a chosen mode.
+pub fn with_render_mode(args: &[String], mode: RenderModeId) -> Vec<String> {
+    let is_mode = |arg: &str| {
+        arg.strip_prefix("--")
+            .and_then(|arg| arg.strip_prefix(OPTION))
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
+    };
+    let mut args: Vec<String> = args
+        .iter()
+        .enumerate()
+        .filter(|(index, arg)| *index == 0 || !is_mode(arg))
+        .map(|(_, arg)| arg.clone())
+        .collect();
+    if let Some(name) = to_store(mode) {
+        args.push(format!("--{OPTION}={name}"));
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_round_trip_and_match_clap() {
+        for &mode in RenderModeId::all() {
+            let clap_name = mode.to_possible_value().unwrap().get_name().to_owned();
+            assert_eq!(mode.name(), clap_name);
+            assert_eq!(RenderModeId::parse(mode.name()), Some(mode));
+            assert!(!mode.mode().label().is_empty());
+            assert!(!mode.mode().legend(0.1).description.is_empty());
+        }
+        assert_eq!(
+            RenderModeId::parse("plate-motion"),
+            Some(RenderModeId::PlateMotion)
+        );
+        assert_eq!(
+            RenderModeId::parse(" topographic\n"),
+            Some(RenderModeId::Topographic)
+        );
+        assert_eq!(RenderModeId::parse("nonsense"), None);
+        assert_eq!(RenderModeId::default(), RenderModeId::Topographic);
+    }
+
+    #[test]
+    fn the_url_wins_over_the_stored_mode_which_wins_over_the_default() {
+        use RenderModeId::*;
+        assert_eq!(initial(None, None), Topographic);
+        assert_eq!(initial(None, Some("plate-motion")), PlateMotion);
+        assert_eq!(
+            initial(Some(Topographic), Some("plate-motion")),
+            Topographic
+        );
+        assert_eq!(initial(Some(PlateMotion), None), PlateMotion);
+        // A stored name that no mode has any more is ignored.
+        assert_eq!(initial(None, Some("removed-mode")), Topographic);
+        assert_eq!(initial(None, Some("")), Topographic);
+    }
+
+    #[test]
+    fn the_default_is_forgotten_rather_than_stored() {
+        assert_eq!(to_store(RenderModeId::Topographic), None);
+        assert_eq!(to_store(RenderModeId::PlateMotion), Some("plate-motion"));
+    }
+
+    #[test]
+    fn the_mode_replaces_the_one_in_the_arguments() {
+        let strings = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
+        let args = strings(&["world-simulator", "--seed=3", "--render-mode=topographic"]);
+        assert_eq!(
+            with_render_mode(&args, RenderModeId::PlateMotion),
+            strings(&["world-simulator", "--seed=3", "--render-mode=plate-motion"])
+        );
+        let args = strings(&["world-simulator", "--render-mode=plate-motion", "--seed=3"]);
+        assert_eq!(
+            with_render_mode(&args, RenderModeId::Topographic),
+            strings(&["world-simulator", "--seed=3"])
+        );
+        // Other options that start with the same letters stay.
+        let args = strings(&["world-simulator", "--render-mode-x=1"]);
+        assert_eq!(with_render_mode(&args, RenderModeId::Topographic), args);
+        // The arguments with the mode parse.
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from(with_render_mode(
+            &strings(&["world-simulator"]),
+            RenderModeId::PlateMotion,
+        ))
+        .unwrap();
+        assert_eq!(cli.render_mode, RenderModeId::PlateMotion);
+    }
+
+    #[test]
+    fn color_scales_interpolate_and_clamp() {
+        let scale = ColorScale {
+            stops: vec![
+                (0.0, [0, 0, 0]),
+                (10.0, [100, 200, 0]),
+                (20.0, [100, 0, 250]),
+            ],
+            title: "Height (m)",
+            ticks: vec![(0.0, "0"), (20.0, "20")],
+        };
+        assert_eq!(scale.color(-5.0), Some([0, 0, 0]));
+        assert_eq!(scale.color(5.0), Some([50, 100, 0]));
+        assert_eq!(scale.color(10.0), Some([100, 200, 0]));
+        assert_eq!(scale.color(15.0), Some([100, 100, 125]));
+        assert_eq!(scale.color(99.0), Some([100, 0, 250]));
+        assert_eq!(scale.color(f64::NAN), None);
+        assert_eq!(scale.range(), (0.0, 20.0));
+        let colors = scale.colors([5.0, f32::NAN].into_iter(), [1, 2, 3]);
+        assert_eq!(colors[0], rgba([50, 100, 0]));
+        assert_eq!(colors[1], rgba([1, 2, 3]));
+    }
+
+    /// A scalar mode as later modes will be: colours from a [`CellInfo`] attribute.
+    struct SedimentTest;
+
+    impl RenderMode for SedimentTest {
+        fn label(&self) -> &'static str {
+            "Sediment (test)"
+        }
+
+        fn colors(&self, data: &ModeData) -> Option<Vec<[f32; 4]>> {
+            let scale = ColorScale {
+                stops: vec![(0.0, [0, 0, 0]), (1000.0, [255, 255, 255])],
+                title: "Sediment (m)",
+                ticks: vec![],
+            };
+            Some(scale.colors(data.cells.iter().map(|cell| cell.sediment), [255, 0, 0]))
+        }
+
+        fn legend(&self, _arrow_spacing: f64) -> Legend {
+            Legend {
+                description: "Sediment thickness.",
+                ..Legend::default()
+            }
+        }
+    }
+
+    #[test]
+    fn a_scalar_mode_recolours_the_vertices() {
+        use clap::Parser;
+        let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "2"]);
+        let planet = crate::build_planet(&cli).unwrap();
+        let vertices = super::super::surface_vertices(&planet, 40.0, 1e11);
+        let cells = super::super::cell_infos(&planet);
+        let mesh = planet.tectonics().mesh();
+        let fields = Fields::default();
+        let data = ModeData {
+            mesh,
+            vertices: &vertices,
+            cells: &cells,
+            fields: &fields,
+            arrow_cells: &[],
+            arrow_spacing: 0.1,
+        };
+        let colors = SedimentTest.colors(&data).unwrap();
+        let new_vertices = recolored(&vertices, &colors).unwrap();
+        for ((vertex, new), cell) in vertices.iter().zip(&new_vertices).zip(&cells) {
+            assert_eq!(vertex.position, new.position);
+            assert_eq!(vertex.normal, new.normal);
+            let grey = (cell.sediment / 1000.0).clamp(0.0, 1.0);
+            assert!(
+                (new.color[0] - grey).abs() < 0.01,
+                "{} {grey}",
+                new.color[0]
+            );
+        }
+        assert!(recolored(&vertices, &colors[1..]).is_none());
+        // The topographic mode keeps the colours; no mode draws arrows without its data.
+        assert!(RenderModeId::Topographic.mode().colors(&data).is_none());
+        for &mode in RenderModeId::all() {
+            assert!(mode.mode().arrows(&data).is_none());
+        }
+    }
+}

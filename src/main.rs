@@ -121,6 +121,10 @@ struct Cli {
     #[arg(long)]
     headless: bool,
 
+    /// What the 3D view shows at the start (it can be changed in the view, top left).
+    #[arg(long, value_enum, default_value_t = viewer::RenderModeId::Topographic)]
+    render_mode: viewer::RenderModeId,
+
     /// Vertical exaggeration of the relief in the 3D view.
     #[arg(long, default_value_t = 40.0)]
     exaggeration: f64,
@@ -206,7 +210,7 @@ fn main() -> anyhow::Result<()> {
         let planet = build_planet(&cli)?;
         std::fs::create_dir_all(&cli.output)
             .with_context(|| format!("creating output directory {}", cli.output.display()))?;
-        return simulate(planet, &cli, |_, _| ControlFlow::Continue(()));
+        return simulate(planet, &cli, |_, _| ControlFlow::Continue(())).map(|_| ());
     }
 
     // Wrong options end the program before the window opens; the window then shows the status
@@ -222,10 +226,21 @@ fn main() -> anyhow::Result<()> {
 /// Starts the simulations of the 3D view on a thread each, which builds its planet and runs
 /// it. A restarted simulation first waits for the previous thread to end, so only one
 /// simulation runs at a time. The previous simulation stops after its current step, because the
-/// view no longer receives its updates.
+/// view no longer receives its updates; a finished one, which waits for requests of other
+/// fields, ends when the view drops its control.
 #[cfg(not(target_arch = "wasm32"))]
 fn simulation_thread_launcher() -> viewer::StartSimulation {
     use viewer::SimulationEvent;
+
+    /// Sends requested layers to the simulation thread.
+    struct ThreadControl(std::sync::mpsc::Sender<viewer::Layers>);
+
+    impl viewer::SimulationControl for ThreadControl {
+        fn request_layers(&mut self, layers: viewer::Layers) {
+            // Fails only once the simulation has ended.
+            let _ = self.0.send(layers);
+        }
+    }
 
     // The thread of the latest simulation and its cancellation flag.
     let mut previous: Option<(std::thread::JoinHandle<()>, Arc<AtomicBool>)> = None;
@@ -235,6 +250,7 @@ fn simulation_thread_launcher() -> viewer::StartSimulation {
             thread
         });
         let cancelled = Arc::new(AtomicBool::new(false));
+        let (requests, received) = std::sync::mpsc::channel();
         let thread = {
             let cancelled = cancelled.clone();
             std::thread::spawn(move || {
@@ -253,7 +269,7 @@ fn simulation_thread_launcher() -> viewer::StartSimulation {
                     }
                 };
                 let run = std::panic::AssertUnwindSafe(|| {
-                    run_simulation_thread(&launch.cli, &cancelled, &events, &*wake_up)
+                    run_simulation_thread(&launch.cli, &cancelled, &events, &*wake_up, &received)
                 });
                 match std::panic::catch_unwind(run) {
                     Ok(Ok(())) => {}
@@ -270,19 +286,24 @@ fn simulation_thread_launcher() -> viewer::StartSimulation {
             })
         };
         previous = Some((thread, cancelled));
+        Box::new(ThreadControl(requests))
     })
 }
 
 /// Runs one simulation of the 3D view, from building its planet on. It stops early once
-/// `cancelled` is set or the view no longer receives its updates.
+/// `cancelled` is set or the view no longer receives its updates. The updates carry the extra
+/// fields last requested through `requests` (at first those of the render mode of `cli`); once
+/// the run is complete, the final state is sent again whenever new fields are requested, until
+/// the view drops the sender.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_simulation_thread(
     cli: &Cli,
     cancelled: &AtomicBool,
     events: &std::sync::mpsc::Sender<viewer::SimulationEvent>,
     wake_up: &dyn Fn(),
+    requests: &std::sync::mpsc::Receiver<viewer::Layers>,
 ) -> anyhow::Result<()> {
-    use viewer::{SimulationEvent, SurfaceUpdate};
+    use viewer::{Fields, SimulationEvent, SurfaceUpdate};
 
     if events.send(SimulationEvent::Generating).is_ok() {
         wake_up();
@@ -291,39 +312,65 @@ fn run_simulation_thread(
         .with_context(|| format!("creating output directory {}", cli.output.display()))?;
     let planet = build_planet(cli)?;
     let mut first_update = true;
-    simulate(
+    let mut layers = cli.render_mode.layers();
+    let mut publish = |planet: &Planet, step_time: Option<Duration>, layers: viewer::Layers| {
+        if cancelled.load(Ordering::Relaxed) {
+            return ControlFlow::Break(());
+        }
+        let mesh = planet.tectonics().mesh();
+        let start = Instant::now();
+        let vertices = viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
+        let vertices_built = start.elapsed();
+        let cells = viewer::cell_infos(planet);
+        let cells_built = start.elapsed();
+        let fields = Fields::extract(planet, layers);
+        debug!(
+            ?vertices_built,
+            cells_built = ?cells_built - vertices_built,
+            fields_built = ?start.elapsed() - cells_built,
+            field_bytes = fields.bytes(),
+            "Surface update built"
+        );
+        let update = SurfaceUpdate {
+            time: planet.tectonics().time(),
+            vertices: Arc::new(vertices),
+            cells: Arc::new(cells),
+            // The triangles only with the first update of a simulation.
+            faces: std::mem::take(&mut first_update).then(|| Arc::new(mesh.faces().to_vec())),
+            step_seconds: step_time.map(|time| time.as_secs_f64()),
+            fields,
+        };
+        // Sending fails once the view started another simulation or was closed.
+        if events.send(SimulationEvent::Surface(update)).is_err() {
+            return ControlFlow::Break(());
+        }
+        wake_up();
+        ControlFlow::Continue(())
+    };
+    let planet = simulate(
         planet,
         cli,
         |planet: &Planet, step_time: Option<Duration>| {
-            if cancelled.load(Ordering::Relaxed) {
-                return ControlFlow::Break(());
+            // The latest request; new fields come with this update.
+            while let Ok(requested) = requests.try_recv() {
+                layers = requested;
             }
-            let mesh = planet.tectonics().mesh();
-            let start = Instant::now();
-            let vertices = viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
-            let vertices_built = start.elapsed();
-            let cells = viewer::cell_infos(planet);
-            debug!(
-                ?vertices_built,
-                cells_built = ?start.elapsed() - vertices_built,
-                "Surface update built"
-            );
-            let update = SurfaceUpdate {
-                time: planet.tectonics().time(),
-                vertices: Arc::new(vertices),
-                cells: Arc::new(cells),
-                // The triangles only with the first update of a simulation.
-                faces: std::mem::take(&mut first_update).then(|| Arc::new(mesh.faces().to_vec())),
-                step_seconds: step_time.map(|time| time.as_secs_f64()),
-            };
-            // Sending fails once the view started another simulation or was closed.
-            if events.send(SimulationEvent::Surface(update)).is_err() {
-                return ControlFlow::Break(());
-            }
-            wake_up();
-            ControlFlow::Continue(())
+            publish(planet, step_time, layers)
         },
-    )
+    )?;
+    // The run is complete (or stopped): the final state again for every request of new
+    // fields, until the view drops the sender (a restart or the window closed).
+    while let Ok(requested) = requests.recv() {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        let new = requested.0 & !layers.0 != 0;
+        layers = requested;
+        if new && publish(&planet, None, layers).is_break() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// On the web, the same binary is the page (3D view) and the simulation worker; see [`web`].
@@ -428,39 +475,84 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
 }
 
 /// Runs the simulation, writing snapshots and calling `on_step` with the initial state and after
-/// every step. The simulation stops early, without a final snapshot, if `on_step` breaks.
-/// `on_step` also gets the time since its previous call (`None` for the initial state): the
-/// time of the step, with the previous update and snapshot, i.e. the pace at which the view
-/// gets new states.
+/// every step, and returns the planet at the end. The simulation stops early, without a final
+/// snapshot, if `on_step` breaks. `on_step` also gets the time since its previous call (`None`
+/// for the initial state): the time of the step, with the previous update and snapshot, i.e.
+/// the pace at which the view gets new states.
 fn simulate(
-    mut planet: Planet,
+    planet: Planet,
     cli: &Cli,
     mut on_step: impl FnMut(&Planet, Option<Duration>) -> ControlFlow<()>,
-) -> anyhow::Result<()> {
-    let steps = (cli.duration / cli.dt).round() as u64;
-    let snapshot_every = ((cli.snapshot_interval / cli.dt).round() as u64).max(1);
-    let start = Instant::now();
-    let mut previous_ledger: Option<PreviousSnapshot> = None;
-    snapshot(&planet, cli, &mut previous_ledger)?;
-    let mut previous_update = Instant::now();
-    if on_step(&planet, None).is_break() {
+) -> anyhow::Result<Planet> {
+    let mut run = Run::new(planet, cli)?;
+    if on_step(&run.planet, None).is_break() {
         info!("Simulation stopped at the start");
-        return Ok(());
+        return Ok(run.planet);
     }
-    for step in 1..=steps {
-        planet.step(cli.dt);
+    while let Some(step_time) = run.advance(cli) {
+        if on_step(&run.planet, Some(step_time)).is_break() {
+            info!(time = run.planet.tectonics().time(), "Simulation stopped");
+            return Ok(run.planet);
+        }
+        run.finish_step(cli)?;
+    }
+    run.log_finished();
+    Ok(run.planet)
+}
+
+/// A simulation run, step by step: [`simulate`] runs it in one loop; the web worker runs one
+/// step at a time, so that it can take messages from the page in between.
+struct Run {
+    planet: Planet,
+    /// The number of steps of the run and of the last one taken.
+    steps: u64,
+    step: u64,
+    snapshot_every: u64,
+    start: Instant,
+    previous_ledger: Option<PreviousSnapshot>,
+    previous_update: Instant,
+}
+
+impl Run {
+    /// Starts a run with the snapshot of the initial state.
+    fn new(planet: Planet, cli: &Cli) -> anyhow::Result<Self> {
+        let start = Instant::now();
+        let mut previous_ledger: Option<PreviousSnapshot> = None;
+        snapshot(&planet, cli, &mut previous_ledger)?;
+        Ok(Self {
+            planet,
+            steps: (cli.duration / cli.dt).round() as u64,
+            step: 0,
+            snapshot_every: ((cli.snapshot_interval / cli.dt).round() as u64).max(1),
+            start,
+            previous_ledger,
+            previous_update: Instant::now(),
+        })
+    }
+
+    /// Takes the next step and returns the time since the previous one (or since the start),
+    /// or `None` if the run is complete.
+    fn advance(&mut self, cli: &Cli) -> Option<Duration> {
+        if self.step >= self.steps {
+            return None;
+        }
+        self.step += 1;
+        self.planet.step(cli.dt);
         let now = Instant::now();
-        let step_time = now - std::mem::replace(&mut previous_update, now);
-        if on_step(&planet, Some(step_time)).is_break() {
-            info!(time = planet.tectonics().time(), "Simulation stopped");
-            return Ok(());
-        }
-        if step % snapshot_every == 0 || step == steps {
-            snapshot(&planet, cli, &mut previous_ledger)?;
-        }
+        Some(now - std::mem::replace(&mut self.previous_update, now))
     }
-    info!("Finished in {:.1?}", start.elapsed());
-    Ok(())
+
+    /// Writes the snapshot of the step just taken if one is due; after the step's update.
+    fn finish_step(&mut self, cli: &Cli) -> anyhow::Result<()> {
+        if self.step.is_multiple_of(self.snapshot_every) || self.step == self.steps {
+            snapshot(&self.planet, cli, &mut self.previous_ledger)?;
+        }
+        Ok(())
+    }
+
+    fn log_finished(&self) {
+        info!("Finished in {:.1?}", self.start.elapsed());
+    }
 }
 
 fn snapshot(

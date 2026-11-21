@@ -14,13 +14,23 @@
 //! also replaces the query of the page URL, so that the setting can be shared as a link. Each
 //! update after the first also carries `step_seconds`, the time of the step in the worker.
 //!
+//! Updates also carry the extra fields of the render mode ([`viewer::Layer`]s, each as a
+//! transferred `Float32Array` buffer under its key): at first those of the mode in the
+//! worker's query, then those the page requests with `{ layers }` (the bits of
+//! [`viewer::Layers`]). The worker runs one step at a time (scheduled with `setTimeout`) so that
+//! such messages reach it between steps; it then sends its current state again with the new
+//! fields at once, also after the run is complete.
+//!
+//! The render mode is remembered like the subdivisions: the URL's `render-mode` wins over the
+//! one in the local storage (stored when the user picks a mode), which wins over the default.
+//! Picking a mode puts it into the page URL at once, without a restart.
+//!
 //! Without `subdivisions` in the URL, the page starts with the subdivisions remembered in the
 //! local storage from the last restart, or else with a guess for the device (see
 //! [`crate::device`]). The worker always gets them explicitly; the page URL only when the user
 //! chose them.
 
-use std::cell::Cell;
-use std::ops::ControlFlow;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -34,13 +44,12 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::device::{self, DeviceSignals, Source};
-use crate::planet::Planet;
 use crate::query::{args_to_query, query_to_args};
 use crate::viewer::{
-    self, CellInfo, Launch, SimulationEvent, SurfaceUpdate, UiOptions, Vertex, has_option,
-    with_default,
+    self, CellInfo, Fields, Launch, Layer, Layers, RenderModeId, SimulationControl,
+    SimulationEvent, SurfaceUpdate, UiOptions, Vertex, has_option, with_default,
 };
-use crate::{Cli, build_planet, simulate};
+use crate::{Cli, Run, build_planet};
 
 /// Id of the canvas in `web/index.html`.
 const CANVAS_ID: &str = "world_simulator";
@@ -57,12 +66,7 @@ pub fn start() {
     let global = js_sys::global();
     if let Some(scope) = global.dyn_ref::<web_sys::DedicatedWorkerGlobalScope>() {
         if let Err(error) = run_worker(scope) {
-            error!("Simulation failed: {error:#}");
-            let message = js_sys::Object::new();
-            set(&message, "error", &format!("{error:#}").into());
-            if let Err(error) = scope.post_message(&message) {
-                error!("Could not report the error to the page: {error:?}");
-            }
+            report_failure(scope, &error);
         }
     } else {
         wasm_bindgen_futures::spawn_local(async {
@@ -201,6 +205,51 @@ fn store_subdivisions(subdivisions: u32, guess: u32) {
     }
 }
 
+/// The remembered render mode, if any (the view checks the name).
+fn stored_render_mode() -> Option<String> {
+    local_storage()?
+        .get_item(viewer::RENDER_MODE_STORAGE_KEY)
+        .ok()
+        .flatten()
+}
+
+/// Remembers the render mode the user picked, or forgets it if it is the default, and puts it
+/// into the page URL (`args` are the options of the running simulation with that mode).
+fn remember_render_mode(mode: RenderModeId, args: &[String]) {
+    replace_query(&args_to_query(args));
+    let Some(storage) = local_storage() else {
+        return;
+    };
+    let result = match viewer::to_store(mode) {
+        Some(name) => storage.set_item(viewer::RENDER_MODE_STORAGE_KEY, name),
+        None => storage.remove_item(viewer::RENDER_MODE_STORAGE_KEY),
+    };
+    if let Err(error) = result {
+        error!("Could not remember the render mode: {error:?}");
+    }
+}
+
+/// Sends requests of the page to the running simulation worker.
+struct WorkerControl(web_sys::Worker);
+
+impl SimulationControl for WorkerControl {
+    fn request_layers(&mut self, layers: Layers) {
+        let message = js_sys::Object::new();
+        set(&message, "layers", &layers.0.into());
+        // A terminated worker ignores messages.
+        if let Err(error) = self.0.post_message(&message) {
+            error!("Could not send the request to the simulation worker: {error:?}");
+        }
+    }
+}
+
+/// A control for a worker that could not start.
+struct NoControl;
+
+impl SimulationControl for NoControl {
+    fn request_layers(&mut self, _layers: Layers) {}
+}
+
 /// Starts the 3D view on the page and the simulation worker.
 async fn run_page() -> anyhow::Result<()> {
     let window = web_sys::window().context("no window")?;
@@ -237,6 +286,10 @@ async fn run_page() -> anyhow::Result<()> {
         launch.cli.subdivisions <= 8,
         "at most 8 subdivisions are supported"
     );
+    let given_mode = has_option(&launch.args, "render-mode").then_some(launch.cli.render_mode);
+    launch.cli.render_mode =
+        viewer::initial_render_mode(given_mode, stored_render_mode().as_deref());
+    info!(mode = launch.cli.render_mode.name(), "Render mode");
     let canvas = document()?
         .get_element_by_id(CANVAS_ID)
         .context("no canvas")?
@@ -267,14 +320,20 @@ async fn run_page() -> anyhow::Result<()> {
                 wake_up,
                 hidden.clone(),
             ) {
-                Ok(worker) => running = Some(worker),
+                Ok(worker) => {
+                    let control = WorkerControl(worker.worker.clone());
+                    running = Some(worker);
+                    Box::new(control) as Box<dyn SimulationControl>
+                }
                 Err(error) => {
                     error!("{error:#}");
                     // Shown in the banner and the panel.
                     let _ = events.send(SimulationEvent::Failed(format!("{error:#}")));
+                    Box::new(NoControl)
                 }
             }
         }),
+        Box::new(remember_render_mode),
         // The view shows the state in its banner from its first frame on.
         Box::new(|| show_status("")),
     )
@@ -416,6 +475,16 @@ fn start_worker(
                 hidden.set(false);
             }
             let step_seconds = get(&data, "step_seconds").as_f64().filter(|_| !was_hidden);
+            let mut fields = Fields::default();
+            for layer in Layer::ALL {
+                let Ok(buffer) = get(&data, layer.key()).dyn_into::<js_sys::ArrayBuffer>() else {
+                    continue;
+                };
+                let values = js_sys::Float32Array::new(&buffer).to_vec();
+                if let Err(message) = fields.insert(layer, values, vertex_count) {
+                    error!("Field from the simulation worker refused: {message}");
+                }
+            }
             if let Ok(document) = document() {
                 document.set_title(&format!("World Simulator — {time:.0} Myr"));
             }
@@ -425,6 +494,7 @@ fn start_worker(
                 cells: Arc::new(cells),
                 faces,
                 step_seconds,
+                fields,
             }));
         });
     worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
@@ -446,21 +516,21 @@ fn start_worker(
     })
 }
 
-/// Runs the whole simulation in the worker, sending the surface to the page after every step.
-/// The loop blocks the worker, which needs no messages from the page: the parameters come
-/// with its URL, and a restart terminates it and starts a new worker.
-fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()> {
-    let search = scope.location().search();
-    let Launch { cli, .. } = parse_query(&search)?;
-    info!(?search, "Simulation worker started");
-    let message = js_sys::Object::new();
-    set(&message, "generating", &true.into());
-    if let Err(error) = scope.post_message(&message) {
-        error!("Could not send the state to the page: {error:?}");
-    }
-    let planet = build_planet(&cli)?;
-    let mut first_update = true;
-    let publish = |planet: &Planet, step_time: Option<std::time::Duration>| {
+/// The simulation of the worker, between steps.
+struct WorkerState {
+    scope: web_sys::DedicatedWorkerGlobalScope,
+    cli: Cli,
+    run: Run,
+    /// The layers the page asked for.
+    layers: Layers,
+    first_update: bool,
+}
+
+impl WorkerState {
+    /// Sends the current state to the page, with the requested layers.
+    fn publish(&mut self, step_time: Option<std::time::Duration>) {
+        let planet = &self.run.planet;
+        let cli = &self.cli;
         let vertices = viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
         let floats: &[f32] = bytemuck::cast_slice(&vertices);
         let array = js_sys::Float32Array::new_with_length(floats.len() as u32);
@@ -479,8 +549,15 @@ fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()>
         let cell_buffer = array.buffer();
         set(&message, "cells", &cell_buffer);
         let transfer = js_sys::Array::of2(&buffer, &cell_buffer);
+        for (layer, values) in Fields::extract(planet, self.layers).iter() {
+            let array = js_sys::Float32Array::new_with_length(values.len() as u32);
+            array.copy_from(values);
+            let buffer = array.buffer();
+            set(&message, layer.key(), &buffer);
+            transfer.push(&buffer);
+        }
         // The triangles only with the first update.
-        if std::mem::take(&mut first_update) {
+        if std::mem::take(&mut self.first_update) {
             let indices: &[u32] = bytemuck::cast_slice(planet.tectonics().mesh().faces());
             let array = js_sys::Uint32Array::new_with_length(indices.len() as u32);
             array.copy_from(indices);
@@ -488,10 +565,101 @@ fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()>
             set(&message, "faces", &faces);
             transfer.push(&faces);
         }
-        if let Err(error) = scope.post_message_with_transfer(&message, &transfer) {
+        if let Err(error) = self.scope.post_message_with_transfer(&message, &transfer) {
             error!("Could not send the surface to the page: {error:?}");
         }
-        ControlFlow::Continue(())
-    };
-    simulate(planet, &cli, publish)
+    }
+
+    /// Takes a request of the page: new layers come with the current state at once.
+    fn request(&mut self, layers: Layers) {
+        let new = layers.0 & !self.layers.0 != 0;
+        self.layers = layers;
+        if new {
+            self.publish(None);
+        }
+    }
+}
+
+/// Reports a failure of the simulation to the page.
+fn report_failure(scope: &web_sys::DedicatedWorkerGlobalScope, error: &anyhow::Error) {
+    error!("Simulation failed: {error:#}");
+    let message = js_sys::Object::new();
+    set(&message, "error", &format!("{error:#}").into());
+    if let Err(error) = scope.post_message(&message) {
+        error!("Could not report the error to the page: {error:?}");
+    }
+}
+
+/// Takes the next step in a later task of the worker, so that messages of the page are handled
+/// in between, sends its state, and schedules the step after it.
+fn schedule_step(state: Rc<RefCell<WorkerState>>) {
+    let scope = state.borrow().scope.clone();
+    let callback = Closure::once_into_js(move || {
+        let more = {
+            let mut guard = state.borrow_mut();
+            let worker = &mut *guard;
+            match worker.run.advance(&worker.cli) {
+                Some(step_time) => {
+                    worker.publish(Some(step_time));
+                    match worker.run.finish_step(&worker.cli) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            report_failure(&worker.scope, &error);
+                            false
+                        }
+                    }
+                }
+                None => {
+                    worker.run.log_finished();
+                    false
+                }
+            }
+        };
+        if more {
+            schedule_step(state);
+        }
+    });
+    if let Err(error) =
+        scope.set_timeout_with_callback_and_timeout_and_arguments_0(callback.unchecked_ref(), 0)
+    {
+        error!("Could not schedule the next step: {error:?}");
+    }
+}
+
+/// Runs the simulation in the worker, sending the surface to the page after every step. The
+/// parameters come with its URL, a restart terminates it and starts a new worker; the only
+/// messages from the page are requests for other fields (`{ layers }`), handled between steps.
+fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()> {
+    let search = scope.location().search();
+    let Launch { cli, .. } = parse_query(&search)?;
+    info!(?search, "Simulation worker started");
+    let message = js_sys::Object::new();
+    set(&message, "generating", &true.into());
+    if let Err(error) = scope.post_message(&message) {
+        error!("Could not send the state to the page: {error:?}");
+    }
+    let planet = build_planet(&cli)?;
+    let run = Run::new(planet, &cli)?;
+    let layers = cli.render_mode.layers();
+    let state = Rc::new(RefCell::new(WorkerState {
+        scope: scope.clone(),
+        cli,
+        run,
+        layers,
+        first_update: true,
+    }));
+    state.borrow_mut().publish(None);
+    let requests = state.clone();
+    let on_message =
+        Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+            match get(&event.data(), "layers").as_f64() {
+                Some(bits) => requests.borrow_mut().request(Layers(bits as u32)),
+                None => error!("Unexpected message from the page"),
+            }
+        });
+    scope.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    // The worker lives as long as the handler.
+    on_message.forget();
+    schedule_step(state);
+    Ok(())
 }
