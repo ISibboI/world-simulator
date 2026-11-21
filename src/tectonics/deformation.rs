@@ -34,20 +34,22 @@ pub(super) const REFERENCE_THICKNESS: f64 = 35e3;
 /// still take a cell above it; the hard cap is `TectonicParams::max_crust_thickness`.
 pub(super) const PLATEAU_THICKNESS: f64 = 70e3;
 
-/// Lowest strength used for distributed deformation. [`lithosphere_strength`] goes down to
-/// 0.05 at ridge axes and fresh rifts, a proxy built for choosing where plates break, not an
-/// integrated viscous strength of continental lithosphere; below 0.3 the s⁻³ weights would put
-/// whole additions into single cells (≤ 37× contrast with this floor).
-const MIN_BAND_STRENGTH: f64 = 0.3;
+/// Lowest strength used for distributed deformation (≤ 8× softness contrast).
+/// [`lithosphere_strength`] goes down to 0.25 in fresh orogenic belts and 0.05 at ridge axes
+/// and fresh rifts: a proxy built for choosing where plates break, not an integrated viscous
+/// strength of continental lithosphere. With a lower floor, the s⁻³ weights make the band
+/// localise in the belt its own collision has just marked (37× at 0.3 with fresh belts at
+/// 0.25), and the belt gets narrower than with no band at all (test
+/// `a_collision_band_spreads_the_belt_and_conserves_mass`).
+const MIN_BAND_STRENGTH: f64 = 0.5;
 
 /// Gravitational acceleration (m/s²).
 const GRAVITY: f64 = 9.81;
 
-/// Relative strength (0.3–1) of the lithosphere under `crust` for distributed deformation.
+/// Relative strength (0.5–1) of the lithosphere under `crust` for distributed deformation.
 /// The single place where this module reads the state of the lithosphere.
 pub(super) fn band_strength(crust: &Crust, time: f64) -> f64 {
-    // The plume-head cap (mantle frame) only applies to cuts; 1 = none.
-    lithosphere_strength(crust, time, 1.0).max(MIN_BAND_STRENGTH)
+    lithosphere_strength(crust, time).max(MIN_BAND_STRENGTH)
 }
 
 /// Excess gravitational potential energy (N/m) of continental crust `thickness` (m) thick over
@@ -152,6 +154,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         }
     }
@@ -184,7 +187,7 @@ mod tests {
         belt.mix_orogeny(-500.0, 1.0);
         let strong = band_weight(&old, 0.0, 0, 4);
         let weak = band_weight(&belt, 0.0, 0, 4);
-        // Strength 0.5 → softness 2³.
+        // A fresh belt (strength 0.25) is bounded at 0.5 → softness 2³.
         assert!((weak / strong - 8.0).abs() < 1e-9, "{weak} / {strong}");
         // Fresh, thin lithosphere is bounded at the band's floor.
         let mut fresh = continental(20e3);

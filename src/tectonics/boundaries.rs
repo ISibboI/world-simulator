@@ -2055,7 +2055,7 @@ mod tests {
             .mix_orogeny(-500.0, 1.0);
         simulation.apply_additions(&[collision_addition(cell, 35e3)]);
         let gained = |c: u32| simulation.surface_crust(c).thickness - 35e3;
-        // Strength 0.5: 8× the share.
+        // Fresh belt, strength bounded at 0.5: 8× the share.
         assert!(
             (gained(weak) / gained(strong) - 8.0).abs() < 1e-6,
             "{} vs {}",
