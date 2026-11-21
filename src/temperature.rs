@@ -204,6 +204,27 @@ pub struct TemperatureParams {
     pub land_heat_capacity: f64,
     /// Temperature decrease with elevation in K/m.
     pub lapse_rate: f64,
+    /// Elevation (m) from which low-latitude land is at least as warm as the free troposphere
+    /// at its height. The energy balance gives every coarse cell's land a temperature of its
+    /// own, with little exchange between cells, so that continents keep their seasons. For
+    /// high ground in low latitudes that is wrong in one direction: it stands above the
+    /// boundary layer (1–3 km deep) in air that the tropical circulation keeps nearly uniform
+    /// along a latitude circle (weak temperature gradients where the Coriolis force is small;
+    /// Sobel et al. 2001), and the sea surface sets the temperature of that air by convection.
+    /// A plateau cannot stay tens of K colder than the air around it, however bright its own
+    /// ice. So between [`Self::free_air_base`] and this elevation, the annual mean of land that
+    /// is colder than the sea surface of its latitude band is raised linearly towards it (the
+    /// seasonal cycle stays the local one). Land that is warmer keeps its own temperature: plateaus are
+    /// elevated heat sources. Zero turns it off.
+    pub free_air_height: f64,
+    /// Elevation (m) below which land keeps the temperature of its own energy balance: it lies
+    /// inside the boundary layer, which the surface below it controls.
+    pub free_air_base: f64,
+    /// Latitude (degrees) up to which [`Self::free_air_height`] applies in full; it fades out
+    /// over the next 15°. Beyond the tropics and subtropics the free troposphere is not uniform,
+    /// and a large cold plateau makes its own climate under a surface inversion (the Antarctic
+    /// plateau is ~30 K colder than the free air at its height over the ocean around it).
+    pub free_air_latitude: f64,
     /// Time steps per year; must be a multiple of 12.
     pub seasons_per_year: usize,
     /// Substeps per season.
@@ -249,6 +270,9 @@ impl Default for TemperatureParams {
             ocean_heat_capacity: 4.18e6 * 50.0,
             land_heat_capacity: 1e7,
             lapse_rate: 0.0065,
+            free_air_height: 3000.0,
+            free_air_base: 1000.0,
+            free_air_latitude: 30.0,
             seasons_per_year: 24,
             substeps_per_season: 8,
             spin_up_years: 20,
@@ -290,6 +314,9 @@ impl TemperatureParams {
             "ocean_heat_capacity" => &mut self.ocean_heat_capacity,
             "land_heat_capacity" => &mut self.land_heat_capacity,
             "lapse_rate" => &mut self.lapse_rate,
+            "free_air_height" => &mut self.free_air_height,
+            "free_air_base" => &mut self.free_air_base,
+            "free_air_latitude" => &mut self.free_air_latitude,
             "solar_constant" => &mut self.orbit.solar_constant,
             _ => anyhow::bail!("unknown temperature parameter {name}"),
         };
@@ -303,6 +330,10 @@ const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
 pub const THERMAL_EQUATOR_SECTORS: usize = 24;
 /// The model assumes an Earth-sized planet for the ocean heat transport.
 const EARTH_RADIUS: f64 = 6.371e6;
+
+/// Annual mean land temperature (°C, at sea level) assumed before the first year of the
+/// spin-up, which decides the ice sheets of that year: warm enough that there are none.
+const ICE_FREE_START: f64 = 40.0;
 /// Angular velocity of the rotation in rad/s.
 const EARTH_ROTATION: f64 = 7.292e-5;
 /// Specific heat capacity of sea water in J/kg/K.
@@ -365,6 +396,10 @@ pub struct TemperatureModel {
     /// Annual mean land temperature of each coarse cell in the previous year, which determines
     /// the ice sheets.
     previous_annual_land: Vec<f64>,
+    /// How much warmer the free troposphere around each coarse cell was than its land surface
+    /// in the previous year (annual means at sea level; see
+    /// [`TemperatureParams::free_air_height`]).
+    previous_free_air_excess: Vec<f64>,
     /// Heat delivered to the ocean mixed layer by ocean currents, per coarse cell, in W/m² of
     /// ocean.
     ocean_heat_convergence: Vec<f64>,
@@ -437,7 +472,11 @@ impl TemperatureModel {
             land: vec![15.0; count],
             ocean: vec![ocean_enthalpy; count],
             ocean_surface: vec![15.0; count],
-            previous_annual_land: vec![15.0; count],
+            // The spin-up starts without ice sheets: they form where the land turns out cold
+            // enough. Starting from a cold land would put ice on every plateau in the first
+            // year, and ice sheets that keep themselves cold would then stay.
+            previous_annual_land: vec![ICE_FREE_START; count],
+            previous_free_air_excess: vec![0.0; count],
             ocean_heat_convergence: vec![0.0; count],
             gyre_model,
             subduction_temperature: [15.0; 2],
@@ -472,9 +511,6 @@ impl TemperatureModel {
         let land_fraction: Vec<f64> = (0..coarse_count)
             .map(|c| land_cells[c] as f64 / cells[c].max(1) as f64)
             .collect();
-        // Heat capacities for the implicit zonal transport: the column under sea ice still holds
-        // the mixed layer, so the ocean's is used throughout (it only sets the stability of the
-        // implicit step).
         let heat_capacity: Vec<f64> = land_fraction
             .iter()
             .map(|&f| f * params.land_heat_capacity + (1.0 - f) * params.ocean_heat_capacity)
@@ -623,6 +659,7 @@ impl TemperatureModel {
             let mut land_ice = vec![0.0; coarse_count];
             for &fine in &land_cells_list {
                 let t = self.interpolate(&self.previous_annual_land, fine)
+                    + self.free_air_shift(fine, elevation[fine])
                     - params.lapse_rate * elevation[fine];
                 let p = precipitation.map_or(f64::INFINITY, |p| p[fine]);
                 land_ice[self.fine_to_coarse[fine] as usize] += ice_sheet_cover(t, p, params);
@@ -816,6 +853,39 @@ impl TemperatureModel {
             for (previous, &sum) in self.previous_annual_land.iter_mut().zip(&annual_land) {
                 *previous = sum / steps_per_year;
             }
+            // The free troposphere: the annual mean temperature of the sea surface of each
+            // latitude band, interpolated between the bands.
+            let annual = |seasonal: &[Vec<f64>], cell: usize| {
+                seasonal.iter().map(|season| season[cell]).sum::<f64>() / seasons as f64
+            };
+            let mut band_sea = vec![(0.0, 0.0); bands];
+            let mut band_air = vec![(0.0, 0.0); bands];
+            for cell in 0..coarse_count {
+                let sea = 1.0 - land_fraction[cell];
+                let band = self.band[cell];
+                band_sea[band].0 += sea * annual(&seasonal_ocean, cell);
+                band_sea[band].1 += sea;
+                band_air[band].0 += annual(&seasonal_mean, cell);
+                band_air[band].1 += 1.0;
+            }
+            // A band with little sea leans on the mean of all its surfaces instead.
+            const AIR_SHARE: f64 = 0.05;
+            let free_air: Vec<f64> = (0..bands)
+                .map(|band| {
+                    (band_sea[band].0 + AIR_SHARE * band_air[band].0)
+                        / (band_sea[band].1 + AIR_SHARE * band_air[band].1).max(1e-9)
+                })
+                .collect();
+            for cell in 0..coarse_count {
+                // Position among the band centres, which are equally spaced in sin(latitude).
+                let position = ((self.coarse_latitude[cell].sin() + 1.0) / 2.0 * bands as f64
+                    - 0.5)
+                    .clamp(0.0, (bands - 1) as f64);
+                let lower = (position as usize).min(bands - 2);
+                let t = position - lower as f64;
+                let regional = free_air[lower] * (1.0 - t) + free_air[lower + 1] * t;
+                self.previous_free_air_excess[cell] = regional - self.previous_annual_land[cell];
+            }
             for sea_ice in &mut annual_sea_ice {
                 *sea_ice /= steps_per_year;
             }
@@ -840,8 +910,12 @@ impl TemperatureModel {
         let monthly_ocean = monthly_means(&seasonal_ocean);
         let monthly_coarse = monthly_means(&seasonal_mean);
 
-        let lapse =
-            |fine: usize, sea_level: f64| sea_level - params.lapse_rate * elevation[fine].max(0.0);
+        // High ground follows the free troposphere around it in the annual mean (see
+        // [`TemperatureParams::free_air_height`]).
+        let lapse = |fine: usize, sea_level: f64| {
+            sea_level + self.free_air_shift(fine, elevation[fine])
+                - params.lapse_rate * elevation[fine].max(0.0)
+        };
         // Every fine cell takes the temperature of its own surface type.
         let surface = |fine: usize, month: usize| {
             if elevation[fine] >= 0.0 {
@@ -945,6 +1019,27 @@ impl TemperatureModel {
             .map(|bin| (bin, smoothed(bin)))
             .max_by(|a, b| a.1.total_cmp(&b.1))
             .map_or(0.0, |(bin, _)| bin as f64 / 2.0 - 60.0 + 0.25)
+    }
+
+    /// Shift (K) of the annual mean temperature of the fine land cell `fine` at `elevation` (m)
+    /// towards the free troposphere (see [`TemperatureParams::free_air_height`]): never
+    /// negative, growing with elevation, and fading out between
+    /// [`TemperatureParams::free_air_latitude`] and 15° beyond it.
+    fn free_air_shift(&self, fine: usize, elevation: f64) -> f64 {
+        let params = &self.params;
+        if params.free_air_height <= 0.0 {
+            return 0.0;
+        }
+        let latitude = self.coarse_latitude[self.fine_to_coarse[fine] as usize]
+            .abs()
+            .to_degrees();
+        let tropical = ((params.free_air_latitude + 15.0 - latitude) / 15.0).clamp(0.0, 1.0);
+        let base = params.free_air_base.min(params.free_air_height - 1.0);
+        let high = ((elevation - base) / (params.free_air_height - base)).clamp(0.0, 1.0);
+        high * tropical
+            * self
+                .interpolate(&self.previous_free_air_excess, fine)
+                .max(0.0)
     }
 
     fn interpolate(&self, coarse_field: &[f64], fine: usize) -> f64 {
@@ -1134,6 +1229,121 @@ mod tests {
             fields.monthly[0][c]
         });
         assert!(south_january > south_july);
+    }
+
+    /// A continent at 300 m between the latitudes `continent` (|longitude| < 50°) with a plateau
+    /// of `height` m between the latitudes `plateau` (|longitude| < 12°). Returns the annual
+    /// mean temperature of the plateau's inner part reduced to sea level with the lapse rate,
+    /// that of the open ocean at the plateau's latitudes, and the ice cover of the plateau.
+    fn plateau_climate(
+        params: TemperatureParams,
+        (continent, plateau): ((f64, f64), (f64, f64)),
+        height: f64,
+        glaciated_start: bool,
+    ) -> (f64, f64, f64) {
+        let mesh = SphereMesh::icosphere(5);
+        let place = |cell: u32| {
+            let p = mesh.vertex(cell);
+            (p.z.asin().to_degrees(), p.y.atan2(p.x).to_degrees())
+        };
+        let within = |range: (f64, f64), lat: f64| (range.0..range.1).contains(&lat);
+        let elevation: Vec<f64> = (0..mesh.len() as u32)
+            .map(|cell| {
+                let (lat, lon) = place(cell);
+                if within(plateau, lat) && lon.abs() < 12.0 {
+                    height
+                } else if within(continent, lat) && lon.abs() < 50.0 {
+                    300.0
+                } else {
+                    -4000.0
+                }
+            })
+            .collect();
+        let lapse_rate = params.lapse_rate;
+        let mut model = TemperatureModel::new(&mesh, params);
+        if glaciated_start {
+            // Cold enough that the plateau starts under ice.
+            model.previous_annual_land.fill(0.0);
+        }
+        model.update(&elevation, None);
+        let fields = model.fields();
+        let mean = |filter: &dyn Fn(f64, f64) -> bool, field: &dyn Fn(usize) -> f64| {
+            let cells: Vec<usize> = (0..mesh.len())
+                .filter(|&c| {
+                    let (lat, lon) = place(c as u32);
+                    filter(lat, lon)
+                })
+                .collect();
+            assert!(!cells.is_empty());
+            cells.iter().map(|&c| field(c)).sum::<f64>() / cells.len() as f64
+        };
+        let inner = (plateau.0 + 3.0, plateau.1 - 3.0);
+        let on_plateau = |lat: f64, lon: f64| within(inner, lat) && lon.abs() < 8.0;
+        (
+            mean(&on_plateau, &|c| {
+                fields.annual_mean[c] + lapse_rate * elevation[c]
+            }),
+            mean(&|lat, lon| within(inner, lat) && lon.abs() > 90.0, &|c| {
+                fields.annual_mean[c]
+            }),
+            mean(&on_plateau, &|c| fields.ice[c]),
+        )
+    }
+
+    fn without_free_air() -> TemperatureParams {
+        TemperatureParams {
+            free_air_height: 0.0,
+            ..TemperatureParams::default()
+        }
+    }
+
+    #[test]
+    fn low_latitude_plateaus_are_not_colder_than_the_free_air_around_them() {
+        for (shape, height) in [
+            // On the equator, 4500 m: about −5 °C by the lapse rate, where ice begins to form.
+            (((-25.0, 25.0), (-8.0, 8.0)), 4500.0),
+            // In the subtropics, 3500 m: well above freezing by the lapse rate.
+            (((5.0, 40.0), (12.0, 28.0)), 3500.0),
+        ] {
+            // Once glaciated, a plateau with only its own energy balance stays glaciated: its
+            // ice keeps it tens of K colder than the air at its height over the ocean.
+            let (land, ocean, ice) = plateau_climate(without_free_air(), shape, height, true);
+            assert!(ocean - land > 10.0, "{land} {ocean}");
+            assert!(ice > 0.9, "{ice}");
+            // Standing in the free troposphere, it cannot be colder than the air at its
+            // height, which the sea surface of its latitude sets: the ice melts.
+            let (land, ocean, ice) =
+                plateau_climate(TemperatureParams::default(), shape, height, true);
+            assert!(land > ocean - 2.0, "{land} {ocean}");
+            assert!(ice < 0.05, "{ice}");
+            // From an ice-free start, the free air changes nothing, or warms: it never cools.
+            let local = plateau_climate(without_free_air(), shape, height, false);
+            let free = plateau_climate(TemperatureParams::default(), shape, height, false);
+            assert!(free.0 >= local.0 - 1e-9, "{free:?} {local:?}");
+            assert!(free.2 <= local.2 + 1e-9, "{free:?} {local:?}");
+        }
+    }
+
+    #[test]
+    fn low_ground_keeps_the_temperature_of_its_own_energy_balance() {
+        // A tropical continent with a "plateau" of 900 m, inside the boundary layer: the free
+        // air changes nothing.
+        let shape = ((-25.0, 25.0), (-8.0, 8.0));
+        let local = plateau_climate(without_free_air(), shape, 900.0, false);
+        let free = plateau_climate(TemperatureParams::default(), shape, 900.0, false);
+        assert_eq!(local, free);
+    }
+
+    #[test]
+    fn polar_plateaus_keep_their_own_climate() {
+        // A polar continent with a plateau of 3000 m: a large cold plateau makes its own
+        // climate, so it is the same with and without the free air, and it is covered by ice
+        // although the spin-up starts without ice.
+        let shape = ((60.0, 91.0), (72.0, 91.0));
+        let local = plateau_climate(without_free_air(), shape, 3000.0, false);
+        let free = plateau_climate(TemperatureParams::default(), shape, 3000.0, false);
+        assert_eq!(local, free);
+        assert!(free.2 > 0.9, "{}", free.2);
     }
 
     #[test]
