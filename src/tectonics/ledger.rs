@@ -33,6 +33,10 @@ pub struct MassLedger {
     pub collision_consumed: f64,
     /// … and stacked onto the overriding plate (+).
     pub collision_stacked: f64,
+    /// Crust of the lower plate at diffuse convergent zones, removed there (−) …
+    pub shortening_consumed: f64,
+    /// … and stacked onto the upper plate by distributed shortening (+).
+    pub shortening_stacked: f64,
     /// Crust removed from the overriding plate at trenches (−).
     pub subduction_erosion: f64,
     /// Difference between the crust added (arcs, accretion, collisions) and what fitted below
@@ -67,6 +71,8 @@ pub(super) enum Term {
     Accretion,
     CollisionConsumed,
     CollisionStacked,
+    ShorteningConsumed,
+    ShorteningStacked,
     SubductionErosion,
     AdditionsLost,
     CrustalFlow,
@@ -95,6 +101,8 @@ impl MassLedger {
             Term::Accretion => &mut self.accretion,
             Term::CollisionConsumed => &mut self.collision_consumed,
             Term::CollisionStacked => &mut self.collision_stacked,
+            Term::ShorteningConsumed => &mut self.shortening_consumed,
+            Term::ShorteningStacked => &mut self.shortening_stacked,
             Term::SubductionErosion => &mut self.subduction_erosion,
             Term::AdditionsLost => &mut self.additions_lost,
             Term::CrustalFlow => &mut self.crustal_flow,
@@ -123,7 +131,7 @@ impl MassLedger {
     }
 
     /// The terms with their names, for reporting.
-    pub fn terms(&self) -> [(&'static str, f64); 17] {
+    pub fn terms(&self) -> [(&'static str, f64); 19] {
         [
             ("new sea floor", self.new_sea_floor),
             ("arcs", self.arcs),
@@ -133,6 +141,8 @@ impl MassLedger {
             ("accretion", self.accretion),
             ("collision consumed", self.collision_consumed),
             ("collision stacked", self.collision_stacked),
+            ("shortening consumed", self.shortening_consumed),
+            ("shortening stacked", self.shortening_stacked),
             ("subduction erosion", self.subduction_erosion),
             ("additions lost", self.additions_lost),
             ("crustal flow", self.crustal_flow),

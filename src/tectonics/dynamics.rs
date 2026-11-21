@@ -47,6 +47,10 @@ pub(super) enum BoundaryKind {
     Ridge,
     /// Continental crust of both plates meets; converging motion is resisted.
     Collision,
+    /// The plate is the lower plate of a diffuse convergent zone (no through-going thrust yet,
+    /// see [`super::polarity::Segment::localised`]) and converges: the convergence is taken up by
+    /// distributed shortening, resisted by the strength of the plate.
+    Diffuse,
     /// Any other boundary (overriding side of a trench, transform, old divergent margin).
     Other,
 }
@@ -143,6 +147,7 @@ impl Simulation {
             // decays after subduction stopped).
             let subducts_here = segment.is_some_and(|segment| {
                 segment.overriding == boundary.other
+                    && segment.localised
                     && ((segment.subducting && convergence > min_convergence)
                         || (segment.slab_length > 0.0 && convergence > -min_convergence))
             });
@@ -153,6 +158,14 @@ impl Simulation {
                 BoundaryKind::Trench {
                     slab_age: crust.age(self.time),
                 }
+            } else if !crust.resists_subduction()
+                && segment.is_some_and(|segment| {
+                    // A diffuse zone that converges across the segment (see
+                    // `polarity::Segment::subducting`) but has no thrust yet.
+                    segment.overriding == boundary.other && !segment.localised && segment.subducting
+                })
+            {
+                BoundaryKind::Diffuse
             } else if convergence < 0.0
                 && !crust.is_continental()
                 && crust.age(self.time) <= params.ridge_age
@@ -178,8 +191,12 @@ impl Simulation {
         boundaries: &[BoundaryCell],
         record: bool,
     ) -> bool {
-        // Per segment id: Σ normal convergence, Σ |strike-slip|, cells.
-        let mut sums: HashMap<u32, (f64, f64, usize)> = HashMap::default();
+        let params = &self.params;
+        let min_convergence = params.min_trench_convergence / (params.planet_radius * 100.0 / 1e6);
+        let yield_rate = params.diffuse_convergence / (params.planet_radius * 100.0 / 1e6);
+        // Per segment id: Σ normal convergence, Σ |strike-slip|, cells, converging cells, cells
+        // converging faster than a diffuse zone creeps.
+        let mut sums: HashMap<u32, (f64, f64, usize, usize, usize)> = HashMap::default();
         for boundary in boundaries {
             let Some(id) = boundary.segment else {
                 continue;
@@ -197,23 +214,29 @@ impl Simulation {
                 - self.plates[boundary.other as usize].angular_velocity)
                 .cross(r);
             let entry = sums.entry(id).or_default();
-            entry.0 += relative.dot(boundary.normal);
+            let convergence = relative.dot(boundary.normal);
+            entry.0 += convergence;
             entry.1 += relative.dot(r.cross(boundary.normal)).abs();
             entry.2 += 1;
+            entry.3 += usize::from(convergence > min_convergence);
+            entry.4 += usize::from(convergence > yield_rate);
         }
-        let params = &self.params;
-        let min_convergence = params.min_trench_convergence / (params.planet_radius * 100.0 / 1e6);
         let obliquity = params.min_trench_obliquity.to_radians().tan();
         let polarity::Polarities {
             pairs, statistics, ..
         } = &mut self.polarities;
         let mut changed = false;
         for segment in pairs.values_mut().flat_map(|pair| pair.segments.iter_mut()) {
-            let (rate, strike_rate) = match sums.get(&segment.id) {
-                Some(&(normal, strike, count)) if count > 0 => {
-                    (normal / count as f64, strike / count as f64)
-                }
-                _ => (0.0, 0.0),
+            let (rate, strike_rate, yielding) = match sums.get(&segment.id) {
+                Some(&(normal, strike, count, converging, fast)) if count > 0 => (
+                    normal / count as f64,
+                    strike / count as f64,
+                    // Where the converging part of a diffuse zone converges faster than it can
+                    // creep, it has reached its strength (an oblique zone may converge along
+                    // part of its length only).
+                    2 * fast > converging,
+                ),
+                _ => (0.0, 0.0, false),
             };
             let subducting = rate > min_convergence && rate >= obliquity * strike_rate;
             if record && subducting && !segment.subducting && segment.slab_length > 0.0 {
@@ -223,6 +246,7 @@ impl Simulation {
             segment.rate = rate;
             segment.strike_rate = strike_rate;
             segment.subducting = subducting;
+            segment.yielding = subducting && yielding;
         }
         changed
     }
@@ -325,26 +349,37 @@ impl Simulation {
         // fixed magnitude; in the linear system it is an effective viscous coupling
         // `strength / speed` from the last solve (Picard iteration), capped for slow contacts,
         // which are locked.
-        let nascent: Vec<(&BoundaryCell, DVec3, f64)> = boundaries
+        // Contacts slower than their lock speed (m/s) are coupled viscously: localised thrusts
+        // are locked below `locked_convergence`, diffuse zones creep up to
+        // `diffuse_convergence` (see [`TectonicParams::diffuse_convergence`]).
+        let to_m_per_s = |cm_per_yr: f64| cm_per_yr / 100.0 / (SECONDS_PER_MYR / 1e6);
+        let (locked_speed, diffuse_speed) = (
+            to_m_per_s(params.locked_convergence),
+            to_m_per_s(params.diffuse_convergence),
+        );
+        let nascent: Vec<(&BoundaryCell, DVec3, f64, f64)> = boundaries
             .iter()
             .zip(&normals)
             .filter_map(|(boundary, &normal)| {
                 let strength = self.initiation_strength(boundary);
-                (strength > 0.0).then_some((boundary, normal, strength))
+                let lock = if self.is_diffuse_contact(boundary) {
+                    diffuse_speed
+                } else {
+                    locked_speed
+                };
+                (strength > 0.0).then_some((boundary, normal, strength, lock))
             })
             .collect();
-        // m/s; contacts slower than this are locked viscously.
-        let locked_speed = params.locked_convergence / 100.0 / (SECONDS_PER_MYR / 1e6);
         let mut nascent_coupling: Vec<f64> = nascent
             .iter()
-            .map(|&(_, _, strength)| strength / locked_speed)
+            .map(|&(_, _, strength, lock)| strength / lock)
             .collect();
 
         let mut omega = vec![DVec3::ZERO; plate_count];
         let mut converged = false;
         for _ in 0..MAX_ACTIVE_SET_ITERATIONS {
             let mut matrix = base.clone();
-            for (&(boundary, normal, _), &coupling) in nascent.iter().zip(&nascent_coupling) {
+            for (&(boundary, normal, _, _), &coupling) in nascent.iter().zip(&nascent_coupling) {
                 if coupling <= 0.0 {
                     continue;
                 }
@@ -406,7 +441,7 @@ impl Simulation {
             // The effective coupling of the yielding contacts follows the new speeds: the
             // resisting force is the strength where the contact converges (less where it is
             // locked) and nothing where it opens.
-            for (&(boundary, normal, strength), coupling) in
+            for (&(boundary, normal, strength, lock), coupling) in
                 nascent.iter().zip(nascent_coupling.iter_mut())
             {
                 let r = self.mesh.vertex(boundary.cell);
@@ -415,7 +450,7 @@ impl Simulation {
                     .dot(normal)
                     * radius;
                 let target = if speed > 0.0 {
-                    strength / speed.max(locked_speed)
+                    strength / speed.max(lock)
                 } else {
                     0.0
                 };
@@ -452,6 +487,15 @@ impl Simulation {
         }
         self.update_segment_motion(&boundaries, true);
     }
+
+    /// Whether a boundary cell belongs to a diffuse contact: no segment yet, or a segment that
+    /// has not localised (see [`super::polarity::Segment::localised`]).
+    fn is_diffuse_contact(&self, boundary: &BoundaryCell) -> bool {
+        boundary
+            .segment
+            .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id))
+            .is_none_or(|segment| !segment.localised)
+    }
 }
 
 impl Simulation {
@@ -467,7 +511,7 @@ impl Simulation {
                 boundary.normal * (params.slab_pull * buoyancy.max(0.0) * boundary_length)
             }
             BoundaryKind::Ridge => -boundary.normal * (params.ridge_push * boundary_length),
-            BoundaryKind::Collision | BoundaryKind::Other => DVec3::ZERO,
+            BoundaryKind::Collision | BoundaryKind::Diffuse | BoundaryKind::Other => DVec3::ZERO,
         }
     }
 
@@ -554,12 +598,13 @@ impl Simulation {
     /// thrust under the other plate there, as a force of fixed magnitude that opposes
     /// convergence:
     ///
-    /// * where the plate would subduct but has no self-sustaining slab yet,
-    ///   [`TectonicParams::initiation_resistance`] per metre, fading as the slab grows to
-    ///   [`TectonicParams::self_sustaining_slab_length`] (the plate must be bent and a thrust
-    ///   must break through it). This holds whether or not the contact converges at the
-    ///   moment, and also where the plates have not overlapped yet (no segment; then each
-    ///   side's oceanic cells carry half);
+    /// * where the plate would subduct but its thrust is not yet self-sustaining,
+    ///   [`TectonicParams::initiation_resistance`] per metre, fading as the displacement on the
+    ///   thrust grows to [`TectonicParams::self_sustaining_slab_length`] (the plate must be
+    ///   bent and a thrust must break through it; see
+    ///   [`super::polarity::Segment::displacement`]); in full at diffuse zones. This holds
+    ///   whether or not the contact converges at the moment, and also where the plates have
+    ///   not overlapped yet (no segment; then each side's oceanic cells carry half);
     /// * at trenches, the buoyancy of a slab of young lithosphere (see
     ///   [`Self::slab_buoyancy`]).
     pub(super) fn initiation_strength(&self, boundary: &BoundaryCell) -> f64 {
@@ -569,13 +614,19 @@ impl Simulation {
             .segment
             .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id));
         let slab_length = segment.map_or(0.0, |segment| segment.slab_length);
-        let undeveloped = 1.0 - (slab_length / params.self_sustaining_slab_length).min(1.0);
+        // The strength fades with the convergence taken up on the thrust, not with the slab:
+        // a slab seeded by an initiation event pulls from the start, but its thrust still has to
+        // break through the plate.
+        let displacement = segment.map_or(0.0, |segment| segment.displacement);
+        let undeveloped = 1.0 - (displacement / params.self_sustaining_slab_length).min(1.0);
         let strength = match (boundary.kind, segment) {
             (BoundaryKind::Trench { slab_age }, _) => {
                 params.initiation_resistance * undeveloped
                     + params.slab_pull * (-self.slab_buoyancy(slab_age, slab_length)).max(0.0)
             }
-            (BoundaryKind::Other, Some(segment)) if segment.overriding == boundary.other => {
+            (BoundaryKind::Diffuse | BoundaryKind::Other, Some(segment))
+                if segment.overriding == boundary.other =>
+            {
                 if self.surface_crust(boundary.cell).resists_subduction() {
                     0.0
                 } else {
@@ -619,8 +670,14 @@ impl Simulation {
     /// that a contact moving along strike does not keep a slab through cells whose normal happens
     /// to point into the motion. `boundaries` are the current [`Self::boundary_cells`].
     ///
-    /// Returns whether a slab appeared or disappeared, or a segment started or stopped
-    /// subducting, which changes the classification of boundary cells (see
+    /// Diffuse convergent zones that yield localise (see
+    /// [`TectonicParams::diffuse_convergence`]); the others accumulate shortening. Slabs grow
+    /// only on localised segments, and so does the displacement on their thrust (see
+    /// [`super::polarity::Segment::displacement`]); a localised segment stays localised until it
+    /// expires.
+    ///
+    /// Returns whether a slab appeared or disappeared, a segment started or stopped
+    /// subducting, or a zone localised, which changes the classification of boundary cells (see
     /// [`Self::boundary_cells`]).
     pub(super) fn update_slab_lengths(&mut self, dt: f64, boundaries: &[BoundaryCell]) -> bool {
         let mut slabs_changed = self.update_segment_motion(boundaries, false);
@@ -666,10 +723,13 @@ impl Simulation {
                     // A boundary keeps the segment in contact, also without overlap.
                     segment.last_contact = segment.last_contact.max(self.time);
                 }
-                if segment.subducting {
-                    segment.slab_length = (segment.slab_length
-                        + segment.rate * params.planet_radius * dt)
-                        .min(params.max_slab_length);
+                if segment.subducting && segment.localised {
+                    let growth = segment.rate * params.planet_radius * dt;
+                    segment.slab_length =
+                        (segment.slab_length + growth).min(params.max_slab_length);
+                    // Slip on the thrust, by the smoothed normals of the force balance.
+                    segment.displacement =
+                        (segment.displacement + growth).min(params.max_slab_length);
                     polarity::Polarities::note_slab_growth(statistics, segment);
                 } else {
                     segment.slab_length *= decay;
@@ -677,6 +737,19 @@ impl Simulation {
                     if segment.slab_length < params.min_slab_length {
                         segment.slab_length = 0.0;
                     }
+                }
+                if !segment.localised && segment.yielding {
+                    // A diffuse zone that converges faster than it can creep has reached its
+                    // strength and yields: it localises on a thrust (see
+                    // `TectonicParams::diffuse_convergence`).
+                    segment.localised = true;
+                    slabs_changed = true;
+                    statistics.localisations += 1;
+                    if self.time - segment.created <= 2.0 {
+                        statistics.transient_stacked += segment.stacked;
+                    }
+                } else if !segment.localised {
+                    segment.shortening += segment.rate.max(0.0) * params.planet_radius * dt;
                 }
                 slabs_changed |= had_slab != (segment.slab_length > 0.0);
             }
@@ -960,8 +1033,18 @@ mod tests {
     /// the mantle below plate 0 drags it at `mantle_speed` cm/yr in the +x direction (the
     /// mantle below plate 1 rests), with the given parameters.
     fn dragged(
+        age_and_slab: (f64, f64),
+        mantle_speed: f64,
+        set: impl Fn(&mut TectonicParams),
+    ) -> Simulation {
+        dragged_with(age_and_slab, mantle_speed, |_| {}, set)
+    }
+
+    /// [`dragged`], with the segments of the trench changed by `segment` first.
+    fn dragged_with(
         (age, slab_length): (f64, f64),
         mantle_speed: f64,
+        segment: impl Fn(&mut polarity::Segment),
         set: impl Fn(&mut TectonicParams),
     ) -> Simulation {
         let params = TectonicParams {
@@ -972,6 +1055,9 @@ mod tests {
         let mut simulation = one_sided_trench(params);
         simulation.polarities.clear();
         simulation.seed_subduction((0, 1), 1, slab_length);
+        for pair in simulation.polarities.pairs.values_mut() {
+            pair.segments.iter_mut().for_each(&segment);
+        }
         for crust in simulation.plates[0].crust.iter_mut().flatten() {
             if !crust.is_continental() {
                 *crust = new_oceanic_crust(-age);
@@ -1053,6 +1139,96 @@ mod tests {
         );
         assert!(opening < -0.5, "{opening}");
         assert!(same < 0.85 * opening, "{same} {opening}");
+    }
+
+    #[test]
+    fn diffuse_zones_creep_below_their_strength_and_localise_when_they_yield() {
+        let strength = TectonicParams::default().initiation_resistance;
+        let resist = |params: &mut TectonicParams| params.initiation_resistance = strength;
+        let diffuse = |segment: &mut polarity::Segment| segment.localised = false;
+        let free = |_: &mut TectonicParams| {};
+        let v_d = TectonicParams::default().diffuse_convergence;
+        // Pushed below the strength, a localised thrust without a slab is locked, while a diffuse
+        // zone creeps by distributed shortening, but no faster than it can creep.
+        let unresisted = mean_approach(&dragged((100.0, 0.0), 3.0, free));
+        let locked = mean_approach(&dragged((100.0, 0.0), 3.0, resist));
+        let mut creeping = dragged_with((100.0, 0.0), 3.0, diffuse, resist);
+        let creep = mean_approach(&creeping);
+        // (The mean over the boundary includes cells moving obliquely, so the locked thrust's
+        // mean is not zero.)
+        assert!(creep > 1.5 * locked.max(0.0), "{creep} {locked}");
+        assert!(
+            creep < v_d && creep < 0.75 * unresisted,
+            "{creep} {unresisted}"
+        );
+        // It keeps shortening without localising or growing a slab.
+        for _ in 0..10 {
+            let boundaries = creeping.boundary_cells();
+            creeping.update_slab_lengths(1.0, &boundaries);
+        }
+        let boundaries = creeping.boundary_cells();
+        assert!(
+            boundaries
+                .iter()
+                .any(|boundary| boundary.kind == BoundaryKind::Diffuse)
+        );
+        assert!(
+            !boundaries
+                .iter()
+                .any(|boundary| matches!(boundary.kind, BoundaryKind::Trench { .. }))
+        );
+        assert!(
+            creeping
+                .polarities
+                .segments()
+                .all(|segment| !segment.localised && segment.slab_length == 0.0)
+        );
+        assert!(
+            creeping
+                .polarities
+                .segments()
+                .any(|segment| segment.shortening > 0.0)
+        );
+        // Pushed hard, it reaches the strength, yields and localises: a trench whose slab grows.
+        let mut yielding = dragged_with((100.0, 0.0), 60.0, diffuse, resist);
+        assert!(mean_approach(&yielding) > v_d);
+        let boundaries = yielding.boundary_cells();
+        assert!(yielding.update_slab_lengths(1.0, &boundaries));
+        assert!(
+            yielding
+                .polarities
+                .segments()
+                .any(|segment| segment.localised)
+        );
+        for _ in 0..3 {
+            let boundaries = yielding.boundary_cells();
+            yielding.update_slab_lengths(1.0, &boundaries);
+        }
+        assert!(
+            yielding
+                .polarities
+                .segments()
+                .any(|segment| segment.slab_length > 0.0 && segment.displacement > 0.0)
+        );
+    }
+
+    #[test]
+    fn event_slabs_feel_the_initiation_strength() {
+        let strength = TectonicParams::default().initiation_resistance;
+        let resist = |params: &mut TectonicParams| params.initiation_resistance = strength;
+        let free = |_: &mut TectonicParams| {};
+        let fresh = |segment: &mut polarity::Segment| segment.displacement = 0.0;
+        // A 150 km slab seeded by an initiation event, whose thrust has not moved yet, is
+        // resisted like a plate without a slab; once 150 km have been taken up on the thrust it
+        // is not.
+        let unresisted = mean_approach(&dragged_with((100.0, 150e3), 3.0, fresh, free));
+        let event = mean_approach(&dragged_with((100.0, 150e3), 3.0, fresh, resist));
+        let established = mean_approach(&dragged((100.0, 150e3), 3.0, resist));
+        assert!(event < 0.5 * unresisted, "{event} {unresisted}");
+        assert!(
+            (established - unresisted).abs() < 1e-6 * unresisted,
+            "{established} {unresisted}"
+        );
     }
 
     #[test]

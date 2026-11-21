@@ -673,15 +673,22 @@ fn snapshot(
     });
     let segments = &statistics.segment_events;
     info!(
-        "    segments {} ({} with slab; slab at trenches {:.0} km; incipient trenches {:.0} km converging at {:.1} cm/yr, others at {:.1} cm/yr) | created {}, merged {}, expired {}, \
+        "    segments {} ({} with slab; slab at trenches {:.0} km; incipient trenches {:.0} km converging at {:.1} cm/yr, others at {:.1} cm/yr; diffuse zones {:.0} km \
+         converging at {:.2} cm/yr; {} shortened, mean {:.0} km, max {:.0} km) | created {}, merged {}, expired {}, \
          flips {}, continental overrides {}, initiation segments {} ({} grew to 300 km), \
-         failed initiations {}, resumed subductions {} | unsettled velocity solves {}",
+         failed initiations {}, resumed subductions {}, localisations {} (stacked before so far {:.0} Gt), \
+         subducted at diffuse zones so far {:.0} Gt, weak thrusts {} | unsettled velocity solves {}",
         statistics.segments,
         statistics.slab_segments,
         statistics.mean_slab_length,
         statistics.incipient_trench_length,
         statistics.incipient_convergence,
         statistics.mature_convergence,
+        statistics.diffuse_length,
+        statistics.diffuse_convergence,
+        statistics.shortened_segments,
+        statistics.mean_shortening,
+        statistics.max_shortening,
         segments.created,
         segments.merged,
         segments.expired,
@@ -691,6 +698,10 @@ fn snapshot(
         segments.successful_initiation_segments,
         statistics.events.failed_initiations,
         segments.resumed_subductions,
+        segments.localisations,
+        segments.transient_stacked * cell_area / 1e12,
+        segments.diffuse_subducted * cell_area / 1e12,
+        statistics.weak_thrust_segments,
         statistics.unsettled_solves,
     );
     info!(

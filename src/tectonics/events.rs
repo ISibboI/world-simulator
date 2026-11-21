@@ -77,6 +77,12 @@ pub struct PlateEventParams {
     /// Length of slab (m) that a new subduction zone at a passive margin starts with: the
     /// foundering lithosphere that triggers it.
     pub initiation_slab_length: f64,
+    /// Displacement (m) on the new thrust that a subduction initiation event starts with (see
+    /// the initiation strength in [`super::dynamics`]). The hazards above are calibrated to
+    /// initiations that succeeded, so by default the event stands for a completed initiation:
+    /// as much as its slab, which leaves no strength to overcome. 0 makes the foundering slab
+    /// work against the full strength of the plate (the hazards are then attempt rates).
+    pub initiation_displacement: f64,
     /// Plates whose continents have been colliding for this many Myr with the collision stalled
     /// (see [`Self::suture_convergence`]) merge.
     pub suture_time: f64,
@@ -129,6 +135,7 @@ impl Default for PlateEventParams {
             fracture_zone_initiation: 1.0,
             weak_zone_splits: 1.0,
             initiation_slab_length: 150e3,
+            initiation_displacement: 150e3,
             suture_time: 30.0,
             suture_convergence: 0.5,
             suture_min_cells: 10,
@@ -1449,6 +1456,7 @@ impl Simulation {
                 let subduction = polarity::Subduction {
                     overriding: overriding_plate,
                     slab_length,
+                    displacement: params.initiation_displacement,
                     initiation: true,
                 };
                 self.polarities
@@ -1588,7 +1596,7 @@ impl Simulation {
         }));
         // Old oceanic boundary cells facing younger or continental crust without subduction.
         for boundary in boundaries {
-            if boundary.kind != BoundaryKind::Other
+            if !matches!(boundary.kind, BoundaryKind::Other | BoundaryKind::Diffuse)
                 || boundary.convergence <= -min_convergence
                 || boundary.plate >= first_new_plate
                 || boundary.other >= first_new_plate
@@ -1676,6 +1684,7 @@ impl Simulation {
         let subduction = polarity::Subduction {
             overriding,
             slab_length,
+            displacement: self.params.events.initiation_displacement,
             initiation: true,
         };
         let reversal = self.polarities.set(
@@ -1730,7 +1739,12 @@ impl Simulation {
                     entry.1 += 1;
                     converging.insert((boundary.cell, boundary.other));
                 }
-            } else if matches!(boundary.kind, BoundaryKind::Trench { .. }) {
+            } else if matches!(
+                boundary.kind,
+                BoundaryKind::Trench { .. } | BoundaryKind::Diffuse
+            ) {
+                // Diffuse zones were incipient trenches before they had their own state: they
+                // hold a pair apart like trenches.
                 contacts.entry(pair).or_default().2 += 1;
             }
         }
