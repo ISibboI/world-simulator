@@ -64,11 +64,13 @@ const REFINEMENT_STEPS: usize = 6;
 
 /// The cell whose displayed surface the ray meets first, if any. `radius(cell)` is the
 /// displayed radius of a cell (at least about 1, the ocean), and `max_radius` the largest one.
+/// The nearest-vertex walk starts at `hint` (e.g. the previous pick) if given.
 pub fn pick(
     mesh: &SphereMesh,
     radius: impl Fn(u32) -> f64,
     max_radius: f64,
     ray: &Ray,
+    hint: Option<u32>,
 ) -> Option<u32> {
     let (enter, leave) = ray_sphere(ray, max_radius.max(1.0))?;
     // The ray ends on the ocean sphere; a ray that misses it can still graze a mountain.
@@ -79,7 +81,11 @@ pub fn pick(
         return None;
     }
     let step = 0.5 * mesh.mean_edge_angle();
-    let mut cell = mesh.nearest(ray.at(start).normalize_or(DVec3::X));
+    let first = ray.at(start).normalize_or(DVec3::X);
+    let mut cell = match hint.filter(|&hint| (hint as usize) < mesh.len()) {
+        Some(hint) => mesh.nearest_from(first, hint),
+        None => mesh.nearest(first),
+    };
     let below = |t: f64, cell: &mut u32| {
         let point = ray.at(t);
         *cell = mesh.nearest_from(point.normalize_or(DVec3::X), *cell);
@@ -221,7 +227,9 @@ mod tests {
             };
             let (enter, _) = ray_sphere(&ray, 1.0).unwrap();
             let expected = mesh.nearest(ray.at(enter).normalize());
-            assert_eq!(pick(&mesh, |_| 1.0, 1.0, &ray), Some(expected));
+            // With and without a (far away) starting point for the walk.
+            let hint = (index % 2 == 1).then_some((index * 37 % mesh.len()) as u32);
+            assert_eq!(pick(&mesh, |_| 1.0, 1.0, &ray, hint), Some(expected));
         }
     }
 
@@ -232,7 +240,7 @@ mod tests {
             origin: DVec3::new(4.5, 0.0, 0.0),
             direction: (DVec3::new(0.0, 1.2, 0.0) - DVec3::new(4.5, 0.0, 0.0)).normalize(),
         };
-        assert_eq!(pick(&mesh, |_| 1.0, 1.05, &ray), None);
+        assert_eq!(pick(&mesh, |_| 1.0, 1.05, &ray, Some(7)), None);
     }
 
     #[test]
@@ -254,10 +262,10 @@ mod tests {
         };
         let (ocean, _) = ray_sphere(&ray, 1.0).unwrap();
         assert_ne!(mesh.nearest(ray.at(ocean).normalize()), mountain);
-        assert_eq!(pick(&mesh, radius, height, &ray), Some(mountain));
+        assert_eq!(pick(&mesh, radius, height, &ray, Some(0)), Some(mountain));
         // Without the mountain, the ray reaches the ocean.
         assert_eq!(
-            pick(&mesh, |_| 1.0, 1.0, &ray),
+            pick(&mesh, |_| 1.0, 1.0, &ray, None),
             Some(mesh.nearest(ray.at(ocean).normalize()))
         );
     }

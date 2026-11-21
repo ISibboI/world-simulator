@@ -258,6 +258,8 @@ struct Viewer {
     picking: Option<Picking>,
     /// The cell selected by a click or tap, shown while no other cell is under the pointer.
     selected: Option<u32>,
+    /// The cell under the pointer in the last frame, where the next pick starts its walk.
+    hovered: Option<u32>,
     /// Rotation of the camera around the planet's axis in radians.
     yaw: f32,
     /// Elevation angle of the camera above the equator in radians.
@@ -304,6 +306,7 @@ impl Viewer {
             touch: ui_options.touch,
             picking: None,
             selected: None,
+            hovered: None,
             yaw: 0.0,
             pitch: 0.4,
             time: None,
@@ -388,13 +391,17 @@ impl Viewer {
                             .normalize_or(DVec3::X)
                     })
                     .collect();
-                let mesh = SphereMesh::from_faces(directions, surface.faces.to_vec(), 0);
-                if self
-                    .selected
-                    .is_some_and(|cell| cell as usize >= mesh.len())
-                {
-                    self.selected = None;
-                }
+                // 10 · 4^s + 2 vertices for s subdivisions.
+                let subdivisions = (vertices.len().saturating_sub(2) / 10).max(1).ilog2() / 2;
+                let mesh = SphereMesh::from_faces(directions, surface.faces.to_vec(), subdivisions);
+                // The selected place stays selected on the new mesh (another resolution).
+                self.selected = match (self.selected, &self.picking) {
+                    (Some(cell), Some(old)) if (cell as usize) < old.mesh.len() => {
+                        Some(mesh.nearest(old.mesh.vertex(cell)))
+                    }
+                    _ => None,
+                };
+                self.hovered = None;
                 self.picking = Some(Picking {
                     mesh_id: surface.mesh_id,
                     mesh,
@@ -424,6 +431,7 @@ impl Viewer {
             |cell| f64::from(Vec3::from(vertices[cell as usize].position).length()),
             picking.max_radius,
             &ray,
+            self.hovered.or(self.selected),
         )
     }
 
@@ -522,7 +530,20 @@ impl eframe::App for Viewer {
                 // further than egui's click distance) selects a cell.
                 let (rect, response) =
                     ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-                let delta = response.drag_delta();
+                // egui starts a drag of a widget that also senses clicks only once the pointer
+                // moved further than a click may; the rotation still follows it from the press.
+                let delta = if response.drag_started() {
+                    ui.input(|input| {
+                        input
+                            .pointer
+                            .press_origin()
+                            .zip(input.pointer.interact_pos())
+                            .map(|(origin, now)| now - origin)
+                    })
+                    .unwrap_or_else(|| response.drag_delta())
+                } else {
+                    response.drag_delta()
+                };
                 self.yaw -= delta.x * ROTATION_SPEED;
                 self.pitch = (self.pitch + delta.y * ROTATION_SPEED).clamp(-1.5, 1.5);
 
@@ -538,11 +559,12 @@ impl eframe::App for Viewer {
                 // The cell under a hovering mouse; none while a button is down (dragging) or
                 // on touch screens after the finger is lifted (egui then has no pointer).
                 let pointing = ui.input(|input| input.pointer.any_down());
-                let hovered = response
+                self.hovered = response
                     .hover_pos()
                     .filter(|_| !pointing)
                     .and_then(|point| self.pick(view_projection, rect, point));
-                shown = hovered
+                shown = self
+                    .hovered
                     .map(|cell| (cell, false))
                     .or(self.selected.map(|cell| (cell, true)));
 

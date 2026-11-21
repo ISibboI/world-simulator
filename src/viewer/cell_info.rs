@@ -27,7 +27,7 @@ pub struct CellInfo {
     pub orogenic: f32,
     /// Time since the last orogeny in Myr, or NaN if there was none.
     pub since_orogeny: f32,
-    /// Annual mean surface temperature in °C (NaN before the first climate update).
+    /// Annual mean surface temperature in °C (NaN if unknown).
     pub temperature: f32,
     /// Mean surface temperature of the first month of the year (early January, the month
     /// starting at perihelion) and of the seventh (July) in °C, or NaN.
@@ -180,7 +180,8 @@ pub fn format_rows(info: &CellInfo, latitude: f64, longitude: f64) -> Vec<(&'sta
             ),
         ),
         (
-            if info.is_continental() {
+            // Old oceanic crust is thinned continental crust that kept its nominal age.
+            if info.is_continental() || info.age >= OLD_LITHOSPHERE {
                 "Lithosphere age"
             } else {
                 "Ocean floor age"
@@ -284,10 +285,15 @@ pub struct ShownCell<'a> {
 pub struct CellInfoPanel {
     /// Whether the widget is shown; decided by the screen width on the first frame.
     open: Option<bool>,
+    /// The highest top edge the open widget has reached since it was opened (points), so
+    /// that the area it reserves does not change with the number of rows.
+    reserved_top: Option<f32>,
 }
 
 impl CellInfoPanel {
-    /// Shows the widget or its button and returns the area it covers.
+    /// Shows the widget or its button and returns the area reserved for it: the area it
+    /// covers, extended up to the highest it reached while open (rows come and go with the
+    /// cell), so that the parameter panel does not change size with it.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -307,6 +313,7 @@ impl CellInfoPanel {
                 }
                 None => "ℹ Cell".to_owned(),
             };
+            self.reserved_top = None;
             return egui::Area::new(egui::Id::unique("cell info button"))
                 .anchor(egui::Align2::LEFT_BOTTOM, [MARGIN, -MARGIN])
                 .show(ctx, |ui| {
@@ -369,7 +376,17 @@ impl CellInfoPanel {
                     });
             });
         self.open = Some(open);
-        response.map(|response| response.response.rect)
+        let mut rect = response?.response.rect;
+        if open {
+            let top = self
+                .reserved_top
+                .map_or(rect.top(), |top| top.min(rect.top()));
+            self.reserved_top = Some(top);
+            rect.min.y = top;
+        } else {
+            self.reserved_top = None;
+        }
+        Some(rect)
     }
 }
 
@@ -480,6 +497,47 @@ mod tests {
             format_summary(&info(), 10.0, -20.0),
             "10.0° N, 20.0° W · 1234 m"
         );
+    }
+
+    #[test]
+    fn cell_info_is_whole_words() {
+        // The web version sends it as u32 words.
+        assert_eq!(std::mem::size_of::<CellInfo>(), 56);
+        assert_eq!(std::mem::align_of::<CellInfo>(), 4);
+    }
+
+    #[test]
+    fn old_oceanic_crust_has_a_lithosphere_age() {
+        let info = CellInfo { flags: 0, ..info() };
+        let rows = format_rows(&info, 0.0, 0.0);
+        assert_eq!(row(&rows, "Lithosphere age").unwrap(), "old (≥ 1000 Myr)");
+        assert_eq!(row(&rows, "Ocean floor age"), None);
+    }
+
+    #[test]
+    fn cell_infos_of_a_small_planet() {
+        use clap::Parser;
+        let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "2"]);
+        let planet = crate::build_planet(&cli).unwrap();
+        let simulation = planet.tectonics();
+        let infos = cell_infos(&planet);
+        assert_eq!(infos.len(), simulation.mesh().len());
+        for (cell, info) in infos.iter().enumerate() {
+            let cell = cell as u32;
+            assert_eq!(info.plate, simulation.owner(cell).plate);
+            assert_eq!(
+                f64::from(info.elevation),
+                simulation.surface_elevation(cell) as f32 as f64
+            );
+            assert_eq!(
+                info.is_continental(),
+                simulation.surface_crust(cell).is_continental()
+            );
+            assert!(info.temperature.is_finite());
+            assert!(info.temperature_january.is_finite() && info.temperature_july.is_finite());
+            assert!(info.precipitation.is_finite() && info.precipitation >= 0.0);
+            assert!(info.crust_thickness > 0.0);
+        }
     }
 
     #[test]

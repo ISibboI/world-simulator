@@ -230,9 +230,8 @@ impl ParameterPanel {
     }
 
     /// Shows the panel (or the button that shows it) and returns the simulation to start if
-    /// the user asked for a restart.
-    /// Shows the panel (or its button). It stays above `avoid` (the cell widget in the bottom
-    /// left corner) where the two could overlap, on narrow screens.
+    /// the user asked for a restart. The panel stays above `avoid` (the area reserved for the
+    /// cell widget in the bottom left corner) where the two could overlap, on narrow screens.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
