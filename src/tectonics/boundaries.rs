@@ -754,7 +754,11 @@ impl Simulation {
                 AdditionKind::Accretion => &self.params.accretion_profile,
             };
             // Continental collisions are taken up by a band of the overriding plate (see
-            // `deformation`), the other additions follow their profile.
+            // `deformation`), the other additions follow their profile. The band is a disc of
+            // rings around the contact on the overriding plate (also across its oceanic cells,
+            // which take no share); with a band, the reach for the spill and for the profile
+            // fallback is the band's. Additions are applied in order, each seeing the state left
+            // by the previous ones (including orogenic marks, which make cells softer).
             let band = addition.kind == AdditionKind::Collision && band_rings > 0;
             let rings = if band {
                 (band_rings + 1).max(profile.len())
@@ -1107,7 +1111,9 @@ impl RingScratch {
 /// plate's crust of continental origin within `rings` rings (its frame) that is thicker than
 /// `breakup_thickness`. The N donors give N/(N + 1) of one donor's crust and sediment in total
 /// (uniform stretching would give each 1/(N + 1)), weighted by 1/k for a donor in ring k (times
-/// (h/35 km)² for thickened donors: extensional collapse, see `deformation`), but
+/// (h/35 km)² for thickened donors: extensional collapse, see `deformation`; thick donors
+/// give larger fractions of larger columns, so in thickened crust the new sample is thicker
+/// and breakup comes later: wide rifts), but
 /// none thins below `breakup_thickness`: thinning is strongest next to the rift, so margins
 /// taper towards the ocean. Mass is conserved. Stretching heats the lithosphere (McKenzie
 /// 1978): crust stretched by β whose thermal uplift is the fraction U of a ridge's gets

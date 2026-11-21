@@ -29,8 +29,9 @@ pub(super) const REFERENCE_THICKNESS: f64 = 35e3;
 
 /// Crust thickness (m) at which the excess potential energy of a column balances the largest
 /// compressive force continental collisions transmit, ~7.6 × 10¹² N/m (Tibet: Molnar &
-/// Lyon-Caen 1988; England & Molnar 1997): thicker crust does not thicken further, the
-/// deforming zone widens instead (plateau growth).
+/// Lyon-Caen 1988; England & Molnar 1997): the band weight of thicker crust is zero, so the
+/// deforming zone widens instead (plateau growth). It is a weight, not a cap: one share can
+/// still take a cell above it; the hard cap is `TectonicParams::max_crust_thickness`.
 pub(super) const PLATEAU_THICKNESS: f64 = 70e3;
 
 /// Lowest strength used for distributed deformation. [`lithosphere_strength`] goes down to
