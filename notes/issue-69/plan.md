@@ -212,3 +212,50 @@ that is the intended behaviour, and the measurement here is without it.
 
 Sources cited from memory of the literature (abstract-level); the numbers used (n ≈ 3, ΔGPE at
 70 km ≈ 7–8·10¹² N/m, belt widths) are textbook values.
+
+## Revisions after the plan review ([`review-plan.md`](review-plan.md))
+
+Baseline measured meanwhile (`main` 536cecb, 8 seeds, 500–1000 Myr; `main-s02` = suture
+threshold 0.2): slow share 13.1% / 18.3%, continental boundaries 13% / 17% (sim_classes), crust
+> 50 km 6.9% / 10.1%, mean land 930 / 1124 m, stacking 24.5 / 31.4 Gt/yr. So `main` is already
+above the 3–6% band, and keeping creeping belts makes it clearly worse.
+
+1. (high, band alone cannot move the boundary shares) **Accepted; a GPE resistance is added to
+   the force balance** (`Simulation::belt_resistance`, `deformation.rs`): at every collision
+   cell a plastic force ΔGPE(h) × ½ cell length (h = the thickest continental crust at the cell
+   and its neighbours, both sides; ½ because both sides have collision cells), treated like
+   `initiation_resistance` (Picard-linearised, released when the contact opens, linear below
+   `locked_convergence`). Factor `belt_gpe_resistance` = 1 (physical; 0 disables, for the
+   ablation). Thick belts slow their own collision (England & Houseman 1989; England & Molnar
+   1997). No recalibration of `collision_resistance`. The PR will state plainly what moved the
+   boundary shares.
+2. (high, stacking/mean land with 0.2) Accepted: stacking, mean land, `AdditionsLost` are primary
+   criteria; stacked mass per km of collision boundary reported.
+3. (high, 8000× softness) Fixed: `band_strength` floors at 0.3 (≤ 37× contrast); the band is
+   distributed by water-filling (3 weighted passes re-evaluating room, then nearest-first spill).
+4. (medium, marking feedback) Fixed in the band: a collision addition marks a cell only if it
+   thickens it by ≥ 1% of its column (`MIN_OROGENIC_STRAIN`); the profile path is unchanged.
+   Marked area reported.
+5. (medium, room at 75 km) Fixed: room = 1 − ΔGPE(h)/ΔGPE(70 km) (`PLATEAU_THICKNESS`, Tibet's
+   force); 75 km stays the hard cap for spill.
+6. (medium, bookkeeping) Fixed: fallback to the profile on the same reached cells (no addition
+   dropped), rings = round(width/spacing) inclusive (5 at 110 km), BFS to band + `SPILL_RINGS`.
+7. (medium, power) A deterministic two-hemisphere collision test (2 cm/yr, 60 Myr, ~220 km mesh)
+   compares profile vs band without seed noise; the s02 sets get 16 seeds; primary metrics named
+   below.
+8. (medium, decision rule) Fixed in advance: propose 0.2 as default only if (a) `full-s02` is in
+   band on crust > 50 km (≤ 6%), mean land (≤ ~1.0 km) and stacking (≤ 23 Gt/yr); (b)
+   `full-s02` beats `main-s02` on crust > 50 km with |t| > 2; (c) the deterministic test shows
+   the band widening the belt. Otherwise 0.5 stays and the boundary-share result is reported as
+   what the default code gives.
+9. (low) Taper = strain-rate decay for uniform strength (doc comment says so).
+10. (low) Rift weight w = (h/h₀)²/ring on the donor's fraction, base renormalised with Σw;
+    identical to `main` for donors ≤ 35 km.
+11. (low) If #75 merges first: rebase and a 4-seed check.
+
+Primary metrics (named before the runs): slow share, continental boundary share, crust > 50 km,
+mean land, collision stacking. Everything else is a guard rail.
+
+Sets (8 seeds × 1000 Myr unless noted): `main`, `main-s02` (16), `full` (band + GPE + rift
+weighting), `full-s02` (16), `band-only` (`belt_gpe_resistance=0`), `gpe-only`
+(`collision_band_width=0`), seeds 0–3 for the two ablations.

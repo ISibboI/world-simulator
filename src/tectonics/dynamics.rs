@@ -361,8 +361,19 @@ impl Simulation {
             .iter()
             .zip(&normals)
             .filter_map(|(boundary, &normal)| {
-                let strength = self.initiation_strength(boundary);
-                let lock = if self.is_diffuse_contact(boundary) {
+                // Thickened collision belts resist further convergence with their excess
+                // potential energy, also a plastic force (see `Simulation::belt_resistance`).
+                let belt = if boundary.kind == BoundaryKind::Collision {
+                    self.belt_resistance(boundary.cell)
+                } else {
+                    0.0
+                };
+                let strength = self.initiation_strength(boundary) + belt;
+                // A collision belt is a continental zone, not an oceanic diffuse one: below
+                // `locked_convergence` its resistance falls linearly with the speed.
+                let lock = if boundary.kind != BoundaryKind::Collision
+                    && self.is_diffuse_contact(boundary)
+                {
                     diffuse_speed
                 } else {
                     locked_speed
@@ -1574,6 +1585,30 @@ mod tests {
         }
         let count = boundaries.len() as f64;
         (strike / count, opening / count)
+    }
+
+    #[test]
+    fn thickened_belts_resist_their_own_collision() {
+        // The same collision with a plateau of 60 km crust on both sides: its excess potential
+        // energy resists the convergence; with the reference thickness nothing changes.
+        let closing = DVec3::X * 2e-16;
+        let motion = |thickness: f64, factor: f64| {
+            let mut simulation = continental_hemispheres(50.0);
+            simulation.params.belt_gpe_resistance = factor;
+            for plate in &mut simulation.plates {
+                for crust in plate.crust.iter_mut().flatten() {
+                    crust.thickness = thickness;
+                }
+            }
+            relative_boundary_motion(&mut simulation, closing).1
+        };
+        let (free, resisted) = (motion(60e3, 0.0), motion(60e3, 1.0));
+        assert!(resisted < 0.9 * free, "{resisted} vs {free}");
+        let (free, reference) = (motion(35e3, 0.0), motion(35e3, 1.0));
+        assert!(
+            (reference / free - 1.0).abs() < 1e-6,
+            "{reference} vs {free}"
+        );
     }
 
     /// Two continental hemispheres split at the equator, at rest, with the given collision

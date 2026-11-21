@@ -7,6 +7,7 @@ use glam::{DQuat, DVec3};
 
 use crate::isostasy::{ARC_DENSITY, SEDIMENT_ROCK_DENSITY};
 
+use super::deformation;
 use super::ledger::Term;
 use super::matching;
 use super::*;
@@ -733,9 +734,14 @@ impl Simulation {
         let mut visited_in_event = vec![usize::MAX; self.mesh.len()];
         let mut frontier = Vec::new();
         let mut next_frontier = Vec::new();
-        // Reached crust samples with their profile weight (0 beyond the profile).
-        let mut reached: Vec<(Ownership, f64)> = Vec::new();
+        // Reached crust samples with their ring and profile weight (0 beyond the profile).
+        let mut reached: Vec<(Ownership, usize, f64)> = Vec::new();
+        let mut weights: Vec<f64> = Vec::new();
         let max_thickness = self.params.max_crust_thickness;
+        let band_rings = deformation::band_rings(
+            self.params.collision_band_width,
+            self.params.planet_radius * self.mesh.mean_edge_angle(),
+        );
 
         for (event_index, addition) in additions.iter().enumerate() {
             let profile = match addition.kind {
@@ -745,12 +751,20 @@ impl Simulation {
                 AdditionKind::Arc => &self.params.arc_profile,
                 AdditionKind::Accretion => &self.params.accretion_profile,
             };
+            // Continental collisions are taken up by a band of the overriding plate (see
+            // `deformation`), the other additions follow their profile.
+            let band = addition.kind == AdditionKind::Collision && band_rings > 0;
+            let rings = if band {
+                (band_rings + 1).max(profile.len())
+            } else {
+                profile.len()
+            };
             frontier.clear();
             frontier.push(addition.cell);
             visited_in_event[addition.cell as usize] = event_index;
             reached.clear();
 
-            for ring in 0..profile.len() + SPILL_RINGS {
+            for ring in 0..rings + SPILL_RINGS {
                 let weight = profile.get(ring).copied().unwrap_or(0.0);
                 next_frontier.clear();
                 for &cell in &frontier {
@@ -767,7 +781,7 @@ impl Simulation {
                     } else {
                         weight
                     };
-                    reached.push((owner, weight));
+                    reached.push((owner, ring, weight));
                     for &neighbor in self.mesh.neighbors(cell) {
                         if visited_in_event[neighbor as usize] != event_index {
                             visited_in_event[neighbor as usize] = event_index;
@@ -778,50 +792,94 @@ impl Simulation {
                 std::mem::swap(&mut frontier, &mut next_frontier);
             }
 
-            let total_weight: f64 = reached.iter().map(|(_, weight)| weight).sum();
+            let time = self.time;
+            let crust_at = |plates: &[Plate], owner: Ownership| {
+                plates[owner.plate as usize].crust[owner.local as usize]
+                    .expect("owners always point to existing crust")
+            };
+            // Band weights from the current state of the samples; `None` if no sample of the
+            // band can take crust (no continental crust within reach, or all of it at the
+            // plateau thickness): then the profile is used.
+            let band_weights = |plates: &[Plate], weights: &mut Vec<f64>| {
+                weights.clear();
+                weights.extend(reached.iter().map(|&(owner, ring, _)| {
+                    deformation::band_weight(&crust_at(plates, owner), time, ring, band_rings)
+                }));
+                weights.iter().sum::<f64>()
+            };
+            let use_band = band && band_weights(&self.plates, &mut weights) > 0.0;
+            if !use_band {
+                weights.clear();
+                weights.extend(reached.iter().map(|&(_, _, weight)| weight));
+            }
+            let total_weight: f64 = weights.iter().sum();
             if total_weight <= 0.0 {
                 continue;
             }
-            // Distribute along the profile, then spill what did not fit outwards, nearest first.
-            let mut leftover = 0.0;
-            let time = self.time;
-            for &(owner, weight) in &reached {
-                let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
-                    .as_mut()
-                    .expect("owners always point to existing crust");
-                let share = addition.thickness * weight / total_weight;
-                let fitting = share.min((max_thickness - crust.thickness).max(0.0));
-                let before = crust.mass();
-                crust.add_crust(
-                    fitting,
-                    addition.density,
-                    (addition.felsic, addition.metasediment),
-                    max_thickness,
-                );
-                // Sediment moved along goes onto the same cells, without a thickness cap.
-                let sediment = addition.sediment * weight / total_weight;
-                if sediment > 0.0 {
-                    crust.add_sediment(sediment, addition.cohort);
+            // Distribute by the weights; in a band, what did not fit is distributed again by
+            // the weights of the samples that still have room (a few passes), then whatever is
+            // left spills outwards, nearest first.
+            let mut remaining = addition.thickness;
+            let passes = if use_band { BAND_PASSES } else { 1 };
+            for pass in 0..passes {
+                let total_weight = if pass == 0 {
+                    total_weight
+                } else {
+                    band_weights(&self.plates, &mut weights)
+                };
+                if total_weight <= 0.0 || remaining <= addition.thickness * 1e-9 {
+                    break;
                 }
-                change += crust.mass() - before;
-                leftover += share - fitting;
-                // Crust thickened by a continental collision is an orogenic belt.
-                if addition.kind == AdditionKind::Collision
-                    && fitting > 0.0
-                    && crust.is_continental_origin()
-                    && crust.thickness > OROGENIC_THICKNESS
-                {
-                    crust.mark_orogeny(time);
+                let mut leftover = 0.0;
+                for (&(owner, _, _), &weight) in reached.iter().zip(&weights) {
+                    if weight <= 0.0 {
+                        continue;
+                    }
+                    let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
+                        .as_mut()
+                        .expect("owners always point to existing crust");
+                    let share = remaining * weight / total_weight;
+                    let fitting = share.min((max_thickness - crust.thickness).max(0.0));
+                    let before = crust.mass();
+                    crust.add_crust(
+                        fitting,
+                        addition.density,
+                        (addition.felsic, addition.metasediment),
+                        max_thickness,
+                    );
+                    // Sediment moved along goes onto the same cells, without a thickness cap
+                    // (collisions carry none: their sediment is stacked as metasediment).
+                    if pass == 0 {
+                        let sediment = addition.sediment * weight / total_weight;
+                        if sediment > 0.0 {
+                            crust.add_sediment(sediment, addition.cohort);
+                        }
+                    }
+                    change += crust.mass() - before;
+                    leftover += share - fitting;
+                    // Crust thickened by a continental collision is an orogenic belt. In a
+                    // band, only where the thickening is material (see
+                    // `MIN_OROGENIC_STRAIN`): a few metres from a distant contact do not deform
+                    // the lithosphere of a whole cell.
+                    if addition.kind == AdditionKind::Collision
+                        && fitting > 0.0
+                        && crust.is_continental_origin()
+                        && crust.thickness > OROGENIC_THICKNESS
+                        && (!use_band || fitting >= MIN_OROGENIC_STRAIN * crust.thickness)
+                    {
+                        crust.mark_orogeny(time);
+                    }
                 }
+                remaining = leftover;
             }
-            for &(owner, _) in &reached {
-                if leftover <= 0.0 {
+            for &(owner, _, _) in &reached {
+                if remaining <= 0.0 {
                     break;
                 }
                 let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
                     .as_mut()
                     .expect("owners always point to existing crust");
-                let fitting = leftover.min((max_thickness - crust.thickness).max(0.0));
+                let fitting = remaining.min((max_thickness - crust.thickness).max(0.0));
                 let before = crust.mass();
                 crust.add_crust(
                     fitting,
@@ -830,12 +888,19 @@ impl Simulation {
                     max_thickness,
                 );
                 change += crust.mass() - before;
-                leftover -= fitting;
+                remaining -= fitting;
             }
         }
         change
     }
 }
+
+/// Passes of the weighted distribution of a collision over its band before the rest spills.
+const BAND_PASSES: usize = 3;
+
+/// Smallest thickening, relative to the column, that marks crust in a collision band as an
+/// orogenic belt (see [`Crust::mark_orogeny`]).
+const MIN_OROGENIC_STRAIN: f64 = 0.01;
 
 pub(super) struct ResolvedBoundaries {
     pub(super) additions: Vec<CrustAddition>,
@@ -1019,7 +1084,8 @@ impl RingScratch {
 /// Fills the empty local vertex `local` of `plate` at an opening rift by stretching the
 /// plate's crust of continental origin within `rings` rings (its frame) that is thicker than
 /// `breakup_thickness`. The N donors give N/(N + 1) of one donor's crust and sediment in total
-/// (uniform stretching would give each 1/(N + 1)), weighted by 1/k for a donor in ring k, but
+/// (uniform stretching would give each 1/(N + 1)), weighted by 1/k for a donor in ring k (times
+/// (h/35 km)² for thickened donors: extensional collapse, see `deformation`), but
 /// none thins below `breakup_thickness`: thinning is strongest next to the rift, so margins
 /// taper towards the ocean. Mass is conserved. Stretching heats the lithosphere (McKenzie
 /// 1978): crust stretched by β whose thermal uplift is the fraction U of a ridge's gets
@@ -1062,14 +1128,23 @@ fn stretch_rift(
         return false;
     }
     let count = donors.len() as f64;
-    let weights: f64 = donors.iter().map(|&(_, ring)| 1.0 / ring as f64).sum();
+    // Thickened crust stretches first (see `deformation::stretching_weight`); for donors of
+    // normal thickness the weight is 1/ring.
+    let weight = |donor: u32, ring: usize| {
+        let crust = plate.crust[donor as usize].expect("donors have crust");
+        deformation::stretching_weight(crust.thickness) / ring as f64
+    };
+    let weights: f64 = donors
+        .iter()
+        .map(|&(donor, ring)| weight(donor, ring))
+        .sum();
     let base = count / (count + 1.0) / weights;
     // Fraction of its crust each donor gives.
     let shares: Vec<f64> = donors
         .iter()
         .map(|&(donor, ring)| {
             let crust = plate.crust[donor as usize].expect("donors have crust");
-            (base / ring as f64).min(1.0 - breakup_thickness / crust.thickness)
+            (base * weight(donor, ring)).min(1.0 - breakup_thickness / crust.thickness)
         })
         .collect();
     let given: f64 = donors
@@ -1756,6 +1831,37 @@ mod tests {
     }
 
     #[test]
+    fn thickened_crust_stretches_first_in_rifts() {
+        let mut simulation = single_continent();
+        let local = 100u32;
+        let neighbors = simulation.mesh.neighbors(local).to_vec();
+        let (thick, normal) = (neighbors[0], neighbors[1]);
+        simulation.plates[0].crust[thick as usize]
+            .as_mut()
+            .unwrap()
+            .thickness = 60e3;
+        simulation.plates[0].crust[local as usize] = None;
+        let mass = simulation.total_mass();
+        assert!(stretch_rift(
+            &simulation.mesh,
+            &mut simulation.plates[0],
+            local,
+            1,
+            15e3,
+            0.0
+        ));
+        assert!((simulation.total_mass() / mass - 1.0).abs() < 1e-12);
+        let crust = |vertex: u32| simulation.plates[0].crust[vertex as usize].unwrap();
+        // Fraction given: (60/35)² times that of a 35 km donor.
+        let given_thick = 1.0 - crust(thick).thickness / 60e3;
+        let given_normal = 1.0 - crust(normal).thickness / 35e3;
+        assert!(
+            (given_thick / given_normal - (60.0f64 / 35.0).powi(2)).abs() < 1e-9,
+            "{given_thick} vs {given_normal}"
+        );
+    }
+
+    #[test]
     fn collisions_deform_the_whole_sample() {
         // A sample with a small orogenic share (from an old belt next to it) that is thickened
         // by a collision is an orogenic belt as a whole.
@@ -1780,6 +1886,144 @@ mod tests {
         let crust = simulation.plates[0].crust[cell as usize].unwrap();
         assert!(crust.thickness > OROGENIC_THICKNESS);
         assert_eq!((crust.orogeny, crust.orogenic), (simulation.time, 1.0));
+    }
+
+    /// Rings (mesh distance in cells) of all cells from `cell`.
+    fn rings_from(simulation: &Simulation, cell: u32) -> Vec<usize> {
+        let mut rings = vec![usize::MAX; simulation.mesh.len()];
+        rings[cell as usize] = 0;
+        let mut queue = VecDeque::from([cell]);
+        while let Some(c) = queue.pop_front() {
+            for &n in simulation.mesh.neighbors(c) {
+                if rings[n as usize] == usize::MAX {
+                    rings[n as usize] = rings[c as usize] + 1;
+                    queue.push_back(n);
+                }
+            }
+        }
+        rings
+    }
+
+    fn collision_addition(cell: u32, thickness: f64) -> CrustAddition {
+        CrustAddition {
+            cell,
+            plate: 0,
+            partner: 0,
+            thickness,
+            density: crate::isostasy::CONTINENTAL_DENSITY,
+            felsic: 1.0,
+            metasediment: 0.0,
+            sediment: 0.0,
+            cohort: 0.0,
+            kind: AdditionKind::Collision,
+        }
+    }
+
+    /// A continent on the ~440 km test mesh with a collision band of 5 rings.
+    fn banded_continent() -> Simulation {
+        let mut simulation = single_continent();
+        let spacing = simulation.params.planet_radius * simulation.mesh.mean_edge_angle();
+        simulation.params.collision_band_width = 5.0 * spacing;
+        simulation
+    }
+
+    #[test]
+    fn collision_bands_conserve_mass_and_spread_over_the_band() {
+        let mut simulation = banded_continent();
+        let cell = 100u32;
+        let rings = rings_from(&simulation, cell);
+        let before: Vec<f64> = (0..simulation.mesh.len() as u32)
+            .map(|c| simulation.surface_crust(c).thickness)
+            .collect();
+        let mass = simulation.total_mass();
+        let addition = collision_addition(cell, 35e3);
+        let added = addition.thickness * addition.density;
+        simulation.apply_additions(&[addition]);
+        assert!((simulation.total_mass() - mass - added).abs() < 1e-9 * added);
+        assert!(simulation.ledger.additions_lost.abs() < 1e-9 * added);
+        let gained = |c: u32| simulation.surface_crust(c).thickness - before[c as usize];
+        // Wider than the old profile, which put 1/8.5 of an addition onto the contact cell
+        // alone and nothing beyond 3 rings.
+        assert!(gained(cell) < 35e3 / 8.5, "{}", gained(cell));
+        let mut by_ring = [0.0; 7];
+        for c in 0..simulation.mesh.len() as u32 {
+            if rings[c as usize] < by_ring.len() {
+                by_ring[rings[c as usize]] += gained(c);
+            } else {
+                assert_eq!(gained(c), 0.0, "cell {c} beyond the band");
+            }
+        }
+        assert!(by_ring[4] > 0.0 && by_ring[5] > 0.0, "{by_ring:?}");
+        assert_eq!(by_ring[6], 0.0, "{by_ring:?}");
+        // Per cell, the taper.
+        let per_cell = |ring: usize| {
+            let n = rings.iter().filter(|&&r| r == ring).count() as f64;
+            by_ring[ring] / n
+        };
+        assert!((1..=5).all(|ring| per_cell(ring) < per_cell(ring - 1)));
+    }
+
+    #[test]
+    fn weak_belts_take_up_more_of_a_collision() {
+        let mut simulation = banded_continent();
+        let cell = 100u32;
+        let rings = rings_from(&simulation, cell);
+        let in_ring_2: Vec<u32> = (0..simulation.mesh.len() as u32)
+            .filter(|&c| rings[c as usize] == 2)
+            .collect();
+        let (weak, strong) = (in_ring_2[0], in_ring_2[in_ring_2.len() / 2]);
+        let local = simulation.owners[weak as usize].local as usize;
+        simulation.plates[0].crust[local]
+            .as_mut()
+            .unwrap()
+            .mix_orogeny(-500.0, 1.0);
+        simulation.apply_additions(&[collision_addition(cell, 35e3)]);
+        let gained = |c: u32| simulation.surface_crust(c).thickness - 35e3;
+        // Strength 0.5: 8× the share.
+        assert!(
+            (gained(weak) / gained(strong) - 8.0).abs() < 1e-6,
+            "{} vs {}",
+            gained(weak),
+            gained(strong)
+        );
+    }
+
+    #[test]
+    fn full_bands_grow_outwards_and_stay_below_the_cap() {
+        let mut simulation = banded_continent();
+        let cell = 100u32;
+        let rings = rings_from(&simulation, cell);
+        let mass = simulation.total_mass();
+        let mut added = 0.0;
+        // The band holds ~91 cells × 35 km below the plateau.
+        for _ in 0..150 {
+            let addition = collision_addition(cell, 35e3);
+            added += addition.thickness * addition.density;
+            simulation.apply_additions(&[addition]);
+        }
+        let thickness = |c: u32| simulation.surface_crust(c).thickness;
+        assert!((0..simulation.mesh.len() as u32).all(|c| thickness(c) <= 75e3 + 1e-6));
+        // The contact reached the plateau; crust went beyond the band once it was full.
+        assert!(thickness(cell) > 65e3, "{}", thickness(cell));
+        let beyond =
+            (0..simulation.mesh.len() as u32).any(|c| rings[c as usize] > 5 && thickness(c) > 35e3);
+        assert!(beyond);
+        let lost = simulation.ledger.additions_lost;
+        assert!((simulation.total_mass() - mass - added - lost).abs() < 1e-9 * added);
+    }
+
+    #[test]
+    fn collisions_without_continental_crust_in_the_band_use_the_profile() {
+        // Oceanic crust all around (e.g. a terrane arriving at an oceanic edge): nothing lost.
+        let mut simulation = single_plate();
+        let spacing = simulation.params.planet_radius * simulation.mesh.mean_edge_angle();
+        simulation.params.collision_band_width = 5.0 * spacing;
+        let mass = simulation.total_mass();
+        let addition = collision_addition(100, 10e3);
+        let added = addition.thickness * addition.density;
+        simulation.apply_additions(&[addition]);
+        assert!((simulation.total_mass() - mass - added).abs() < 1e-9 * added);
+        assert!(simulation.surface_crust(100).thickness > new_oceanic_crust(0.0).thickness);
     }
 
     #[test]
