@@ -32,19 +32,30 @@ use crate::sphere::SphereMesh;
 /// the basin is an arm of the sea fed over its sill, like the Mediterranean, not a lake.
 pub const SILL_TOLERANCE: f64 = 1e-6;
 
-/// The seed of the ocean: the deepest cell of the largest connected body (by cell count) of the
-/// cells with `level < reference`, or the lowest cell of all if there is none.
-fn seed(mesh: &SphereMesh, level: &[f64], reference: f64) -> usize {
+/// Bodies of water below sea level of at least this fraction of the planet's surface are seas
+/// (default of [`crate::tectonics::TectonicParams::min_sea_fraction`]): 0.2%, ~10⁶ km² on an
+/// Earth-sized planet, ~80 cells of the default grid. On Earth every water body of that size
+/// below sea level is connected to the ocean, mostly through straits far narrower than a cell
+/// (Mediterranean, Black Sea, Red Sea, Baltic); the largest closed one, the Caspian Sea, has a
+/// third of it.
+pub const MIN_SEA_FRACTION: f64 = 0.002;
+
+/// The seeds of the ocean: the deepest cell of the largest connected body (by cell count) of the
+/// cells with `level < reference`, and of every other body of at least `min_sea_fraction` of
+/// the cells (connected to the ocean by straits narrower than a cell); the lowest cell of all
+/// if there is none.
+fn seeds(mesh: &SphereMesh, level: &[f64], reference: f64, min_sea_fraction: f64) -> Vec<usize> {
     let cell_count = mesh.len();
-    let mut body = vec![u32::MAX; cell_count];
+    let min_cells = min_sea_fraction * cell_count as f64;
+    let mut body = vec![false; cell_count];
     let mut queue = VecDeque::new();
-    // (size, deepest cell) of the largest body so far.
-    let mut best: Option<(usize, usize)> = None;
+    // (size, deepest cell) of every body.
+    let mut bodies: Vec<(usize, usize)> = Vec::new();
     for start in 0..cell_count {
-        if body[start] != u32::MAX || level[start] >= reference {
+        if body[start] || level[start] >= reference {
             continue;
         }
-        body[start] = start as u32;
+        body[start] = true;
         queue.push_back(start);
         let (mut size, mut deepest) = (0, start);
         while let Some(cell) = queue.pop_front() {
@@ -54,30 +65,33 @@ fn seed(mesh: &SphereMesh, level: &[f64], reference: f64) -> usize {
             }
             for &neighbor in mesh.neighbors(cell as u32) {
                 let n = neighbor as usize;
-                if body[n] == u32::MAX && level[n] < reference {
-                    body[n] = start as u32;
+                if !body[n] && level[n] < reference {
+                    body[n] = true;
                     queue.push_back(n);
                 }
             }
         }
-        if best.is_none_or(|(largest, _)| size > largest) {
-            best = Some((size, deepest));
-        }
+        bodies.push((size, deepest));
     }
-    best.map_or_else(
-        || {
+    let largest = bodies.iter().map(|&(size, _)| size).max();
+    let Some(largest) = largest else {
+        return vec![
             (0..cell_count)
                 .min_by(|&a, &b| level[a].total_cmp(&level[b]))
-                .unwrap_or(0)
-        },
-        |(_, deepest)| deepest,
-    )
+                .unwrap_or(0),
+        ];
+    };
+    bodies
+        .iter()
+        .filter(|&&(size, _)| size == largest || size as f64 >= min_cells)
+        .map(|&(_, deepest)| deepest)
+        .collect()
 }
 
 /// The pass level of every cell: the lowest possible highest `level` on a path of neighbouring
 /// cells from `seed` (Barnes et al., 2014: priority flood). [`sea_level`] floods the same way.
 #[cfg(test)]
-fn pass_levels(mesh: &SphereMesh, level: &[f64], seed: usize) -> Vec<f64> {
+fn pass_levels(mesh: &SphereMesh, level: &[f64], seeds: &[usize]) -> Vec<f64> {
     let cell_count = mesh.len();
     let mut pass = vec![f64::INFINITY; cell_count];
     let mut reached = vec![false; cell_count];
@@ -87,9 +101,11 @@ fn pass_levels(mesh: &SphereMesh, level: &[f64], seed: usize) -> Vec<f64> {
     }
     // Cells leave the queue in the order of their pass levels, so the first path to reach a
     // cell is the lowest one.
-    pass[seed] = level[seed];
-    reached[seed] = true;
-    heap.push(Reverse((Ordered(level[seed]), seed as u32)));
+    for &seed in seeds {
+        pass[seed] = level[seed];
+        reached[seed] = true;
+        heap.push(Reverse((Ordered(level[seed]), seed as u32)));
+    }
     while let Some(Reverse((Ordered(at), cell))) = heap.pop() {
         for &neighbor in mesh.neighbors(cell) {
             let n = neighbor as usize;
@@ -104,11 +120,12 @@ fn pass_levels(mesh: &SphereMesh, level: &[f64], seed: usize) -> Vec<f64> {
 }
 
 /// The ocean among cells with the given surface elevations relative to sea level (m): the cells
-/// below sea level connected to the largest body of water below sea level, also over sills on
+/// below sea level connected to the largest body of water below sea level, or to another one of
+/// at least `min_sea_fraction` of the surface (see [`MIN_SEA_FRACTION`]), also over sills on
 /// which the sea level stands (see [`SILL_TOLERANCE`]).
-pub fn ocean_mask(mesh: &SphereMesh, elevation: &[f64]) -> Vec<bool> {
-    let seed = seed(mesh, elevation, -SILL_TOLERANCE);
-    ocean_from(mesh, elevation, std::iter::once(seed))
+pub fn ocean_mask(mesh: &SphereMesh, elevation: &[f64], min_sea_fraction: f64) -> Vec<bool> {
+    let seeds = seeds(mesh, elevation, -SILL_TOLERANCE, min_sea_fraction);
+    ocean_from(mesh, elevation, seeds)
 }
 
 /// The cells below sea level (`elevation < 0`, less [`SILL_TOLERANCE`]) connected to the
@@ -162,7 +179,7 @@ pub fn sea_level(
     pores: &[f64],
     cell_area: f64,
     volume: f64,
-    reference: f64,
+    (reference, min_sea_fraction): (f64, f64),
 ) -> SeaLevel {
     if dry.is_empty() {
         return SeaLevel {
@@ -173,18 +190,23 @@ pub fn sea_level(
     // The priority flood of `pass_levels` hands out the cells in the order of their passes,
     // which is the order in which `isostasy::sea_level_for_volume_with_passes` takes them: solve
     // while flooding and stop at the level, without passes for the cells above it.
-    let seed = seed(mesh, dry, reference);
+    let seeds = seeds(mesh, dry, reference, min_sea_fraction);
     let target = volume / (cell_area * isostasy::WATER_LOADING);
+    let mut reached = vec![false; dry.len()];
+    let mut heap = BinaryHeap::new();
+    for &seed in &seeds {
+        reached[seed] = true;
+        heap.push(Reverse((Ordered(dry[seed]), seed as u32)));
+    }
     if target <= 0.0 {
+        let Some(Reverse((Ordered(lowest), _))) = heap.peek() else {
+            unreachable!("there is a seed")
+        };
         return SeaLevel {
-            level: dry[seed],
+            level: *lowest,
             deficit: 0.0,
         };
     }
-    let mut reached = vec![false; dry.len()];
-    let mut heap = BinaryHeap::new();
-    reached[seed] = true;
-    heap.push(Reverse((Ordered(dry[seed]), seed as u32)));
     let (mut count, mut prefix, mut pore_prefix) = (0usize, 0.0, 0.0);
     // The cells with a lower pass than the current one: their count and sums.
     let mut lower = (0, 0.0, 0.0);
@@ -237,14 +259,22 @@ pub fn relative_sea_level(
     elevations: &[f64],
     sediment: &[f64],
     cell_area: f64,
-    volume: f64,
+    (volume, min_sea_fraction): (f64, f64),
 ) -> f64 {
     let dry: Vec<f64> = elevations.iter().map(|&e| isostasy::to_dry(e)).collect();
     let pores: Vec<f64> = sediment
         .iter()
         .map(|&s| isostasy::sediment_pores(s))
         .collect();
-    sea_level(mesh, &dry, &pores, cell_area, volume, 0.0).level
+    sea_level(
+        mesh,
+        &dry,
+        &pores,
+        cell_area,
+        volume,
+        (-SILL_TOLERANCE, min_sea_fraction),
+    )
+    .level
 }
 
 /// A totally ordered `f64` for the priority queue.
@@ -277,15 +307,21 @@ mod tests {
     use crate::isostasy::{WATER_LOADING, to_surface};
 
     /// A mesh with a deep ocean in the southern hemisphere, a continent in the north, and a
-    /// closed depression on the continent around the north pole (dry elevations).
+    /// closed depression on the continent around the north pole (dry elevations), smaller than
+    /// [`MIN_SEA_FRACTION`] of the surface.
     fn world(depression: f64) -> (SphereMesh, Vec<f64>) {
+        world_with(depression, 0.997)
+    }
+
+    /// [`world`] with the depression where `z > cap`.
+    fn world_with(depression: f64, cap: f64) -> (SphereMesh, Vec<f64>) {
         let mesh = SphereMesh::icosphere(4);
         let dry = (0..mesh.len() as u32)
             .map(|cell| {
                 let z = mesh.vertex(cell).z;
                 if z < 0.0 {
                     -2000.0
-                } else if z > 0.95 {
+                } else if z > cap {
                     depression
                 } else {
                     500.0
@@ -312,7 +348,7 @@ mod tests {
         let southern = dry.iter().filter(|&&d| d == -2000.0).count() as f64;
         // Enough water for 1000 m over the southern hemisphere.
         let volume = southern * 1000.0 * WATER_LOADING * area;
-        let solved = sea_level(&mesh, &dry, &pores, area, volume, 0.0);
+        let solved = sea_level(&mesh, &dry, &pores, area, volume, (0.0, MIN_SEA_FRACTION));
         assert!((solved.level + 1000.0).abs() < 1e-6, "{solved:?}");
         assert_eq!(solved.deficit, 0.0);
         // At the same volume, counting all water below sea level would also fill the
@@ -321,12 +357,45 @@ mod tests {
         assert!(all.level < solved.level);
         // The mask agrees: the depression is below sea level but not ocean.
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - solved.level)).collect();
-        let ocean = ocean_mask(&mesh, &elevation);
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
         for cell in 0..dry.len() {
             assert_eq!(ocean[cell], dry[cell] == -2000.0, "{cell}");
         }
         assert!(elevation.iter().zip(&ocean).any(|(&e, &o)| e < 0.0 && !o));
         assert!((held(&dry, &ocean, solved.level, area) / volume - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn large_closed_basins_are_seas() {
+        // A basin of 2.5% of the surface: a sea connected by straits narrower than a cell.
+        let (mesh, dry) = world_with(-1800.0, 0.95);
+        let basin = dry.iter().filter(|&&d| d == -1800.0).count();
+        assert!(basin as f64 > MIN_SEA_FRACTION * dry.len() as f64);
+        let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d + 1000.0)).collect();
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
+        assert_eq!(
+            ocean.iter().filter(|&&o| o).count(),
+            dry.iter().filter(|&&d| d < 0.0).count()
+        );
+        // It holds water at the sea level.
+        let pores = vec![0.0; dry.len()];
+        let southern = dry.iter().filter(|&&d| d == -2000.0).count() as f64;
+        let volume = southern * 1000.0 * WATER_LOADING * 1e10;
+        let solved = sea_level(
+            &mesh,
+            &dry,
+            &pores,
+            1e10,
+            volume,
+            (-1000.0, MIN_SEA_FRACTION),
+        );
+        let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - solved.level)).collect();
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
+        assert!((held(&dry, &ocean, solved.level, 1e10) / volume - 1.0).abs() < 1e-9);
+        assert!(ocean.iter().zip(&dry).any(|(&o, &d)| o && d == -1800.0));
+        // Without the rule, it is a lake.
+        let ocean = ocean_mask(&mesh, &elevation, 1.0);
+        assert!(!ocean.iter().zip(&dry).any(|(&o, &d)| o && d == -1800.0));
     }
 
     #[test]
@@ -342,10 +411,10 @@ mod tests {
         let area = 1e10;
         let pores = vec![0.0; dry.len()];
         let volume = 1e17;
-        let solved = sea_level(&mesh, &dry, &pores, area, volume, 0.0);
+        let solved = sea_level(&mesh, &dry, &pores, area, volume, (0.0, MIN_SEA_FRACTION));
         assert!(solved.level > -300.0 && solved.deficit == 0.0, "{solved:?}");
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - solved.level)).collect();
-        let ocean = ocean_mask(&mesh, &elevation);
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
         for cell in 0..dry.len() {
             assert_eq!(ocean[cell], elevation[cell] < 0.0, "{cell}");
         }
@@ -372,19 +441,33 @@ mod tests {
             (southern + extra) * WATER_LOADING * area
         };
         let basin = dry.iter().filter(|&&d| d == -300.0).count() as f64 * 800.0;
-        let solved = sea_level(&mesh, &dry, &pores, area, at_rim(0.5 * basin), 0.0);
+        let solved = sea_level(
+            &mesh,
+            &dry,
+            &pores,
+            area,
+            at_rim(0.5 * basin),
+            (0.0, MIN_SEA_FRACTION),
+        );
         assert_eq!(solved.level, 500.0);
         let expected = 0.5 * basin * WATER_LOADING * area;
         assert!((solved.deficit / expected - 1.0).abs() < 1e-6, "{solved:?}");
         // The sea spills over the rim: the basin is an arm of the sea holding the deficit, the
         // rim (at sea level) is not ocean.
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - solved.level)).collect();
-        let ocean = ocean_mask(&mesh, &elevation);
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
         for (cell, &d) in dry.iter().enumerate() {
             assert_eq!(ocean[cell], d < 500.0, "{cell}");
         }
         // Once the basin is full, it is ocean.
-        let solved = sea_level(&mesh, &dry, &pores, area, at_rim(1.5 * basin), 0.0);
+        let solved = sea_level(
+            &mesh,
+            &dry,
+            &pores,
+            area,
+            at_rim(1.5 * basin),
+            (0.0, MIN_SEA_FRACTION),
+        );
         assert!(solved.level > 500.0 && solved.deficit == 0.0, "{solved:?}");
     }
 
@@ -402,9 +485,9 @@ mod tests {
             .collect();
         let pores: Vec<f64> = (0..dry.len()).map(|c| ((c * 37) % 11) as f64).collect();
         for volume in [0.0, 1e14, 1e16, 3e16, 1e17, 1e19] {
-            let solved = sea_level(&mesh, &dry, &pores, 1e10, volume, 0.0);
-            let seed = seed(&mesh, &dry, 0.0);
-            let passes = pass_levels(&mesh, &dry, seed);
+            let solved = sea_level(&mesh, &dry, &pores, 1e10, volume, (0.0, MIN_SEA_FRACTION));
+            let seeds = seeds(&mesh, &dry, 0.0, MIN_SEA_FRACTION);
+            let passes = pass_levels(&mesh, &dry, &seeds);
             let sorted =
                 isostasy::sea_level_for_volume_with_passes(&dry, &passes, &pores, 1e10, volume);
             assert!(
@@ -426,7 +509,7 @@ mod tests {
             .unwrap();
         dry[pit] = -8000.0;
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d + 1000.0)).collect();
-        let ocean = ocean_mask(&mesh, &elevation);
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
         assert!(!ocean[pit]);
         assert_eq!(
             ocean.iter().filter(|&&o| o).count(),
@@ -434,10 +517,17 @@ mod tests {
         );
         let pores = vec![0.0; dry.len()];
         let volume = 1e16;
-        let solved = sea_level(&mesh, &dry, &pores, 1e10, volume, -1000.0);
+        let solved = sea_level(
+            &mesh,
+            &dry,
+            &pores,
+            1e10,
+            volume,
+            (-1000.0, MIN_SEA_FRACTION),
+        );
         assert!(solved.level < -1000.0, "{solved:?}");
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - solved.level)).collect();
-        let ocean = ocean_mask(&mesh, &elevation);
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
         assert!(!ocean[pit]);
         assert!((held(&dry, &ocean, solved.level, 1e10) / volume - 1.0).abs() < 1e-9);
     }

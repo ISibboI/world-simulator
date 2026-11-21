@@ -263,6 +263,10 @@ pub struct TectonicParams {
     /// Volume of the water in the ocean in m³ (Earth: 1.335e18), which sets the sea level: open
     /// water plus the pore water of submerged sediment (which comes out of the ocean).
     pub ocean_volume: f64,
+    /// Bodies of water below sea level of at least this fraction of the surface are seas
+    /// connected to the ocean by straits narrower than a cell (see
+    /// [`crate::sea::MIN_SEA_FRACTION`]); smaller closed ones are lakes or dry.
+    pub min_sea_fraction: f64,
     /// Mantle flow below the plates.
     pub mantle: MantleParams,
     /// How plates are matched to cells.
@@ -338,6 +342,7 @@ impl Default for TectonicParams {
             boundary_coupling_width: 200e3,
             track_material_budget: false,
             ocean_volume: 1.335e18,
+            min_sea_fraction: crate::sea::MIN_SEA_FRACTION,
             mantle: MantleParams::default(),
             matching: MatchingParams::default(),
             events: PlateEventParams::default(),
@@ -402,6 +407,7 @@ impl TectonicParams {
             "slab_pull" => &mut self.slab_pull,
             "slab_sinking_speed" => &mut self.slab_sinking_speed,
             "ocean_volume" => &mut self.ocean_volume,
+            "min_sea_fraction" => &mut self.min_sea_fraction,
             "rift_width" => &mut self.rift_width,
             "breakup_thickness" => &mut self.breakup_thickness,
             "min_stretching_rate" => &mut self.min_stretching_rate,
@@ -1125,7 +1131,7 @@ impl Simulation {
             &pores,
             cell_area,
             self.ocean_volume(),
-            self.sea_level,
+            (self.sea_level, self.params.min_sea_fraction),
         )
         .level;
         self.sea_level - without
@@ -1180,7 +1186,16 @@ impl Simulation {
 
     /// The ocean: the cells below sea level connected to the world ocean (see [`crate::sea`]).
     pub fn ocean_mask(&self) -> Vec<bool> {
-        crate::sea::ocean_mask(&self.mesh, &self.surface_elevations())
+        crate::sea::ocean_mask(
+            &self.mesh,
+            &self.surface_elevations(),
+            self.params.min_sea_fraction,
+        )
+    }
+
+    /// See [`TectonicParams::min_sea_fraction`].
+    pub fn min_sea_fraction(&self) -> f64 {
+        self.params.min_sea_fraction
     }
 
     fn solve_sea_level_with_deficit(&self) -> crate::isostasy::SeaLevel {
@@ -1202,7 +1217,7 @@ impl Simulation {
             &pores,
             cell_area,
             self.ocean_volume(),
-            self.sea_level,
+            (self.sea_level, self.params.min_sea_fraction),
         )
     }
 

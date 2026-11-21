@@ -313,6 +313,7 @@ impl Planet {
                     plate: &plate,
                     class: &class,
                     ocean_volume: self.tectonics.ocean_volume(),
+                    min_sea_fraction: self.tectonics.min_sea_fraction(),
                 },
                 params,
                 dt_years,
@@ -400,7 +401,11 @@ impl Planet {
 
     pub fn statistics(&self) -> PlanetStatistics {
         let elevation = self.tectonics.surface_elevations();
-        let ocean = crate::sea::ocean_mask(self.tectonics.mesh(), &elevation);
+        let ocean = crate::sea::ocean_mask(
+            self.tectonics.mesh(),
+            &elevation,
+            self.tectonics.min_sea_fraction(),
+        );
         // Land includes closed depressions below sea level (dry or holding lakes).
         let land: Vec<usize> = (0..elevation.len()).filter(|&cell| !ocean[cell]).collect();
         let mean_land_precipitation = if land.is_empty() {
@@ -537,6 +542,7 @@ impl Planet {
         let wave_base = crate::erosion::wave_bases(
             tectonics.mesh(),
             elevation,
+            tectonics.min_sea_fraction(),
             self.erosion.as_ref().unwrap_or(&default),
         );
         let (cell_sediment, all_sediment) = tectonics.sediment_totals();
@@ -606,7 +612,7 @@ fn crust_class(crust: &Crust) -> CrustClass {
 /// anyway), so that they get runoff and potential evaporation instead of ocean evaporation.
 fn climate_elevations(tectonics: &Simulation) -> Vec<f64> {
     let mut elevation = tectonics.surface_elevations();
-    let ocean = crate::sea::ocean_mask(tectonics.mesh(), &elevation);
+    let ocean = crate::sea::ocean_mask(tectonics.mesh(), &elevation, tectonics.min_sea_fraction());
     for (e, ocean) in elevation.iter_mut().zip(ocean) {
         if !ocean {
             *e = e.max(0.0);

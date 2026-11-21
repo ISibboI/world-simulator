@@ -1160,7 +1160,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     let mesh = simulation.mesh();
     let cell_count = mesh.len() as u32;
     let elevation = simulation.surface_elevations();
-    let ocean = sea::ocean_mask(mesh, &elevation);
+    let ocean = sea::ocean_mask(mesh, &elevation, simulation.min_sea_fraction());
     let temperature = planet.temperature();
     // Precipitation of the solved month nearest to `month` (0 = January).
     let cycle = planet.water_cycle();

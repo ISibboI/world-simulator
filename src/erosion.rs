@@ -310,6 +310,9 @@ pub struct Surface<'a> {
     /// Volume of the ocean (m³), to solve the sea level (see
     /// [`sea::sea_level`]) as sediment fills it.
     pub ocean_volume: f64,
+    /// Bodies of water below sea level of at least this fraction of the surface are seas (see
+    /// [`sea::MIN_SEA_FRACTION`]).
+    pub min_sea_fraction: f64,
 }
 
 /// Changes caused by one erosion step, and diagnostic fields.
@@ -409,12 +412,13 @@ pub fn erode(
         plate,
         class,
         ocean_volume,
+        min_sea_fraction,
     } = *surface;
     let cell_count = mesh.len();
     let cell_area = 4.0 * std::f64::consts::PI * params.planet_radius.powi(2) / cell_count as f64;
     // The ocean: water below sea level connected to the world ocean. Closed depressions below
     // sea level are land, dry or holding lakes (#58).
-    let ocean = sea::ocean_mask(mesh, elevation);
+    let ocean = sea::ocean_mask(mesh, elevation, min_sea_fraction);
     let is_ocean = |cell: usize| ocean[cell];
 
     let Drainage {
@@ -603,8 +607,13 @@ pub fn erode(
 
     // The sea level (relative to the current one) before the step, to measure its changes;
     // zero up to rounding.
-    let initial_sea_level =
-        sea::relative_sea_level(mesh, elevation, sediment, cell_area, ocean_volume);
+    let initial_sea_level = sea::relative_sea_level(
+        mesh,
+        elevation,
+        sediment,
+        cell_area,
+        (ocean_volume, min_sea_fraction),
+    );
     let mut seabed = Seabed {
         sediment: sediment
             .iter()
@@ -753,7 +762,8 @@ pub fn erode(
     // The deposits displace water: the coastal processes below work against the sea level
     // they raised, so that delta plains are not built for a sea level that their own sediment
     // floods (all elevations are shifted; land lower than the rise becomes sea).
-    let fluvial = seabed.sea_level(mesh, cell_area, ocean_volume) - initial_sea_level;
+    let fluvial =
+        seabed.sea_level(mesh, cell_area, (ocean_volume, min_sea_fraction)) - initial_sea_level;
     seabed.shift_sea_level(fluvial);
     // The sea now also covers the land lower than its rise that it reaches.
     let risen: Vec<f64> = (0..cell_count)
@@ -852,12 +862,12 @@ pub fn erode(
         }
     }
 
-    let ocean = sea::ocean_mask(mesh, &seabed.elevation);
+    let ocean = sea::ocean_mask(mesh, &seabed.elevation, min_sea_fraction);
     diffuse_sediment(mesh, &mut seabed, &ocean, params, dt_years);
 
     let wave = if params.waves {
         wave_erosion(
-            mesh,
+            (mesh, min_sea_fraction),
             &mut seabed,
             &mut bedrock_delta,
             (bedrock_density, bedrock_isostatic_density),
@@ -870,7 +880,7 @@ pub fn erode(
     };
 
     // Relative to the shifted sea level.
-    let coastal = seabed.sea_level(mesh, cell_area, ocean_volume);
+    let coastal = seabed.sea_level(mesh, cell_area, (ocean_volume, min_sea_fraction));
     ErosionResult {
         bedrock_delta,
         sediment_delta: seabed.delta,
@@ -1160,7 +1170,7 @@ fn fill_lake(seabed: &mut Seabed, cells: &[u32], spill: f64, amount: f64) -> f64
 /// The moved sediment goes offshore through the sea, nearest cells first, to cells below their
 /// wave base with room (zone targets and caps). What finds no room within reach stays.
 fn wave_erosion(
-    mesh: &SphereMesh,
+    (mesh, min_sea_fraction): (&SphereMesh, f64),
     seabed: &mut Seabed,
     bedrock_delta: &mut [f64],
     (bedrock_density, bedrock_isostatic_density): (&[f64], &[f64]),
@@ -1173,7 +1183,7 @@ fn wave_erosion(
     let mut result = WaveErosion::default();
 
     // Waves act on the ocean only, not on lakes or dry depressions.
-    let ocean = sea::ocean_mask(mesh, &seabed.elevation);
+    let ocean = sea::ocean_mask(mesh, &seabed.elevation, min_sea_fraction);
     let wave_base = wave_bases_in(mesh, &seabed.elevation, &ocean, params);
     let wave_base = |cell: usize| wave_base[cell];
 
@@ -1303,8 +1313,18 @@ fn wave_erosion(
 /// [`ErosionParams::fetch_rings`] rings (through the sea) of open water deeper than
 /// [`ErosionParams::open_water_depth`], [`ErosionParams::sheltered_wave_base`] in the enclosed
 /// and epicontinental seas beyond.
-pub fn wave_bases(mesh: &SphereMesh, elevation: &[f64], params: &ErosionParams) -> Vec<f64> {
-    wave_bases_in(mesh, elevation, &sea::ocean_mask(mesh, elevation), params)
+pub fn wave_bases(
+    mesh: &SphereMesh,
+    elevation: &[f64],
+    min_sea_fraction: f64,
+    params: &ErosionParams,
+) -> Vec<f64> {
+    wave_bases_in(
+        mesh,
+        elevation,
+        &sea::ocean_mask(mesh, elevation, min_sea_fraction),
+        params,
+    )
 }
 
 /// [`wave_bases`] for the given ocean mask (see [`sea::ocean_mask`]); only ocean cells are
@@ -1647,14 +1667,8 @@ impl Seabed {
 
     /// The sea level relative to the one the elevations refer to (m, an offset of dry
     /// elevations).
-    fn sea_level(&self, mesh: &SphereMesh, cell_area: f64, ocean_volume: f64) -> f64 {
-        sea::relative_sea_level(
-            mesh,
-            &self.elevation,
-            &self.sediment,
-            cell_area,
-            ocean_volume,
-        )
+    fn sea_level(&self, mesh: &SphereMesh, cell_area: f64, volume: (f64, f64)) -> f64 {
+        sea::relative_sea_level(mesh, &self.elevation, &self.sediment, cell_area, volume)
     }
 
     /// Makes the elevations relative to a sea level `rise` m (dry offset) higher.
@@ -1953,6 +1967,7 @@ mod tests {
                 plate,
                 class,
                 ocean_volume: ocean_volume(mesh, elevation, sediment, params.planet_radius),
+                min_sea_fraction: sea::MIN_SEA_FRACTION,
             },
             params,
             1e6,
@@ -1981,7 +1996,13 @@ mod tests {
         let cell_area =
             4.0 * std::f64::consts::PI * params.planet_radius.powi(2) / elevation.len() as f64;
         let volume = ocean_volume(mesh, elevation, sediment, params.planet_radius);
-        let rise = sea::relative_sea_level(mesh, &new_elevation, &new_sediment, cell_area, volume);
+        let rise = sea::relative_sea_level(
+            mesh,
+            &new_elevation,
+            &new_sediment,
+            cell_area,
+            (volume, sea::MIN_SEA_FRACTION),
+        );
         let total = result.sea_level_change.fluvial + result.sea_level_change.coastal;
         assert!((rise - total).abs() < 1e-6, "{rise} vs {total}");
         new_elevation
@@ -1995,7 +2016,7 @@ mod tests {
     /// depressions below sea level.
     fn ocean_volume(mesh: &SphereMesh, elevation: &[f64], sediment: &[f64], radius: f64) -> f64 {
         let cell_area = 4.0 * std::f64::consts::PI * radius * radius / elevation.len() as f64;
-        let ocean = sea::ocean_mask(mesh, elevation);
+        let ocean = sea::ocean_mask(mesh, elevation, sea::MIN_SEA_FRACTION);
         elevation
             .iter()
             .zip(sediment)
@@ -2273,6 +2294,7 @@ mod tests {
                 plate: &vec![0; n],
                 class: &classes(elevation, -1000.0),
                 ocean_volume: ocean_volume(mesh, elevation, &sediment, params.planet_radius),
+                min_sea_fraction: sea::MIN_SEA_FRACTION,
             },
             &params,
             1e6,
@@ -2352,6 +2374,7 @@ mod tests {
                 plate: &vec![0; n],
                 class: &classes(elevation, -1000.0),
                 ocean_volume: ocean_volume(mesh, elevation, sediment, params.planet_radius),
+                min_sea_fraction: sea::MIN_SEA_FRACTION,
             },
             params,
             1e6,
@@ -2362,7 +2385,7 @@ mod tests {
     fn closed_depressions_below_sea_level_are_lakes_not_sea() {
         let mesh = SphereMesh::icosphere(4);
         let (elevation, pit) = island_with_depression(&mesh);
-        assert!(!sea::ocean_mask(&mesh, &elevation)[pit]);
+        assert!(!sea::ocean_mask(&mesh, &elevation, sea::MIN_SEA_FRACTION)[pit]);
         let sediment = vec![0.0; mesh.len()];
         let params = ErosionParams::default();
 
@@ -2416,12 +2439,15 @@ mod tests {
         // A deep depression is no open water for the wave base either.
         let mut deep = elevation.clone();
         deep[pit] = -3000.0;
-        let bases = wave_bases(&mesh, &deep, &params);
-        let ocean = sea::ocean_mask(&mesh, &deep);
+        let bases = wave_bases(&mesh, &deep, sea::MIN_SEA_FRACTION, &params);
+        let ocean = sea::ocean_mask(&mesh, &deep, sea::MIN_SEA_FRACTION);
         let mut open = deep.clone();
         open[pit] = 0.0;
         assert!(!ocean[pit]);
-        assert_eq!(bases, wave_bases(&mesh, &open, &params));
+        assert_eq!(
+            bases,
+            wave_bases(&mesh, &open, sea::MIN_SEA_FRACTION, &params)
+        );
     }
 
     #[test]
@@ -2441,7 +2467,7 @@ mod tests {
             diffuse_sediment(&mesh, &mut seabed, ocean, &params, 1e6);
             seabed.delta[pit]
         };
-        let ocean = sea::ocean_mask(&mesh, &elevation);
+        let ocean = sea::ocean_mask(&mesh, &elevation, sea::MIN_SEA_FRACTION);
         let dry = spread(&ocean);
         // As sea (the old treatment), land would be lowered at most to sea level.
         let mut as_sea = ocean.clone();
