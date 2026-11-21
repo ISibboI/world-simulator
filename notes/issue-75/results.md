@@ -31,7 +31,7 @@ its crust samples (plate frame), and the memory fades by conductive cooling.
 
 | set | code | runs |
 |---|---|---|
-| `main` | main 536cecb + only the new rift log line and counters of this branch (local commit 481b577, not pushed; no physics change) | 8 seeds × 1000 Myr; seeds 0–3 × 3000 Myr |
+| `main` | main 536cecb + only the new rift log line and counters of this branch ([`scripts/baseline-diagnostics.patch`](scripts/baseline-diagnostics.patch), commit 481b577; no physics change: its logs of seeds 0 and 3 equal a plain-main run apart from the new line and wall time) | 8 seeds × 1000 Myr; seeds 0–3 × 3000 Myr |
 | `branch` | this branch, 7a86510 | same |
 
 Default parameters, `--material-budget --cell-dump`, snapshots every 100 (250) Myr. Runs
@@ -39,7 +39,7 @@ diverge after the first changed event, so sets are compared as distributions: me
 seeds (min–max), Welch t. Scripts: [`scripts/`](scripts/) (`weak_area.py` on the cell dumps,
 `rifts.py` on the rift log line, `compare.py` from batch 4 for the guard rails).
 
-## #75: the weak area is bounded
+## #75: the orogenic weak area is bounded
 
 % of continental cells, mean of the seeds (1000 Myr: 8 seeds; later: 4 seeds):
 
@@ -66,40 +66,57 @@ seeds (min–max), Welch t. Scripts: [`scripts/`](scripts/) (`weak_area.py` on t
   rework most of the continental crust within 3 Gyr. On Earth, too, most continental crust
   outside the Archean cores has been reworked; what changes is that old belts are strong
   again.
-- Lithosphere weaker than 0.75 from all causes (thin and young lithosphere included):
-  16% of the continental cells at the start (rifted margins), ~40–45% from 500 Myr on,
-  44–54% after 2–3 Gyr (branch only; main's dump has no strength column).
+- Lithosphere weaker than 0.75 from **all** causes still grows on the branch: 16% of the
+  continental cells at the start, 40% at 500 Myr, 45% at 1000–2000 Myr, 54% at 3000 Myr
+  (branch only; main's dump has no strength column). Broken down (review): continental
+  crust thinner than ~26 km (thinning factor < 0.75) grows from 16% to 31% over 3 Gyr and
+  drives it; the orogenic factor < 0.75 stays at 14–24%, thermal < 0.75 at ~5%. The growth
+  of thinned continental crust (median thickness 30.8 → 28.9 km) is older than this branch
+  and not addressed here.
 
-## Rifts still follow belts, also after 3 Gyr
+## Rifts keep following belts over 3 Gyr
 
 Plume rifts; continental cells on the new boundaries vs in the two rifted plates, pooled over
-seeds per window. "Weak" = orogenic weakening ≥ 0.25; the ratio is the share on the
-boundaries over the share in the plates (> 1: rifts follow belts):
+seeds per window. "Weak" = orogenic weakening ≥ 0.25 (strength ≤ 0.81). The share ratio
+(share on the boundaries / share in the plates) is capped at 1/p, where p is the weak share
+of the plates, so it is not comparable when p differs much (main's p reaches 55–65%, capping
+its ratio at ~1.5–1.8). The **odds ratio** has no such cap and is the measure used here
+(both from `rifts.py`; > 1: rifts follow belts):
 
-| window | set | rifts | weak cells on boundaries / in plates | ratio | weighted ratio | ever-marked ratio | never-marked ratio |
+| window | set | rifts | weak cells on boundaries / in plates | share ratio | odds ratio | odds ratio, ever marked | never-marked share ratio |
 |---|---|---|---|---|---|---|---|
-| 0–1000 (8 seeds) | main | 221 | 49% / 25% | 1.96 | 1.94 | 1.93 | 0.67 |
-| | branch | 197 | 28% / 14% | 1.98 | 1.84 | 1.58 | 0.80 |
-| 1000–2000 (4) | main | 69 | 83% / 55% | 1.53 | 1.52 | 1.51 | 0.32 |
-| | branch | 85 | 30% / 17% | 1.73 | 1.66 | 1.17 | 0.75 |
-| 2000–3000 (4) | main | 93 | 87% / 65% | 1.34 | 1.34 | 1.31 | 0.34 |
-| | branch | 95 | 32% / 18% | 1.84 | 1.74 | 1.07 | 0.85 |
+| 0–1000 (8 seeds) | main | 221 | 49% / 25% | 1.96 | 2.88 | 2.88 | 0.67 |
+| | branch | 197 | 28% / 14% | 1.98 | 2.36 | 1.97 | 0.80 |
+| 1000–2000 (4) | main | 69 | 83% / 55% | 1.53 | 4.17 | 4.68 | 0.32 |
+| | branch | 85 | 30% / 17% | 1.73 | 2.04 | 1.57 | 0.75 |
+| 2000–3000 (4) | main | 93 | 87% / 65% | 1.34 | 3.60 | 3.85 | 0.34 |
+| | branch | 95 | 32% / 18% | 1.84 | 2.23 | 1.25 | 0.85 |
 
-Per-seed ranges are wide (branch weak-cell ratio 0.2–2.4 at 0–1000, 0.7–2.7 at 2000–3000;
-one seed with few belts drives the low end), so single windows are ±0.3.
+- **Branch:** rifts select weak belts with an odds ratio of ~2.0–2.4 in every window, with no
+  trend over 3 Gyr: they follow the *young* belts (weak cells ~30% of the boundaries,
+  ~15–18% of the plates). Healed belts are treated almost like crust never deformed
+  (ever-marked odds ratio 2.0 → 1.25).
+- **Main:** selectivity is not lower, by the odds ratio even higher (2.9–4.2) — but on main
+  83–87% of the rifted continental cells are weak after 1 Gyr: rifts there run almost
+  anywhere *except* through the last never-marked crust (never-marked share ratio 0.3).
+  The "fading contrast" claimed in #75 is, in the rift statistics, mostly the shrinking
+  share of strong crust, not lower selectivity.
+- Per seed the branch and main do not differ significantly in any window (Welch t of the
+  per-seed share ratio −0.9, −0.2, +0.6); per-seed values range widely (branch share ratio
+  0.2–2.4 at 0–1000 Myr; one seed with few belts gives the low end), and the same window
+  gives main 2.4 with 4 seeds and 2.0 with 8. A branch-vs-main comparison of rift selectivity
+  is also confounded by the stronger fresh weakening (0.25 instead of 0.5).
 
-- **Main:** the belt contrast fades, 2.0 → 1.5 → 1.3, because almost every rifted cell is
-  weak (87% of the boundary cells in 2–3 Gyr). Rifts avoid the remaining never-marked crust
-  strongly (0.3), but only because it is the last strong crust left.
-- **Branch:** the contrast holds at ~1.7–2.0 in every window: rifts follow the *young* belts
-  (weak cells are ~30% of the boundaries, ~15–18% of the plates). The ever-marked ratio
-  drops to ~1.1, i.e. healed belts are treated like crust that was never deformed.
+What the data support: on the branch the orogenic weak area stays bounded at 12–20% and the
+belts that are weak keep steering rifts with a stable selectivity over 3 Gyr; on main the
+weak area grows to two thirds of the continents, so "following belts" becomes "avoiding the
+last strong crust".
 
-## Do cratons need their own strength term? Not to keep rifts on belts
+## Do cratons need their own strength term? Not for #75
 
-Decision rule of the plan: healing suffices if the contrast stays clearly above 1 relative
-to main in the same window and the weak area is bounded. Both hold (1.84 vs 1.34 in
-2–3 Gyr; 12–20% vs 66%). **No craton term was added.**
+Decision rule of the plan: healing suffices if the weak area is bounded and rifts keep
+following belts. Both hold on the branch (bounded at 12–20%; odds ratio ~2 in every window
+up to 3 Gyr). **No craton term was added.**
 
 What healing does *not* give: original cores staying distinct from healed belts. On the
 branch, rifts through never-marked crust occur at 0.75–0.85 of its share in the plates, the
@@ -139,9 +156,11 @@ land 13.6 → 16.3% (+1.9). |t| 1.2–1.6, not significant: plates > 1% 16.5 →
 mantle. Plate speeds (4.11 vs 4.10 cm/yr), sea-floor production (6.35 vs 6.12 km²/yr),
 continental area, land, temperature, sediment budget unchanged.
 
-A slightly older sea floor is the expected direction: old belts heal, so fewer weak
-paths for breaks in later continents (plates > 1% −12%, t = −1.3). It stays plausible for an
-Earth-like planet (mean 52 Myr, median 35 Myr).
+With 69 metrics, ~3–4 at |t| ≥ 2 are expected by chance, so these are not evidence of an
+effect. If the older sea floor were real, healed belts (fewer weak paths) and the twice
+weaker fresh belts (more) would act in opposite directions; the sign flips later (−6 Myr,
+t = −1.5, at 2000–3000 Myr). Either way it stays plausible for an Earth-like planet (mean
+52 Myr, median 35 Myr).
 
 On the 3000 Myr runs (4 seeds; [`compare-long-1000-2000.md`](compare-long-1000-2000.md),
 [`compare-long-2000-3000.md`](compare-long-2000-3000.md)) the signals at |t| ≥ 2 differ in
@@ -163,7 +182,8 @@ Runtime: RUNTIME_PLACEHOLDER
 - `reheated` is mixed with the max rule (youngest contributor); it fades within 75 Myr, so
   the over-spreading cannot accumulate.
 - Grid: belts are a few 110 km cells wide; a cell's weakening is a mean over the cell.
-- 4 seeds for the long runs: windows are ±0.3 in the contrast ratios.
+- 4 seeds for the long runs: a window's ratio changes by up to ~0.5 between 4 and 8 seeds;
+  only patterns that hold in every window are claimed.
 
 ## Interaction with #69 (deformable margins, branch `agent/issue-69`)
 
@@ -171,3 +191,16 @@ The strength history sits behind `weak_zones::lithosphere_strength(crust, time)`
 `Simulation::lithosphere_strength(cell)`). #69's band deformation should call it instead of
 reading `orogenic`/`birth`. Expected conflicts on rebase: the new `Crust::reheated` field in
 struct literals and the dropped `plume_head` argument.
+
+## Review of these results ([`review-results.md`](review-results.md))
+
+Code found correct, numbers reproduced. Worked in: the rift comparison uses odds ratios and
+no longer claims that main's selectivity fades while the branch's holds; the craton decision
+rests on the bounded weak area and the stable selectivity on the branch, with the
+`SUTURE_WEAKENING` confound named (1); paired local runtime added (2); "orogenic weak area"
+instead of "weak area", thinning named as the driver of the all-causes weak area (3); the
+guard-rail sea-floor age is not interpreted as an effect (4); tests: the step test now kills
+the plume and checks that the carried resets remain and fade, the healing test checks the
+orogenic mass of a whole plate, and the max rule for `reheated` is tested in `stretch_rift`
+and `heal_gap` (5); the baseline is reproducible from
+[`scripts/baseline-diagnostics.patch`](scripts/baseline-diagnostics.patch) (6).

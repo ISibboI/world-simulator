@@ -737,12 +737,20 @@ mod tests {
         let healed = 1.0 - (1.0 - SUTURE_WEAKENING) * (-1.0f64).exp();
         assert!((lithosphere_strength(&belt, 0.0) - healed).abs() < 1e-12);
         assert!(healed > 0.7 && healed < 0.75);
-        // Mixing by mass, then healing, equals healing, then mixing.
-        let (a, b, wa, wb) = (1.0, 0.2, 3.0, 1.0);
-        let factor = (-37.0 / OROGENIC_HEALING_TIME).exp();
-        let mixed_then_healed = (wa * a + wb * b) / (wa + wb) * factor;
-        let healed_then_mixed = (wa * a * factor + wb * b * factor) / (wa + wb);
-        assert!((mixed_then_healed - healed_then_mixed).abs() < 1e-12);
+        // The decay is linear, so the orogenic mass decays exactly: the mixing by mass
+        // (which conserves it) commutes with the healing.
+        let mass = |simulation: &Simulation| -> f64 {
+            simulation.plates[0]
+                .crust
+                .iter()
+                .flatten()
+                .map(|crust| crust.thickness * crust.density * crust.orogenic)
+                .sum()
+        };
+        let before = mass(&simulation);
+        simulation.heal_orogenic_weakening(37.0);
+        let expected = before * (-37.0 / OROGENIC_HEALING_TIME).exp();
+        assert!((mass(&simulation) / expected - 1.0).abs() < 1e-12);
     }
 
     #[test]
@@ -772,8 +780,10 @@ mod tests {
 
     #[test]
     fn steps_carry_plume_heating_with_the_plate() {
-        let mut simulation =
-            Simulation::new(SphereMesh::icosphere(4), 4, TectonicParams::default(), 1);
+        let mut params = TectonicParams::default();
+        // No new plumes, so that every reset after the plume died was carried by the crust.
+        params.mantle.plume_interval = 1e12;
+        let mut simulation = Simulation::new(SphereMesh::icosphere(4), 4, params, 1);
         let position = DVec3::new(0.3, 0.2, 0.9).normalize();
         simulation.mantle.insert_plume(Plume {
             position,
@@ -788,13 +798,28 @@ mod tests {
         // The lithosphere above the plume was heated by this step's reheating.
         let above = simulation.surface_crust(simulation.mesh.nearest(position));
         assert!(above.reheated > NO_REHEATING);
-        // Samples heated in earlier steps keep their reset wherever the plate took them.
-        let heated = simulation
+        // The plume dies; the heated samples keep their reset (a field in the mantle frame
+        // would leave nothing), move with their plates and cool: none is weakened by it 80 Myr
+        // later.
+        simulation.mantle = mantle::MantleFlow::new(simulation.params.mantle.clone());
+        for _ in 0..20 {
+            simulation.step(1.0);
+        }
+        let heated: Vec<Crust> = simulation
             .plates
             .iter()
-            .flat_map(|plate| plate.crust.iter().flatten())
+            .flat_map(|plate| plate.crust.iter().flatten().copied())
             .filter(|crust| crust.reheated > NO_REHEATING)
-            .count();
-        assert!(heated >= 10, "{heated}");
+            .collect();
+        assert!(heated.len() >= 10, "{}", heated.len());
+        assert!(
+            heated
+                .iter()
+                .any(|crust| crust.strength_age(simulation.time) < FULL_STRENGTH_AGE)
+        );
+        let later = simulation.time + 80.0;
+        assert!(heated.iter().all(|crust| {
+            crust.strength_age(later) >= FULL_STRENGTH_AGE || crust.age(later) < FULL_STRENGTH_AGE
+        }));
     }
 }

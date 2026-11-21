@@ -1737,6 +1737,11 @@ mod tests {
             .as_mut()
             .unwrap()
             .mark_orogeny(-300.0);
+        // The belt sample was also heated by a plume: the new sample takes the latest reset.
+        simulation.plates[0].crust[marked as usize]
+            .as_mut()
+            .unwrap()
+            .reheat(-10.0, 25.0);
         simulation.plates[0].crust[local as usize] = None;
         let orogenic_mass = |simulation: &Simulation| -> f64 {
             simulation.plates[0]
@@ -1758,6 +1763,7 @@ mod tests {
         let crust = |vertex: u32| simulation.plates[0].crust[vertex as usize].unwrap();
         let stretched = crust(local);
         assert_eq!(stretched.orogeny, -300.0);
+        assert_eq!(stretched.reheated, -35.0);
         assert!(
             stretched.orogenic > 0.0 && stretched.orogenic < 0.5,
             "{}",
@@ -2038,6 +2044,11 @@ mod tests {
             .as_mut()
             .unwrap()
             .mark_orogeny(-300.0);
+        // The belt sample was also heated by a plume: the new sample takes the latest reset.
+        simulation.plates[0].crust[marked as usize]
+            .as_mut()
+            .unwrap()
+            .reheat(-10.0, 25.0);
         simulation.plates[0].crust[local as usize] = None;
         let orogenic_mass = |simulation: &Simulation| -> f64 {
             simulation.plates[0]
@@ -2063,6 +2074,7 @@ mod tests {
         let neighbours = simulation.mesh.neighbors(local).len() as f64;
         let filled = simulation.plates[0].crust[local as usize].unwrap();
         assert_eq!(filled.orogeny, -300.0);
+        assert_eq!(filled.reheated, -35.0);
         assert!((filled.orogenic - 1.0 / neighbours).abs() < 1e-12);
         assert_eq!(
             simulation.plates[0].crust[marked as usize]

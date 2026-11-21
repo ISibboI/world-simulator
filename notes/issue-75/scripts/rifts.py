@@ -77,6 +77,10 @@ for label, per in sets:
         r = lambda x, y: x / y if y > 0 else float('nan')
         P = pooled
         mb, mp = r(P['marked_b'], P['cont_b']), r(P['marked_p'], P['cont_p'])
+        def odds(wb, cb, wp, cp):
+            pb, pp = r(wb, cb), r(wp, cp)
+            return (pb / (1 - pb)) / (pp / (1 - pp)) if 0 < pb < 1 and 0 < pp < 1 else float('nan')
+        print(f"| pooled odds ratio (weak >= 0.25, boundary vs plates): {odds(P['weak_b'], P['cont_b'], P['weak_p'], P['cont_p']):.2f}; ever marked: {odds(P['marked_b'], P['cont_b'], P['marked_p'], P['cont_p']):.2f} |")
         print(f"| pooled over seeds: rifts {P['rifts']:.0f}, failed plume rifts {P['failed']:.0f}, boundary cells {P['cont_b']:.0f} | ever marked {100*mb:.0f}% vs {100*mp:.0f}% ({r(mb,mp):.2f}); never marked {r(1-mb,1-mp):.2f}; weakening {r(r(P['oro_b'],P['cont_b']),r(P['oro_p'],P['cont_p'])):.2f} ({100*r(P['oro_b'],P['cont_b']):.1f}% vs {100*r(P['oro_p'],P['cont_p']):.1f}%); weak>=0.25 {100*r(P['weak_b'],P['cont_b']):.0f}% vs {100*r(P['weak_p'],P['cont_p']):.0f}% ({r(r(P['weak_b'],P['cont_b']),r(P['weak_p'],P['cont_p'])):.2f}); |cos| {r(P['align'],P['aligned']):.3f} over {P['aligned']:.0f} |")
     for k, v in vals.items():
         v = [x for x in v if not math.isnan(x)]
