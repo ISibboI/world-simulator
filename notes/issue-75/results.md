@@ -169,7 +169,12 @@ sign between the windows (1000–2000: more flooded continental crust and shelf 
 branch), i.e. the supercontinent cycle of 4 seeds is out of phase, not a trend. The sea-floor
 age that was +4 Myr at 500–1000 is −6 Myr at 2000–3000.
 
-Runtime: RUNTIME_PLACEHOLDER
+Runtime: paired local runs (seeds 0–1, 1000 Myr, no cell dumps) took 861 / 588 s on main
+and 878 / 861 s on the branch. Seed 0 differs by 2%; seed 1's 46% is not a cost of the code
+(plate count and trench length are the same; local runs share the machine with other jobs at
+low priority, so wall times scatter). By construction the added work per 1 Myr step is one
+dot product per cell and live plume (~10 plumes × 41k cells) plus one multiplication per crust
+sample, well under 1% of a step (~0.6 s). The 8-seed sets on mixed machines: 594 vs 535 s.
 
 ## Caveats
 
