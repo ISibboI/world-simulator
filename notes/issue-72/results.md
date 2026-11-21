@@ -74,3 +74,27 @@ compiles them only), high-DPI desktop screens.
   terrace at its vertex's height, so on steep exaggerated flanks the pick can be one cell off.
 - egui decides between a click and a drag after 6 pt of movement; the rotation then catches
   up with the movement since the press, so it is not lost.
+
+## Follow-up: stable rows (PR #83 comment)
+
+Sebastian: the rows jumped around when moving over the planet, because some cells lack some
+values. Now:
+
+- The widget always shows the same 13 rows in the same order (`ROW_LABELS`): Position,
+  Elevation, Surface, Plate, Crust, Lithosphere age, Sediment, Orogeny, Temperature, Jan / Jul,
+  Precipitation, Permanent ice, River discharge. A value that does not apply (no orogeny, no
+  permanent ice, no river or an ocean cell, unknown) is shown as "—" with the row greyed out
+  (egui's weak text colour). Without a cell, all rows are greyed out.
+- Rows that changed their label are fixed: "Depth 4259 m" is now "Elevation -4259 m", and
+  "Ocean floor age 45 Myr" is "Lithosphere age 45 Myr (ocean floor)".
+- The widget has a fixed width, so values of other lengths do not resize it; the label column
+  is set by the longest label, which is always present.
+- The summary button of the hidden widget (phones) is padded and in a monospace font, so it
+  keeps its width.
+- Unit test: the same rows for land, ocean, sea-ice, ice-sheet and bare-land cells and for no
+  cell; constant summary length.
+
+Screenshots: [rows-before-after.png](rows-before-after.png) (desktop viewer, virtual screen:
+before/after for an ocean and a land cell; before, the widget changes height, width and
+labels), [rows-phone.png](rows-phone.png) (headless Chromium phone emulation: the summary
+button for two cells, then the open widget for two cells; constant sizes).
