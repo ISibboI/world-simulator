@@ -645,12 +645,14 @@ mod tests {
         let plate = simulation.owners[0].plate;
         for pair in simulation.polarities.pairs.values_mut() {
             pair.collision_time = 25.0;
+            pair.stall_time = 25.0;
         }
         let normal = simulation.mesh.vertex(0).any_orthonormal_vector();
         let new_plate = simulation.split_plate(plate, normal).unwrap();
         for (&(a, b), pair) in &simulation.polarities.pairs {
             if a == new_plate || b == new_plate {
                 assert_eq!(pair.collision_time, 0.0);
+                assert_eq!(pair.stall_time, 0.0);
             }
         }
     }
