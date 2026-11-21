@@ -212,11 +212,14 @@ pub struct TemperatureParams {
     /// along a latitude circle (weak temperature gradients where the Coriolis force is small;
     /// Sobel et al. 2001), and the sea surface sets the temperature of that air by convection.
     /// A plateau cannot stay tens of K colder than the air around it, however bright its own
-    /// ice. So between sea level and this elevation, the annual mean of land that is colder
-    /// than the sea surface of its latitude band is raised linearly towards it (the seasonal
-    /// cycle stays the local one). Land that is warmer keeps its own temperature: plateaus are
+    /// ice. So between [`Self::free_air_base`] and this elevation, the annual mean of land that
+    /// is colder than the sea surface of its latitude band is raised linearly towards it (the
+    /// seasonal cycle stays the local one). Land that is warmer keeps its own temperature: plateaus are
     /// elevated heat sources. Zero turns it off.
     pub free_air_height: f64,
+    /// Elevation (m) below which land keeps the temperature of its own energy balance: it lies
+    /// inside the boundary layer, which the surface below it controls.
+    pub free_air_base: f64,
     /// Latitude (degrees) up to which [`Self::free_air_height`] applies in full; it fades out
     /// over the next 15°. Beyond the tropics and subtropics the free troposphere is not uniform,
     /// and a large cold plateau makes its own climate under a surface inversion (the Antarctic
@@ -268,6 +271,7 @@ impl Default for TemperatureParams {
             land_heat_capacity: 1e7,
             lapse_rate: 0.0065,
             free_air_height: 3000.0,
+            free_air_base: 1000.0,
             free_air_latitude: 30.0,
             seasons_per_year: 24,
             substeps_per_season: 8,
@@ -311,6 +315,7 @@ impl TemperatureParams {
             "land_heat_capacity" => &mut self.land_heat_capacity,
             "lapse_rate" => &mut self.lapse_rate,
             "free_air_height" => &mut self.free_air_height,
+            "free_air_base" => &mut self.free_air_base,
             "free_air_latitude" => &mut self.free_air_latitude,
             "solar_constant" => &mut self.orbit.solar_constant,
             _ => anyhow::bail!("unknown temperature parameter {name}"),
@@ -1029,7 +1034,8 @@ impl TemperatureModel {
             .abs()
             .to_degrees();
         let tropical = ((params.free_air_latitude + 15.0 - latitude) / 15.0).clamp(0.0, 1.0);
-        let high = (elevation / params.free_air_height).clamp(0.0, 1.0);
+        let base = params.free_air_base.min(params.free_air_height - 1.0);
+        let high = ((elevation - base) / (params.free_air_height - base)).clamp(0.0, 1.0);
         high * tropical
             * self
                 .interpolate(&self.previous_free_air_excess, fine)
@@ -1316,6 +1322,16 @@ mod tests {
             assert!(free.0 >= local.0 - 1e-9, "{free:?} {local:?}");
             assert!(free.2 <= local.2 + 1e-9, "{free:?} {local:?}");
         }
+    }
+
+    #[test]
+    fn low_ground_keeps_the_temperature_of_its_own_energy_balance() {
+        // A tropical continent with a "plateau" of 900 m, inside the boundary layer: the free
+        // air changes nothing.
+        let shape = ((-25.0, 25.0), (-8.0, 8.0));
+        let local = plateau_climate(without_free_air(), shape, 900.0, false);
+        let free = plateau_climate(TemperatureParams::default(), shape, 900.0, false);
+        assert_eq!(local, free);
     }
 
     #[test]
