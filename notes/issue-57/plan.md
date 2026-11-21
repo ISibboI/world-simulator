@@ -70,6 +70,9 @@ Per call of `apply_surface_changes`:
    such cell has that kind of change. So a hidden sample takes about the change of its own
    place, not the plate's mean (a hidden lowland sample does not take mountain incision).
    Bedrock mass is turned into metres with each recipient's density.
+   (Added after the results review, F5: a hidden sample takes at most two extra cells' worth
+   of a part per step; the excess is handed on to the others, what none can take stays on the
+   duplicated samples. See results.md.)
 5. Fallback, counted: no hidden sample of that class on the plate → the residual stays on the
    duplicated samples (the old sum for them). No transfer to the other class (second look S4:
    thinning mafic crust for felsic erosion distorts the felsic budget).
