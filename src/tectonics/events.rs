@@ -91,7 +91,10 @@ pub struct PlateEventParams {
     /// converge on average slower than this (cm/yr). A collision that keeps converging stays
     /// a plate boundary (India–Asia after 50 Myr at ~4 cm/yr, Arabia–Eurasia at ~2 cm/yr); plates
     /// merge once convergence across the belt has ceased. The slowest active collision belts
-    /// that are still plate boundaries converge at ~0.2–0.5 cm/yr (Alps; PB2002).
+    /// that are still plate boundaries converge at ~0.2–0.5 cm/yr (Alps; PB2002), the lower
+    /// bound of diffuse boundaries ~0.2 cm/yr (Gordon 1998). 0.2: with the collision band and
+    /// the belt resistance of #69 a creeping belt no longer piles crust onto its edge, which
+    /// was why #68 had to suture belts creeping below 0.5 cm/yr.
     pub suture_convergence: f64,
     /// Minimum number of colliding boundary cells for a pair of plates to count as colliding.
     pub suture_min_cells: usize,
@@ -138,7 +141,7 @@ impl Default for PlateEventParams {
             initiation_slab_length: 150e3,
             initiation_displacement: 150e3,
             suture_time: 30.0,
-            suture_convergence: 0.5,
+            suture_convergence: 0.2,
             suture_min_cells: 10,
             suture_trench_ratio: 1.0,
             terrane_accretion_time: 12.0,
@@ -2913,10 +2916,10 @@ mod tests {
 
     #[test]
     fn suturing_pairs_do_not_accrete_terranes() {
-        // With the trench-ratio rule off, a stalled collision (0.3 cm/yr, below
+        // With the trench-ratio rule off, a stalled collision (0.13 cm/yr, below
         // `suture_convergence`) sutures after `suture_time` (default 30 Myr) instead of
         // accreting after the terrane accretion time.
-        let (mut simulation, _) = microcontinent_collision(0.05, 0.0005, 0.0);
+        let (mut simulation, _) = microcontinent_collision(0.05, 0.0002, 0.0);
         for _ in 0..40 {
             let boundaries = simulation.boundary_cells();
             simulation.suture_colliding_plates(1.0, &boundaries);

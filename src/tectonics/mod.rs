@@ -37,6 +37,7 @@
 
 mod boundaries;
 mod crust;
+mod deformation;
 mod dynamics;
 mod events;
 mod generation;
@@ -143,6 +144,16 @@ pub struct TectonicParams {
     /// Relative amounts of stacked crust at distances of 0, 1, 2, … cells from a continental
     /// collision.
     pub collision_profile: Vec<f64>,
+    /// Width (m) of the band of the overriding plate behind a continental collision that takes
+    /// up the shortening (see [`deformation`]): the overridden crust is distributed over it by
+    /// [`deformation::band_weight`] instead of by [`Self::collision_profile`]. Convergence
+    /// between continents is taken up over zones ~200 km (Alps) to > 1000 km (Tibet) wide;
+    /// 500 km is about half of Tibet's width behind the Himalayan front. 0 restores the profile.
+    pub collision_band_width: f64,
+    /// Factor on the resistance of a collision belt to further convergence from its excess
+    /// gravitational potential energy (see [`deformation::excess_potential_energy`]); 1 is the
+    /// physical value, 0 disables it.
+    pub belt_gpe_resistance: f64,
     /// Crust thicker than this is removed from below (delamination).
     pub max_crust_thickness: f64,
     /// Crust thicker than this flows sideways under its own weight (lower-crustal flow,
@@ -240,6 +251,10 @@ pub struct TectonicParams {
     /// local splits and terrane accretion) on continental thickness, mean land and collision
     /// stacking: 50 (~2–3e12 N/m at 1–2 cm/yr, below Tibet's ~5–8e12; mean land 0.6–0.8 km,
     /// 2–6% > 50 km, stacking 13–23 Gt/yr; 30–100 give similar land within seed scatter).
+    /// That force stood in for the potential energy of thickened belts, which
+    /// [`Self::belt_gpe_resistance`] now models explicitly; recalibrated with it (#69, PR #81):
+    /// 0 (mean land 0.80 km, 4.5% > 50 km, stacking 22 Gt/yr; 5–50 give 0.63–0.72 km), so
+    /// collisions are resisted by the belts they build, not by a viscous stand-in.
     pub collision_resistance: f64,
     /// Resistance of plate boundaries to strike-slip motion along them: each
     /// metre of boundary resists like the basal drag under this many metres times a metre.
@@ -294,6 +309,8 @@ impl Default for TectonicParams {
             arc_profile: vec![0.0, 1.0, 0.5],
             accretion_profile: vec![1.0, 0.5],
             collision_profile: vec![1.0, 0.75, 0.5, 0.25],
+            collision_band_width: 500e3,
+            belt_gpe_resistance: 1.0,
             max_crust_thickness: 75_000.0,
             crustal_flow_threshold: 40_000.0,
             crustal_flow_range: 20_000.0,
@@ -321,7 +338,7 @@ impl Default for TectonicParams {
             ridge_age: 20.0,
             basal_drag: 1e15,
             continental_drag_factor: 4.0,
-            collision_resistance: 50.0,
+            collision_resistance: 0.0,
             boundary_coupling_width: 200e3,
             track_material_budget: false,
             ocean_volume: 1.335e18,
@@ -375,6 +392,8 @@ impl TectonicParams {
             "basal_drag" => &mut self.basal_drag,
             "continental_drag_factor" => &mut self.continental_drag_factor,
             "collision_resistance" => &mut self.collision_resistance,
+            "collision_band_width" => &mut self.collision_band_width,
+            "belt_gpe_resistance" => &mut self.belt_gpe_resistance,
             "initiation_resistance" => &mut self.initiation_resistance,
             "neutral_buoyancy_age" => &mut self.neutral_buoyancy_age,
             "self_sustaining_slab_length" => &mut self.self_sustaining_slab_length,
