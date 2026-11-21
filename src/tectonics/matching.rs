@@ -318,6 +318,7 @@ mod tests {
                             c.birth.to_bits(),
                             c.sediment.to_bits(),
                             c.orogeny.to_bits(),
+                            c.orogenic.to_bits(),
                         ]
                     })
                 };
