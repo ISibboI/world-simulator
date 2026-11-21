@@ -288,10 +288,19 @@ fn run_simulation_thread(
             return ControlFlow::Break(());
         }
         let mesh = planet.tectonics().mesh();
+        let start = Instant::now();
         let vertices = viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
+        let vertices_built = start.elapsed();
+        let cells = viewer::cell_infos(planet);
+        debug!(
+            ?vertices_built,
+            cells_built = ?start.elapsed() - vertices_built,
+            "Surface update built"
+        );
         let update = SurfaceUpdate {
             time: planet.tectonics().time(),
             vertices: Arc::new(vertices),
+            cells: Arc::new(cells),
             // The triangles only with the first update of a simulation.
             faces: std::mem::take(&mut first_update).then(|| Arc::new(mesh.faces().to_vec())),
         };

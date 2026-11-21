@@ -230,8 +230,14 @@ impl ParameterPanel {
     }
 
     /// Shows the panel (or the button that shows it) and returns the simulation to start if
-    /// the user asked for a restart.
-    pub fn show(&mut self, ctx: &egui::Context, status: &SimulationStatus) -> Option<Launch> {
+    /// the user asked for a restart. The panel stays above `avoid` (the area reserved for the
+    /// cell widget in the bottom left corner) where the two could overlap, on narrow screens.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        status: &SimulationStatus,
+        avoid: Option<egui::Rect>,
+    ) -> Option<Launch> {
         let args = self.args();
         if args != self.checked {
             self.error = validate(&args).err();
@@ -255,6 +261,13 @@ impl ParameterPanel {
             return None;
         }
 
+        let max_width = (screen.width() - 4.0 * MARGIN).clamp(100.0, MAX_WIDTH);
+        let bottom = match avoid {
+            Some(avoid) if avoid.right() + MARGIN > screen.right() - MARGIN - max_width => {
+                avoid.top().min(screen.bottom())
+            }
+            _ => screen.bottom(),
+        };
         let mut open = true;
         let mut launch = None;
         egui::Window::new("Simulation parameters")
@@ -265,10 +278,10 @@ impl ParameterPanel {
             // As large as the contents, but nothing off-screen on small screens: the contents
             // scroll (the title bar and the frame come on top), and long messages wrap.
             .auto_sized()
-            .max_width((screen.width() - 4.0 * MARGIN).clamp(100.0, MAX_WIDTH))
+            .max_width(max_width)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
-                    .max_height((screen.height() - 10.0 * MARGIN).max(100.0))
+                    .max_height((bottom - screen.top() - 10.0 * MARGIN).max(100.0))
                     .show(ui, |ui| launch = self.contents(ui, status));
             });
         self.open = Some(open);
@@ -554,19 +567,19 @@ mod tests {
         };
         let mut launch = None;
         run(&ctx, egui::RawInput::default(), |ui| {
-            launch = panel.show(ui.ctx(), &status);
+            launch = panel.show(ui.ctx(), &status, None);
         });
         assert!(launch.is_none());
         assert!(panel.error.is_none());
         field(&mut panel, "plates").text = "0".to_owned();
         run(&ctx, egui::RawInput::default(), |ui| {
-            panel.show(ui.ctx(), &status);
+            panel.show(ui.ctx(), &status, None);
         });
         assert!(panel.error.as_deref().unwrap().contains("plate"));
         // Hidden, the panel keeps its values.
         panel.open = Some(false);
         run(&ctx, egui::RawInput::default(), |ui| {
-            panel.show(ui.ctx(), &status);
+            panel.show(ui.ctx(), &status, None);
         });
         assert_eq!(field(&mut panel, "plates").text, "0");
 
@@ -581,7 +594,7 @@ mod tests {
             ..Default::default()
         };
         run(&ctx, phone, |ui| {
-            panel.show(ui.ctx(), &status);
+            panel.show(ui.ctx(), &status, None);
         });
         assert_eq!(panel.open, Some(false));
     }

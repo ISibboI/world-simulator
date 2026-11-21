@@ -4,6 +4,8 @@ struct Uniforms {
     view_projection: mat4x4<f32>,
     // Direction towards the light, in world space (w unused).
     light_direction: vec4<f32>,
+    // Size of the view in physical pixels (x, y); used by outline.wgsl.
+    viewport: vec4<f32>,
 };
 
 @group(0) @binding(0)

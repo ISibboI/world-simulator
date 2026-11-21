@@ -6,7 +6,8 @@
 //! parameters are the command-line options, given as URL query parameters
 //! (`?seed=3&subdivisions=5&no-erosion&set=basal_drag=8e14`, see [`crate::query`]); the worker
 //! gets the same query string. It sends a surface update after every step as
-//! `{ time, vertices }` (the first one also with `faces`, the triangles), with the buffers
+//! `{ time, vertices, cells }` (the vertices, the attributes of the cells as
+//! [`viewer::CellInfo`]s, and with the first update also `faces`, the triangles), with the buffers
 //! transferred rather than copied, or `{ error }` if the simulation fails. A restart from the
 //! parameter panel terminates the worker and starts a new one with the new query string, which
 //! also replaces the query of the page URL, so that the setting can be shared as a link.
@@ -25,7 +26,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::planet::Planet;
 use crate::query::{args_to_query, query_to_args};
-use crate::viewer::{self, Launch, SimulationEvent, SurfaceUpdate, UiOptions, Vertex};
+use crate::viewer::{self, CellInfo, Launch, SimulationEvent, SurfaceUpdate, UiOptions, Vertex};
 use crate::{Cli, build_planet, simulate};
 
 /// Id of the canvas in `web/index.html`.
@@ -242,9 +243,10 @@ fn start_worker(
                 send(SimulationEvent::Failed(message));
                 return;
             }
-            let (Some(time), Ok(buffer)) = (
+            let (Some(time), Ok(buffer), Ok(cell_buffer)) = (
                 get(&data, "time").as_f64(),
                 get(&data, "vertices").dyn_into::<js_sys::ArrayBuffer>(),
+                get(&data, "cells").dyn_into::<js_sys::ArrayBuffer>(),
             ) else {
                 error!("Unexpected message from the simulation worker");
                 return;
@@ -261,6 +263,17 @@ fn start_worker(
             let vertex_count = floats.length() as usize / floats_per_vertex;
             let mut vertices: Vec<Vertex> = vec![bytemuck::Zeroable::zeroed(); vertex_count];
             floats.copy_to(bytemuck::cast_slice_mut(&mut vertices));
+            let cell_words = js_sys::Uint32Array::new(&cell_buffer);
+            let words_per_cell = std::mem::size_of::<CellInfo>() / std::mem::size_of::<u32>();
+            if cell_words.length() as usize != vertex_count * words_per_cell {
+                error!(
+                    words = cell_words.length(),
+                    vertex_count, "Cell attributes of the wrong size from the simulation worker"
+                );
+                return;
+            }
+            let mut cells: Vec<CellInfo> = vec![bytemuck::Zeroable::zeroed(); vertex_count];
+            cell_words.copy_to(bytemuck::cast_slice_mut(&mut cells));
             let faces = get(&data, "faces")
                 .dyn_into::<js_sys::ArrayBuffer>()
                 .ok()
@@ -279,6 +292,7 @@ fn start_worker(
             send(SimulationEvent::Surface(SurfaceUpdate {
                 time,
                 vertices: Arc::new(vertices),
+                cells: Arc::new(cells),
                 faces,
             }));
         });
@@ -320,7 +334,13 @@ fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()>
         let message = js_sys::Object::new();
         set(&message, "time", &planet.tectonics().time().into());
         set(&message, "vertices", &buffer);
-        let transfer = js_sys::Array::of1(&buffer);
+        let cells = viewer::cell_infos(planet);
+        let words: &[u32] = bytemuck::cast_slice(&cells);
+        let array = js_sys::Uint32Array::new_with_length(words.len() as u32);
+        array.copy_from(words);
+        let cell_buffer = array.buffer();
+        set(&message, "cells", &cell_buffer);
+        let transfer = js_sys::Array::of2(&buffer, &cell_buffer);
         // The triangles only with the first update.
         if std::mem::take(&mut first_update) {
             let indices: &[u32] = bytemuck::cast_slice(planet.tectonics().mesh().faces());

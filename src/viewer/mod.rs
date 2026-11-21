@@ -5,27 +5,34 @@
 //! drawn with wgpu through an egui paint callback (see [`renderer`]).
 //!
 //! The simulation runs on a separate thread (in a Web Worker on the web, see `crate::web`) and
-//! sends new surface meshes to the view through a channel. The parameter panel
-//! ([`parameters`]) restarts it with other options.
+//! sends new surface meshes to the view through a channel, each with the attributes of every
+//! cell ([`CellInfo`]). The parameter panel ([`parameters`]) restarts it with other options; the
+//! cell widget ([`cell_info`]) shows the cell under the pointer (or the tapped one), whose
+//! outline is drawn on the planet ([`picking`]).
 
+mod cell_info;
 mod parameters;
+mod picking;
 mod renderer;
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
 use eframe::egui;
-use glam::Vec3;
+use glam::{DVec3, Vec2, Vec3};
 
 use crate::Cli;
 use crate::planet::Planet;
 use crate::render;
+use crate::sphere::SphereMesh;
+pub use cell_info::{CellInfo, cell_infos};
+use cell_info::{CellInfoPanel, ShownCell};
 use parameters::{ParameterPanel, SimulationStatus};
 #[cfg(target_arch = "wasm32")]
 pub use renderer::Vertex;
 #[cfg(not(target_arch = "wasm32"))]
 use renderer::Vertex;
-use renderer::{PlanetCallback, Surface, Uniforms};
+use renderer::{LineSegment, PlanetCallback, Surface, Uniforms};
 
 /// Bits of the depth buffer requested from eframe; must match [`renderer::DEPTH_FORMAT`].
 const DEPTH_BUFFER_BITS: u8 = 32;
@@ -38,12 +45,21 @@ const FIELD_OF_VIEW: f32 = 0.6;
 const CAMERA_DISTANCE: f32 = 4.5;
 /// Camera rotation in radians per point of mouse movement.
 const ROTATION_SPEED: f32 = 0.008;
+/// Width of the outline of the shown cell in points: a light line with a dark border, visible
+/// on any terrain.
+const OUTLINE_WIDTH: f32 = 1.5;
+const OUTLINE_BORDER_WIDTH: f32 = 3.5;
+/// The outline is moved towards the camera by this fraction of the cell spacing, so that it is
+/// not hidden by the surface it lies on (also where its width reaches over a slope).
+const OUTLINE_LIFT: f64 = 0.5;
 
 /// A new state of the planet surface to display.
 pub struct SurfaceUpdate {
     /// Simulated time in Myr.
     pub time: f64,
     pub vertices: Arc<Vec<Vertex>>,
+    /// The attributes of every cell, in the order of the vertices.
+    pub cells: Arc<Vec<CellInfo>>,
     /// The triangles of the mesh: sent with the first update of a simulation, `None` after.
     pub faces: Option<Arc<Vec<[u32; 3]>>>,
 }
@@ -175,6 +191,7 @@ fn app_creator(
         Ok(Box::new(Viewer::new(
             &creation_context.egui_ctx,
             initial,
+            ui_options,
             start_simulation,
         )))
     })
@@ -234,6 +251,15 @@ struct Viewer {
     events: Receiver<SimulationEvent>,
     start_simulation: StartSimulation,
     parameters: ParameterPanel,
+    cell_panel: CellInfoPanel,
+    /// Whether the main pointer is coarse (touch): cells are tapped rather than pointed at.
+    touch: bool,
+    /// The mesh of [`Viewer::surface`] for picking, with its cells' attributes.
+    picking: Option<Picking>,
+    /// The cell selected by a click or tap, shown while no other cell is under the pointer.
+    selected: Option<u32>,
+    /// The cell under the pointer in the last frame, where the next pick starts its walk.
+    hovered: Option<u32>,
     /// Rotation of the camera around the planet's axis in radians.
     yaw: f32,
     /// Elevation angle of the camera above the equator in radians.
@@ -251,14 +277,36 @@ struct Viewer {
     surfaces: u64,
 }
 
+/// What picking needs to know about the displayed surface.
+struct Picking {
+    /// [`Surface::mesh_id`] of the mesh.
+    mesh_id: u64,
+    /// The mesh with the directions of the displayed vertices.
+    mesh: SphereMesh,
+    /// The attributes of the cells of the displayed state.
+    cells: Arc<Vec<CellInfo>>,
+    /// The largest displayed radius of a vertex.
+    max_radius: f64,
+}
+
 impl Viewer {
-    fn new(ctx: &egui::Context, initial: Launch, start_simulation: StartSimulation) -> Self {
+    fn new(
+        ctx: &egui::Context,
+        initial: Launch,
+        ui_options: UiOptions,
+        start_simulation: StartSimulation,
+    ) -> Self {
         let parameters = ParameterPanel::new(&initial.args);
         let (_, events) = std::sync::mpsc::channel();
         let mut viewer = Self {
             events,
             start_simulation,
             parameters,
+            cell_panel: CellInfoPanel::default(),
+            touch: ui_options.touch,
+            picking: None,
+            selected: None,
+            hovered: None,
             yaw: 0.0,
             pitch: 0.4,
             time: None,
@@ -302,12 +350,125 @@ impl Viewer {
             },
         };
         self.time = Some(update.time);
-        self.surface = Some(Surface {
+        let surface = Surface {
             mesh_id: self.meshes,
             faces,
             vertices_id: self.surfaces,
             vertices: update.vertices,
-        });
+        };
+        self.update_picking(&surface, update.cells);
+        self.surface = Some(surface);
+    }
+
+    /// Updates the picking data for a new surface: the mesh when it changed, the radii and
+    /// attributes always.
+    fn update_picking(&mut self, surface: &Surface, cells: Arc<Vec<CellInfo>>) {
+        let vertices = &surface.vertices;
+        if cells.len() != vertices.len() {
+            tracing::error!(
+                cells = cells.len(),
+                vertices = vertices.len(),
+                "Cell attributes of the wrong size"
+            );
+            self.picking = None;
+            return;
+        }
+        let max_radius = vertices
+            .iter()
+            .map(|vertex| f64::from(Vec3::from(vertex.position).length()))
+            .fold(1.0, f64::max);
+        match &mut self.picking {
+            Some(picking) if picking.mesh_id == surface.mesh_id => {
+                picking.cells = cells;
+                picking.max_radius = max_radius;
+            }
+            _ => {
+                let directions = vertices
+                    .iter()
+                    .map(|vertex| {
+                        Vec3::from(vertex.position)
+                            .as_dvec3()
+                            .normalize_or(DVec3::X)
+                    })
+                    .collect();
+                // 10 · 4^s + 2 vertices for s subdivisions.
+                let subdivisions = (vertices.len().saturating_sub(2) / 10).max(1).ilog2() / 2;
+                let mesh = SphereMesh::from_faces(directions, surface.faces.to_vec(), subdivisions);
+                // The selected place stays selected on the new mesh (another resolution).
+                self.selected = match (self.selected, &self.picking) {
+                    (Some(cell), Some(old)) if (cell as usize) < old.mesh.len() => {
+                        Some(mesh.nearest(old.mesh.vertex(cell)))
+                    }
+                    _ => None,
+                };
+                self.hovered = None;
+                self.picking = Some(Picking {
+                    mesh_id: surface.mesh_id,
+                    mesh,
+                    cells,
+                    max_radius,
+                });
+            }
+        }
+    }
+
+    /// The cell under a point of the view `rect` (in points), if the planet is there.
+    fn pick(
+        &self,
+        view_projection: glam::Mat4,
+        rect: egui::Rect,
+        point: egui::Pos2,
+    ) -> Option<u32> {
+        let picking = self.picking.as_ref()?;
+        let vertices = &self.surface.as_ref()?.vertices;
+        let ndc = Vec2::new(
+            (point.x - rect.left()) / rect.width().max(1.0) * 2.0 - 1.0,
+            1.0 - (point.y - rect.top()) / rect.height().max(1.0) * 2.0,
+        );
+        let ray = picking::pointer_ray(view_projection, ndc);
+        picking::pick(
+            &picking.mesh,
+            |cell| f64::from(Vec3::from(vertices[cell as usize].position).length()),
+            picking.max_radius,
+            &ray,
+            self.hovered.or(self.selected),
+        )
+    }
+
+    /// The outline of a cell as line segments for the renderer, `pixels_per_point` physical
+    /// pixels per point.
+    fn outline(&self, cell: u32, pixels_per_point: f32) -> Vec<LineSegment> {
+        let (Some(picking), Some(surface)) = (&self.picking, &self.surface) else {
+            return Vec::new();
+        };
+        let eye = self.camera_position().as_dvec3();
+        let lift = OUTLINE_LIFT * picking.mesh.mean_edge_angle();
+        let points: Vec<[f32; 3]> = picking::outline(
+            &picking.mesh,
+            |vertex| Vec3::from(surface.vertices[vertex as usize].position).as_dvec3(),
+            cell,
+        )
+        .into_iter()
+        .map(|point| {
+            (point + (eye - point).normalize_or_zero() * lift)
+                .as_vec3()
+                .to_array()
+        })
+        .collect();
+        let points = &points;
+        let segments = |width: f32, color: [f32; 4]| {
+            (0..points.len()).map(move |index| LineSegment {
+                start: points[index],
+                width: width * pixels_per_point,
+                end: points[(index + 1) % points.len()],
+                _padding: 0.0,
+                color,
+            })
+        };
+        // The dark border first, the light line over it.
+        segments(OUTLINE_BORDER_WIDTH, [0.0, 0.0, 0.0, 1.0])
+            .chain(segments(OUTLINE_WIDTH, [1.0, 1.0, 1.0, 1.0]))
+            .collect()
     }
 
     fn camera_position(&self) -> Vec3 {
@@ -319,7 +480,9 @@ impl Viewer {
         ) * CAMERA_DISTANCE
     }
 
-    fn uniforms(&self, aspect_ratio: f32) -> Uniforms {
+    /// The uniforms for a view of `viewport` physical pixels.
+    fn uniforms(&self, viewport: egui::Vec2) -> Uniforms {
+        let aspect_ratio = viewport.x / viewport.y.max(1.0);
         let eye = self.camera_position();
         let view = glam::camera::rh::view::look_at_mat4(eye, Vec3::ZERO, Vec3::Z);
         // wgpu uses normalised device coordinates with Z in [0, 1] and Y up.
@@ -337,6 +500,7 @@ impl Viewer {
         Uniforms {
             view_projection: (projection * view).to_cols_array_2d(),
             light_direction: light.extend(0.0).to_array(),
+            viewport: [viewport.x, viewport.y, 0.0, 0.0],
         }
     }
 }
@@ -358,32 +522,83 @@ impl eframe::App for Viewer {
                 )));
         }
 
+        let mut shown = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(5, 5, 15)))
             .show(ui, |ui| {
+                // Dragging rotates the planet; a click or tap (a press that does not move
+                // further than egui's click distance) selects a cell.
                 let (rect, response) =
-                    ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
-                let delta = response.drag_delta();
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                // egui starts a drag of a widget that also senses clicks only once the pointer
+                // moved further than a click may; the rotation still follows it from the press.
+                let delta = if response.drag_started() {
+                    ui.input(|input| {
+                        input
+                            .pointer
+                            .press_origin()
+                            .zip(input.pointer.interact_pos())
+                            .map(|(origin, now)| now - origin)
+                    })
+                    .unwrap_or_else(|| response.drag_delta())
+                } else {
+                    response.drag_delta()
+                };
                 self.yaw -= delta.x * ROTATION_SPEED;
                 self.pitch = (self.pitch + delta.y * ROTATION_SPEED).clamp(-1.5, 1.5);
 
-                let aspect_ratio = rect.width() / rect.height().max(1.0);
+                let pixels_per_point = ui.ctx().pixels_per_point();
+                let uniforms = self.uniforms(rect.size() * pixels_per_point);
+                let view_projection = glam::Mat4::from_cols_array_2d(&uniforms.view_projection);
+                if response.clicked()
+                    && let Some(point) = response.interact_pointer_pos()
+                {
+                    // A click beside the planet clears the selection.
+                    self.selected = self.pick(view_projection, rect, point);
+                }
+                // The cell under a hovering mouse; none while a button is down (dragging) or
+                // on touch screens after the finger is lifted (egui then has no pointer).
+                let pointing = ui.input(|input| input.pointer.any_down());
+                self.hovered = response
+                    .hover_pos()
+                    .filter(|_| !pointing)
+                    .and_then(|point| self.pick(view_projection, rect, point));
+                shown = self
+                    .hovered
+                    .map(|cell| (cell, false))
+                    .or(self.selected.map(|cell| (cell, true)));
+
+                let lines = shown
+                    .map(|(cell, _)| self.outline(cell, pixels_per_point))
+                    .unwrap_or_default();
                 ui.painter()
                     .add(eframe::egui_wgpu::Callback::new_paint_callback(
                         rect,
                         PlanetCallback {
-                            uniforms: self.uniforms(aspect_ratio),
+                            uniforms,
                             surface: self.surface.clone(),
+                            lines,
                         },
                     ));
             });
+
+        let shown = shown.and_then(|(cell, selected)| {
+            let picking = self.picking.as_ref()?;
+            Some(ShownCell {
+                cell,
+                info: picking.cells.get(cell as usize)?,
+                direction: picking.mesh.vertex(cell),
+                selected,
+            })
+        });
+        let cell_panel = self.cell_panel.show(ui.ctx(), shown, self.touch);
 
         let status = SimulationStatus {
             time: self.time,
             duration: self.duration,
             failure: self.failure.as_deref(),
         };
-        if let Some(launch) = self.parameters.show(ui.ctx(), &status) {
+        if let Some(launch) = self.parameters.show(ui.ctx(), &status, cell_panel) {
             tracing::info!(args = ?launch.args, "Restarting the simulation");
             self.parameters.set_running(launch.args.clone());
             let ctx = ui.ctx().clone();
