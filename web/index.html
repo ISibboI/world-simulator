@@ -22,12 +22,21 @@
             height: 100%;
             touch-action: none;
         }
+        /* Looks like the view's status banner (src/viewer/banner.rs), which replaces it. */
         #status {
             position: absolute;
-            top: 1em;
-            left: 1em;
-            right: 1em;
+            top: 50%;
+            left: 0;
+            right: 0;
+            transform: translateY(-50%);
+            box-sizing: border-box;
+            padding: 0.3em 1em;
+            background: rgba(255, 255, 255, 0.9);
+            color: #000;
+            font-size: 1.44rem;
+            text-align: center;
             white-space: pre-wrap;
+            overflow-wrap: anywhere;
         }
     </style>
 </head>

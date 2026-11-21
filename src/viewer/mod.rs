@@ -8,8 +8,10 @@
 //! sends new surface meshes to the view through a channel, each with the attributes of every
 //! cell ([`CellInfo`]). The parameter panel ([`parameters`]) restarts it with other options; the
 //! cell widget ([`cell_info`]) shows the cell under the pointer (or the tapped one), whose
-//! outline is drawn on the planet ([`picking`]).
+//! outline is drawn on the planet ([`picking`]). A banner ([`banner`]) shows when the
+//! simulation is starting, restarting or failed.
 
+mod banner;
 mod cell_info;
 mod parameters;
 mod picking;
@@ -270,6 +272,8 @@ struct Viewer {
     duration: f64,
     /// Why the running simulation failed, if it did.
     failure: Option<String>,
+    /// The number of simulations started: more than one after a restart.
+    runs: u32,
     /// The latest surface; the previous simulation's until the new one sends its first.
     surface: Option<Surface>,
     /// The number of meshes and surface states received, for [`Surface`]'s ids.
@@ -312,6 +316,7 @@ impl Viewer {
             time: None,
             duration: initial.cli.duration,
             failure: None,
+            runs: 0,
             surface: None,
             meshes: 0,
             surfaces: 0,
@@ -329,6 +334,9 @@ impl Viewer {
         self.time = None;
         self.duration = launch.cli.duration;
         self.failure = None;
+        self.runs += 1;
+        // Shows the banner at once, not only with the next input or event.
+        ctx.request_repaint();
         let ctx = ctx.clone();
         (self.start_simulation)(launch, sender, Box::new(move || ctx.request_repaint()));
     }
@@ -581,6 +589,13 @@ impl eframe::App for Viewer {
                         },
                     ));
             });
+
+        // Over the planet, below the parameter panel (see `banner`).
+        if let Some(text) =
+            banner::simulation_text(self.runs > 1, self.time, self.failure.as_deref())
+        {
+            banner::show(ui, &text);
+        }
 
         let shown = shown.and_then(|(cell, selected)| {
             let picking = self.picking.as_ref()?;
