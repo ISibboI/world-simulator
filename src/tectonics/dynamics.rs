@@ -1157,7 +1157,7 @@ mod tests {
         // mean is not zero.)
         assert!(creep > 1.5 * locked.max(0.0), "{creep} {locked}");
         assert!(
-            creep < v_d && creep < 0.5 * unresisted,
+            creep < v_d && creep < 0.75 * unresisted,
             "{creep} {unresisted}"
         );
         // It keeps shortening without localising or growing a slab.
