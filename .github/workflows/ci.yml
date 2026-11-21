@@ -2,6 +2,10 @@ name: Tests and Lints
 
 on:
   push:
+    # runs/* are temporary branches the agents' run scheduler pushes only so that the sweep
+    # workflow can build a commit; they don't need CI or a pages build.
+    branches-ignore: ["runs/**"]
+    tags: ["**"]
   pull_request:
 
 # Warnings are denied via CARGO_BUILD_WARNINGS=deny, which setup-rust-toolchain v2 sets by default.
