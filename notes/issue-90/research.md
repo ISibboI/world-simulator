@@ -83,9 +83,9 @@ Sources:
 3. The **timing is permissive, not deterministic**: oxygenation steps and snowball exits open
    windows; which window life uses, and when, is contingent (Knoll & Nowak 2017). Earth needed
    ~4.0 Gyr to reach it; nothing in physics fixes that number for an Earth-like planet. A model
-   without an O₂ cycle cannot predict the date honestly, so the trigger should be a planet-age
-   parameter, optionally gated by conditions the model *does* have (no snowball, enough shallow
-   shelf, see plan.md).
+   without an O₂ cycle cannot predict the date honestly, so the trigger should be a chosen
+   parameter, optionally gated by conditions the model *does* have (no snowball; see plan.md
+   §2.2 for why a run time is preferred over a planet age in this model).
 4. Snowball exits and nutrient pulses precede both the algal rise and the Cambrian. The model can
    detect a snowball (frozen fraction) but has no P cycle; a "habitable shelf with nutrient
    supply" map is the closest proxy it can produce.
@@ -262,3 +262,44 @@ All of these exist or follow directly from existing fields at the end of phase 1
 | Climate fields | monthly T and P, PET, AET, ice | PFT limits, NPP, biomes |
 | Connectivity | land masses (`statistics`), ocean basins | dispersal barriers, isolation |
 | Habitability history (optional) | time-integral of the above over phase 1 | refugia, "where early life was" maps for display |
+
+## 7. Added after the plan review
+
+Suggested by the independent reviewer ([plan-review.md](plan-review.md)); bibliographic data from
+background knowledge, **[known]**, not re-read in this task:
+
+- Le Hir et al. (2011), "The climate change caused by the land plant invasion in the Devonian",
+  *Earth and Planetary Science Letters* 310, 203–212,
+  [doi:10.1016/j.epsl.2011.08.042](https://doi.org/10.1016/j.epsl.2011.08.042): albedo, hydrology
+  and weathering effects of the first forests in a GCM coupled with a geochemical model — the
+  closest analogue to the planned coupling (stage 3).
+- Brovkin et al. (1998), "On the stability of the atmosphere–vegetation system in the
+  Sahara/Sahel region", *JGR* 103, 31613–31624,
+  [doi:10.1029/1998JD200006](https://doi.org/10.1029/1998JD200006); Claussen et al. (1999),
+  "Simulation of an abrupt change in Saharan vegetation in the mid-Holocene", *GRL* 26,
+  2037–2040, [doi:10.1029/1999GL900494](https://doi.org/10.1029/1999GL900494): multiple
+  vegetation–climate equilibria (green vs. desert states).
+- Hirota et al. (2011), "Global resilience of tropical forest and savanna to critical
+  transitions", *Science* 334, 232–235,
+  [doi:10.1126/science.1210657](https://doi.org/10.1126/science.1210657): forest/savanna
+  bistability.
+- Clark et al. (1998), "Reid's paradox of rapid plant migration", *BioScience* 48, 13–24,
+  [doi:10.2307/1313224](https://doi.org/10.2307/1313224): post-glacial tree migration of
+  100–1000 m/yr, i.e. 100–1000 km per kyr: within one Myr step any connected suitable region is
+  reachable.
+- Allen, Brown & Gillooly (2002), "Global biodiversity, biochemical kinetics, and the
+  energetic-equivalence rule", *Science* 297, 1545–1548,
+  [doi:10.1126/science.1072380](https://doi.org/10.1126/science.1072380); Saupe et al. (2019),
+  "Spatio-temporal climate change contributes to latitudinal diversity gradients", *Nature
+  Ecology & Evolution* 3, 1419–1429,
+  [doi:10.1038/s41559-019-0962-7](https://doi.org/10.1038/s41559-019-0962-7): temperature-
+  dependent diversification and the role of climate change for diversity gradients.
+
+Code facts confirmed by the review: `temperature.land_albedo` is a *planetary* (top-of-atmosphere,
+cloud-including) albedo per coarse cell (~440 km), so a surface contrast maps to about half of it
+in the model (the presets' 0.32 → 0.37 for a surface change of ~0.1); the water cycle re-solves
+only some months per step (4 solved months, one refreshed per step) and the temperature model runs
+2 years per step, so the climate responds to a land-surface change over ~1–4 steps;
+`erosion.runoff_discharge` is on by default, so Budyko ω also changes river discharge and erosion
+(the remark in `presets.rs` that discharge follows precipitation is stale); with the default
+(compensating) greenhouse forcing, the epoch hardly changes the absorbed sunlight.
