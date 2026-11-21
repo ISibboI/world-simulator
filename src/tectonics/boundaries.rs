@@ -798,15 +798,14 @@ impl Simulation {
                 std::mem::swap(&mut frontier, &mut next_frontier);
             }
 
-            // A sample shown at several cells takes part in the band once, at its nearest
-            // ring (`reached` is in ring order).
-            if band {
-                first_seen.clear();
-                for &(owner, ..) in &reached {
-                    first_seen.push(seen.insert(owner));
-                }
-                seen.clear();
+            // A sample shown at several cells takes part once, at its nearest ring (`reached`
+            // is in ring order), in a band and in a profile alike (#57): otherwise each of its
+            // cells would show the crust added at all of them.
+            first_seen.clear();
+            for &(owner, ..) in &reached {
+                first_seen.push(seen.insert(owner));
             }
+            seen.clear();
             let time = self.time;
             let crust_at = |plates: &[Plate], owner: Ownership| {
                 plates[owner.plate as usize].crust[owner.local as usize]
@@ -836,7 +835,12 @@ impl Simulation {
             let use_band = band && band_weights(&self.plates, &mut weights) > 0.0;
             if !use_band {
                 weights.clear();
-                weights.extend(reached.iter().map(|&(_, _, weight)| weight));
+                weights.extend(
+                    reached
+                        .iter()
+                        .zip(&first_seen)
+                        .map(|(&(_, _, weight), &first)| if first { weight } else { 0.0 }),
+                );
             }
             let total_weight: f64 = weights.iter().sum();
             if total_weight <= 0.0 {
@@ -2031,6 +2035,36 @@ mod tests {
         simulation.apply_additions(&[addition]);
         assert!((simulation.total_mass() - mass - added).abs() < 1e-9 * added);
         let gained = |c: u32| simulation.surface_crust(c).thickness - 35e3;
+        assert!(
+            (gained(shown_twice) / gained(other) - 1.0).abs() < 1e-9,
+            "{} vs {}",
+            gained(shown_twice),
+            gained(other)
+        );
+    }
+
+    #[test]
+    fn samples_shown_at_several_cells_take_their_profile_share_once() {
+        // Accretion spreads by a profile (no band): a sample shown at two ring-1 cells gets the
+        // share of one cell, like any other sample of its ring, and mass is conserved (#57).
+        let mut simulation = single_continent();
+        let cell = 100u32;
+        let rings = rings_from(&simulation, cell);
+        let ring_1: Vec<u32> = (0..simulation.mesh.len() as u32)
+            .filter(|&c| rings[c as usize] == 1)
+            .collect();
+        let (shown_twice, other) = (ring_1[0], ring_1[2]);
+        simulation.owners[ring_1[1] as usize] = simulation.owners[shown_twice as usize];
+        let mass = simulation.total_mass();
+        let addition = CrustAddition {
+            kind: AdditionKind::Accretion,
+            ..collision_addition(cell, 1000.0)
+        };
+        let added = addition.thickness * addition.density;
+        simulation.apply_additions(&[addition]);
+        assert!((simulation.total_mass() - mass - added).abs() < 1e-9 * added);
+        let gained = |c: u32| simulation.surface_crust(c).thickness - 35e3;
+        assert!(gained(other) > 0.0);
         assert!(
             (gained(shown_twice) / gained(other) - 1.0).abs() < 1e-9,
             "{} vs {}",
