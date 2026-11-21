@@ -199,3 +199,62 @@ and the remaining orogenic weakening (`Crust::orogenic`) are combined. The mantl
 argument `plume_head` disappears (the plume's effect is already on the crust). #69 should call
 this function rather than reading `orogenic`/`birth` itself; whichever PR lands second
 rebases (the only conflict expected is the signature and the new `Crust` field in literals).
+
+## Changes after the plan review ([`review-plan.md`](review-plan.md))
+
+1. **Amplitude from young belts (review 1).** `SUTURE_WEAKENING` becomes the strength of
+   *freshly* deformed orogenic lithosphere: **0.25** (was 0.5), from the lithosphere thickness
+   of young mobile belts / former back-arcs, 50–60 km, against 150–300 km for cratons and
+   regions with a thermotectonic age above ~300 Ma (Hyndman, Currie & Mazzotti 2005). Chosen
+   before any run. Cross-check with healing: the mean strength of belts of all Phanerozoic ages
+   (0–540 Myr, uniform) is `1 − 0.75 · (200/540)(1 − e^(−2.7))` = 0.74, against ~0.5 from the
+   lithosphere thicknesses of Artemieva & Mooney 2001. The rest of that difference is
+   compositional/secular (Phanerozoic lithospheric mantle is less depleted than Archean keels
+   and never becomes cratonic); not modelled, named in the results.
+2. **Healing time (review 13).** τ = 200 Myr stays: the first conductive mode for 250 km
+   (the thickness Hyndman et al. relax towards). Verified against Currie & Hyndman 2006 (JGR
+   111, B08404): "much of the back-arc thermal anomaly decays within 300 Myr of subduction
+   termination" and "the decay of high back-arc temperatures and establishment of a strong
+   lithosphere occur over a time scale of about 300 Myr" — with τ = 200 Myr, 78% has decayed
+   at 300 Myr. Plate-model citation corrected: Parsons & Sclater 1977 (~125 km); GDH1 (Stein
+   & Stein 1992) uses 95 km. The "~200 Myr after closure" example is the central Atlantic
+   (Alleghanian ~300 Ma, rifting ~230–200 Ma).
+3. **Permanent residual as an option (review 2).** Not added. If the contrast or the
+   distinctness of old cores fades, the decision offered to Sebastian lists both a craton
+   keel term and a permanent residual fraction of the orogenic weakening (fabric, mantle
+   scars).
+4. **Metrics for the craton question (review 3, 4).** Added: never-marked continental area
+   and area last marked > 500 Myr ago, over time (cell dumps, main and branch, to 3 Gyr); the
+   existing "ever marked" rift statistic, read as its complement (share of rift-boundary
+   continental cells in never-marked crust vs their share in the rifted plates); a threshold
+   version (`orogenic ≥ 0.25`) besides the weighted one; raw sums and the rift count in the
+   log for windows; per-seed ranges. The decision rule is relative to main's own value in the
+   same window, not a fixed 1.5.
+5. **Order in the step (review 5).** The reheating runs immediately before `plate_events`
+   (after the substeps and `crustal_flow`); the healing once per step with the step's dt.
+6. **Plume rift side effects (review 6).** New counters: plume rifts that failed (no
+   division), and the mean |cos| of the angle between the plate's velocity at the plume and
+   the new boundary within 500 km of the plume (random orientation: 2/π ≈ 0.64; alignment
+   with plate motion → 1).
+7. **Tails (review 7).** The heating's intensity follows `flux / peak_flux` (head growth and
+   the end-of-life fade of the existing plume model, no new parameter) instead of only
+   `head_growth`. The tail's centre value stays the head's (25 Myr equivalent): the generous
+   end (Von Herzen et al. 1989 argue for less). Initiations on reheated lithosphere are named
+   under risks and checked in the guard rails (initiation counts).
+8. **Head stage (review 8).** `PLUME_HEAD_STAGE` = 20 Myr; its doc notes that it equals
+   `rift_delay` and that head-heated cells keep their reset (max rule), so a later
+   `rift_delay` sees the head heating cooled by the extra time, not lost.
+9. **Two cooling laws (review 9).** Plume-heated (and, as before, stretched) lithosphere
+   recovers on the plate-model law (full at 100 Myr thermal age) because the plume and
+   stretching reset only the thermal boundary layer of the existing thermal-age model; the
+   orogenic weakening is the slower rebuilding of the whole thick lithosphere. Stated in the
+   docs.
+10. **Code places (review 10)** added: `matching.rs::assert_same_state`,
+    `topology::add_crystalline` (receiver keeps its `reheated`, documented), `stretch_rift`
+    (plume heating does not enter the stretching heat budget), healing on all `Some` samples
+    with a precomputed factor, dump header and log line.
+11. **Tests (review 11)**: cut near a plume without reheating is not weakened; an end-to-end
+    `step` test (cells above the plume and cells moved off carry `reheated`); the plume-rift
+    tests apply the reheating with plumes of age ≥ 10 Myr.
+12. **Expected bound (review 12):** ~10–15% mean remaining weakening of the continental area
+    (gross marking rate × τ).
