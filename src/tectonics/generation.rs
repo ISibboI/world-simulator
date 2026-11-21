@@ -6,6 +6,7 @@
 //! (region growing with independent random edge costs converges to rounded hexagons; see
 //! `notes/research/initial-conditions.md`).
 
+use crate::math;
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 
@@ -42,12 +43,12 @@ pub(super) fn random_unit_vector(rng: &mut impl Rng) -> DVec3 {
 fn standard_normal(rng: &mut impl Rng) -> f64 {
     let u: f64 = rng.random_range(f64::EPSILON..1.0);
     let v: f64 = rng.random_range(0.0..1.0);
-    (-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * v).cos()
+    (-2.0 * math::ln(u)).sqrt() * math::cos(std::f64::consts::TAU * v)
 }
 
 /// The angle (radians) between two unit vectors, accurate also for small angles.
 pub(super) fn angle_between(a: DVec3, b: DVec3) -> f64 {
-    a.cross(b).length().atan2(a.dot(b))
+    math::atan2(a.cross(b).length(), a.dot(b))
 }
 
 /// A float ordered by [`f64::total_cmp`], for priority queues.
@@ -239,10 +240,8 @@ pub(super) fn continents(
     let warp = Warp::new(rng, 1.2, 0.5, 4);
     let detail = GradientNoise::new(rng);
     // A supercontinent is held together by a bowl around the pole of about its own radius.
-    let supercontinent_radius = (1.0 - 2.0 * count as f64 / cell_count as f64)
-        .clamp(-1.0, 1.0)
-        .acos()
-        .max(0.1);
+    let supercontinent_radius =
+        math::acos((1.0 - 2.0 * count as f64 / cell_count as f64).clamp(-1.0, 1.0)).max(0.1);
     let field: Vec<f64> = (0..cell_count as u32)
         .map(|cell| {
             let p = warp.apply(mesh.vertex(cell));
@@ -250,7 +249,7 @@ pub(super) fn continents(
                 .iter()
                 .map(|craton| {
                     let x = angle_between(p, craton.centre) / craton.radius;
-                    (-x * x).exp()
+                    math::exp(-x * x)
                 })
                 .fold(0.0, f64::max);
             let bowl = match configuration {
@@ -328,12 +327,12 @@ pub(super) fn plate_partition(
     let cell_count = mesh.len();
     let plate_count = plate_count.min(cell_count).max(1);
     let mut targets: Vec<f64> = (0..plate_count)
-        .map(|rank| (rank as f64 + 1.0).powf(-0.9) * (0.25 * standard_normal(rng)).exp())
+        .map(|rank| math::powf(rank as f64 + 1.0, -0.9) * math::exp(0.25 * standard_normal(rng)))
         .collect();
     let total: f64 = targets.iter().sum();
     targets.iter_mut().for_each(|t| *t /= total);
     // Angular radius of a spherical cap covering `fraction` of the sphere.
-    let cap_radius = |fraction: f64| (1.0 - 2.0 * fraction.clamp(0.0, 1.0)).acos();
+    let cap_radius = |fraction: f64| math::acos(1.0 - 2.0 * fraction.clamp(0.0, 1.0));
     let warp = Warp::new(rng, 1.5, 0.35, 4);
     let warped: Vec<DVec3> = (0..cell_count as u32)
         .map(|cell| warp.apply(mesh.vertex(cell)))

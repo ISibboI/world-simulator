@@ -46,6 +46,7 @@
 //! smoothly. Surface temperatures on the fine mesh are interpolated from the land or the ocean
 //! surface, depending on the fine cell, and lowered with elevation according to the lapse rate.
 
+use crate::math;
 use std::f64::consts::{PI, TAU};
 
 use crate::sphere::SphereMesh;
@@ -90,16 +91,21 @@ impl OrbitParams {
         // Solve Kepler's equation `M = E - e sin E` with Newton's method.
         let mut eccentric_anomaly = mean_anomaly;
         for _ in 0..8 {
-            eccentric_anomaly -= (eccentric_anomaly - e * eccentric_anomaly.sin() - mean_anomaly)
-                / (1.0 - e * eccentric_anomaly.cos());
+            eccentric_anomaly -=
+                (eccentric_anomaly - e * math::sin(eccentric_anomaly) - mean_anomaly)
+                    / (1.0 - e * math::cos(eccentric_anomaly));
         }
         let true_anomaly = 2.0
-            * ((1.0 + e).sqrt() * (eccentric_anomaly / 2.0).sin())
-                .atan2((1.0 - e).sqrt() * (eccentric_anomaly / 2.0).cos());
+            * math::atan2(
+                (1.0 + e).sqrt() * math::sin(eccentric_anomaly / 2.0),
+                (1.0 - e).sqrt() * math::cos(eccentric_anomaly / 2.0),
+            );
         let solar_longitude = true_anomaly + self.perihelion_longitude.to_radians();
         OrbitalPosition {
-            declination: (self.obliquity.to_radians().sin() * solar_longitude.sin()).asin(),
-            distance: 1.0 - e * eccentric_anomaly.cos(),
+            declination: math::asin(
+                math::sin(self.obliquity.to_radians()) * math::sin(solar_longitude),
+            ),
+            distance: 1.0 - e * math::cos(eccentric_anomaly),
         }
     }
 
@@ -107,17 +113,17 @@ impl OrbitParams {
     pub fn daily_insolation(&self, latitude: f64, position: OrbitalPosition) -> f64 {
         let declination = position.declination;
         // Hour angle of sunset; 0 during polar night, π during polar day.
-        let cos_sunset = -latitude.tan() * declination.tan();
+        let cos_sunset = -math::tan(latitude) * math::tan(declination);
         let sunset = if cos_sunset >= 1.0 {
             0.0
         } else if cos_sunset <= -1.0 {
             PI
         } else {
-            cos_sunset.acos()
+            math::acos(cos_sunset)
         };
         self.solar_constant / PI / position.distance.powi(2)
-            * (sunset * latitude.sin() * declination.sin()
-                + latitude.cos() * declination.cos() * sunset.sin())
+            * (sunset * math::sin(latitude) * math::sin(declination)
+                + math::cos(latitude) * math::cos(declination) * math::sin(sunset))
     }
 }
 
@@ -420,7 +426,7 @@ impl TemperatureModel {
         );
         let coarse = SphereMesh::icosphere(params.coarse_subdivisions.min(fine.subdivisions()));
         let coarse_latitude: Vec<f64> = (0..coarse.len() as u32)
-            .map(|cell| coarse.vertex(cell).z.clamp(-1.0, 1.0).asin())
+            .map(|cell| math::asin(coarse.vertex(cell).z.clamp(-1.0, 1.0)))
             .collect();
         assert!(
             params.latitude_bands >= 2,
@@ -430,7 +436,7 @@ impl TemperatureModel {
         let band = coarse_latitude
             .iter()
             .map(|latitude| {
-                let x = (latitude.sin() + 1.0) / 2.0;
+                let x = (math::sin(*latitude) + 1.0) / 2.0;
                 ((x * params.latitude_bands as f64) as usize).min(params.latitude_bands - 1)
             })
             .collect();
@@ -449,7 +455,7 @@ impl TemperatureModel {
             let candidates =
                 std::iter::once(nearest).chain(coarse.neighbors(nearest).iter().copied());
             for (slot, candidate) in weights.iter_mut().zip(candidates) {
-                let distance = coarse.vertex(candidate).angle_between(position);
+                let distance = math::angle_between(coarse.vertex(candidate), position);
                 *slot = (candidate, (1.0 - distance / radius).max(0.0).powi(2));
             }
             let total: f64 = weights.iter().map(|(_, w)| w).sum();
@@ -576,7 +582,7 @@ impl TemperatureModel {
             .coarse_latitude
             .iter()
             .map(|latitude| {
-                let x = latitude.sin();
+                let x = math::sin(*latitude);
                 params.ocean_albedo + params.ocean_albedo_latitude * (3.0 * x * x - 1.0) / 2.0
             })
             .collect();
@@ -594,17 +600,17 @@ impl TemperatureModel {
         let ekman: Vec<f64> = (0..bands - 1)
             .map(|b| {
                 let x = -1.0 + (b + 1) as f64 * 2.0 / bands as f64;
-                let latitude = x.asin();
+                let latitude = math::asin(x);
                 let stress = crate::climate::surface_wind_stress(latitude.to_degrees(), 4.5);
                 if stress >= 0.0 || latitude.to_degrees().abs() > params.subduction_latitude {
                     return 0.0;
                 }
-                let f = 2.0 * EARTH_ROTATION * latitude.sin();
+                let f = 2.0 * EARTH_ROTATION * math::sin(latitude);
                 let mass = -stress * f / (f * f + params.equatorial_friction.powi(2));
                 let width = 2.0
                     * PI
                     * EARTH_RADIUS
-                    * latitude.cos()
+                    * math::cos(latitude)
                     * 0.5
                     * (band_ocean[b] + band_ocean[b + 1]);
                 mass * width
@@ -612,7 +618,7 @@ impl TemperatureModel {
             .collect();
         // The bands holding the subduction latitude in the south and the north.
         let subduction_band = |sign: f64| {
-            let x = (sign * params.subduction_latitude.to_radians()).sin();
+            let x = math::sin(sign * params.subduction_latitude.to_radians());
             (((x + 1.0) / 2.0 * bands as f64) as usize).min(bands - 1)
         };
         let subduction = [subduction_band(-1.0), subduction_band(1.0)];
@@ -878,7 +884,7 @@ impl TemperatureModel {
                 .collect();
             for cell in 0..coarse_count {
                 // Position among the band centres, which are equally spaced in sin(latitude).
-                let position = ((self.coarse_latitude[cell].sin() + 1.0) / 2.0 * bands as f64
+                let position = ((math::sin(self.coarse_latitude[cell]) + 1.0) / 2.0 * bands as f64
                     - 0.5)
                     .clamp(0.0, (bands - 1) as f64);
                 let lower = (position as usize).min(bands - 2);
@@ -977,7 +983,7 @@ impl TemperatureModel {
                     let x = -1.0 + (b + 1) as f64 * 2.0 / bands as f64;
                     let steps = (seasons * params.substeps_per_season) as f64;
                     (
-                        x.asin().to_degrees(),
+                        math::asin(x).to_degrees(),
                         transport_sum[b] / steps * 4.0 * PI / bands as f64,
                         ocean_transport_sum[b] / steps / (EARTH_RADIUS * EARTH_RADIUS),
                     )
@@ -998,8 +1004,8 @@ impl TemperatureModel {
             let position = (latitude.to_degrees() + 60.0) * 2.0;
             if (0.0..BINS as f64).contains(&position) {
                 let p = self.coarse.vertex(cell as u32);
-                let difference = (p.y.atan2(p.x) - longitude + PI).rem_euclid(TAU) - PI;
-                let weight = (-(difference / 30f64.to_radians()).powi(2)).exp();
+                let difference = (math::atan2(p.y, p.x) - longitude + PI).rem_euclid(TAU) - PI;
+                let weight = math::exp(-(difference / 30f64.to_radians()).powi(2));
                 sum[position as usize] += weight * value;
                 count[position as usize] += weight;
             }
@@ -1008,7 +1014,7 @@ impl TemperatureModel {
             let (mut s, mut c) = (0.0, 0.0);
             for other in bin.saturating_sub(30)..(bin + 31).min(BINS) {
                 let distance = (other as f64 - bin as f64) / 10.0;
-                let weight = (-0.5 * distance * distance).exp();
+                let weight = math::exp(-0.5 * distance * distance);
                 s += weight * sum[other];
                 c += weight * count[other];
             }
@@ -1157,8 +1163,8 @@ mod tests {
             let position = orbit.position(i as f64 / 365.0);
             for j in 0..180 {
                 let latitude = ((j as f64 + 0.5) - 90.0).to_radians();
-                sum += orbit.daily_insolation(latitude, position) * latitude.cos();
-                weight += latitude.cos();
+                sum += orbit.daily_insolation(latitude, position) * math::cos(latitude);
+                weight += math::cos(latitude);
             }
         }
         assert!((sum / weight - 1361.0 / 4.0).abs() < 2.0);
@@ -1172,8 +1178,8 @@ mod tests {
         let elevation: Vec<f64> = (0..mesh.len() as u32)
             .map(|cell| {
                 let p = mesh.vertex(cell);
-                let latitude = p.z.asin().to_degrees();
-                let longitude = p.y.atan2(p.x).to_degrees();
+                let latitude = math::asin(p.z).to_degrees();
+                let longitude = math::atan2(p.y, p.x).to_degrees();
                 if (30.0..70.0).contains(&latitude) && longitude.abs() < 60.0 {
                     300.0
                 } else {
@@ -1189,7 +1195,10 @@ mod tests {
             let cells: Vec<usize> = (0..mesh.len())
                 .filter(|&c| {
                     let p = mesh.vertex(c as u32);
-                    filter(p.z.asin().to_degrees(), p.y.atan2(p.x).to_degrees())
+                    filter(
+                        math::asin(p.z).to_degrees(),
+                        math::atan2(p.y, p.x).to_degrees(),
+                    )
                 })
                 .collect();
             cells.iter().map(|&c| field(c)).sum::<f64>() / cells.len() as f64
@@ -1244,7 +1253,10 @@ mod tests {
         let mesh = SphereMesh::icosphere(5);
         let place = |cell: u32| {
             let p = mesh.vertex(cell);
-            (p.z.asin().to_degrees(), p.y.atan2(p.x).to_degrees())
+            (
+                math::asin(p.z).to_degrees(),
+                math::atan2(p.y, p.x).to_degrees(),
+            )
         };
         let within = |range: (f64, f64), lat: f64| (range.0..range.1).contains(&lat);
         let elevation: Vec<f64> = (0..mesh.len() as u32)
@@ -1359,7 +1371,7 @@ mod tests {
             model.update(&elevation, None);
             let fields = model.fields();
             let cells: Vec<usize> = (0..mesh.len())
-                .filter(|&c| mesh.vertex(c as u32).z.abs() > 70f64.to_radians().sin())
+                .filter(|&c| mesh.vertex(c as u32).z.abs() > math::sin(70f64.to_radians()))
                 .collect();
             cells.iter().map(|&c| fields.annual_mean[c]).sum::<f64>() / cells.len() as f64
         };
@@ -1377,7 +1389,7 @@ mod tests {
         let fields = model.fields();
         let mean_where = |filter: &dyn Fn(f64) -> bool, field: &dyn Fn(usize) -> f64| {
             let cells: Vec<usize> = (0..mesh.len())
-                .filter(|&c| filter(mesh.vertex(c as u32).z.asin().to_degrees()))
+                .filter(|&c| filter(math::asin(mesh.vertex(c as u32).z).to_degrees()))
                 .collect();
             cells.iter().map(|&c| field(c)).sum::<f64>() / cells.len() as f64
         };

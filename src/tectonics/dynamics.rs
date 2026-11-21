@@ -25,6 +25,7 @@
 //! resistance only acts where the plates actually converge, which is resolved by re-solving with
 //! the converging contacts only (active set).
 
+use crate::math;
 use glam::{DMat3, DVec3};
 
 use super::*;
@@ -221,7 +222,7 @@ impl Simulation {
             entry.3 += usize::from(convergence > min_convergence);
             entry.4 += usize::from(convergence > yield_rate);
         }
-        let obliquity = params.min_trench_obliquity.to_radians().tan();
+        let obliquity = math::tan(params.min_trench_obliquity.to_radians());
         let polarity::Polarities {
             pairs, statistics, ..
         } = &mut self.polarities;
@@ -693,7 +694,7 @@ impl Simulation {
             })
             .collect();
         let params = &self.params;
-        let decay = (-dt / params.slab_decay_time).exp();
+        let decay = math::exp(-dt / params.slab_decay_time);
         let polarity::Polarities {
             pairs, statistics, ..
         } = &mut self.polarities;
@@ -705,7 +706,7 @@ impl Simulation {
                 let (sediment, squares) = std::mem::take(&mut segment.incoming);
                 if sediment > 0.0 {
                     let elapsed = self.time - segment.fill_time;
-                    let rate = 1.0 - (-elapsed.max(dt) / params.trench_fill_time).exp();
+                    let rate = 1.0 - math::exp(-elapsed.max(dt) / params.trench_fill_time);
                     segment.fill += (squares / sediment - segment.fill) * rate;
                     segment.fill_time = self.time;
                 }
@@ -803,7 +804,8 @@ impl Simulation {
                     / SECONDS_PER_MYR;
                 let excess = (crate::isostasy::MANTLE_DENSITY - crate::isostasy::WATER_DENSITY)
                     * (crust::oceanic_depth(0.0) - crust::oceanic_depth(slab_age));
-                let position = (r * offset.cos() + boundary.normal * offset.sin()).normalize();
+                let position =
+                    (r * math::cos(offset) + boundary.normal * math::sin(offset)).normalize();
                 (relative > 0.0).then_some((position, relative * boundary_length * excess))
             })
             .collect()
@@ -1296,7 +1298,7 @@ mod tests {
         let mut simulation = hemispheres(0.0, 4);
         simulation.seed_subduction((0, 1), 1, slab_length);
         let speed = 5.0 * CM_PER_YEAR;
-        let (along, across) = (angle.to_radians().cos(), angle.to_radians().sin());
+        let (along, across) = (math::cos(angle.to_radians()), math::sin(angle.to_radians()));
         // Near +y, the rotation about z moves along the equator, the one about x across it.
         simulation.plates[1].angular_velocity = DVec3::ZERO;
         simulation.plates[0].angular_velocity = (DVec3::Z * along + DVec3::X * across) * speed;
@@ -1325,7 +1327,7 @@ mod tests {
         for (angle, subducts) in [(12.0, false), (45.0, true)] {
             let mut simulation = oblique_contact(angle, 0.0);
             let segment = simulation.segment_near(DVec3::Y);
-            let measured = (segment.rate / segment.strike_rate).atan().to_degrees();
+            let measured = math::atan(segment.rate / segment.strike_rate).to_degrees();
             assert!((measured - angle).abs() < 5.0, "{angle}: {measured}");
             assert_eq!(segment.subducting, subducts, "{angle}");
             for _ in 0..5 {

@@ -17,6 +17,7 @@
 
 use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
+use crate::math;
 use crate::tectonics::TectonicParams;
 use crate::temperature::TemperatureParams;
 
@@ -161,7 +162,7 @@ impl Epoch {
     /// (−36 °C, 95% frozen).
     pub fn greenhouse_forcing(&self) -> f64 {
         match self.co2 {
-            Some(co2) => CO2_FORCING_PER_E_FOLD * co2.ln(),
+            Some(co2) => CO2_FORCING_PER_E_FOLD * math::ln(co2),
             None => (PRESENT_SOLAR_CONSTANT - self.solar_constant()) * (1.0 - BOND_ALBEDO) / 4.0,
         }
     }
@@ -327,7 +328,7 @@ mod tests {
             Biosphere::Abiotic,
             Epoch::new(3.5, Some(10.0)).unwrap(),
         );
-        assert!((parameters.temperature.greenhouse_forcing - 5.35 * 10f64.ln()).abs() < 1e-12);
+        assert!((parameters.temperature.greenhouse_forcing - 5.35 * math::ln(10f64)).abs() < 1e-12);
         parameters.set("climate.budyko_omega", 2.0).unwrap();
         parameters.set("temperature.land_albedo", 0.3).unwrap();
         parameters
@@ -360,8 +361,8 @@ mod tests {
         let elevation: Vec<f64> = (0..mesh.len() as u32)
             .map(|cell| {
                 let p = mesh.vertex(cell);
-                let latitude = p.z.asin().to_degrees();
-                let longitude = p.y.atan2(p.x).to_degrees();
+                let latitude = math::asin(p.z).to_degrees();
+                let longitude = math::atan2(p.y, p.x).to_degrees();
                 if (-30.0..50.0).contains(&latitude) && longitude.abs() < 60.0 {
                     300.0
                 } else {
@@ -377,7 +378,7 @@ mod tests {
         let count = mesh.len() as f64;
         let global = fields.annual_mean.iter().sum::<f64>() / count;
         let polar: Vec<f64> = (0..mesh.len())
-            .filter(|&c| mesh.vertex(c as u32).z.abs() > 60f64.to_radians().sin())
+            .filter(|&c| mesh.vertex(c as u32).z.abs() > math::sin(60f64.to_radians()))
             .map(|c| fields.annual_mean[c])
             .collect();
         let polar = polar.iter().sum::<f64>() / polar.len() as f64;

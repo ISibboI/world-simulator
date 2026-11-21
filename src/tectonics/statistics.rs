@@ -1,5 +1,6 @@
 //! Aggregate statistics of the tectonic state.
 
+use crate::math;
 use crate::sphere::SphereMesh;
 
 use super::*;
@@ -310,7 +311,8 @@ impl Simulation {
             .filter(|&&area| area > 0)
             .map(|&area| {
                 let fraction = area as f64 / cell_count as f64;
-                2.0 * std::f64::consts::PI * (1.0 - 2.0 * fraction).clamp(-1.0, 1.0).acos().sin()
+                2.0 * std::f64::consts::PI
+                    * math::sin(math::acos((1.0 - 2.0 * fraction).clamp(-1.0, 1.0)))
             })
             .sum();
         boundary / circles.max(1e-9)

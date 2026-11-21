@@ -13,12 +13,16 @@ use eframe::egui;
 use super::Launch;
 use crate::Cli;
 
-/// Options the panel does not show: the 3D view is never headless, and on the web there are no
-/// files either.
+/// Whether the panel hides an option: the 3D view is never headless, and on the web there are no
+/// files either, and `web-math` is always on there.
 #[cfg(not(target_arch = "wasm32"))]
-const HIDDEN: &[&str] = &["headless"];
+fn hidden(name: &str) -> bool {
+    name == "headless"
+}
 #[cfg(target_arch = "wasm32")]
-const HIDDEN: &[&str] = crate::query::WEB_UNAVAILABLE;
+fn hidden(name: &str) -> bool {
+    crate::query::WEB_UNAVAILABLE.contains(&name) || crate::query::WEB_IMPLIED.contains(&name)
+}
 
 /// The options shown at the top of the panel, in this order; all others follow in the order of
 /// the definition under "More options".
@@ -136,7 +140,7 @@ impl ParameterPanel {
             .get_arguments()
             .filter_map(|arg| {
                 let name = arg.get_long()?;
-                if HIDDEN.contains(&name) {
+                if hidden(name) {
                     return None;
                 }
                 let kind = match arg.get_action() {
@@ -442,7 +446,7 @@ mod tests {
         let names: Vec<&str> = panel.fields.iter().map(|f| f.name.as_str()).collect();
         for arg in Cli::command().get_arguments() {
             let name = arg.get_long().unwrap();
-            assert_eq!(names.contains(&name), !HIDDEN.contains(&name), "{name}");
+            assert_eq!(names.contains(&name), !hidden(name), "{name}");
         }
         for name in MAIN {
             assert!(names.contains(name), "{name}");

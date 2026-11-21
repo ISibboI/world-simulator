@@ -8,6 +8,8 @@
 //! To handle columns that cross sea level, elevations are converted to *dry* elevations (the
 //! elevation the column would have without water loading), where contributions simply add up.
 
+use crate::math;
+
 /// Density of the upper mantle in kg/m³.
 pub const MANTLE_DENSITY: f64 = 3300.0;
 /// Density of sea water in kg/m³.
@@ -81,7 +83,7 @@ fn sediment_grains(sediment: f64) -> f64 {
 
 /// Grain thickness of a compacted column of bulk thickness `bulk` (Athy's law integrated).
 fn grains_in_bulk(bulk: f64) -> f64 {
-    bulk - SURFACE_POROSITY * COMPACTION_LENGTH * (1.0 - (-bulk / COMPACTION_LENGTH).exp())
+    bulk - SURFACE_POROSITY * COMPACTION_LENGTH * (1.0 - math::exp(-bulk / COMPACTION_LENGTH))
 }
 
 /// Exact bulk thickness of a compacted column with `grains` m of grains (Newton).
@@ -93,7 +95,7 @@ fn bulk_for_grains(grains: f64) -> f64 {
     // iteration decreases monotonically.
     let mut bulk = grains + SURFACE_POROSITY * COMPACTION_LENGTH;
     for _ in 0..100 {
-        let slope = 1.0 - SURFACE_POROSITY * (-bulk / COMPACTION_LENGTH).exp();
+        let slope = 1.0 - SURFACE_POROSITY * math::exp(-bulk / COMPACTION_LENGTH);
         let step = (grains_in_bulk(bulk) - grains) / slope;
         bulk -= step;
         if step < 1e-12 * (1.0 + bulk) {

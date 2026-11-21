@@ -8,8 +8,13 @@
 //! sends new surface meshes to the view through a channel, each with the attributes of every
 //! cell ([`CellInfo`]). The parameter panel ([`parameters`]) restarts it with other options; the
 //! cell widget ([`cell_info`]) shows the cell under the pointer (or the tapped one), whose
-//! outline is drawn on the planet ([`picking`]). A banner ([`banner`]) shows when the
-//! simulation is starting, restarting or failed.
+//! outline is drawn on the planet ([`picking`]). A banner ([`banner`]) shows what the
+//! simulation is doing until its first update (starting, generating the planet), or that it
+//! failed.
+
+// The view only shows the simulation and never changes it, so it may use the platform's math
+// functions directly instead of `crate::math` (see `clippy.toml`).
+#![allow(clippy::disallowed_methods)]
 
 mod banner;
 mod cell_info;

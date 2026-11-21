@@ -5,6 +5,7 @@ use crate::isostasy::{
     self, CONTINENTAL_DENSITY, MANTLE_DENSITY, OCEANIC_DENSITY, SEDIMENT_ROCK_DENSITY,
     WATER_LOADING,
 };
+use crate::math;
 
 /// Oceanic crust is thinner than this (m); thicker crust is transitional or continental.
 const MAX_OCEANIC_THICKNESS: f64 = 12_000.0;
@@ -427,10 +428,10 @@ pub(super) fn age_for_thermal_fraction(fraction: f64) -> Option<f64> {
     let ridge = OLD_OCEAN_DEPTH - 2600.0;
     let anomaly = fraction.min(1.0) * ridge;
     // The branches meet at 20 Myr, where the anomaly is 2473 e^(−0.0278 · 20).
-    if anomaly >= 2473.0 * (-0.0278f64 * 20.0).exp() {
+    if anomaly >= 2473.0 * math::exp(-0.0278f64 * 20.0) {
         Some(((ridge - anomaly) / 365.0).powi(2))
     } else if anomaly > 1e-3 {
-        Some(-(anomaly / 2473.0).ln() / 0.0278)
+        Some(-math::ln(anomaly / 2473.0) / 0.0278)
     } else {
         None
     }
@@ -444,7 +445,7 @@ pub fn oceanic_depth(age: f64) -> f64 {
     if age < 20.0 {
         -(2600.0 + 365.0 * age.sqrt())
     } else {
-        -(OLD_OCEAN_DEPTH - 2473.0 * (-0.0278 * age).exp())
+        -(OLD_OCEAN_DEPTH - 2473.0 * math::exp(-0.0278 * age))
     }
 }
 

@@ -1,5 +1,6 @@
 //! Equirectangular renderings of the simulation state.
 
+use crate::math;
 use glam::DVec3;
 use image::{Rgb, RgbImage};
 
@@ -20,9 +21,9 @@ fn render(simulation: &Simulation, width: u32, color: impl Fn(u32) -> Rgb<u8>) -
         for x in 0..width {
             let longitude = ((f64::from(x) + 0.5) / f64::from(width) - 0.5) * std::f64::consts::TAU;
             let position = DVec3::new(
-                latitude.cos() * longitude.cos(),
-                latitude.cos() * longitude.sin(),
-                latitude.sin(),
+                math::cos(latitude) * math::cos(longitude),
+                math::cos(latitude) * math::sin(longitude),
+                math::sin(latitude),
             );
             cell = mesh.nearest_from(position, cell);
             if x == 0 {
