@@ -292,6 +292,10 @@ normals and the segment bookkeeping exist already.
    oblique ridges turn into orthogonal segments with offsets of ≥ 2 cells. Ceiling: about +6
    points of oceanic transform (6% → 12%) at this resolution; it does nothing for the continental
    deficit. Moderate effort in `boundaries.rs`, one projection per filled cell.
+   Ranked last because the other items address larger implausibilities, item 1 alone converts
+   more length (up to ~18 thousand km of oblique trench) than this can add, and it is the most
+   complex change (fill rule plus stable segmentation over time). It gains weight on a finer grid,
+   which resolves Earth's short offsets.
 
 Not recommended: a coarser grid changes nothing, and a finer one (4× cost per level) could show
 more short transforms but not fix 1–4; tuning speeds or ridge push keeps the partitioning (#32).
