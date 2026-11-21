@@ -286,16 +286,18 @@ normals and the segment bookkeeping exist already.
 4. **Plate driving of slab-free plates** (continental drag, return flow), the candidate PR #63 left
    open. It sets the speed of the slow boundaries; test it after 1–2, which remove most of the
    extra slabs that make every plate fast.
-5. **Ridges that orient themselves** (lower priority). In the gap fill, assign a new cell to the
-   plate on whose side of the local spreading axis it lies (perpendicular to the relative
-   velocity, per segment of a few cells) instead of to whichever plate reaches it first, so that
-   oblique ridges turn into orthogonal segments with offsets of ≥ 2 cells. Ceiling: about +6
-   points of oceanic transform (6% → 12%) at this resolution; it does nothing for the continental
-   deficit. Moderate effort in `boundaries.rs`, one projection per filled cell.
-   Ranked last because the other items address larger implausibilities, item 1 alone converts
-   more length (up to ~18 thousand km of oblique trench) than this can add, and it is the most
-   complex change (fill rule plus stable segmentation over time). It gains weight on a finer grid,
-   which resolves Earth's short offsets.
+
+**Out of scope at this resolution: ridges that orient themselves** (decided on #43). In the gap fill, assign a new cell to the
+plate on whose side of the local spreading axis it lies (perpendicular to the relative
+velocity, per segment of a few cells) instead of to whichever plate reaches it first, so that
+oblique ridges turn into orthogonal segments with offsets of ≥ 2 cells. Ceiling: about +6
+points of oceanic transform (6% → 12%) at this resolution; it does nothing for the continental
+deficit. Moderate effort in `boundaries.rs`, one projection per filled cell.
+It was first ranked last because the other items address larger implausibilities, item 1 alone converts
+more length (up to ~18 thousand km of oblique trench) than this can add, and it is the most
+complex change (fill rule plus stable segmentation over time). It gains weight on a finer grid,
+which resolves Earth's short offsets.
+At ~110 km cells most real ridge offsets are sub-grid; only the few offsets of several hundred km (Romanche, Eltanin, Charlie-Gibbs) span cells, worth a few points of transform at most. Revisit if the grid gets finer, or once items 1–4 are done.
 
 Not recommended: a coarser grid changes nothing, and a finer one (4× cost per level) could show
 more short transforms but not fix 1–4; tuning speeds or ridge push keeps the partitioning (#32).
