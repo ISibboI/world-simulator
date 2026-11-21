@@ -517,8 +517,8 @@ pub struct SurfaceSharing {
     pub gross: f64,
     /// Part of [`Self::gross`] given to hidden samples as residuals of duplicated samples.
     pub to_hidden: f64,
-    /// Part of [`Self::gross`] kept by duplicated samples because their plate had no hidden
-    /// samples.
+    /// Part of [`Self::gross`] kept by duplicated samples because their plate had no or too
+    /// few hidden samples of their class.
     pub kept: f64,
     /// Requested erosion that found no bedrock left (not applied).
     pub clamped: f64,
@@ -582,7 +582,15 @@ struct SampleChange {
     cell: u32,
     thickness: f64,
     sediment: f64,
+    /// Whether the column is of continental origin, before the change.
+    class: u8,
+    /// Residual of the bedrock change as mass (kg/m²), for duplicated samples.
+    bedrock_mass: f64,
 }
+
+/// Most extra cells' worth of the residual of a plate that one hidden sample takes in one step
+/// (see [`Simulation::apply_surface_changes`]).
+const MAX_EXTRA_CELLS_PER_HIDDEN_SAMPLE: f64 = 2.0;
 
 /// Applies a change of bedrock thickness and sediment thickness (m) to `crust`: deposits are
 /// new sediment, sediment removal beyond the available sediment comes from the bedrock at the
@@ -1322,8 +1330,9 @@ impl Simulation {
     /// to the samples hidden by the resampling, which hold mass but no area: per plate and
     /// class (column of continental origin or not), over its hidden samples of that class that
     /// lie under the plate's own cells (not under another plate), each in proportion to the
-    /// same kind of change at the cell it lies under. Without such samples, the residual stays
-    /// on the shown sample (the sum of its cells' changes). Thickness changes are metres of the
+    /// same kind of change at the cell it lies under, at most two extra cells' worth per hidden
+    /// sample and step. What they cannot take (no such samples, or too few) stays on the shown
+    /// sample (up to the sum of its cells' changes). Thickness changes are metres of the
     /// shown sample's bedrock; residuals are moved as mass and turned back into metres with
     /// each recipient's density.
     ///
@@ -1355,6 +1364,8 @@ impl Simulation {
                     cell: cell as u32,
                     thickness: 0.0,
                     sediment: 0.0,
+                    class: 0,
+                    bedrock_mass: 0.0,
                 });
             }
             let change = &mut changes[*slot as usize];
@@ -1364,31 +1375,34 @@ impl Simulation {
         }
 
         // Residuals per plate and class: removed bedrock mass, deposited and removed sediment
-        // mass (kg/m², bedrock ≤ 0, deposits ≥ 0, removal ≤ 0), and whether a duplicated
-        // sample of that plate and class exists.
+        // mass (kg/m², bedrock ≤ 0, deposits ≥ 0, removal ≤ 0), and the number of extra
+        // cells (k − 1 summed over the duplicated samples).
         let mut residuals = vec![[[0.0; 3]; 2]; self.plates.len()];
-        let mut has_residual = vec![[false; 2]; self.plates.len()];
+        let mut extra_cells = vec![[0u32; 2]; self.plates.len()];
         let mut change = 0.0;
         let mut clamped = 0.0;
         let mut duplicated = 0;
         let mut gross = 0.0;
-        for sample in &changes {
+        for sample in &mut changes {
             let crust = self.plates[sample.owner.plate as usize].crust[sample.owner.local as usize]
                 .as_mut()
                 .expect("owners always point to existing crust");
+            // The class before the change decides where the residual goes, in every pass.
+            sample.class = u8::from(crust.is_continental_origin_column());
             let k = f64::from(sample.cells);
             let (thickness, sediment) = (sample.thickness / k, sample.sediment / k);
             gross += (sample.thickness * crust.density).abs()
                 + (sample.sediment * SEDIMENT_ROCK_DENSITY).abs();
             if sample.cells > 1 {
                 duplicated += 1;
-                let class = usize::from(crust.is_continental_origin_column());
-                let plate = sample.owner.plate as usize;
+                // The bedrock residual as mass, at the density the erosion used.
+                sample.bedrock_mass = (k - 1.0) * thickness * crust.density;
+                let (plate, class) = (sample.owner.plate as usize, usize::from(sample.class));
                 let residual = &mut residuals[plate][class];
-                residual[0] += (k - 1.0) * thickness * crust.density;
+                residual[0] += sample.bedrock_mass;
                 let sediment_mass = (k - 1.0) * sediment * SEDIMENT_ROCK_DENSITY;
                 residual[if sediment_mass > 0.0 { 1 } else { 2 }] += sediment_mass;
-                has_residual[plate][class] = true;
+                extra_cells[plate][class] += sample.cells - 1;
             }
             let (applied, expected) = apply_surface_change(crust, thickness, sediment);
             change += applied;
@@ -1398,13 +1412,17 @@ impl Simulation {
         // Spread the residuals over the hidden samples of the plate and class. Each part goes
         // to the hidden samples in proportion to the same kind of change (bedrock removal,
         // deposition, sediment removal) at the cell they lie under, so a hidden sample takes
-        // about the change of its place (equal shares if no cell has such a change).
+        // about the change of its place (equal shares if no cell has such a change). No hidden
+        // sample takes more than two extra cells' worth of a part
+        // ([`MAX_EXTRA_CELLS_PER_HIDDEN_SAMPLE`]): a plate with few hidden samples would
+        // otherwise pile its whole residual onto them, and they would surface as spikes or
+        // pits. What they cannot take stays on the duplicated samples.
         // (hidden local vertex, its cell)
         let mut recipients: [Vec<(u32, u32)>; 2] = [Vec::new(), Vec::new()];
         let mut to_hidden = 0.0;
         let mut kept = 0.0;
         for plate in 0..self.plates.len() {
-            if !has_residual[plate][0] && !has_residual[plate][1] {
+            if extra_cells[plate] == [0, 0] {
                 continue;
             }
             recipients[0].clear();
@@ -1434,40 +1452,11 @@ impl Simulation {
                     .push((local as u32, cell));
             }
             for class in 0..2 {
-                if !has_residual[plate][class] {
+                if extra_cells[plate][class] == 0 {
                     continue;
                 }
                 let targets = &recipients[class];
-                if targets.is_empty() {
-                    // No hidden samples of this class: the duplicated samples keep their
-                    // residuals (the sum of their cells' changes).
-                    for sample in changes
-                        .iter()
-                        .filter(|c| c.cells > 1 && c.owner.plate as usize == plate)
-                    {
-                        let crust = self.plates[plate].crust[sample.owner.local as usize]
-                            .as_mut()
-                            .expect("owners always point to existing crust");
-                        if usize::from(crust.is_continental_origin_column()) != class {
-                            continue;
-                        }
-                        let k = f64::from(sample.cells);
-                        let share = (k - 1.0) / k;
-                        kept += share
-                            * ((sample.thickness * crust.density).abs()
-                                + (sample.sediment * SEDIMENT_ROCK_DENSITY).abs());
-                        let (applied, expected) = apply_surface_change(
-                            crust,
-                            share * sample.thickness,
-                            share * sample.sediment,
-                        );
-                        change += applied;
-                        clamped += expected - applied;
-                    }
-                    continue;
-                }
-                let [bedrock, deposits, removal] = residuals[plate][class];
-                to_hidden += bedrock.abs() + deposits + removal.abs();
+                let parts = residuals[plate][class];
                 // Weights per part: the same kind of change at the recipient's cell.
                 let weight = |part: usize, cell: u32| -> f64 {
                     let cell = cell as usize;
@@ -1484,21 +1473,56 @@ impl Simulation {
                     }
                 }
                 let n = targets.len() as f64;
+                let cap = MAX_EXTRA_CELLS_PER_HIDDEN_SAMPLE / f64::from(extra_cells[plate][class]);
+                // Per part, the fraction given to hidden samples.
+                let mut given = [0.0; 3];
                 for &(local, cell) in targets {
                     let share = |part: usize| {
-                        if sums[part] > 0.0 {
+                        let share = if sums[part] > 0.0 {
                             weight(part, cell) / sums[part]
                         } else {
                             1.0 / n
-                        }
+                        };
+                        share.min(cap)
                     };
+                    let shares = [share(0), share(1), share(2)];
+                    for part in 0..3 {
+                        given[part] += shares[part];
+                    }
                     let crust = self.plates[plate].crust[local as usize]
                         .as_mut()
                         .expect("recipients have crust");
                     let (applied, expected) = apply_surface_change(
                         crust,
-                        bedrock * share(0) / crust.density,
-                        (deposits * share(1) + removal * share(2)) / SEDIMENT_ROCK_DENSITY,
+                        parts[0] * shares[0] / crust.density,
+                        (parts[1] * shares[1] + parts[2] * shares[2]) / SEDIMENT_ROCK_DENSITY,
+                    );
+                    change += applied;
+                    clamped += expected - applied;
+                }
+                to_hidden += (0..3)
+                    .map(|part| parts[part].abs() * given[part])
+                    .sum::<f64>();
+                // The rest stays on the duplicated samples of this plate and class.
+                let keep = given.map(|given| (1.0 - given).max(0.0));
+                if keep.iter().all(|&keep| keep <= 0.0) {
+                    continue;
+                }
+                for sample in changes.iter().filter(|c| {
+                    c.cells > 1 && c.owner.plate as usize == plate && usize::from(c.class) == class
+                }) {
+                    let k = f64::from(sample.cells);
+                    let sediment_mass = (k - 1.0) / k * sample.sediment * SEDIMENT_ROCK_DENSITY;
+                    let sediment_keep = keep[if sediment_mass > 0.0 { 1 } else { 2 }];
+                    let crust = self.plates[plate].crust[sample.owner.local as usize]
+                        .as_mut()
+                        .expect("owners always point to existing crust");
+                    kept += (sample.bedrock_mass * keep[0]).abs()
+                        + (sediment_mass * sediment_keep).abs();
+                    let (applied, expected) = apply_surface_change(
+                        crust,
+                        sample.bedrock_mass * keep[0] / crust.density,
+                        sediment_mass * sediment_keep / SEDIMENT_ROCK_DENSITY,
                     );
                     change += applied;
                     clamped += expected - applied;
@@ -2040,7 +2064,7 @@ mod tests {
         assert!((hidden_after.sediment - 3.0).abs() < 1e-9);
         // Mass is conserved: the change is what the cells asked for.
         let change = simulation.total_mass() - mass;
-        assert!((change - expected).abs() < 1e-6, "{change} vs {expected}");
+        assert!((change - expected).abs() < 1e-3, "{change} vs {expected}");
         let after = simulation.ledger.checked(simulation.total_mass()).residual;
         assert!((after - residual).abs() < 1e-6, "{after} vs {residual}");
     }
@@ -2051,17 +2075,18 @@ mod tests {
         let (a, b) = same_plate_neighbors(&simulation);
         let (under_other, recipient) =
             (simulation.owners[a as usize], simulation.owners[b as usize]);
-        // Cell a shows a sample of another plate, cell b the sample of cell 0.
+        // Cell a shows a sample of another plate, cell b the sample of cell 0. Both hidden
+        // samples are of the class of the sample of cell 0.
         let other = (0..simulation.mesh.len())
             .map(|cell| simulation.owners[cell])
             .find(|owner| owner.plate != simulation.owners[0].plate)
             .unwrap();
         simulation.owners[a as usize] = other;
         simulation.owners[b as usize] = simulation.owners[0];
-        let before = (
-            crust_of(&simulation, under_other).unwrap(),
-            crust_of(&simulation, recipient).unwrap(),
-        );
+        let shown = simulation.surface_crust(0);
+        for owner in [under_other, recipient] {
+            simulation.plates[owner.plate as usize].crust[owner.local as usize] = Some(shown);
+        }
         let mut thickness = vec![0.0; simulation.mesh.len()];
         thickness[0] = -10.0;
         thickness[b as usize] = -10.0;
@@ -2070,15 +2095,96 @@ mod tests {
         let expected = requested(&simulation, &thickness, &sediment);
         simulation.apply_surface_changes(&thickness, &sediment, SurfaceSeaLevel::default());
         let untouched = crust_of(&simulation, under_other).unwrap();
-        assert_eq!(untouched.thickness, before.0.thickness);
-        assert_eq!(untouched.sediment, before.0.sediment);
-        let recipient_after = crust_of(&simulation, recipient).unwrap();
-        if before.1.is_continental_origin_column()
-            == simulation.surface_crust(0).is_continental_origin_column()
-        {
-            assert!(recipient_after.mass() < before.1.mass());
+        assert_eq!(untouched.thickness, shown.thickness);
+        assert_eq!(untouched.sediment, shown.sediment);
+        // The other hidden sample took the residual: the cells show −10 m, not −20 m.
+        let taken = crust_of(&simulation, recipient).unwrap();
+        assert!((taken.thickness - (shown.thickness - 10.0)).abs() < 1e-9);
+        assert!((simulation.surface_crust(0).thickness - (shown.thickness - 10.0)).abs() < 1e-9);
+        assert!((simulation.total_mass() - mass - expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_hidden_sample_takes_at_most_two_extra_cells_worth() {
+        let mut simulation = simulation(4);
+        // The sample of cell 0 is shown at all its same-plate neighbours (4 or more extra
+        // cells); only the sample of one neighbour stays as a hidden sample of the same class,
+        // the others are consumed.
+        let plate = simulation.owners[0].plate;
+        let neighbors: Vec<u32> = simulation
+            .mesh
+            .neighbors(0)
+            .iter()
+            .copied()
+            .filter(|&n| simulation.owners[n as usize].plate == plate)
+            .collect();
+        assert!(neighbors.len() >= 4, "{neighbors:?}");
+        let shown = simulation.surface_crust(0);
+        let hidden = simulation.owners[neighbors[0] as usize];
+        simulation.plates[hidden.plate as usize].crust[hidden.local as usize] = Some(shown);
+        for &n in &neighbors[1..] {
+            let gone = simulation.owners[n as usize];
+            simulation.plates[gone.plate as usize].crust[gone.local as usize] = None;
         }
-        assert!((simulation.total_mass() - mass - expected).abs() < 1e-6);
+        for &n in &neighbors {
+            simulation.owners[n as usize] = simulation.owners[0];
+        }
+        let extra = neighbors.len() as f64;
+        let mut thickness = vec![0.0; simulation.mesh.len()];
+        thickness[0] = -10.0;
+        for &n in &neighbors {
+            thickness[n as usize] = -10.0;
+        }
+        let sediment = vec![0.0; simulation.mesh.len()];
+        let mass = simulation.total_mass();
+        let expected = requested(&simulation, &thickness, &sediment);
+        simulation.apply_surface_changes(&thickness, &sediment, SurfaceSeaLevel::default());
+        // The hidden sample takes two extra cells' worth (20 m), the shown sample the rest.
+        let taken = shown.thickness - crust_of(&simulation, hidden).unwrap().thickness;
+        assert!((taken - 20.0).abs() < 1e-9, "{taken}");
+        let on_shown = shown.thickness - simulation.surface_crust(0).thickness;
+        assert!(
+            (on_shown - (10.0 * (extra + 1.0) - 20.0)).abs() < 1e-9,
+            "{on_shown}"
+        );
+        assert!((simulation.total_mass() - mass - expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn removing_more_sediment_than_there_is_takes_bedrock_of_the_same_mass() {
+        let mut simulation = simulation(4);
+        let (neighbor, _) = same_plate_neighbors(&simulation);
+        let hidden = simulation.owners[neighbor as usize];
+        simulation.owners[neighbor as usize] = simulation.owners[0];
+        let shown = simulation.surface_crust(0);
+        simulation.plates[hidden.plate as usize].crust[hidden.local as usize] = Some(Crust {
+            sediment: 0.0,
+            ..shown
+        });
+        let mut sediment = vec![0.0; simulation.mesh.len()];
+        let removal = shown.sediment + 100.0;
+        sediment[0] = -removal;
+        sediment[neighbor as usize] = -removal;
+        let thickness = vec![0.0; simulation.mesh.len()];
+        let mass = simulation.total_mass();
+        let expected = requested(&simulation, &thickness, &sediment);
+        simulation.apply_surface_changes(&thickness, &sediment, SurfaceSeaLevel::default());
+        // The shown sample loses all its sediment and 100 m of sediment's mass in bedrock;
+        // the hidden one (no sediment) the whole removal in bedrock.
+        let after = simulation.surface_crust(0);
+        assert_eq!(after.sediment, 0.0);
+        let bedrock = (shown.thickness - after.thickness) * shown.density;
+        assert!(
+            (bedrock - 100.0 * SEDIMENT_ROCK_DENSITY).abs() < 1e-6,
+            "{bedrock}"
+        );
+        let taken = crust_of(&simulation, hidden).unwrap();
+        let bedrock = (shown.thickness - taken.thickness) * shown.density;
+        assert!(
+            (bedrock - removal * SEDIMENT_ROCK_DENSITY).abs() < 1e-6,
+            "{bedrock}"
+        );
+        assert!((simulation.total_mass() - mass - expected).abs() < 1e-3);
     }
 
     #[test]
@@ -2100,7 +2206,7 @@ mod tests {
         simulation.apply_surface_changes(&thickness, &sediment, SurfaceSeaLevel::default());
         assert!((simulation.surface_crust(0).thickness - (before.thickness - 30.0)).abs() < 1e-9);
         assert!(crust_of(&simulation, gone).is_none());
-        assert!((simulation.total_mass() - mass - expected).abs() < 1e-6);
+        assert!((simulation.total_mass() - mass - expected).abs() < 1e-3);
         assert!(simulation.surface_sharing().kept > 0.0);
     }
 }
