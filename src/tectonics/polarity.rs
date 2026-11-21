@@ -590,12 +590,15 @@ impl Polarities {
         side: impl Fn(DVec3) -> Side,
         rotations: &[DQuat],
     ) {
-        let keys: Vec<(u32, u32)> = self
+        let mut keys: Vec<(u32, u32)> = self
             .pairs
             .keys()
             .copied()
             .filter(|&(a, b)| a == plate || b == plate)
             .collect();
+        // In a defined order: the copies below get new ids in this order (hash-map order
+        // differs between platforms).
+        keys.sort_unstable();
         let mut new_pairs = Vec::new();
         for key in keys {
             let other = other_of(key, plate);
