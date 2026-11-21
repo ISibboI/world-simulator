@@ -1773,6 +1773,8 @@ mod tests {
             density: crate::isostasy::CONTINENTAL_DENSITY,
             felsic: 1.0,
             metasediment: 0.0,
+            sediment: 0.0,
+            cohort: 0.0,
             kind: AdditionKind::Collision,
         }]);
         let crust = simulation.plates[0].crust[cell as usize].unwrap();
@@ -2299,6 +2301,7 @@ mod tests {
                 felsic: 1.0,
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
+                orogenic: 0.0,
                 cohort: 0.0,
             };
         }
