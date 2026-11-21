@@ -530,12 +530,14 @@ impl Simulation {
                 _ => {}
             }
         }
-        let shortenings: Vec<f64> = self
+        let mut shortenings: Vec<f64> = self
             .polarities
             .segments()
             .filter(|segment| !segment.localised && segment.shortening > 0.0)
             .map(|segment| segment.shortening)
             .collect();
+        // Summed in a defined order (hash-map order differs between platforms).
+        shortenings.sort_by(f64::total_cmp);
         let slabs: Vec<f64> = self
             .polarities
             .segments()

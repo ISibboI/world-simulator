@@ -1083,7 +1083,7 @@ pub fn low_level_wind(position: DVec3, thermal_equator: f64) -> DVec3 {
 /// Areas (m²) of the Voronoi cells and their edges, from the circumcentres of the triangles.
 fn voronoi_geometry(mesh: &SphereMesh, radius: f64) -> (Vec<f64>, Vec<Vec<Edge>>) {
     let cell_count = mesh.len();
-    let mut corners: std::collections::HashMap<(u32, u32), Vec<DVec3>> = Default::default();
+    let mut corners: crate::hash::HashMap<(u32, u32), Vec<DVec3>> = Default::default();
     let mut area = vec![0.0; cell_count];
     let triangle = |a: DVec3, b: DVec3, c: DVec3| 0.5 * (b - a).cross(c - a).length();
     for &[a, b, c] in mesh.faces() {

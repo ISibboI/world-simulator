@@ -1,7 +1,7 @@
 //! Discretisation of the unit sphere into an icosphere mesh.
 
+use crate::hash::HashMap;
 use crate::math;
-use std::collections::HashMap;
 
 use glam::DVec3;
 
@@ -67,7 +67,7 @@ impl SphereMesh {
         ];
 
         for _ in 0..subdivisions {
-            let mut midpoints: HashMap<(u32, u32), u32> = HashMap::new();
+            let mut midpoints: HashMap<(u32, u32), u32> = HashMap::default();
             let mut midpoint = |a: u32, b: u32, vertices: &mut Vec<DVec3>| -> u32 {
                 let key = (a.min(b), a.max(b));
                 *midpoints.entry(key).or_insert_with(|| {
