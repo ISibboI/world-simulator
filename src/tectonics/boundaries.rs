@@ -280,13 +280,70 @@ impl Simulation {
                         &rotations,
                     )
                     .is_some_and(|segment| segment.overriding == contact.loser.plate);
+            // At a diffuse convergent zone (no through-going thrust yet, see
+            // `polarity::Segment::localised`) the lower plate does not subduct: the convergence
+            // is taken up by distributed shortening, which thickens the crust of the zone
+            // (Central Indian Basin). Nothing goes into the mantle, and there is no arc.
+            // This holds for all crust overlapped there, whichever side it comes from, where the
+            // zone converges by the last velocity solve (see `polarity::Segment::subducting`).
+            // Overlaps where it does not (slow or oblique zones, resampling noise along
+            // transforms, a segment the solve has not seen yet) are handled as everywhere else;
+            // stacking them thickened oceanic crust to 40–60 km in a first version.
+            let diffuse = !loser_crust.resists_subduction()
+                && !overridden_upper_plate
+                && polarities
+                    .segment_at_mut(
+                        winner.plate,
+                        contact.loser.plate,
+                        mesh.vertex(contact.cell),
+                        &rotations,
+                    )
+                    .filter(|segment| !segment.localised && segment.subducting)
+                    .map(|segment| segment.stacked += loser_crust.mass())
+                    .is_some();
             if overridden_upper_plate {
                 trench_sediment.upper_plate_accreted += loser_crust.mass();
             }
             if loser_crust.resists_subduction() || overridden_upper_plate {
                 trench_sediment.stacked += sediment_mass;
             }
-            if loser_crust.resists_subduction() || overridden_upper_plate {
+            if diffuse {
+                // The crystalline crust is stacked with its own composition, its sediment moves
+                // along as sediment.
+                ledger.record(Term::ShorteningConsumed, -loser_crust.mass());
+                // It is the oceanic lithosphere that shortens: where the overriding crust is
+                // continental, the crust is stacked onto the oceanic side of the zone (next to
+                // the contact), not onto the continental margin.
+                let continental_winner = plates[winner.plate as usize].crust[winner.local as usize]
+                    .is_some_and(|crust| crust.is_continental_origin());
+                let oceanic_side = continental_winner
+                    .then(|| {
+                        mesh.neighbors(contact.cell)
+                            .iter()
+                            .copied()
+                            .find(|&neighbor| {
+                                new_owners[neighbor as usize]
+                                    .is_some_and(|owner| owner.plate == contact.loser.plate)
+                            })
+                    })
+                    .flatten();
+                let (cell, plate, partner) = match oceanic_side {
+                    Some(neighbor) => (neighbor, contact.loser.plate, winner.plate),
+                    None => (contact.cell, winner.plate, contact.loser.plate),
+                };
+                additions.push(CrustAddition {
+                    cell,
+                    plate,
+                    partner,
+                    thickness: loser_crust.thickness,
+                    density: loser_crust.density,
+                    felsic: loser_crust.felsic,
+                    metasediment: loser_crust.metasediment,
+                    kind: AdditionKind::Shortening,
+                    sediment: loser_crust.sediment,
+                    cohort: loser_crust.cohort,
+                });
+            } else if loser_crust.resists_subduction() || overridden_upper_plate {
                 // Collision or terrane accretion: buoyant crust of the lower plate (continents,
                 // thick arcs, plateaus) is stacked onto the overriding plate instead of
                 // subducting, and so is the upper plate's crust overridden by it; sediment
@@ -308,6 +365,8 @@ impl Simulation {
                     // Stacked into an orogen, it becomes part of the continental basement.
                     metasediment: 0.0,
                     kind: AdditionKind::Collision,
+                    sediment: 0.0,
+                    cohort: 0.0,
                 });
             } else {
                 // Subduction: the lower plate's crust and most of its sediment sink into the
@@ -320,6 +379,19 @@ impl Simulation {
                 };
                 ledger.record(term, -crust_mass);
                 ledger.record(Term::SubductedSediment, -sediment_mass);
+                // Overlaps at diffuse zones that the last velocity solve did not see converging
+                // (new segments, resampling noise) subduct as elsewhere; counted.
+                if polarities
+                    .segment_at(
+                        winner.plate,
+                        contact.loser.plate,
+                        mesh.vertex(contact.cell),
+                        &rotations,
+                    )
+                    .is_some_and(|segment| !segment.localised)
+                {
+                    polarities.statistics.diffuse_subducted += crust_mass + sediment_mass;
+                }
                 // Rock-equivalent thickness of the sediment and metasediment column.
                 let column =
                     loser_crust.sediment + loser_crust.metasediment_mass() / SEDIMENT_ROCK_DENSITY;
@@ -338,6 +410,8 @@ impl Simulation {
                     },
                     metasediment: 0.0,
                     kind: AdditionKind::Arc,
+                    sediment: 0.0,
+                    cohort: 0.0,
                 });
                 // At accretionary margins (thick trench fill, slow convergence; see
                 // `Simulation::update_slab_lengths`) the sediment above a décollement is scraped
@@ -390,6 +464,8 @@ impl Simulation {
                         felsic: 1.0,
                         metasediment: 0.0,
                         kind: AdditionKind::Accretion,
+                        sediment: 0.0,
+                        cohort: 0.0,
                     });
                 }
                 if !accretionary {
@@ -612,12 +688,14 @@ impl Simulation {
     pub(super) fn apply_additions(&mut self, additions: &[CrustAddition]) {
         let mut nominal = 0.0;
         for addition in additions {
-            let mass = addition.thickness * addition.density;
+            let mass =
+                addition.thickness * addition.density + addition.sediment * SEDIMENT_ROCK_DENSITY;
             nominal += mass;
             let term = match addition.kind {
                 AdditionKind::Arc => Term::Arcs,
                 AdditionKind::Accretion => Term::Accretion,
                 AdditionKind::Collision => Term::CollisionStacked,
+                AdditionKind::Shortening => Term::ShorteningStacked,
             };
             self.ledger.record(term, mass);
         }
@@ -661,7 +739,9 @@ impl Simulation {
 
         for (event_index, addition) in additions.iter().enumerate() {
             let profile = match addition.kind {
-                AdditionKind::Collision => &self.params.collision_profile,
+                AdditionKind::Collision | AdditionKind::Shortening => {
+                    &self.params.collision_profile
+                }
                 AdditionKind::Arc => &self.params.arc_profile,
                 AdditionKind::Accretion => &self.params.accretion_profile,
             };
@@ -718,6 +798,11 @@ impl Simulation {
                     (addition.felsic, addition.metasediment),
                     max_thickness,
                 );
+                // Sediment moved along goes onto the same cells, without a thickness cap.
+                let sediment = addition.sediment * weight / total_weight;
+                if sediment > 0.0 {
+                    crust.add_sediment(sediment, addition.cohort);
+                }
                 change += crust.mass() - before;
                 leftover += share - fitting;
                 // Crust thickened by a continental collision is an orogenic belt.
@@ -1142,6 +1227,10 @@ pub(super) struct CrustAddition {
     felsic: f64,
     metasediment: f64,
     kind: AdditionKind,
+    /// Sediment (rock-equivalent m over one cell) moved along with the crust, and its cohort
+    /// fraction (see [`Crust::cohort`]).
+    sediment: f64,
+    cohort: f64,
 }
 
 /// Where added crust comes from; decides its distribution and its ledger term.
@@ -1153,6 +1242,8 @@ pub(super) enum AdditionKind {
     Accretion,
     /// Crust of the lower plate stacked in a continental collision.
     Collision,
+    /// Crust of the lower plate stacked by distributed shortening at a diffuse convergent zone.
+    Shortening,
 }
 
 pub(super) use super::crust::METASEDIMENT_DENSITY;
@@ -1522,6 +1613,8 @@ mod tests {
             felsic: 0.4,
             metasediment: 0.0,
             kind: AdditionKind::Arc,
+            sediment: 0.0,
+            cohort: 0.0,
         }]);
         // Nothing on the trench cell (amagmatic forearc), most one ring behind it.
         assert_eq!(thickness(&simulation, cell), before[cell as usize]);
@@ -1938,6 +2031,181 @@ mod tests {
             shared_per_substep < 0.05 * simulation.mesh.len() as f64,
             "{shared_per_substep}"
         );
+    }
+
+    /// Two oceanic plates (south and north of the equator), plate 0 moving north into plate 1,
+    /// with plate 0 subducting below plate 1 along an established trench or without any
+    /// segments (a fresh contact).
+    fn oceanic_plates_converging(trench: bool) -> Simulation {
+        let mut simulation = single_plate();
+        simulation.split_plate(0, DVec3::Z).unwrap();
+        simulation.polarities.clear();
+        if trench {
+            simulation.seed_subduction((0, 1), 1, 600e3);
+        }
+        simulation.plates[0].angular_velocity = -DVec3::Y * 0.004;
+        simulation.plates[1].angular_velocity = DVec3::ZERO;
+        simulation
+    }
+
+    /// Records the convergence of the segments as a velocity solve would.
+    fn record_segment_rates(simulation: &mut Simulation) {
+        let boundaries = simulation.boundary_cells();
+        simulation.update_segment_motion(&boundaries, false);
+    }
+
+    #[test]
+    fn diffuse_zones_shorten_instead_of_subducting() {
+        let mut simulation = oceanic_plates_converging(false);
+        // The first overlaps create the segments (the contact spreads along the boundary), still
+        // unseen by a velocity solve.
+        for _ in 0..20 {
+            simulation.substep(1.0);
+        }
+        record_segment_rates(&mut simulation);
+        assert!(
+            simulation
+                .polarities
+                .segments()
+                .all(|segment| !segment.localised)
+        );
+        // Sediment on the lower plate (polarity by buoyancy) moves along as sediment.
+        let upper = simulation
+            .polarities
+            .segments()
+            .next()
+            .expect("segments")
+            .overriding as usize;
+        for (index, plate) in simulation.plates.iter_mut().enumerate() {
+            for crust in plate.crust.iter_mut().flatten() {
+                crust.sediment = if index == upper { 0.0 } else { 200.0 };
+            }
+        }
+        // A converging diffuse zone: the overlapping crust is stacked onto the upper plate
+        // (distributed shortening), nothing subducts and no arc grows.
+        let before = simulation.ledger.clone();
+        for _ in 0..20 {
+            simulation.substep(1.0);
+            record_segment_rates(&mut simulation);
+        }
+        let ledger = &simulation.ledger;
+        let shortened = ledger.shortening_consumed - before.shortening_consumed;
+        let subducted = ledger.subducted_oceanic - before.subducted_oceanic;
+        assert!(shortened < 0.0);
+        // Only segments created on the way (their first substeps) subduct.
+        assert!(
+            subducted.abs() < 0.1 * shortened.abs(),
+            "{subducted} {shortened}"
+        );
+        assert!(ledger.arcs - before.arcs <= 0.1 * shortened.abs());
+        // The sediment of the stacked crust moves along as sediment: it piles up on the
+        // receiving cells and hardly any subducts.
+        let max_sediment = |plate: usize| {
+            simulation.plates[plate]
+                .crust
+                .iter()
+                .flatten()
+                .map(|crust| crust.sediment)
+                .fold(0.0, f64::max)
+        };
+        assert!(max_sediment(upper) > 0.0);
+        let subducted_sediment = ledger.subducted_sediment - before.subducted_sediment;
+        assert!(
+            subducted_sediment.abs() < 0.1 * shortened.abs(),
+            "{subducted_sediment}"
+        );
+        let lost = ledger.additions_lost.abs();
+        assert!(
+            (ledger.shortening_stacked + ledger.shortening_consumed).abs() <= lost + 1e-6,
+            "{ledger:?}"
+        );
+        assert!(
+            simulation
+                .polarities
+                .segments()
+                .all(|segment| !segment.localised && segment.slab_length == 0.0)
+        );
+        // The crust of the zone thickened, and still counts as oceanic.
+        let thickest = (0..simulation.mesh.len() as u32)
+            .map(|cell| simulation.surface_crust(cell))
+            .filter(|crust| crust.is_oceanic())
+            .map(|crust| crust.thickness)
+            .fold(0.0, f64::max);
+        assert!(thickest > OCEANIC_THICKNESS + 100.0, "{thickest}");
+        // The zone converges at 2.5 cm/yr, faster than a diffuse zone creeps: it yields and
+        // localises, and from then on the plate subducts and an arc grows.
+        let boundaries = simulation.boundary_cells();
+        simulation.update_slab_lengths(1.0, &boundaries);
+        assert!(
+            simulation
+                .polarities
+                .segments()
+                .any(|segment| segment.localised)
+        );
+        let before = simulation.ledger.clone();
+        for _ in 0..10 {
+            simulation.substep(1.0);
+        }
+        assert!(simulation.ledger.subducted_oceanic < before.subducted_oceanic);
+        assert!(simulation.ledger.arcs > before.arcs);
+        // Along an established trench the same convergence subducts from the start.
+        let mut trench = oceanic_plates_converging(true);
+        record_segment_rates(&mut trench);
+        for _ in 0..20 {
+            trench.substep(1.0);
+        }
+        assert!(trench.ledger.subducted_oceanic < 0.0);
+        assert_eq!(trench.ledger.shortening_consumed, 0.0);
+        assert!(trench.ledger.arcs > 0.0);
+    }
+
+    #[test]
+    fn oceanic_crust_shortens_on_its_own_side_of_an_ocean_continent_zone() {
+        let mut simulation = oceanic_plates_converging(false);
+        // Plate 1 (north) is a continent: it overrides, and the oceanic plate shortens.
+        for crust in simulation.plates[1].crust.iter_mut().flatten() {
+            *crust = Crust {
+                thickness: 35_000.0,
+                density: crate::isostasy::CONTINENTAL_DENSITY,
+                birth: -1000.0,
+                sediment: 0.0,
+                felsic: 1.0,
+                metasediment: 0.0,
+                orogeny: NO_OROGENY,
+                cohort: 0.0,
+            };
+        }
+        for _ in 0..20 {
+            simulation.substep(1.0);
+        }
+        record_segment_rates(&mut simulation);
+        let mafic = |simulation: &Simulation| -> f64 {
+            simulation.plates[1]
+                .crust
+                .iter()
+                .flatten()
+                .map(|crust| crust.mass() - crust.felsic_mass())
+                .sum()
+        };
+        let (before, consumed) = (mafic(&simulation), simulation.ledger.shortening_consumed);
+        for _ in 0..10 {
+            simulation.substep(1.0);
+            record_segment_rates(&mut simulation);
+        }
+        assert!(simulation.ledger.shortening_consumed < consumed);
+        // No oceanic crust was stacked onto the continent.
+        assert!(mafic(&simulation) <= before + 1e-6 * before.abs());
+    }
+
+    #[test]
+    fn overlaps_at_diffuse_zones_that_do_not_converge_are_not_stacked() {
+        // Before a velocity solve has seen the zone (and at zones that do not converge, where
+        // overlaps are resampling noise), overlaps are handled as everywhere else.
+        let mut simulation = oceanic_plates_converging(false);
+        for _ in 0..3 {
+            simulation.substep(1.0);
+        }
+        assert_eq!(simulation.ledger.shortening_consumed, 0.0);
     }
 
     /// Plate 0 covers x < -0.02, plate 1 covers x > 0.02, the band between is uncovered. Returns
