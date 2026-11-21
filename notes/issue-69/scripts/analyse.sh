@@ -4,7 +4,7 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 notes=$(cd "$here/../.." && pwd)
-runs=$1; base=$2; shift 2
+runs=$(cd "$1" && pwd); base=$2; shift 2
 for set in "$base" "$@"; do
   for d in "$runs/$set"/seed-*; do ln -sfn log.txt "$d/log"; done
 done
