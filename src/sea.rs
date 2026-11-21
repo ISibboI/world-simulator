@@ -41,8 +41,8 @@ pub const SILL_TOLERANCE: f64 = 1e-6;
 pub const MIN_SEA_FRACTION: f64 = 0.002;
 
 /// The seeds of the ocean: the deepest cell of the largest connected body (by cell count) of the
-/// cells with `level < reference`, and of every other body whose basin, filled to its lowest
-/// pass, covers at least `min_sea_fraction` of the cells
+/// cells with `level < reference`, and of every other body whose basin, filled to its pass
+/// towards the largest body, covers at least `min_sea_fraction` of the cells
 /// (a sea connected to the ocean by straits narrower than a cell); the lowest cell of all if
 /// there is none. The size at the pass does not depend on the sea level, so a body is a sea or
 /// not whichever reference the solve or a mask uses, as long as some of it is below it.
@@ -90,42 +90,36 @@ fn seeds(mesh: &SphereMesh, level: &[f64], reference: f64, min_sea_fraction: f64
     if bodies.len() == 1 || min_cells > cell_count as f64 {
         return seeds;
     }
-    // Every other body's basin, filled to its lowest pass: grow it from its deepest cell in the
-    // order of the levels (a priority flood) until the flood passes a cell lower than the
-    // water level, i.e. it has crossed the pass, or it is large enough.
-    let mut visited = vec![false; cell_count];
-    let mut touched = Vec::new();
-    let mut heap = BinaryHeap::new();
+    // Every other body's basin, filled to its pass towards the largest body (its spill level
+    // into the world ocean, which deposits in sub-basins do not change).
+    let pass = pass_levels(mesh, level, &seeds);
+    let mut in_basin = vec![false; cell_count];
+    let mut basin = Vec::new();
     for (index, &(_, deepest)) in bodies.iter().enumerate() {
         if index == first {
             continue;
         }
-        heap.clear();
-        heap.push(Reverse((Ordered(level[deepest]), deepest as u32)));
-        visited[deepest] = true;
-        touched.push(deepest);
-        let (mut water, mut size) = (f64::NEG_INFINITY, 0usize);
-        while let Some(Reverse((Ordered(at), cell))) = heap.pop() {
-            if at < water {
-                break;
-            }
-            water = at;
-            size += 1;
-            if size as f64 >= min_cells {
-                seeds.push(deepest);
-                break;
-            }
-            for &neighbor in mesh.neighbors(cell) {
+        let spill = pass[deepest];
+        basin.clear();
+        basin.push(deepest);
+        in_basin[deepest] = true;
+        let mut next = 0;
+        while next < basin.len() && (basin.len() as f64) < min_cells {
+            let cell = basin[next];
+            next += 1;
+            for &neighbor in mesh.neighbors(cell as u32) {
                 let n = neighbor as usize;
-                if !visited[n] {
-                    visited[n] = true;
-                    touched.push(n);
-                    heap.push(Reverse((Ordered(level[n]), neighbor)));
+                if !in_basin[n] && level[n] < spill {
+                    in_basin[n] = true;
+                    basin.push(n);
                 }
             }
         }
-        for cell in touched.drain(..) {
-            visited[cell] = false;
+        if basin.len() as f64 >= min_cells {
+            seeds.push(deepest);
+        }
+        for &cell in &basin {
+            in_basin[cell] = false;
         }
     }
     seeds
@@ -133,7 +127,6 @@ fn seeds(mesh: &SphereMesh, level: &[f64], reference: f64, min_sea_fraction: f64
 
 /// The pass level of every cell: the lowest possible highest `level` on a path of neighbouring
 /// cells from `seeds` (Barnes et al., 2014: priority flood). [`sea_level`] floods the same way.
-#[cfg(test)]
 fn pass_levels(mesh: &SphereMesh, level: &[f64], seeds: &[usize]) -> Vec<f64> {
     let cell_count = mesh.len();
     let mut pass = vec![f64::INFINITY; cell_count];
@@ -439,6 +432,16 @@ mod tests {
         let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
         assert!((held(&dry, &ocean, solved.level, 1e10) / volume - 1.0).abs() < 1e-9);
         assert!(ocean.iter().zip(&dry).any(|(&o, &d)| o && d == -1800.0));
+        // Sills inside it do not make it smaller.
+        let mut inner = dry.clone();
+        for (cell, d) in inner.iter_mut().enumerate() {
+            let z = mesh.vertex(cell as u32).z;
+            if *d == -1800.0 && (0.96..0.975).contains(&z) {
+                *d = -900.0;
+            }
+        }
+        assert!(inner.contains(&-900.0));
+        assert!(seeds(&mesh, &inner, -1000.0, MIN_SEA_FRACTION).len() >= 3);
         // Without the rule, it is a lake.
         let ocean = ocean_mask(&mesh, &elevation, 1.0);
         assert!(!ocean.iter().zip(&dry).any(|(&o, &d)| o && d == -1800.0));
