@@ -170,8 +170,14 @@ impl Simulation {
     /// Evaluates the motion across every boundary segment with the current plate velocities (see
     /// [`polarity::Segment::rate`]) and whether its lower plate subducts there (see
     /// [`polarity::Segment::subducting`]). `boundaries` are the current [`Self::boundary_cells`].
-    /// Returns whether any segment started or stopped subducting.
-    pub(super) fn update_segment_motion(&mut self, boundaries: &[BoundaryCell]) -> bool {
+    /// Returns whether any segment started or stopped subducting. With `record`, segments whose
+    /// slab was decaying and that subduct again are counted (once per step: the velocity solve
+    /// records, the slab update does not).
+    pub(super) fn update_segment_motion(
+        &mut self,
+        boundaries: &[BoundaryCell],
+        record: bool,
+    ) -> bool {
         // Per segment id: Σ normal convergence, Σ |strike-slip|, cells.
         let mut sums: HashMap<u32, (f64, f64, usize)> = HashMap::default();
         for boundary in boundaries {
@@ -210,7 +216,7 @@ impl Simulation {
                 _ => (0.0, 0.0),
             };
             let subducting = rate > min_convergence && rate >= obliquity * strike_rate;
-            if subducting && !segment.subducting && segment.slab_length > 0.0 {
+            if record && subducting && !segment.subducting && segment.slab_length > 0.0 {
                 statistics.resumed_subductions += 1;
             }
             changed |= subducting != segment.subducting;
@@ -444,7 +450,7 @@ impl Simulation {
         for (plate, omega) in self.plates.iter_mut().zip(omega) {
             plate.angular_velocity = omega * SECONDS_PER_MYR;
         }
-        self.update_segment_motion(&boundaries);
+        self.update_segment_motion(&boundaries, true);
     }
 }
 
@@ -617,7 +623,7 @@ impl Simulation {
     /// subducting, which changes the classification of boundary cells (see
     /// [`Self::boundary_cells`]).
     pub(super) fn update_slab_lengths(&mut self, dt: f64, boundaries: &[BoundaryCell]) -> bool {
-        let mut slabs_changed = self.update_segment_motion(boundaries);
+        let mut slabs_changed = self.update_segment_motion(boundaries, false);
         // Segments with boundary cells of their lower plate (subducting or not) are in contact.
         let in_contact: HashSet<u32> = boundaries
             .iter()
@@ -1127,7 +1133,7 @@ mod tests {
         /// evaluated for the current plate velocities.
         fn segment_near(&mut self, r: DVec3) -> polarity::Segment {
             let boundaries = self.boundary_cells();
-            self.update_segment_motion(&boundaries);
+            self.update_segment_motion(&boundaries, false);
             let rotations = self.rotations();
             self.polarities
                 .segment_at(0, 1, r, &rotations)
@@ -1219,26 +1225,43 @@ mod tests {
     }
 
     #[test]
-    fn slab_pull_per_boundary_length_does_not_depend_on_the_resolution() {
-        // A converging trench along the equator: the summed slab pull on plate 0 per unit of
-        // boundary length is the same on two meshes.
+    fn slab_pull_per_boundary_length_matches_the_parameter() {
+        // A trench along the whole equator: the summed slab pull on plate 0 per unit of
+        // boundary length is `slab_pull` × the slab's buoyancy, on two meshes. (With the length
+        // of a mesh edge per cell instead of the boundary length per cell, it was ~10% more.)
         let pull_per_length = |subdivisions: u32| {
             let mut simulation = hemispheres(0.0, subdivisions);
             simulation.seed_subduction((0, 1), 1, 600e3);
             simulation.plates[0].angular_velocity = DVec3::ZERO;
             simulation.plates[1].angular_velocity = DVec3::ZERO;
             let boundaries = simulation.boundary_cells();
-            let force: DVec3 = boundaries
+            let force: f64 = boundaries
                 .iter()
                 .filter(|b| b.plate == 0)
                 .map(|b| simulation.boundary_force(b).length())
-                .map(|f| DVec3::X * f)
                 .sum();
+            let expected = simulation.params.slab_pull * simulation.slab_buoyancy(50.0, 600e3);
             // The equator is 2πR long.
-            force.x / (2.0 * std::f64::consts::PI * simulation.params.planet_radius)
+            force / (2.0 * std::f64::consts::PI * simulation.params.planet_radius) / expected
         };
-        let (coarse, fine) = (pull_per_length(4), pull_per_length(5));
-        assert!((fine / coarse - 1.0).abs() < 0.1, "{coarse} {fine}");
+        for subdivisions in [4, 5] {
+            let ratio = pull_per_length(subdivisions);
+            assert!((ratio - 1.0).abs() < 0.06, "{subdivisions}: {ratio}");
+        }
+    }
+
+    #[test]
+    fn segments_rotating_about_a_pole_inside_them_do_not_subduct() {
+        // Plate 0 rotates about the axis through +y: near +y, one half of the segment converges,
+        // the other opens.
+        let mut simulation = oblique_contact(45.0, 0.0);
+        simulation.plates[0].angular_velocity = DVec3::Y * (5.0 * CM_PER_YEAR / 0.1);
+        let segment = simulation.segment_near(DVec3::Y);
+        assert!(
+            !segment.subducting,
+            "{} {}",
+            segment.rate, segment.strike_rate
+        );
     }
 
     #[test]

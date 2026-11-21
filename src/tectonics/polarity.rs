@@ -143,7 +143,7 @@ pub(super) struct Polarities {
 
 /// The bits of the state of a pair and its segments, for comparisons in tests.
 #[cfg(test)]
-pub(super) type PairSnapshot = ((u32, u32), Vec<[u64; 7]>);
+pub(super) type PairSnapshot = ((u32, u32), Vec<[u64; 10]>);
 
 /// World position of a segment.
 fn world(segment: &Segment, rotations: &[DQuat]) -> DVec3 {
@@ -650,7 +650,7 @@ impl Polarities {
             .pairs
             .iter()
             .map(|(&key, pair)| {
-                let mut segments: Vec<[u64; 7]> = pair
+                let mut segments: Vec<[u64; 10]> = pair
                     .segments
                     .iter()
                     .map(|s| {
@@ -662,6 +662,9 @@ impl Polarities {
                             s.slab_length.to_bits(),
                             s.arrival_time.to_bits(),
                             s.last_contact.to_bits(),
+                            s.rate.to_bits(),
+                            s.strike_rate.to_bits(),
+                            u64::from(s.subducting),
                         ]
                     })
                     .collect();
@@ -669,6 +672,9 @@ impl Polarities {
                     pair.last_contact.to_bits(),
                     pair.collision_time.to_bits(),
                     pair.stall_time.to_bits(),
+                    0,
+                    0,
+                    0,
                     0,
                     0,
                     0,

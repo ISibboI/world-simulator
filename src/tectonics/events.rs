@@ -80,8 +80,8 @@ pub struct PlateEventParams {
     /// Plates whose continents have been colliding for this many Myr with the collision stalled
     /// (see [`Self::suture_convergence`]) merge.
     pub suture_time: f64,
-    /// A collision counts as stalled while fewer than [`Self::suture_min_cells`] of its
-    /// colliding cells converge faster than this (cm/yr). A collision that keeps converging stays
+    /// A collision counts as stalled while its colliding cells (those not clearly diverging)
+    /// converge on average slower than this (cm/yr). A collision that keeps converging stays
     /// a plate boundary (India–Asia after 50 Myr at ~4 cm/yr, Arabia–Eurasia at ~2 cm/yr); plates
     /// merge once convergence across the belt has ceased. The slowest active collision belts
     /// that are still plate boundaries converge at ~0.2–0.5 cm/yr (Alps; PB2002).
@@ -1630,9 +1630,9 @@ impl Simulation {
         let stall_convergence =
             self.params.events.suture_convergence / (self.params.planet_radius * 100.0 / 1e6);
         // Per pair: colliding cells (not clearly diverging), converging colliding cells, trench
-        // cells and colliding cells converging faster than `suture_convergence`; collision motion
+        // cells and the summed convergence (rad/Myr) of the colliding cells; collision motion
         // along the smoothed boundary normals (like dynamics).
-        let mut contacts: HashMap<(u32, u32), (usize, usize, usize, usize)> = HashMap::default();
+        let mut contacts: HashMap<(u32, u32), (usize, usize, usize, f64)> = HashMap::default();
         // Colliding (cell, other plate) contacts that converge.
         let mut converging: HashSet<(u32, u32)> = HashSet::default();
         let normals: Vec<DVec3> = boundaries.iter().map(|boundary| boundary.normal).collect();
@@ -1647,13 +1647,11 @@ impl Simulation {
                 let entry = contacts.entry(pair).or_default();
                 if convergence > -min_convergence {
                     entry.0 += 1;
+                    entry.3 += convergence;
                 }
                 if convergence > min_convergence {
                     entry.1 += 1;
                     converging.insert((boundary.cell, boundary.other));
-                }
-                if convergence > stall_convergence {
-                    entry.3 += 1;
                 }
             } else if matches!(boundary.kind, BoundaryKind::Trench { .. }) {
                 contacts.entry(pair).or_default().2 += 1;
@@ -1665,25 +1663,23 @@ impl Simulation {
         for (pair, state) in &mut self.polarities.pairs {
             // The continents collide, and collision dominates the convergent boundary: plates
             // that still subduct along long trenches keep moving independently.
-            let (colliding, converging_cells, trenches, fast) =
+            let (colliding, converging_cells, trenches, convergence) =
                 contacts.get(pair).copied().unwrap_or_default();
             if colliding >= min_cells
                 && colliding as f64 >= self.params.events.suture_trench_ratio * trenches as f64
             {
                 state.collision_time += dt;
-                // A collision that still converges is no suture in the making: it stays a plate
-                // boundary and may accrete terranes.
-                if fast < min_cells {
+                // A collision that still converges across the belt is no suture in the making: it
+                // stays a plate boundary and may accrete terranes.
+                if convergence / (colliding as f64) < stall_convergence {
                     state.stall_time += dt;
+                    suturing.insert(*pair);
                 } else {
                     state.stall_time = (state.stall_time - dt).max(0.0);
                 }
             } else {
                 state.collision_time = (state.collision_time - dt).max(0.0);
                 state.stall_time = (state.stall_time - dt).max(0.0);
-            }
-            if state.stall_time > 0.0 {
-                suturing.insert(*pair);
             }
             if converging_cells >= min_cells {
                 state.terrane_time += dt;
