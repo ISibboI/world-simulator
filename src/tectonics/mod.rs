@@ -592,6 +592,10 @@ struct SampleChange {
 /// (see [`Simulation::apply_surface_changes`]).
 const MAX_EXTRA_CELLS_PER_HIDDEN_SAMPLE: f64 = 2.0;
 
+/// Passes that hand on what exceeds the cap of the hidden samples (see
+/// [`MAX_EXTRA_CELLS_PER_HIDDEN_SAMPLE`]).
+const FILL_PASSES: usize = 8;
+
 /// Applies a change of bedrock thickness and sediment thickness (m) to `crust`: deposits are
 /// new sediment, sediment removal beyond the available sediment comes from the bedrock at the
 /// same mass, and erosion thins the bedrock from the top (never below zero). Returns the
@@ -1406,19 +1410,21 @@ impl Simulation {
             }
             let (applied, expected) = apply_surface_change(crust, thickness, sediment);
             change += applied;
-            clamped += expected - applied;
+            clamped += (expected - applied).abs();
         }
 
         // Spread the residuals over the hidden samples of the plate and class. Each part goes
         // to the hidden samples in proportion to the same kind of change (bedrock removal,
         // deposition, sediment removal) at the cell they lie under, so a hidden sample takes
         // about the change of its place (equal shares if no cell has such a change). No hidden
-        // sample takes more than two extra cells' worth of a part
+        // sample takes more than two extra cells' worth of a part, the excess goes to the
+        // others
         // ([`MAX_EXTRA_CELLS_PER_HIDDEN_SAMPLE`]): a plate with few hidden samples would
         // otherwise pile its whole residual onto them, and they would surface as spikes or
         // pits. What they cannot take stays on the duplicated samples.
         // (hidden local vertex, its cell)
         let mut recipients: [Vec<(u32, u32)>; 2] = [Vec::new(), Vec::new()];
+        let mut shares: Vec<[f64; 3]> = Vec::new();
         let mut to_hidden = 0.0;
         let mut kept = 0.0;
         for plate in 0..self.plates.len() {
@@ -1466,39 +1472,61 @@ impl Simulation {
                         _ => (-sediment_delta[cell]).max(0.0),
                     }
                 };
-                let mut sums = [0.0; 3];
-                for &(_, cell) in targets {
-                    for (part, sum) in sums.iter_mut().enumerate() {
-                        *sum += weight(part, cell);
-                    }
-                }
-                let n = targets.len() as f64;
                 let cap = MAX_EXTRA_CELLS_PER_HIDDEN_SAMPLE / f64::from(extra_cells[plate][class]);
-                // Per part, the fraction given to hidden samples.
+                // Shares per recipient and part, filled up to the cap: in proportion to the
+                // weights, what exceeds the cap goes to the recipients below it (by weight while
+                // any of them has weight, then equally).
+                shares.clear();
+                shares.resize(targets.len(), [0.0; 3]);
                 let mut given = [0.0; 3];
-                for &(local, cell) in targets {
-                    let share = |part: usize| {
-                        let share = if sums[part] > 0.0 {
-                            weight(part, cell) / sums[part]
-                        } else {
-                            1.0 / n
-                        };
-                        share.min(cap)
-                    };
-                    let shares = [share(0), share(1), share(2)];
-                    for part in 0..3 {
-                        given[part] += shares[part];
+                for part in 0..3 {
+                    let mut remaining = 1.0;
+                    for _ in 0..FILL_PASSES {
+                        if remaining <= 1e-12 {
+                            break;
+                        }
+                        let open = |share: &[f64; 3]| share[part] < cap;
+                        let (mut sum, mut count) = (0.0, 0usize);
+                        for (share, &(_, cell)) in shares.iter().zip(targets) {
+                            if open(share) {
+                                sum += weight(part, cell);
+                                count += 1;
+                            }
+                        }
+                        if count == 0 {
+                            break;
+                        }
+                        let mut excess = 0.0;
+                        for (share, &(_, cell)) in shares.iter_mut().zip(targets) {
+                            if !open(share) {
+                                continue;
+                            }
+                            share[part] += remaining
+                                * if sum > 0.0 {
+                                    weight(part, cell) / sum
+                                } else {
+                                    1.0 / count as f64
+                                };
+                            if share[part] > cap {
+                                excess += share[part] - cap;
+                                share[part] = cap;
+                            }
+                        }
+                        remaining = excess;
                     }
+                    given[part] = 1.0 - remaining;
+                }
+                for (share, &(local, _)) in shares.iter().zip(targets) {
                     let crust = self.plates[plate].crust[local as usize]
                         .as_mut()
                         .expect("recipients have crust");
                     let (applied, expected) = apply_surface_change(
                         crust,
-                        parts[0] * shares[0] / crust.density,
-                        (parts[1] * shares[1] + parts[2] * shares[2]) / SEDIMENT_ROCK_DENSITY,
+                        parts[0] * share[0] / crust.density,
+                        (parts[1] * share[1] + parts[2] * share[2]) / SEDIMENT_ROCK_DENSITY,
                     );
                     change += applied;
-                    clamped += expected - applied;
+                    clamped += (expected - applied).abs();
                 }
                 to_hidden += (0..3)
                     .map(|part| parts[part].abs() * given[part])
@@ -1525,7 +1553,7 @@ impl Simulation {
                         sediment_mass * sediment_keep / SEDIMENT_ROCK_DENSITY,
                     );
                     change += applied;
-                    clamped += expected - applied;
+                    clamped += (expected - applied).abs();
                 }
             }
         }
