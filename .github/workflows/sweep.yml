@@ -1,0 +1,159 @@
+# Seed sweeps on GitHub-hosted runners, so that long simulation runs don't have to queue on the
+# agents' server. Started by hand or by the agents (`agent-sweep` on tktie):
+#
+#   gh workflow run sweep.yml -f ref=<branch|sha> -f seeds=0-15 -f args="--duration 500" -f label=<id>
+#
+# One job builds the release binary of `ref`; then every runner (4 vCPUs) takes `per_job` seeds
+# and runs them in parallel with `--headless --seed S --output out/seed-S <args>`. Each seed
+# directory holds the snapshots, `log.txt` (stdout + stderr), `exit` and `seconds`. Results are
+# uploaded as artifacts `sweep-<label>-<chunk>` (kept 7 days).
+#
+# Changes to this file also run a tiny sweep on the pull request as a smoke test.
+name: Sweep
+run-name: "sweep ${{ inputs.label || github.head_ref || github.ref_name }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit to build"
+        required: true
+        default: main
+      seeds:
+        description: "Seeds: ranges and lists, e.g. 0-15 or 1,4,9-12 (at most 200)"
+        required: true
+        default: "0-3"
+      args:
+        description: "Further simulator arguments (split on whitespace, no quoting)"
+        required: false
+        default: ""
+      per_job:
+        description: "Seeds per runner, run in parallel (runners have 4 vCPUs)"
+        required: false
+        default: "4"
+      label:
+        description: "Unique label; names the run and its artifacts"
+        required: true
+  pull_request:
+    paths:
+      - .github/workflows/sweep.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sweep-${{ inputs.label || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      chunks: ${{ steps.plan.outputs.chunks }}
+      label: ${{ steps.plan.outputs.label }}
+    steps:
+      - id: plan
+        env:
+          SEEDS: ${{ inputs.seeds || '0-1' }}
+          PER_JOB: ${{ inputs.per_job || '2' }}
+          LABEL: ${{ inputs.label || format('pr-{0}-{1}', github.event.pull_request.number, github.run_attempt) }}
+        run: |
+          set -euo pipefail
+          [[ "$LABEL" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::label may only contain A-Z a-z 0-9 . _ -"; exit 1; }
+          [[ "$PER_JOB" =~ ^[1-9][0-9]*$ ]] || { echo "::error::per_job must be a positive integer"; exit 1; }
+          seeds=()
+          IFS=',' read -ra parts <<< "${SEEDS// /}"
+          for p in "${parts[@]}"; do
+            if [[ "$p" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+              for ((s = BASH_REMATCH[1]; s <= BASH_REMATCH[2]; s++)); do seeds+=("$s"); done
+            elif [[ "$p" =~ ^[0-9]+$ ]]; then seeds+=("$p")
+            else echo "::error::bad seed spec: $p"; exit 1; fi
+            (( ${#seeds[@]} <= 200 )) || { echo "::error::at most 200 seeds"; exit 1; }
+          done
+          (( ${#seeds[@]} > 0 )) || { echo "::error::no seeds"; exit 1; }
+          chunks=$(printf '%s\n' "${seeds[@]}" | jq -R . | jq -sc --argjson n "$PER_JOB" \
+            '[range(0; length; $n) as $i | {id: ($i / $n | floor), seeds: (.[$i:$i+$n] | join(" "))}]')
+          echo "chunks=$chunks" >> "$GITHUB_OUTPUT"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "${#seeds[@]} seeds in $(jq length <<< "$chunks") jobs: $chunks"
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-key: sweep
+
+      - name: Build release binary
+        run: |
+          cargo build --release --locked
+          mkdir -p dist
+          cp target/release/world-simulator dist/
+          git rev-parse HEAD > dist/commit
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binary
+          path: dist/
+          retention-days: 1
+
+  run:
+    name: Seeds ${{ matrix.chunk.seeds }}
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: ${{ fromJSON(needs.plan.outputs.chunks) }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: binary
+          path: dist
+
+      - name: Run seeds
+        env:
+          SEEDS: ${{ matrix.chunk.seeds }}
+          EVENT: ${{ github.event_name }}
+          INPUT_ARGS: ${{ inputs.args }}
+        run: |
+          set -uo pipefail
+          if [ "$EVENT" = workflow_dispatch ]; then SIM_ARGS=$INPUT_ARGS
+          else SIM_ARGS="--duration 10 --snapshot-interval 10 --subdivisions 4"; fi   # PR smoke test
+          chmod +x dist/world-simulator
+          read -ra args <<< "$SIM_ARGS"
+          run_seed() {
+            local s=$1 d="out/seed-$1" t0 rc
+            mkdir -p "$d"
+            t0=$(date +%s)
+            ./dist/world-simulator --headless --seed "$s" --output "$d" "${args[@]}" > "$d/log.txt" 2>&1
+            rc=$?
+            echo $rc > "$d/exit"; echo $(( $(date +%s) - t0 )) > "$d/seconds"
+            echo "seed $s: exit $rc after $(cat "$d/seconds") s"
+            return $rc
+          }
+          pids=()
+          for s in $SEEDS; do run_seed "$s" & pids+=($!); done
+          fail=0
+          for p in "${pids[@]}"; do wait "$p" || fail=1; done
+          cp dist/commit out/
+          printf '%s\n' "$SIM_ARGS" > out/args
+          exit $fail
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sweep-${{ needs.plan.outputs.label }}-${{ matrix.chunk.id }}
+          path: out/
+          retention-days: 7
