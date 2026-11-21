@@ -1,7 +1,7 @@
 //! The topographic mode, the default: the colours the simulation computes with the vertices
 //! (`render::surface_color`: elevation, rivers, permanent ice), unchanged.
 
-use super::{ColorScale, Legend, RenderMode, Swatch};
+use super::{ColorScale, Legend, ModeData, RenderMode, Swatch};
 use crate::render;
 
 pub struct Topographic;
@@ -11,23 +11,24 @@ impl RenderMode for Topographic {
         "Topographic"
     }
 
-    fn legend(&self, _arrow_spacing: f64) -> Legend {
+    fn legend(&self, _data: Option<&ModeData>) -> Legend {
         Legend {
             description: "Elevation above and depth below sea level, with rivers and permanent \
-                          ice. The relief is exaggerated.",
+                          ice. The relief is exaggerated."
+                .into(),
             scale: Some(elevation_scale()),
             swatches: vec![
                 Swatch {
                     color: render::RIVER_COLOR,
-                    label: "River",
+                    label: "River".into(),
                 },
                 Swatch {
                     color: render::ICE_SHEET_COLOR,
-                    label: "Ice sheet",
+                    label: "Ice sheet".into(),
                 },
                 Swatch {
                     color: render::SEA_ICE_COLOR,
-                    label: "Sea ice",
+                    label: "Sea ice".into(),
                 },
             ],
             arrows: None,
@@ -42,13 +43,13 @@ pub fn elevation_scale() -> ColorScale {
             .iter()
             .map(|&(value, color)| (value, color.map(|channel| channel.round() as u8)))
             .collect(),
-        title: "Elevation (km)",
+        title: "Elevation (km)".into(),
         ticks: vec![
-            (-6000.0, "−6"),
-            (-3000.0, "−3"),
-            (0.0, "0"),
-            (3000.0, "3"),
-            (6000.0, "6"),
+            (-6000.0, "−6".into()),
+            (-3000.0, "−3".into()),
+            (0.0, "0".into()),
+            (3000.0, "3".into()),
+            (6000.0, "6".into()),
         ],
     }
 }

@@ -253,11 +253,6 @@ impl ParameterPanel {
         args
     }
 
-    /// The arguments of the running simulation, as [`ParameterPanel::args`] produces them.
-    pub fn running(&self) -> &[String] {
-        &self.running
-    }
-
     /// Records that a simulation with `args` was started.
     pub fn set_running(&mut self, args: Vec<String>) {
         self.running = args;
@@ -312,7 +307,7 @@ impl ParameterPanel {
         let open = *self.open.get_or_insert(screen.width() >= NARROW_SCREEN);
         if !open {
             let width = (screen.width() - 4.0 * MARGIN).clamp(100.0, MAX_WIDTH);
-            let (top, width) = beside_or_below(screen, switcher, width);
+            let (top, width) = beside_or_below(screen, switcher, width, MIN_BESIDE);
             egui::Area::new(egui::Id::unique("parameter panel button"))
                 .anchor(egui::Align2::RIGHT_TOP, [-MARGIN, top])
                 .show(ctx, |ui| {
@@ -336,6 +331,8 @@ impl ParameterPanel {
         }
 
         let max_width = (screen.width() - 4.0 * MARGIN).clamp(100.0, MAX_WIDTH);
+        // Beside the switcher if the panel fits there, else below it (phones).
+        let (top, max_width) = beside_or_below(screen, switcher, max_width, MIN_PANEL_BESIDE);
         let bottom = match avoid {
             Some(avoid) if avoid.right() + MARGIN > screen.right() - MARGIN - max_width => {
                 avoid.top().min(screen.bottom())
@@ -346,7 +343,7 @@ impl ParameterPanel {
         let mut launch = None;
         egui::Window::new("Simulation parameters")
             .id(egui::Id::unique("parameter panel"))
-            .anchor(egui::Align2::RIGHT_TOP, [-MARGIN, MARGIN])
+            .anchor(egui::Align2::RIGHT_TOP, [-MARGIN, top])
             .open(&mut open)
             .collapsible(false)
             // As large as the contents, but nothing off-screen on small screens: the contents
@@ -355,7 +352,7 @@ impl ParameterPanel {
             .max_width(max_width)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
-                    .max_height((bottom - screen.top() - 10.0 * MARGIN).max(100.0))
+                    .max_height((bottom - screen.top() - top - 9.0 * MARGIN).max(100.0))
                     .show(ui, |ui| launch = self.contents(ui, status, hint));
             });
         self.open = Some(open);
@@ -450,15 +447,22 @@ impl ParameterPanel {
     }
 }
 
-/// Narrowest room (points) beside the switcher for the button and the hint of the hidden panel.
+/// Narrowest room (points) beside the switcher for the button and the hint of the hidden panel,
+/// and for the open panel.
 const MIN_BESIDE: f32 = 160.0;
+const MIN_PANEL_BESIDE: f32 = 300.0;
 
-/// Where the button of the hidden panel goes, as the distance of its top from the top of the
-/// screen, and how wide it and the hint under it may be (at most `width`): beside `switcher` in
-/// the top right corner if there is room, else below it.
-fn beside_or_below(screen: egui::Rect, switcher: egui::Rect, width: f32) -> (f32, f32) {
+/// Where the panel or its button goes, as the distance of its top from the top of the screen,
+/// and how wide it (and the hint under the button) may be (at most `width`): beside `switcher`
+/// in the top right corner if there are at least `min_beside` points of room, else below it.
+fn beside_or_below(
+    screen: egui::Rect,
+    switcher: egui::Rect,
+    width: f32,
+    min_beside: f32,
+) -> (f32, f32) {
     let room = screen.right() - MARGIN - (switcher.right() + MARGIN);
-    if room >= MIN_BESIDE.min(width) {
+    if room >= min_beside.min(width) {
         (MARGIN, width.min(room))
     } else {
         (switcher.bottom() - screen.top() + MARGIN, width)
@@ -810,16 +814,27 @@ mod tests {
         let switcher = egui::Rect::from_min_max(egui::pos2(8.0, 8.0), egui::pos2(250.0, 60.0));
         // Wide screen: in the corner, as wide as allowed.
         let wide = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
-        assert_eq!(beside_or_below(wide, switcher, 360.0), (MARGIN, 360.0));
+        assert_eq!(
+            beside_or_below(wide, switcher, 360.0, MIN_BESIDE),
+            (MARGIN, 360.0)
+        );
         // A phone with room beside the switcher: in the corner, narrower.
         let phone = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(430.0, 800.0));
-        let (top, width) = beside_or_below(phone, switcher, 360.0);
+        let (top, width) = beside_or_below(phone, switcher, 360.0, MIN_BESIDE);
         assert_eq!(top, MARGIN);
         assert_eq!(width, 430.0 - MARGIN - 258.0);
         assert!(phone.right() - MARGIN - width >= switcher.right());
         // Too little room: below the switcher.
         let small = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360.0, 640.0));
-        assert_eq!(beside_or_below(small, switcher, 328.0), (68.0, 328.0));
+        assert_eq!(
+            beside_or_below(small, switcher, 328.0, MIN_BESIDE),
+            (68.0, 328.0)
+        );
+        // The open panel needs more room: below the switcher on the phone.
+        assert_eq!(
+            beside_or_below(phone, switcher, 360.0, MIN_PANEL_BESIDE),
+            (68.0, 360.0)
+        );
     }
 
     #[test]

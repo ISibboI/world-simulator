@@ -3,7 +3,7 @@
 
 use super::super::arrows::{ArrowStyle, Sample};
 use super::super::fields::{Layer, Layers};
-use super::{ArrowScale, Legend, ModeData, RenderMode};
+use super::{ArrowScale, DEFAULT_ARROW_SPACING, Legend, ModeData, RenderMode};
 
 pub struct PlateMotion;
 
@@ -33,12 +33,13 @@ impl RenderMode for PlateMotion {
         Some((samples, style(data.arrow_spacing)))
     }
 
-    fn legend(&self, arrow_spacing: f64) -> Legend {
-        let style = style(arrow_spacing);
+    fn legend(&self, data: Option<&ModeData>) -> Legend {
+        let style = style(data.map_or(DEFAULT_ARROW_SPACING, |data| data.arrow_spacing));
         Legend {
             description: "Velocity of the plates over the mantle (the planet's fixed frame), \
                           over the topographic colours. Arrow length grows with the square root \
-                          of the speed, up to 10 cm/yr.",
+                          of the speed, up to 10 cm/yr."
+                .into(),
             scale: None,
             swatches: Vec::new(),
             arrows: Some(ArrowScale::new(

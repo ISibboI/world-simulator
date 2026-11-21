@@ -49,9 +49,12 @@ pub use fields::Layer;
 pub use fields::{Fields, Layers};
 pub use modes::RenderModeId;
 use modes::switcher::{ModeSwitcher, SwitcherView};
-use modes::{ModeData, recolored};
+use modes::{ModeData, Shading, recolored};
 #[cfg(target_arch = "wasm32")]
-pub use modes::{STORAGE_KEY as RENDER_MODE_STORAGE_KEY, initial as initial_render_mode, to_store};
+pub use modes::{
+    STORAGE_KEY as RENDER_MODE_STORAGE_KEY, initial as initial_render_mode, to_store,
+    with_render_mode,
+};
 use pace::{HintAction, Pace};
 use parameters::{ParameterPanel, SimulationStatus};
 #[cfg(target_arch = "wasm32")]
@@ -225,15 +228,14 @@ pub type StartSimulation = Box<
 pub trait SimulationControl {
     /// Asks the simulation to send these extra fields with its updates from now on. A
     /// simulation sends its current state again with them if they include new ones, as soon
-    /// as it can (between steps, or at once once it has finished), so that a new mode does not
-    /// wait for the next step.
+    /// as it can (the web worker between steps, or at once once it has finished; the desktop
+    /// thread with its next step, which comes as soon), so that a new mode does not wait long.
     fn request_layers(&mut self, layers: Layers);
 }
 
-/// Called when the user chose another render mode, with the command-line arguments of the
-/// running simulation with that mode (the web page puts them into its URL and remembers the
-/// mode).
-pub type RememberRenderMode = Box<dyn FnMut(RenderModeId, &[String])>;
+/// Called when the user chose another render mode (the web page puts it into its URL and
+/// remembers it).
+pub type RememberRenderMode = Box<dyn FnMut(RenderModeId)>;
 
 /// Creates the viewer app; shared by the desktop window and the web page.
 fn app_creator(
@@ -349,6 +351,8 @@ struct Viewer {
     arrow_cells: Option<(u64, Vec<u32>, f64)>,
     /// Points per planet radius on the planet's front in the last frame.
     points_per_radius: f32,
+    /// The legend of the active mode for the displayed state.
+    legend: modes::Legend,
     parameters: ParameterPanel,
     cell_panel: CellInfoPanel,
     pace: Pace,
@@ -427,6 +431,7 @@ impl Viewer {
             displays: 0,
             arrow_cells: None,
             points_per_radius: 100.0,
+            legend: initial.cli.render_mode.mode().legend(None),
             parameters,
             cell_panel: CellInfoPanel::default(),
             pace,
@@ -492,10 +497,7 @@ impl Viewer {
             }
         }
         if let Some(remember) = &mut self.remember_render_mode {
-            remember(
-                mode,
-                &modes::with_render_mode(self.parameters.running(), mode),
-            );
+            remember(mode);
         }
     }
 
@@ -505,8 +507,14 @@ impl Viewer {
             return;
         }
         let (Some(surface), Some(picking)) = (&self.surface, &self.picking) else {
-            self.display = self.surface.clone();
+            // A fresh id, so that the renderer uploads these vertices.
+            self.displays += 1;
+            self.display = self.surface.clone().map(|surface| Surface {
+                vertices_id: self.displays,
+                ..surface
+            });
             self.overlay = None;
+            self.legend = self.mode.mode().legend(None);
             return;
         };
         let start = web_time::Instant::now();
@@ -548,6 +556,7 @@ impl Viewer {
             id: self.displays,
             vertices: Arc::new(vertices),
         });
+        self.legend = mode.legend(Some(&data));
         tracing::debug!(
             mode = self.mode.name(),
             elapsed = ?start.elapsed(),
@@ -727,7 +736,15 @@ impl Viewer {
         Uniforms {
             view_projection: (projection * view).to_cols_array_2d(),
             light_direction: light.extend(0.0).to_array(),
-            viewport: [viewport.x, viewport.y, 0.0, 0.0],
+            viewport: [
+                viewport.x,
+                viewport.y,
+                match self.mode.mode().shading() {
+                    Shading::Lit => 0.0,
+                    Shading::Unlit => 1.0,
+                },
+                0.0,
+            ],
         }
     }
 }
@@ -854,10 +871,7 @@ impl eframe::App for Viewer {
 
         let mut mode = self.mode;
         let view = SwitcherView {
-            arrow_spacing: self
-                .arrow_cells
-                .as_ref()
-                .map_or(0.14, |(_, _, spacing)| *spacing),
+            legend: &self.legend,
             points_per_radius: self.points_per_radius,
             waiting: self.waiting_for_fields(),
         };

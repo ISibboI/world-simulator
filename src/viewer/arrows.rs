@@ -10,6 +10,7 @@
 
 use glam::{DVec3, Vec3};
 
+use crate::hash::HashSet;
 use crate::sphere::SphereMesh;
 
 /// A vector at a point of the sphere.
@@ -114,7 +115,10 @@ pub fn arrows(samples: &[Sample], style: &ArrowStyle) -> Vec<Arrow> {
             let tangent = sample.vector - up * sample.vector.dot(up);
             let magnitude = tangent.length();
             let length = style.length(magnitude);
-            if up == DVec3::ZERO || length < style.min_fraction * style.max_length {
+            if up == DVec3::ZERO
+                || !(magnitude > 0.0 && magnitude.is_finite())
+                || length < style.min_fraction * style.max_length
+            {
                 return None;
             }
             Some(Arrow {
@@ -142,9 +146,7 @@ pub fn arrow_triangles(arrow: &Arrow, style: &ArrowStyle, margin: f64) -> [[DVec
     let along = arrow.direction;
     // `along × up` points to the right of the arrow seen from outside; `up × along` left.
     let left = up.cross(along).normalize_or_zero();
-    let head_length = (style.head_length * arrow.length)
-        .min(style.head_length * style.max_length)
-        .max(0.0);
+    let head_length = (style.head_length * arrow.length).max(0.0);
     let start = arrow.base - along * margin;
     let neck = arrow.base + along * (arrow.length - head_length);
     let tip = arrow.base + along * (arrow.length + 2.0 * margin);
@@ -193,15 +195,34 @@ pub fn sample_cells(mesh: &SphereMesh, subdivisions: u32) -> (Vec<u32>, f64) {
     (cells, grid.mean_edge_angle())
 }
 
-/// Where an arrow at `cell` starts: on the highest displayed point of the cell and its
-/// neighbours (so that it is not buried in the relief next to it), given the displayed
-/// positions of the vertices.
-pub fn base_point(mesh: &SphereMesh, cell: u32, position: impl Fn(u32) -> Vec3) -> DVec3 {
-    let radius = std::iter::once(cell)
-        .chain(mesh.neighbors(cell).iter().copied())
-        .map(|vertex| f64::from(position(vertex).length()))
-        .fold(1.0, f64::max);
-    mesh.vertex(cell).normalize_or(DVec3::X) * radius
+/// Where an arrow at `cell` starts: above the highest displayed point within `reach` (planet
+/// radii, the longest arrow) of the cell, so that the arrow does not dive into the relief it
+/// points at (with the exaggerated relief, mountains rise several cell spacings' worth above
+/// the tangent plane), given the displayed positions of the vertices.
+pub fn base_point(
+    mesh: &SphereMesh,
+    cell: u32,
+    reach: f64,
+    position: impl Fn(u32) -> Vec3,
+) -> DVec3 {
+    let up = mesh.vertex(cell).normalize_or(DVec3::X);
+    // Cells within the reach: a walk over neighbours, as far as the angle allows.
+    let min_cos = reach.min(std::f64::consts::FRAC_PI_2).cos();
+    let mut seen: HashSet<u32> = HashSet::default();
+    seen.insert(cell);
+    let mut frontier = vec![cell];
+    let mut radius = 1.0f64;
+    while let Some(vertex) = frontier.pop() {
+        radius = radius.max(f64::from(position(vertex).length()));
+        for &neighbor in mesh.neighbors(vertex) {
+            if mesh.vertex(neighbor).normalize_or(DVec3::X).dot(up) >= min_cos
+                && seen.insert(neighbor)
+            {
+                frontier.push(neighbor);
+            }
+        }
+    }
+    up * radius
 }
 
 #[cfg(test)]
@@ -355,11 +376,35 @@ mod tests {
         let mesh = SphereMesh::icosphere(2);
         let cell = 5;
         let high = mesh.neighbors(cell)[0];
-        let base = base_point(&mesh, cell, |vertex| {
+        let base = base_point(&mesh, cell, 0.5 * mesh.mean_edge_angle(), |vertex| {
+            let radius = if vertex == high { 1.05 } else { 1.01 };
+            mesh.vertex(vertex).as_vec3() * radius
+        });
+        // The neighbour is out of reach.
+        assert!((base.length() - 1.01).abs() < 1e-6);
+        let base = base_point(&mesh, cell, 1.2 * mesh.mean_edge_angle(), |vertex| {
             let radius = if vertex == high { 1.05 } else { 1.01 };
             mesh.vertex(vertex).as_vec3() * radius
         });
         assert!((base.length() - 1.05).abs() < 1e-6);
         assert!(close(base.normalize().dot(mesh.vertex(cell)), 1.0));
+        // A peak two rings away counts with a reach that includes it.
+        let ring = mesh.neighbors(cell);
+        let far = ring
+            .iter()
+            .flat_map(|&n| mesh.neighbors(n).iter().copied())
+            .find(|v| *v != cell && !ring.contains(v))
+            .unwrap();
+        let distance = mesh
+            .vertex(far)
+            .dot(mesh.vertex(cell))
+            .clamp(-1.0, 1.0)
+            .acos();
+        let peak = |vertex: u32| {
+            let radius = if vertex == far { 1.08 } else { 1.0 };
+            mesh.vertex(vertex).as_vec3() * radius
+        };
+        assert!((base_point(&mesh, cell, distance * 1.01, peak).length() - 1.08).abs() < 1e-6);
+        assert!((base_point(&mesh, cell, distance * 0.99, peak).length() - 1.0).abs() < 1e-6);
     }
 }

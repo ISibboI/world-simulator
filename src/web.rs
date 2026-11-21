@@ -214,9 +214,15 @@ fn stored_render_mode() -> Option<String> {
 }
 
 /// Remembers the render mode the user picked, or forgets it if it is the default, and puts it
-/// into the page URL (`args` are the options of the running simulation with that mode).
-fn remember_render_mode(mode: RenderModeId, args: &[String]) {
-    replace_query(&args_to_query(args));
+/// into the page URL in place of the one there (the rest of the URL stays as it is).
+fn remember_render_mode(mode: RenderModeId) {
+    let search = web_sys::window()
+        .and_then(|window| window.location().search().ok())
+        .unwrap_or_default();
+    match query_to_args(&search) {
+        Ok(args) => replace_query(&args_to_query(&viewer::with_render_mode(&args, mode))),
+        Err(error) => error!("Could not update the URL: {error:#}"),
+    }
     let Some(storage) = local_storage() else {
         return;
     };
@@ -575,7 +581,10 @@ impl WorkerState {
         let new = layers.0 & !self.layers.0 != 0;
         self.layers = layers;
         if new {
+            let start = web_time::Instant::now();
             self.publish(None);
+            // The time of this extra update does not count into the next step's.
+            self.run.previous_update += start.elapsed();
         }
     }
 }

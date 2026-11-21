@@ -121,7 +121,8 @@ struct Cli {
     #[arg(long)]
     headless: bool,
 
-    /// What the 3D view shows at the start (it can be changed in the view, top left).
+    /// What the 3D view shows at the start (it can be changed in the view, top left); ignored
+    /// with `--headless`.
     #[arg(long, value_enum, default_value_t = viewer::RenderModeId::Topographic)]
     render_mode: viewer::RenderModeId,
 

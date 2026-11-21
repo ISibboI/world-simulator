@@ -27,8 +27,8 @@ pub struct Vertex {
 pub struct Uniforms {
     pub view_projection: [[f32; 4]; 4],
     pub light_direction: [f32; 4],
-    /// Size of the view in physical pixels (`x`, `y`; `z` and `w` unused), for lines of a
-    /// fixed width.
+    /// Size of the view in physical pixels (`x`, `y`), for lines of a fixed width; `z` is 1 if
+    /// the render mode shows its colours unlit, 0 if lit (`w` unused).
     pub viewport: [f32; 4],
 }
 

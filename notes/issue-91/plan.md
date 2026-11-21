@@ -14,13 +14,24 @@ building block end to end. The other modes are not implemented here.
   - `layers()` — extra fields it needs beyond `CellInfo` (default: none);
   - `colors(&ModeData)` — per-cell colours, or `None` to keep the topographic vertex colours;
   - `arrows(&ModeData)` — vector samples + `ArrowStyle`, or `None`;
-  - `legend(arrow_spacing)` — description, colour bar (`ColorScale` with title/unit and tick
-    labels), swatches, arrow scale.
+  - `shading()` — lit (relief visible, default) or unlit (colours exactly as in the legend);
+  - `legend(Option<&ModeData>)` — description, colour bar (`ColorScale` with title/unit and tick
+    labels), swatches, arrow scale; built with every update, so ranges/counts can follow the data
+    (texts are `Cow<'static, str>`).
 - `ModeData` gives a mode the mesh, the displayed vertices, the `CellInfo`s, the received fields
   and evenly spread arrow cells (icosphere-3 grid, 642 arrows ~8° apart).
 - Adding a mode = enum variant + its name + a file with the impl + one line in
   `RenderModeId::mode`. A scalar mode is ~30 lines: `ColorScale::colors(cells.iter().map(|c|
   c.temperature), missing)` + a legend. A vector mode: a `Layer` + `ModeData::vector_samples`.
+- Known limits for later modes (from the review), deliberately left for the modes that need them:
+  - Colours are per vertex and interpolated across triangles, so categorical modes (#93 plates,
+    #99 crust type, #103 Köppen) get soft boundaries one cell wide; crisp ones need flat per-cell
+    shading (a dual mesh or a per-cell colour texture) — #93 can add it.
+  - Boundary lines (#93): the overlay already takes any triangles (a line is a thin quad);
+    a mode hook for lines/polygons besides arrows is a small extension of `RenderMode::arrows`.
+  - Modes are stateless `&'static` values; settings (e.g. #94's month) or caches would move into
+    a per-mode state owned by the viewer.
+  - #92 (photorealistic) needs its own shader/pipeline; `shading()` is the first such hook.
 - Topographic keeps the colours the simulation computes (`render::surface_color`), so it is
   byte-for-byte the old view (and the headless PNGs are untouched).
 
@@ -39,7 +50,8 @@ building block end to end. The other modes are not implemented here.
   - Web: the worker used to block in the simulation loop and could not receive messages. It now
     runs one step per `setTimeout(0)` task (`Run`, factored out of `simulate`), so `{ layers }`
     messages arrive between steps; it then re-sends its current state with the new fields at
-    once (also after the run is complete).
+    once (also after the run is complete). `worker.js` keeps messages that arrive while the module
+    is still loading and hands them over once the simulation's handler is installed.
 
 ### Vector overlay (`src/viewer/arrows.rs`, `overlay.wgsl`)
 - `Sample { base, vector }` → `arrows()` with an `ArrowStyle` (length and width grow linearly

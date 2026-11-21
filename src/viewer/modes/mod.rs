@@ -107,7 +107,10 @@ impl ModeData<'_> {
                 .filter_map(|&cell| {
                     let vector = self.fields.vector(layer, cell)?;
                     Some(Sample {
-                        base: base_point(self.mesh, cell, |vertex| self.position(vertex)),
+                        // Arrows are at most about one spacing long.
+                        base: base_point(self.mesh, cell, self.arrow_spacing, |vertex| {
+                            self.position(vertex)
+                        }),
                         vector: vector.as_dvec3(),
                     })
                 })
@@ -137,15 +140,39 @@ pub trait RenderMode: Sync {
         None
     }
 
-    /// The legend, given the spacing of the arrows in planet radii (for an arrow scale).
-    fn legend(&self, arrow_spacing: f64) -> Legend;
+    /// Whether the planet is shaded by the light (relief visible) or shows the colours as they
+    /// are (so that they match the legend exactly).
+    fn shading(&self) -> Shading {
+        Shading::Lit
+    }
+
+    /// The legend, from the data of the displayed state if there is one (ranges, counts and
+    /// the arrow spacing can follow the data); rebuilt with every update.
+    fn legend(&self, data: Option<&ModeData>) -> Legend;
 }
+
+/// How the planet's colours are lit, see [`RenderMode::shading`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Shading {
+    /// Diffuse light from the upper left of the camera.
+    #[default]
+    Lit,
+    /// The colours as they are.
+    #[allow(dead_code)] // For the scalar modes to come; see the tests.
+    Unlit,
+}
+
+/// Spacing of the arrows (planet radii) assumed before the first surface arrived.
+pub const DEFAULT_ARROW_SPACING: f64 = 0.14;
+
+/// Text of a legend: fixed, or built from the data.
+pub type Text = std::borrow::Cow<'static, str>;
 
 /// What the legend of a mode shows; drawn by [`switcher`].
 #[derive(Debug, Clone, Default)]
 pub struct Legend {
     /// One or two sentences about what the mode shows.
-    pub description: &'static str,
+    pub description: Text,
     /// A colour bar with its unit.
     pub scale: Option<ColorScale>,
     /// Colours with a meaning of their own (rivers, ice, …).
@@ -158,7 +185,7 @@ pub struct Legend {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Swatch {
     pub color: [u8; 3],
-    pub label: &'static str,
+    pub label: Text,
 }
 
 /// Arrows of known magnitudes, drawn in the legend at their size on the planet's front.
@@ -166,20 +193,20 @@ pub struct Swatch {
 pub struct ArrowScale {
     /// Magnitudes in `unit` with the lengths and shaft widths of their arrows in planet radii.
     pub examples: Vec<(f64, f64, f64)>,
-    pub unit: &'static str,
+    pub unit: Text,
     /// The colour of the arrows.
     pub color: [f32; 4],
 }
 
 impl ArrowScale {
     /// The arrows of `magnitudes` in a style.
-    pub fn new(style: &ArrowStyle, magnitudes: &[f64], unit: &'static str) -> Self {
+    pub fn new(style: &ArrowStyle, magnitudes: &[f64], unit: impl Into<Text>) -> Self {
         Self {
             examples: magnitudes
                 .iter()
                 .map(|&magnitude| (magnitude, style.length(magnitude), style.width(magnitude)))
                 .collect(),
-            unit,
+            unit: unit.into(),
             color: style.color,
         }
     }
@@ -191,9 +218,9 @@ pub struct ColorScale {
     /// Values with their colours, sorted by value; at least two.
     pub stops: Vec<(f64, [u8; 3])>,
     /// What the values are, with their unit, e.g. "Elevation (km)".
-    pub title: &'static str,
+    pub title: Text,
     /// Values labelled under the bar, with their labels.
-    pub ticks: Vec<(f64, &'static str)>,
+    pub ticks: Vec<(f64, Text)>,
 }
 
 impl ColorScale {
@@ -289,12 +316,20 @@ pub fn with_render_mode(args: &[String], mode: RenderModeId) -> Vec<String> {
             .and_then(|arg| arg.strip_prefix(OPTION))
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
     };
-    let mut args: Vec<String> = args
-        .iter()
-        .enumerate()
-        .filter(|(index, arg)| *index == 0 || !is_mode(arg))
-        .map(|(_, arg)| arg.clone())
-        .collect();
+    let mut kept = Vec::with_capacity(args.len() + 1);
+    let mut rest = args.iter();
+    if let Some(program) = rest.next() {
+        kept.push(program.clone());
+    }
+    while let Some(arg) = rest.next() {
+        if arg == &format!("--{OPTION}") {
+            // `--render-mode NAME`: the name goes too.
+            rest.next();
+        } else if !is_mode(arg) {
+            kept.push(arg.clone());
+        }
+    }
+    let mut args = kept;
     if let Some(name) = to_store(mode) {
         args.push(format!("--{OPTION}={name}"));
     }
@@ -312,7 +347,7 @@ mod tests {
             assert_eq!(mode.name(), clap_name);
             assert_eq!(RenderModeId::parse(mode.name()), Some(mode));
             assert!(!mode.mode().label().is_empty());
-            assert!(!mode.mode().legend(0.1).description.is_empty());
+            assert!(!mode.mode().legend(None).description.is_empty());
         }
         assert_eq!(
             RenderModeId::parse("plate-motion"),
@@ -360,6 +395,17 @@ mod tests {
             with_render_mode(&args, RenderModeId::Topographic),
             strings(&["world-simulator", "--seed=3"])
         );
+        // The spelling with a separate value.
+        let args = strings(&[
+            "world-simulator",
+            "--render-mode",
+            "plate-motion",
+            "--seed=3",
+        ]);
+        assert_eq!(
+            with_render_mode(&args, RenderModeId::Topographic),
+            strings(&["world-simulator", "--seed=3"])
+        );
         // Other options that start with the same letters stay.
         let args = strings(&["world-simulator", "--render-mode-x=1"]);
         assert_eq!(with_render_mode(&args, RenderModeId::Topographic), args);
@@ -381,8 +427,8 @@ mod tests {
                 (10.0, [100, 200, 0]),
                 (20.0, [100, 0, 250]),
             ],
-            title: "Height (m)",
-            ticks: vec![(0.0, "0"), (20.0, "20")],
+            title: "Height (m)".into(),
+            ticks: vec![(0.0, "0".into()), (20.0, "20".into())],
         };
         assert_eq!(scale.color(-5.0), Some([0, 0, 0]));
         assert_eq!(scale.color(5.0), Some([50, 100, 0]));
@@ -407,15 +453,19 @@ mod tests {
         fn colors(&self, data: &ModeData) -> Option<Vec<[f32; 4]>> {
             let scale = ColorScale {
                 stops: vec![(0.0, [0, 0, 0]), (1000.0, [255, 255, 255])],
-                title: "Sediment (m)",
+                title: "Sediment (m)".into(),
                 ticks: vec![],
             };
             Some(scale.colors(data.cells.iter().map(|cell| cell.sediment), [255, 0, 0]))
         }
 
-        fn legend(&self, _arrow_spacing: f64) -> Legend {
+        fn shading(&self) -> Shading {
+            Shading::Unlit
+        }
+
+        fn legend(&self, _data: Option<&ModeData>) -> Legend {
             Legend {
-                description: "Sediment thickness.",
+                description: "Sediment thickness.".into(),
                 ..Legend::default()
             }
         }
@@ -451,6 +501,8 @@ mod tests {
             );
         }
         assert!(recolored(&vertices, &colors[1..]).is_none());
+        assert_eq!(SedimentTest.shading(), Shading::Unlit);
+        assert_eq!(RenderModeId::Topographic.mode().shading(), Shading::Lit);
         // The topographic mode keeps the colours; no mode draws arrows without its data.
         assert!(RenderModeId::Topographic.mode().colors(&data).is_none());
         for &mode in RenderModeId::all() {

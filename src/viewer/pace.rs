@@ -239,6 +239,7 @@ impl Pace {
         options.width = 0;
         options.river_threshold = 0.0;
         options.exaggeration = 0.0;
+        options.render_mode = Default::default();
         self.options = format!("{options:?}");
         self.subdivisions = cli.subdivisions;
         self.times = StepTimes::default();

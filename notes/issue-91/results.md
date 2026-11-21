@@ -38,7 +38,10 @@ Design: [plan.md](plan.md). Screenshots in this folder.
 - Web: `?render-mode=…` > localStorage `world-simulator.render-mode` > default. Checked in headless
   Chromium: stored `plate-motion` without URL parameter → plate motion; URL `topographic` with
   stored `plate-motion` → topographic; picking a mode → URL gets `render-mode=plate-motion` at once
-  and the storage is set; restarts keep the mode (desktop and web).
+  and the storage is set; restarts keep the mode (desktop and web). With remembered subdivisions
+  (localStorage) and no `subdivisions` in the URL, picking a mode leaves the URL without them.
+- Phones: the open parameter panel goes below the switcher (`phone-panel-open.png`), the hidden
+  panel's button beside it.
 
 ## Tests
 - Unit tests (new): mode names vs clap, precedence, store/forget, argument rewriting and parsing,
@@ -65,6 +68,17 @@ Design: [plan.md](plan.md). Screenshots in this folder.
   vectors per fine cell, or interpolate), then `data.vector_samples(layer)` + an `ArrowStyle`.
 - #92 (photorealistic) needs its own pipeline/shader; `RenderMode` would then grow a hook for
   that. The crust-anchored detail noise needs per-cell plate-frame positions — another layer.
+
+## Independent review
+One reviewer subagent read the diff (findings in the task folder, summarised here). No blocking
+findings; fixed: requests lost while the worker module loads (buffered in `worker.js`), step-time
+measurements keyed with the render mode, picking a mode wrote remembered subdivisions into the URL
+(now only the URL's own `render-mode` is replaced), arrows diving into mountains (base lifted over
+everything within an arrow's length), a stale vertex id on an error path, the open parameter panel
+overlapping the switcher (placed beside or below it like the button), legend texts now dynamic and
+built from the data, a lit/unlit shading hook, `--render-mode NAME` spelling, and small nits.
+Left as documented limits for later modes: categorical colours interpolate across cells, no line
+hook yet, stateless modes, `setTimeout` 4 ms clamp per step.
 
 ## Unrelated fix
 - `src/viewer/pace.rs` (#78) used std's `HashMap`, which #87's Clippy rule rejects (the two PRs

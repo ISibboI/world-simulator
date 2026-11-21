@@ -18,9 +18,9 @@ const MARGIN: f32 = 8.0;
 const BAR_HEIGHT: f32 = 0.9;
 
 /// What the switcher needs to know about the view.
-pub struct SwitcherView {
-    /// Spacing of the arrows in planet radii, for the arrow scale.
-    pub arrow_spacing: f64,
+pub struct SwitcherView<'a> {
+    /// The legend of the active mode.
+    pub legend: &'a Legend,
     /// Points per planet radius on the planet's front, to draw the arrow scale at the size of
     /// the arrows.
     pub points_per_radius: f32,
@@ -86,7 +86,7 @@ impl ModeSwitcher {
                         ui.set_max_width(width);
                         controls(ui, mode, legend_open);
                         ui.separator();
-                        legend(ui, &mode.mode().legend(view.arrow_spacing), view, width);
+                        legend(ui, view.legend, view, width);
                     });
                 } else {
                     // Hidden, only the controls remain, like the buttons of the other panels.
@@ -102,9 +102,9 @@ fn legend(ui: &mut egui::Ui, legend: &Legend, view: &SwitcherView, width: f32) {
     ui.set_width(width);
     let text_size = egui::TextStyle::Body.resolve(ui.style()).size;
     let bar_height = BAR_HEIGHT * text_size;
-    ui.add(egui::Label::new(egui::RichText::new(legend.description).small()).wrap());
+    ui.add(egui::Label::new(egui::RichText::new(legend.description.as_ref()).small()).wrap());
     if let Some(scale) = &legend.scale {
-        ui.label(scale.title);
+        ui.label(scale.title.as_ref());
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, bar_height), egui::Sense::hover());
         let (low, high) = scale.range();
         let x = |value: f64| {
@@ -134,10 +134,10 @@ fn legend(ui: &mut egui::Ui, legend: &Legend, view: &SwitcherView, width: f32) {
         let font = egui::TextStyle::Small.resolve(ui.style());
         let (label_rect, _) =
             ui.allocate_exact_size(egui::vec2(width, font.size * 1.3), egui::Sense::hover());
-        for &(value, label) in &scale.ticks {
-            let position = x(value);
+        for (value, label) in &scale.ticks {
+            let position = x(*value);
             let galley = ui.painter().layout_no_wrap(
-                label.to_owned(),
+                label.to_string(),
                 font.clone(),
                 ui.visuals().text_color(),
             );
@@ -171,7 +171,7 @@ fn legend(ui: &mut egui::Ui, legend: &Legend, view: &SwitcherView, width: f32) {
                     ui.visuals().widgets.noninteractive.bg_stroke,
                     egui::StrokeKind::Outside,
                 );
-                ui.label(swatch.label);
+                ui.label(swatch.label.as_ref());
             }
         });
     }
