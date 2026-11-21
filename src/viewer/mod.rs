@@ -25,14 +25,14 @@ use parameters::{ParameterPanel, SimulationStatus};
 pub use renderer::Vertex;
 #[cfg(not(target_arch = "wasm32"))]
 use renderer::Vertex;
-use renderer::{PlanetCallback, Uniforms};
+use renderer::{PlanetCallback, Surface, Uniforms};
 
 /// Bits of the depth buffer requested from eframe; must match [`renderer::DEPTH_FORMAT`].
 const DEPTH_BUFFER_BITS: u8 = 32;
 /// Multisample anti-aliasing samples (desktop only; the web painter does not multisample).
 #[cfg(not(target_arch = "wasm32"))]
 const MSAA_SAMPLES: u16 = 4;
-/// Vertical field of view of the camera in radians.
+/// Field of view of the camera in radians: vertical, or horizontal in a portrait view.
 const FIELD_OF_VIEW: f32 = 0.6;
 /// Distance of the camera from the planet centre in planet radii.
 const CAMERA_DISTANCE: f32 = 4.5;
@@ -244,6 +244,11 @@ struct Viewer {
     duration: f64,
     /// Why the running simulation failed, if it did.
     failure: Option<String>,
+    /// The latest surface; the previous simulation's until the new one sends its first.
+    surface: Option<Surface>,
+    /// The number of meshes and surface states received, for [`Surface`]'s ids.
+    meshes: u64,
+    surfaces: u64,
 }
 
 impl Viewer {
@@ -259,6 +264,9 @@ impl Viewer {
             time: None,
             duration: initial.cli.duration,
             failure: None,
+            surface: None,
+            meshes: 0,
+            surfaces: 0,
         };
         viewer.start(ctx, initial);
         viewer
@@ -277,6 +285,31 @@ impl Viewer {
         (self.start_simulation)(launch, sender, Box::new(move || ctx.request_repaint()));
     }
 
+    /// Takes a new surface state. The first one of a simulation brings its triangles.
+    fn receive(&mut self, update: SurfaceUpdate) {
+        self.surfaces += 1;
+        let faces = match update.faces {
+            Some(faces) => {
+                self.meshes += 1;
+                faces
+            }
+            None => match &self.surface {
+                Some(surface) => surface.faces.clone(),
+                None => {
+                    tracing::error!("Surface update without a mesh");
+                    return;
+                }
+            },
+        };
+        self.time = Some(update.time);
+        self.surface = Some(Surface {
+            mesh_id: self.meshes,
+            faces,
+            vertices_id: self.surfaces,
+            vertices: update.vertices,
+        });
+    }
+
     fn camera_position(&self) -> Vec3 {
         // The planet's rotation axis is +z.
         Vec3::new(
@@ -290,8 +323,14 @@ impl Viewer {
         let eye = self.camera_position();
         let view = glam::camera::rh::view::look_at_mat4(eye, Vec3::ZERO, Vec3::Z);
         // wgpu uses normalised device coordinates with Z in [0, 1] and Y up.
+        // In portrait (phones), the field of view applies horizontally, so the planet fits.
+        let field_of_view = if aspect_ratio < 1.0 {
+            2.0 * ((FIELD_OF_VIEW / 2.0).tan() / aspect_ratio.max(0.01)).atan()
+        } else {
+            FIELD_OF_VIEW
+        };
         let projection =
-            glam::camera::rh::proj::directx::perspective(FIELD_OF_VIEW, aspect_ratio, 0.1, 10.0);
+            glam::camera::rh::proj::directx::perspective(field_of_view, aspect_ratio, 0.1, 10.0);
         // Light from the upper left of the camera, so the visible side is always lit.
         let right = Vec3::Z.cross(eye).normalize_or(Vec3::X);
         let light = (eye.normalize() + Vec3::Z * 0.5 - right * 0.6).normalize();
@@ -304,22 +343,15 @@ impl Viewer {
 
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Only the latest update matters, but the triangles come with the first one.
-        let mut vertices = None;
-        let mut faces = None;
+        let mut updated = false;
         while let Ok(event) = self.events.try_recv() {
             match event {
-                SimulationEvent::Surface(update) => {
-                    self.time = Some(update.time);
-                    vertices = Some(update.vertices);
-                    faces = update.faces.or(faces);
-                }
+                SimulationEvent::Surface(update) => self.receive(update),
                 SimulationEvent::Failed(message) => self.failure = Some(message),
             }
+            updated = true;
         }
-        if vertices.is_some()
-            && let Some(time) = self.time
-        {
+        if updated && let Some(time) = self.time {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Title(format!(
                     "World Simulator — {time:.0} Myr"
@@ -341,8 +373,7 @@ impl eframe::App for Viewer {
                         rect,
                         PlanetCallback {
                             uniforms: self.uniforms(aspect_ratio),
-                            vertices,
-                            faces,
+                            surface: self.surface.clone(),
                         },
                     ));
             });

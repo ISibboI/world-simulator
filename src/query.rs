@@ -79,6 +79,9 @@ fn decode(component: &str) -> anyhow::Result<String> {
                     rest.next().ok_or_else(invalid)?,
                     rest.next().ok_or_else(invalid)?,
                 ];
+                if !hex.iter().all(u8::is_ascii_hexdigit) {
+                    return Err(invalid());
+                }
                 let hex = std::str::from_utf8(&hex).map_err(|_| invalid())?;
                 bytes.push(u8::from_str_radix(hex, 16).map_err(|_| invalid())?);
             }
@@ -138,6 +141,7 @@ mod tests {
         assert!(query_to_args("?seed=%4").is_err());
         assert!(query_to_args("?seed=%zz").is_err());
         assert!(query_to_args("?seed=%ff").is_err());
+        assert!(query_to_args("?seed=%+f").is_err());
     }
 
     #[test]

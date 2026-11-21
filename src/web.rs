@@ -165,11 +165,13 @@ async fn run_page() -> anyhow::Result<()> {
                 show_status("");
                 replace_query(&query);
             }
-            match start_worker(&query, events, wake_up) {
+            match start_worker(&query, events.clone(), wake_up) {
                 Ok(worker) => running = Some(worker),
                 Err(error) => {
                     error!("{error:#}");
                     show_status(&format!("{error:#}"));
+                    // The panel shows it too (the view repaints on its next input).
+                    let _ = events.send(SimulationEvent::Failed(format!("{error:#}")));
                 }
             }
         }),

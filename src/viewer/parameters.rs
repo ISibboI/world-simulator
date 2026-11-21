@@ -38,6 +38,9 @@ const MAIN: &[&str] = &[
 /// Screens narrower than this (in points) start with the panel hidden, e.g. phones in portrait.
 const NARROW_SCREEN: f32 = 600.0;
 
+/// Largest width of the panel in points.
+const MAX_WIDTH: f32 = 360.0;
+
 /// Distance of the panel and its button from the corner of the window, in points.
 const MARGIN: f32 = 8.0;
 
@@ -259,12 +262,15 @@ impl ParameterPanel {
             .anchor(egui::Align2::RIGHT_TOP, [-MARGIN, MARGIN])
             .open(&mut open)
             .collapsible(false)
-            .resizable(false)
-            .vscroll(true)
-            // Nothing off-screen on small screens (the title bar and frame come on top).
-            .max_width((screen.width() - 4.0 * MARGIN).max(100.0))
-            .max_height((screen.height() - 8.0 * MARGIN).max(100.0))
-            .show(ctx, |ui| launch = self.contents(ui, status));
+            // As large as the contents, but nothing off-screen on small screens: the contents
+            // scroll (the title bar and the frame come on top), and long messages wrap.
+            .auto_sized()
+            .max_width((screen.width() - 4.0 * MARGIN).clamp(100.0, MAX_WIDTH))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height((screen.height() - 10.0 * MARGIN).max(100.0))
+                    .show(ui, |ui| launch = self.contents(ui, status));
+            });
         self.open = Some(open);
         launch
     }
@@ -518,6 +524,15 @@ mod tests {
         assert!(!message.starts_with("error:"), "{message}");
         assert!(error(&["world-simulator", "--subdivisions=9"]).contains("subdivisions"));
         assert!(error(&["world-simulator", "--dt=0"]).contains("time step"));
+        assert!(error(&["world-simulator", "--subdivisions=0", "--plates=13"]).contains("cells"));
+        assert!(
+            validate(&strings(&[
+                "world-simulator",
+                "--subdivisions=0",
+                "--plates=12"
+            ]))
+            .is_ok()
+        );
         assert!(error(&["world-simulator", "--epoch=-1"]).contains("epoch"));
         assert!(error(&["world-simulator", "--set=nonexistent=1"]).contains("nonexistent"));
         assert!(error(&["world-simulator", "--set=basal_drag"]).contains("NAME=VALUE"));

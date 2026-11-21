@@ -38,6 +38,12 @@ struct PlanetResources {
 /// Vertex and index buffers of the planet mesh. They are replaced when a simulation with
 /// another mesh starts.
 struct MeshBuffers {
+    /// [`Surface::mesh_id`] of the mesh.
+    id: u64,
+    /// [`Surface::vertices_id`] of the vertices last written, if any.
+    vertices_id: Option<u64>,
+    /// Whether the vertex buffer holds vertices.
+    has_vertices: bool,
     vertex_buffer: wgpu::Buffer,
     vertex_count: usize,
     index_buffer: wgpu::Buffer,
@@ -45,7 +51,7 @@ struct MeshBuffers {
 }
 
 impl MeshBuffers {
-    fn new(device: &wgpu::Device, vertex_count: usize, faces: &[[u32; 3]]) -> Self {
+    fn new(device: &wgpu::Device, id: u64, vertex_count: usize, faces: &[[u32; 3]]) -> Self {
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("planet vertices"),
             size: (vertex_count * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress,
@@ -58,6 +64,9 @@ impl MeshBuffers {
             usage: wgpu::BufferUsages::INDEX,
         });
         Self {
+            id,
+            vertices_id: None,
+            has_vertices: false,
             vertex_buffer,
             vertex_count,
             index_buffer,
@@ -156,13 +165,22 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
         });
 }
 
+/// The latest surface to draw. It is passed with every frame, and the renderer uploads only
+/// what changed, so a frame that egui discards (e.g. a sizing pass) loses nothing.
+#[derive(Clone)]
+pub struct Surface {
+    /// Changes with every new mesh (a new simulation).
+    pub mesh_id: u64,
+    pub faces: Arc<Vec<[u32; 3]>>,
+    /// Changes with every new state of the surface.
+    pub vertices_id: u64,
+    pub vertices: Arc<Vec<Vertex>>,
+}
+
 /// Draws the planet into the area of an egui widget.
 pub struct PlanetCallback {
     pub uniforms: Uniforms,
-    /// New vertex data to upload before drawing, if the planet changed.
-    pub vertices: Option<Arc<Vec<Vertex>>>,
-    /// The triangles of a new mesh, with the first vertices of a new simulation.
-    pub faces: Option<Arc<Vec<[u32; 3]>>>,
+    pub surface: Option<Surface>,
 }
 
 impl egui_wgpu::CallbackTrait for PlanetCallback {
@@ -182,16 +200,29 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
             0,
             bytemuck::bytes_of(&self.uniforms),
         );
-        if let (Some(faces), Some(vertices)) = (&self.faces, &self.vertices) {
-            resources.mesh = Some(MeshBuffers::new(device, vertices.len(), faces));
+        let Some(surface) = &self.surface else {
+            return Vec::new();
+        };
+        if resources.mesh.as_ref().map(|mesh| mesh.id) != Some(surface.mesh_id) {
+            resources.mesh = Some(MeshBuffers::new(
+                device,
+                surface.mesh_id,
+                surface.vertices.len(),
+                &surface.faces,
+            ));
         }
-        if let (Some(vertices), Some(mesh)) = (&self.vertices, &resources.mesh) {
+        if let Some(mesh) = &mut resources.mesh
+            && mesh.vertices_id != Some(surface.vertices_id)
+        {
+            mesh.vertices_id = Some(surface.vertices_id);
             // Vertices of another mesh (which should not happen) are not drawn.
-            if vertices.len() == mesh.vertex_count {
+            if surface.vertices.len() == mesh.vertex_count {
+                let vertices: &[Vertex] = &surface.vertices;
                 queue.write_buffer(&mesh.vertex_buffer, 0, bytemuck::cast_slice(vertices));
+                mesh.has_vertices = true;
             } else {
                 tracing::error!(
-                    vertices = vertices.len(),
+                    vertices = surface.vertices.len(),
                     expected = mesh.vertex_count,
                     "Surface update of the wrong size"
                 );
@@ -209,7 +240,7 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
         let resources: &PlanetResources = callback_resources
             .get()
             .expect("planet resources are initialised at startup");
-        let Some(mesh) = &resources.mesh else {
+        let Some(mesh) = resources.mesh.as_ref().filter(|mesh| mesh.has_vertices) else {
             return;
         };
         render_pass.set_pipeline(&resources.pipeline);

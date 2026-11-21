@@ -21,6 +21,11 @@ mod web;
 
 use std::ops::ControlFlow;
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use web_time::Instant;
 
@@ -207,56 +212,95 @@ fn main() -> anyhow::Result<()> {
 /// its updates.
 #[cfg(not(target_arch = "wasm32"))]
 fn simulation_thread_launcher(planet: Planet) -> viewer::StartSimulation {
-    use viewer::{SimulationEvent, SurfaceUpdate};
+    use viewer::SimulationEvent;
 
     let mut initial_planet = Some(planet);
-    let mut previous: Option<std::thread::JoinHandle<()>> = None;
+    // The thread of the latest simulation and its cancellation flag.
+    let mut previous: Option<(std::thread::JoinHandle<()>, Arc<AtomicBool>)> = None;
     Box::new(move |launch, events, wake_up| {
         let planet = initial_planet.take();
-        let previous_thread = previous.take();
-        previous = Some(std::thread::spawn(move || {
-            if let Some(thread) = previous_thread
-                && thread.join().is_err()
-            {
-                error!("The previous simulation thread panicked");
-            }
-            let cli = launch.cli;
-            let mut first_update = true;
-            let publish = |planet: &Planet| {
-                let mesh = planet.tectonics().mesh();
-                let vertices =
-                    viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
-                let update = SurfaceUpdate {
-                    time: planet.tectonics().time(),
-                    vertices: std::sync::Arc::new(vertices),
-                    // The triangles only with the first update of a simulation.
-                    faces: std::mem::take(&mut first_update)
-                        .then(|| std::sync::Arc::new(mesh.faces().to_vec())),
+        let previous_thread = previous.take().map(|(thread, cancelled)| {
+            cancelled.store(true, Ordering::Relaxed);
+            thread
+        });
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let cancelled = cancelled.clone();
+            std::thread::spawn(move || {
+                if let Some(thread) = previous_thread {
+                    // A panic was reported when it happened.
+                    let _ = thread.join();
+                }
+                // Replaced already while waiting (quick repeated restarts).
+                if cancelled.load(Ordering::Relaxed) {
+                    return;
+                }
+                let report = |message: String| {
+                    error!("Simulation failed: {message}");
+                    if events.send(SimulationEvent::Failed(message)).is_ok() {
+                        wake_up();
+                    }
                 };
-                // Sending fails once the view started another simulation or was closed.
-                if events.send(SimulationEvent::Surface(update)).is_err() {
-                    return ControlFlow::Break(());
+                let run = std::panic::AssertUnwindSafe(|| {
+                    run_simulation_thread(planet, &launch.cli, &cancelled, &events, &*wake_up)
+                });
+                match std::panic::catch_unwind(run) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => report(format!("{error:#}")),
+                    Err(panic) => {
+                        let message = panic
+                            .downcast_ref::<&str>()
+                            .map(|message| (*message).to_owned())
+                            .or_else(|| panic.downcast_ref::<String>().cloned())
+                            .unwrap_or_default();
+                        report(format!("the simulation panicked: {message}"));
+                    }
                 }
-                wake_up();
-                ControlFlow::Continue(())
-            };
-            let result = match planet {
-                Some(planet) => simulate(planet, &cli, publish),
-                None => std::fs::create_dir_all(&cli.output)
-                    .with_context(|| format!("creating output directory {}", cli.output.display()))
-                    .and_then(|()| build_planet(&cli))
-                    .and_then(|planet| simulate(planet, &cli, publish)),
-            };
-            if let Err(error) = result {
-                error!("Simulation failed: {error:#}");
-                if events
-                    .send(SimulationEvent::Failed(format!("{error:#}")))
-                    .is_ok()
-                {
-                    wake_up();
-                }
-            }
-        }));
+            })
+        };
+        previous = Some((thread, cancelled));
+    })
+}
+
+/// Runs one simulation of the 3D view: with the `planet` built at start-up, or with a new one.
+/// It stops early once `cancelled` is set or the view no longer receives its updates.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_simulation_thread(
+    planet: Option<Planet>,
+    cli: &Cli,
+    cancelled: &AtomicBool,
+    events: &std::sync::mpsc::Sender<viewer::SimulationEvent>,
+    wake_up: &dyn Fn(),
+) -> anyhow::Result<()> {
+    use viewer::{SimulationEvent, SurfaceUpdate};
+
+    let planet = match planet {
+        Some(planet) => planet,
+        None => {
+            std::fs::create_dir_all(&cli.output)
+                .with_context(|| format!("creating output directory {}", cli.output.display()))?;
+            build_planet(cli)?
+        }
+    };
+    let mut first_update = true;
+    simulate(planet, cli, |planet: &Planet| {
+        if cancelled.load(Ordering::Relaxed) {
+            return ControlFlow::Break(());
+        }
+        let mesh = planet.tectonics().mesh();
+        let vertices = viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
+        let update = SurfaceUpdate {
+            time: planet.tectonics().time(),
+            vertices: Arc::new(vertices),
+            // The triangles only with the first update of a simulation.
+            faces: std::mem::take(&mut first_update).then(|| Arc::new(mesh.faces().to_vec())),
+        };
+        // Sending fails once the view started another simulation or was closed.
+        if events.send(SimulationEvent::Surface(update)).is_err() {
+            return ControlFlow::Break(());
+        }
+        wake_up();
+        ControlFlow::Continue(())
     })
 }
 
@@ -274,6 +318,12 @@ impl Cli {
             "at most 8 subdivisions are supported"
         );
         ensure!(self.plates >= 1, "there must be at least one plate");
+        let cells = 10 * 4usize.pow(self.subdivisions) + 2;
+        ensure!(
+            self.plates <= cells,
+            "there can be at most as many plates as cells ({cells} at {} subdivisions)",
+            self.subdivisions
+        );
         ensure!(self.dt > 0.0, "the time step must be positive");
         ensure!(self.duration >= 0.0, "the duration must not be negative");
         ensure!(self.width >= 2, "the image width must be at least 2");
