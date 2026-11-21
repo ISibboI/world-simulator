@@ -133,31 +133,70 @@ pub fn format_position(latitude: f64, longitude: f64) -> String {
     )
 }
 
-/// A value with its unit, or "–" if it is not known (NaN).
-fn known(value: f32, format: impl Fn(f32) -> String) -> String {
-    if value.is_finite() {
-        format(value)
-    } else {
-        "–".to_owned()
+/// Placeholder for a value that does not apply to a cell or is not known.
+pub const NOT_APPLICABLE: &str = "—";
+
+/// One row of the widget.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+    pub label: &'static str,
+    /// The value, or [`NOT_APPLICABLE`].
+    pub value: String,
+    /// Whether the value applies to the cell; rows that do not are greyed out.
+    pub applies: bool,
+}
+
+/// The labels of the rows, always all of them in this order, so that the widget does not
+/// change its layout from cell to cell.
+pub const ROW_LABELS: [&str; 13] = [
+    "Position",
+    "Elevation",
+    "Surface",
+    "Plate",
+    "Crust",
+    "Lithosphere age",
+    "Sediment",
+    "Orogeny",
+    "Temperature",
+    "Jan / Jul",
+    "Precipitation",
+    "Permanent ice",
+    "River discharge",
+];
+
+fn row(label: &'static str, value: Option<String>) -> Row {
+    match value {
+        Some(value) => Row {
+            label,
+            value,
+            applies: true,
+        },
+        None => Row {
+            label,
+            value: NOT_APPLICABLE.to_owned(),
+            applies: false,
+        },
     }
 }
 
-fn format_temperature(value: f32) -> String {
+/// `Some(format(value))` if the value is known (not NaN).
+fn known(value: f32, format: impl Fn(f32) -> String) -> Option<String> {
+    value.is_finite().then(|| format(value))
+}
+
+fn format_temperature(value: f32) -> Option<String> {
     known(value, |t| format!("{t:.1} °C"))
 }
 
-/// The rows of the widget for a cell at `latitude`/`longitude` (degrees): a label and a value
-/// each.
-pub fn format_rows(info: &CellInfo, latitude: f64, longitude: f64) -> Vec<(&'static str, String)> {
+/// The rows of the widget for a cell at `latitude`/`longitude` (degrees): always the rows of
+/// [`ROW_LABELS`], with the values that do not apply to the cell (no orogeny, no ice, no river,
+/// unknown values) as [`NOT_APPLICABLE`].
+pub fn format_rows(info: &CellInfo, latitude: f64, longitude: f64) -> Vec<Row> {
     let land = info.elevation >= 0.0;
-    let mut rows = vec![
-        ("Position", format_position(latitude, longitude)),
-        (
-            if land { "Elevation" } else { "Depth" },
-            format!("{:.0} m", info.elevation.abs()),
-        ),
-        (
-            "Surface",
+    let values: [Option<String>; 13] = [
+        Some(format_position(latitude, longitude)),
+        Some(format!("{:.0} m", info.elevation)),
+        Some(
             match (land, info.ice > 0.5) {
                 (true, false) => "land",
                 (true, true) => "land, ice sheet",
@@ -166,74 +205,65 @@ pub fn format_rows(info: &CellInfo, latitude: f64, longitude: f64) -> Vec<(&'sta
             }
             .to_owned(),
         ),
-        ("Plate", info.plate.to_string()),
-        (
-            "Crust",
-            format!(
-                "{}, {:.1} km",
-                if info.is_continental() {
-                    "continental"
-                } else {
-                    "oceanic"
-                },
-                info.crust_thickness / 1000.0
-            ),
-        ),
-        (
-            // Old oceanic crust is thinned continental crust that kept its nominal age.
-            if info.is_continental() || info.age >= OLD_LITHOSPHERE {
-                "Lithosphere age"
+        Some(info.plate.to_string()),
+        Some(format!(
+            "{}, {:.1} km",
+            if info.is_continental() {
+                "continental"
             } else {
-                "Ocean floor age"
+                "oceanic"
             },
-            known(info.age, |age| {
-                if age >= OLD_LITHOSPHERE {
-                    format!("old (≥ {OLD_LITHOSPHERE:.0} Myr)")
-                } else {
-                    format!("{age:.0} Myr")
-                }
-            }),
-        ),
-        ("Sediment", format!("{:.0} m (as rock)", info.sediment)),
-    ];
-    if info.since_orogeny.is_finite() || info.orogenic > 0.0 {
-        rows.push((
-            "Orogeny",
+            info.crust_thickness / 1000.0
+        )),
+        known(info.age, |age| {
+            if age >= OLD_LITHOSPHERE {
+                format!("old (≥ {OLD_LITHOSPHERE:.0} Myr)")
+            } else if info.is_continental() {
+                format!("{age:.0} Myr")
+            } else {
+                format!("{age:.0} Myr (ocean floor)")
+            }
+        }),
+        Some(format!("{:.0} m (as rock)", info.sediment)),
+        (info.since_orogeny.is_finite() || info.orogenic > 0.0).then(|| {
             format!(
-                "{:.0}% of lithosphere, last {}",
+                "{:.0}%, last {}",
                 100.0 * info.orogenic,
                 known(info.since_orogeny, |age| format!("{age:.0} Myr ago"))
-            ),
-        ));
-    }
-    rows.extend([
-        ("Temperature", format_temperature(info.temperature)),
-        (
-            "Jan / Jul",
+                    .unwrap_or_else(|| NOT_APPLICABLE.to_owned())
+            )
+        }),
+        format_temperature(info.temperature),
+        (info.temperature_january.is_finite() || info.temperature_july.is_finite()).then(|| {
+            let month = |t| format_temperature(t).unwrap_or_else(|| NOT_APPLICABLE.to_owned());
             format!(
                 "{} / {}",
-                format_temperature(info.temperature_january),
-                format_temperature(info.temperature_july)
-            ),
-        ),
-        (
-            "Precipitation",
-            known(info.precipitation, |p| format!("{:.0} mm/yr", p * 1000.0)),
-        ),
-    ]);
-    if info.ice > 0.0 {
-        rows.push(("Permanent ice", format!("{:.0}%", 100.0 * info.ice)));
-    }
-    if land && info.discharge > 0.0 {
-        rows.push((
-            "River discharge",
+                month(info.temperature_january),
+                month(info.temperature_july)
+            )
+        }),
+        known(info.precipitation, |p| format!("{:.0} mm/yr", p * 1000.0)),
+        (info.ice > 0.0).then(|| format!("{:.0}%", 100.0 * info.ice)),
+        (land && info.discharge > 0.0).then(|| {
             format!(
                 "{} m³/s",
                 significant(f64::from(info.discharge) / crate::SECONDS_PER_YEAR)
-            ),
-        ));
-    }
-    rows
+            )
+        }),
+    ];
+    ROW_LABELS
+        .into_iter()
+        .zip(values)
+        .map(|(label, value)| row(label, value))
+        .collect()
+}
+
+/// The rows of the widget while no cell is shown: all of them, without values.
+pub fn empty_rows() -> Vec<Row> {
+    ROW_LABELS
+        .into_iter()
+        .map(|label| row(label, None))
+        .collect()
 }
 
 /// A number with about three significant digits and no exponent: 0.0123, 1.23, 123, 12300.
@@ -252,10 +282,11 @@ fn significant(value: f64) -> String {
     format!("{rounded:.decimals$}")
 }
 
-/// The short summary shown on the button of the hidden widget: position and elevation.
+/// The short summary shown on the button of the hidden widget: position and elevation, padded
+/// to a constant length (it is shown in a monospace font, so the button keeps its size).
 pub fn format_summary(info: &CellInfo, latitude: f64, longitude: f64) -> String {
     format!(
-        "{} · {:.0} m",
+        "{:>17} · {:>6.0} m",
         format_position(latitude, longitude),
         info.elevation
     )
@@ -292,8 +323,8 @@ pub struct CellInfoPanel {
 
 impl CellInfoPanel {
     /// Shows the widget or its button and returns the area reserved for it: the area it
-    /// covers, extended up to the highest it reached while open (rows come and go with the
-    /// cell), so that the parameter panel does not change size with it.
+    /// covers, extended up to the highest it reached while open (e.g. a wrapped line), so that
+    /// the parameter panel does not change size with it.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -319,7 +350,10 @@ impl CellInfoPanel {
                 .show(ctx, |ui| {
                     // One line: the area is as narrow as the screen allows.
                     if ui
-                        .add(egui::Button::new(text).wrap_mode(egui::TextWrapMode::Extend))
+                        .add(
+                            egui::Button::new(egui::RichText::new(text).monospace())
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                        )
                         .on_hover_text("Show information about the cell")
                         .clicked()
                     {
@@ -331,6 +365,7 @@ impl CellInfoPanel {
                 .into();
         }
 
+        let width = (screen.width() - 4.0 * MARGIN).clamp(100.0, MAX_WIDTH);
         let mut open = true;
         let response = egui::Window::new("Cell")
             .id(egui::Id::unique("cell info"))
@@ -338,41 +373,44 @@ impl CellInfoPanel {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .max_width((screen.width() - 4.0 * MARGIN).clamp(100.0, MAX_WIDTH))
+            // A fixed width, so that values of other lengths do not resize it.
+            .min_width(width)
+            .max_width(width)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .max_height((screen.height() * 0.45).max(100.0))
-                    .show(ui, |ui| match &position {
-                        Some((shown, latitude, longitude)) => {
-                            egui::Grid::new("cell info grid")
-                                .num_columns(2)
-                                .striped(true)
-                                .show(ui, |ui| {
-                                    for (label, value) in
-                                        format_rows(shown.info, *latitude, *longitude)
-                                    {
-                                        ui.label(label);
-                                        ui.label(value);
-                                        ui.end_row();
+                    .show(ui, |ui| {
+                        let rows = match &position {
+                            Some((shown, latitude, longitude)) => {
+                                format_rows(shown.info, *latitude, *longitude)
+                            }
+                            None => empty_rows(),
+                        };
+                        egui::Grid::new("cell info grid")
+                            .num_columns(2)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for row in rows {
+                                    if row.applies {
+                                        ui.label(row.label);
+                                        ui.label(row.value);
+                                    } else {
+                                        ui.weak(row.label);
+                                        ui.weak(row.value);
                                     }
-                                });
-                            ui.weak(if shown.selected {
-                                format!(
-                                    "Cell {}, selected; {} elsewhere to clear.",
-                                    shown.cell,
-                                    if touch { "tap" } else { "click" }
-                                )
-                            } else {
-                                format!("Cell {}; click to keep it.", shown.cell)
+                                    ui.end_row();
+                                }
                             });
-                        }
-                        None => {
-                            ui.label(if touch {
-                                "Tap the planet to see a cell."
-                            } else {
-                                "Point at the planet to see a cell; click to keep it."
-                            });
-                        }
+                        ui.weak(match &position {
+                            Some((shown, ..)) if shown.selected => format!(
+                                "Cell {}, selected; {} beside the planet to clear.",
+                                shown.cell,
+                                if touch { "tap" } else { "click" }
+                            ),
+                            Some((shown, ..)) => format!("Cell {}; click to keep it.", shown.cell),
+                            None if touch => "Tap the planet to see a cell.".to_owned(),
+                            None => "Point at the planet to see a cell.".to_owned(),
+                        });
                     });
             });
         self.open = Some(open);
@@ -413,10 +451,18 @@ mod tests {
         }
     }
 
-    fn row(rows: &[(&str, String)], label: &str) -> Option<String> {
-        rows.iter()
-            .find(|(name, _)| *name == label)
-            .map(|(_, value)| value.clone())
+    /// The value of a row, or `None` if it does not apply.
+    fn row(rows: &[Row], label: &str) -> Option<String> {
+        let row = rows
+            .iter()
+            .find(|row| row.label == label)
+            .unwrap_or_else(|| panic!("no row {label}"));
+        if row.applies {
+            Some(row.value.clone())
+        } else {
+            assert_eq!(row.value, NOT_APPLICABLE);
+            None
+        }
     }
 
     #[test]
@@ -450,10 +496,7 @@ mod tests {
         assert_eq!(row(&rows, "Crust").unwrap(), "continental, 35.2 km");
         assert_eq!(row(&rows, "Lithosphere age").unwrap(), "old (≥ 1000 Myr)");
         assert_eq!(row(&rows, "Sediment").unwrap(), "512 m (as rock)");
-        assert_eq!(
-            row(&rows, "Orogeny").unwrap(),
-            "25% of lithosphere, last 88 Myr ago"
-        );
+        assert_eq!(row(&rows, "Orogeny").unwrap(), "25%, last 88 Myr ago");
         assert_eq!(row(&rows, "Temperature").unwrap(), "12.3 °C");
         assert_eq!(row(&rows, "Jan / Jul").unwrap(), "-3.2 °C / 25.0 °C");
         assert_eq!(row(&rows, "Precipitation").unwrap(), "812 mm/yr");
@@ -462,9 +505,8 @@ mod tests {
         assert_eq!(row(&rows, "River discharge").unwrap(), "10000 m³/s");
     }
 
-    #[test]
-    fn ocean_cell_rows() {
-        let info = CellInfo {
+    fn ocean() -> CellInfo {
+        CellInfo {
             elevation: -4321.0,
             crust_thickness: 7000.0,
             age: 42.4,
@@ -476,27 +518,65 @@ mod tests {
             ice: 0.75,
             flags: 0,
             ..info()
-        };
-        let rows = format_rows(&info, -5.0, -170.0);
-        assert_eq!(row(&rows, "Depth").unwrap(), "4321 m");
-        assert_eq!(row(&rows, "Elevation"), None);
+        }
+    }
+
+    #[test]
+    fn ocean_cell_rows() {
+        let rows = format_rows(&ocean(), -5.0, -170.0);
+        assert_eq!(row(&rows, "Elevation").unwrap(), "-4321 m");
         assert_eq!(row(&rows, "Surface").unwrap(), "ocean, sea ice");
         assert_eq!(row(&rows, "Crust").unwrap(), "oceanic, 7.0 km");
-        assert_eq!(row(&rows, "Ocean floor age").unwrap(), "42 Myr");
+        assert_eq!(
+            row(&rows, "Lithosphere age").unwrap(),
+            "42 Myr (ocean floor)"
+        );
         assert_eq!(row(&rows, "Orogeny"), None);
-        assert_eq!(row(&rows, "Temperature").unwrap(), "–");
-        assert_eq!(row(&rows, "Jan / Jul").unwrap(), "– / –");
+        assert_eq!(row(&rows, "Temperature"), None);
+        assert_eq!(row(&rows, "Jan / Jul"), None);
         assert_eq!(row(&rows, "Permanent ice").unwrap(), "75%");
         // No rivers in the ocean.
         assert_eq!(row(&rows, "River discharge"), None);
     }
 
     #[test]
-    fn summary_is_short() {
+    fn every_cell_has_the_same_rows() {
+        let labels = |rows: Vec<Row>| rows.into_iter().map(|row| row.label).collect::<Vec<_>>();
+        let ice_sheet = CellInfo {
+            ice: 1.0,
+            discharge: 0.0,
+            ..info()
+        };
+        let bare_land = CellInfo {
+            orogenic: 0.0,
+            since_orogeny: f32::NAN,
+            discharge: 0.0,
+            ..info()
+        };
+        for cell in [info(), ocean(), ice_sheet, bare_land] {
+            assert_eq!(labels(format_rows(&cell, 1.0, 2.0)), ROW_LABELS);
+        }
+        assert_eq!(labels(empty_rows()), ROW_LABELS);
+        assert!(empty_rows().iter().all(|row| !row.applies));
+    }
+
+    #[test]
+    fn summary_has_a_constant_length() {
         assert_eq!(
             format_summary(&info(), 10.0, -20.0),
-            "10.0° N, 20.0° W · 1234 m"
+            " 10.0° N, 20.0° W ·   1234 m"
         );
+        let length = |text: String| text.chars().count();
+        let longest = length(format_summary(
+            &CellInfo {
+                elevation: -10_999.0,
+                ..info()
+            },
+            -89.95,
+            -179.4,
+        ));
+        assert_eq!(length(format_summary(&info(), 1.0, 2.0)), longest);
+        assert_eq!(length(format_summary(&info(), 10.0, -20.0)), longest);
     }
 
     #[test]
@@ -507,11 +587,10 @@ mod tests {
     }
 
     #[test]
-    fn old_oceanic_crust_has_a_lithosphere_age() {
+    fn old_oceanic_crust_has_no_ocean_floor_age() {
         let info = CellInfo { flags: 0, ..info() };
         let rows = format_rows(&info, 0.0, 0.0);
         assert_eq!(row(&rows, "Lithosphere age").unwrap(), "old (≥ 1000 Myr)");
-        assert_eq!(row(&rows, "Ocean floor age"), None);
     }
 
     #[test]
