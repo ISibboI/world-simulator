@@ -1,5 +1,6 @@
 //! Discretisation of the unit sphere into an icosphere mesh.
 
+use crate::math;
 use std::collections::HashMap;
 
 use glam::DVec3;
@@ -109,7 +110,7 @@ impl SphereMesh {
             .enumerate()
             .flat_map(|(from, list)| list.iter().map(move |&to| (from, to as usize)))
             .fold((0.0, 0usize), |(sum, count), (from, to)| {
-                let angle = vertices[from].dot(vertices[to]).clamp(-1.0, 1.0).acos();
+                let angle = math::acos(vertices[from].dot(vertices[to]).clamp(-1.0, 1.0));
                 (sum + angle, count + 1)
             });
 

@@ -120,10 +120,10 @@ pub(super) fn plume_heating_age(plume: &Plume, r: DVec3) -> Option<f64> {
     } else {
         PLUME_TAIL_RADIUS
     };
-    if r.dot(plume.position) <= radius.cos() || plume.peak_flux <= 0.0 {
+    if r.dot(plume.position) <= math::cos(radius) || plume.peak_flux <= 0.0 {
         return None;
     }
-    let x = r.angle_between(plume.position) / radius;
+    let x = math::angle_between(r, plume.position) / radius;
     let intensity = (plume.flux() / plume.peak_flux).clamp(0.0, 1.0);
     let centre = (PLUME_HEAD_THERMAL_AGE / FULL_STRENGTH_AGE).sqrt();
     let thickness = 1.0 - (1.0 - centre) * (1.0 - x * x).max(0.0) * intensity;
@@ -155,7 +155,7 @@ impl Simulation {
     /// The orogenic weakening of all crust samples (hidden ones too) decays over `dt` Myr (see
     /// [`OROGENIC_HEALING_TIME`]).
     pub(super) fn heal_orogenic_weakening(&mut self, dt: f64) {
-        let factor = (-dt / OROGENIC_HEALING_TIME).exp();
+        let factor = math::exp(-dt / OROGENIC_HEALING_TIME);
         for plate in &mut self.plates {
             for crust in plate.crust.iter_mut().flatten() {
                 crust.heal_orogenic(factor);
@@ -182,7 +182,7 @@ impl Break {
     pub(super) fn place(&self, r: DVec3) -> (bool, f64) {
         match *self {
             Break::Circle { normal } => {
-                let offset = r.dot(normal).clamp(-1.0, 1.0).asin();
+                let offset = math::asin(r.dot(normal).clamp(-1.0, 1.0));
                 (offset > 0.0, offset.abs())
             }
         }
@@ -415,7 +415,7 @@ impl Simulation {
                 {
                     UNBREAKABLE
                 } else {
-                    r.angle_between(self.mesh.vertex(neighbor))
+                    math::angle_between(r, self.mesh.vertex(neighbor))
                         * 0.5
                         * (strength[index] + strength[other as usize])
                 };
@@ -444,7 +444,7 @@ mod tests {
     fn banded_ocean(band: f64) -> Simulation {
         let mut simulation =
             Simulation::new(SphereMesh::icosphere(4), 1, TectonicParams::default(), 0);
-        let band_normal = DVec3::new(-band.sin(), band.cos(), 0.0);
+        let band_normal = DVec3::new(-math::sin(band), math::cos(band), 0.0);
         for (local, crust) in simulation.plates[0].crust.iter_mut().enumerate() {
             let r = simulation.mesh.vertex(local as u32);
             let age = if r.dot(band_normal).abs() < 0.05 {
@@ -465,7 +465,7 @@ mod tests {
         let azimuth = azimuth.to_radians();
         simulation
             .mesh
-            .nearest(DVec3::new(azimuth.cos(), azimuth.sin(), 0.0))
+            .nearest(DVec3::new(math::cos(azimuth), math::sin(azimuth), 0.0))
     }
 
     #[test]
@@ -518,7 +518,11 @@ mod tests {
         // detours than a belt.
         let continent = |half_width: f64, orogenic: f64| {
             let mut simulation = banded_ocean(75f64.to_radians());
-            let band_normal = DVec3::new(-75f64.to_radians().sin(), 75f64.to_radians().cos(), 0.0);
+            let band_normal = DVec3::new(
+                -math::sin(75f64.to_radians()),
+                math::cos(75f64.to_radians()),
+                0.0,
+            );
             for plate in 0..simulation.plates.len() {
                 for local in 0..simulation.mesh.len() {
                     let r = simulation.mesh.vertex(local as u32);
@@ -665,7 +669,7 @@ mod tests {
             peak_flux: 5e-3,
             has_rifted: false,
         };
-        let at = |angle: f64| DVec3::new(angle.sin(), 0.0, angle.cos());
+        let at = |angle: f64| DVec3::new(math::sin(angle), 0.0, math::cos(angle));
         let strength = |plume: &Plume, r: DVec3| {
             plume_heating_age(plume, r).map_or(1.0, |age| (age / FULL_STRENGTH_AGE).sqrt())
         };
@@ -719,7 +723,7 @@ mod tests {
             simulation.heal_orogenic_weakening(1.0);
         }
         for crust in simulation.plates[0].crust.iter().flatten() {
-            assert!((crust.orogenic - (-1.0f64).exp()).abs() < 1e-9);
+            assert!((crust.orogenic - math::exp(-1.0f64)).abs() < 1e-9);
         }
         // A belt 200 Myr after its orogeny has regained most of its strength.
         let belt = Crust {
@@ -730,11 +734,11 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: -200.0,
-            orogenic: (-1.0f64).exp(),
+            orogenic: math::exp(-1.0f64),
             reheated: NO_REHEATING,
             cohort: 0.0,
         };
-        let healed = 1.0 - (1.0 - SUTURE_WEAKENING) * (-1.0f64).exp();
+        let healed = 1.0 - (1.0 - SUTURE_WEAKENING) * math::exp(-1.0f64);
         assert!((lithosphere_strength(&belt, 0.0) - healed).abs() < 1e-12);
         assert!(healed > 0.7 && healed < 0.75);
         // The decay is linear, so the orogenic mass decays exactly: the mixing by mass
@@ -749,7 +753,7 @@ mod tests {
         };
         let before = mass(&simulation);
         simulation.heal_orogenic_weakening(37.0);
-        let expected = before * (-37.0 / OROGENIC_HEALING_TIME).exp();
+        let expected = before * math::exp(-37.0 / OROGENIC_HEALING_TIME);
         assert!((mass(&simulation) / expected - 1.0).abs() < 1e-12);
     }
 

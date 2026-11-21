@@ -73,6 +73,7 @@ use rand::rngs::ChaCha8Rng;
 use rand::{RngExt, SeedableRng};
 
 use crate::isostasy::{CONTINENTAL_DENSITY, SEDIMENT_ROCK_DENSITY};
+use crate::math;
 use crate::sphere::SphereMesh;
 
 /// Physical parameters of the simulation. Times are in Myr, elevations in metres.
@@ -1025,7 +1026,7 @@ impl Simulation {
 
     fn move_plates(&mut self, dt: f64) {
         for plate in &mut self.plates {
-            let delta = DQuat::from_scaled_axis(plate.angular_velocity * dt);
+            let delta = math::quat_from_scaled_axis(plate.angular_velocity * dt);
             plate.rotation = (delta * plate.rotation).normalize();
         }
     }

@@ -25,6 +25,7 @@
 //! rise and fall by a few hundred metres over 10–100 Myr, and rivers strip the cover of uplifted
 //! platforms (see [`MantleFlow::dynamic_topography`]).
 
+use crate::math;
 use glam::DVec3;
 use rand::{Rng, RngExt};
 
@@ -228,13 +229,13 @@ impl MantleFlow {
         rng: &mut impl Rng,
     ) {
         let params = &self.params;
-        let keep = (-dt / params.slab_memory).exp();
+        let keep = math::exp(-dt / params.slab_memory);
         // Slabs pass through the depth stages: each stage hands on the share of its mass that
         // sank out of it during the step (mass-conserving), the last one loses it to depths the
         // surface does not feel.
         let mut handed_on: Option<Vec<f64>> = None;
         for (stage, masses) in params.slab_stages.iter().zip(&mut self.slab_mass) {
-            let leave = 1.0 - (-dt / stage.residence).exp();
+            let leave = 1.0 - math::exp(-dt / stage.residence);
             let outflow: Vec<f64> = masses.iter().map(|m| m * leave).collect();
             for (mass, out) in masses.iter_mut().zip(&outflow) {
                 *mass -= out;
@@ -399,7 +400,7 @@ impl MantleFlow {
                         if angle_squared > 16.0 * width * width {
                             0.0
                         } else {
-                            height * (-angle_squared / (2.0 * width * width)).exp()
+                            height * math::exp(-angle_squared / (2.0 * width * width))
                         }
                     })
                     .sum()
@@ -472,7 +473,7 @@ fn tent_weights(grid: &SphereMesh, nearest: u32, r: DVec3) -> Weights {
     let mut weights: Vec<(u32, f64)> = std::iter::once(nearest)
         .chain(grid.neighbors(nearest).iter().copied())
         .map(|c| {
-            let angle = grid.vertex(c).angle_between(r);
+            let angle = math::angle_between(grid.vertex(c), r);
             (c, (1.0 - angle / reach).max(0.0).powi(2))
         })
         .filter(|&(_, w)| w > 0.0)
@@ -487,12 +488,12 @@ fn tent_weights(grid: &SphereMesh, nearest: u32, r: DVec3) -> Weights {
 /// Radial speed factor of [`radial_speed_per_sine`] at the angular distance `angle`, for tests.
 #[cfg(test)]
 fn radial_speed_factor(angle: f64, core_radius: f64) -> f64 {
-    angle.sin() * radial_speed_per_sine(angle.cos(), core_term(core_radius))
+    math::sin(angle) * radial_speed_per_sine(math::cos(angle), core_term(core_radius))
 }
 
 /// The softening term `1 − cos c` of the radial speed for the core radius `c`.
 fn core_term(core_radius: f64) -> f64 {
-    1.0 - core_radius.cos()
+    1.0 - math::cos(core_radius)
 }
 
 /// Radial speed (times the planet radius, per unit flux) of the flow from a point source,
@@ -531,7 +532,9 @@ mod tests {
         let velocities = mantle.velocities(&mesh, 6.371e6);
         let near = |target: DVec3| {
             (0..mesh.len() as u32)
-                .filter(|&cell| (0.3..0.6).contains(&mesh.vertex(cell).angle_between(target)))
+                .filter(|&cell| {
+                    (0.3..0.6).contains(&math::angle_between(mesh.vertex(cell), target))
+                })
                 .collect::<Vec<_>>()
         };
         for cell in near(DVec3::X) {
@@ -558,8 +561,9 @@ mod tests {
         for degrees in [30.0, 60.0, 90.0, 120.0, 150.0] {
             let angle: f64 = f64::to_radians(degrees);
             // A negligible core radius, so that the softening does not matter here.
-            let flux = 2.0 * std::f64::consts::PI * angle.sin() * radial_speed_factor(angle, 1e-4);
-            let expected = (1.0 + angle.cos()) / 2.0;
+            let flux =
+                2.0 * std::f64::consts::PI * math::sin(angle) * radial_speed_factor(angle, 1e-4);
+            let expected = (1.0 + math::cos(angle)) / 2.0;
             assert!(
                 (flux - expected).abs() < 0.01,
                 "{degrees}: {flux} vs {expected}"
@@ -591,7 +595,10 @@ mod tests {
         let slabs: Vec<(DVec3, f64)> = (-25..=25)
             .map(|i| {
                 let angle = f64::from(i) * 100e3 / 6.371e6;
-                (DVec3::new(angle.cos(), 0.0, angle.sin()), flux / 51.0)
+                (
+                    DVec3::new(math::cos(angle), 0.0, math::sin(angle)),
+                    flux / 51.0,
+                )
             })
             .collect();
         for _ in 0..300 {

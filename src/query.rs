@@ -17,6 +17,10 @@ pub const WEB_UNAVAILABLE: &[&str] = &[
     "version",
 ];
 
+/// Options that are always on in the web version: the URL accepts them, so that a desktop command
+/// line carries over, but they change nothing there, and the parameter panel does not show them.
+pub const WEB_IMPLIED: &[&str] = &["web-math"];
+
 /// Converts a query string (with or without the leading `?`) into command-line arguments,
 /// starting with the program name. Names may use `_` instead of `-`.
 pub fn query_to_args(search: &str) -> anyhow::Result<Vec<String>> {
@@ -132,6 +136,16 @@ mod tests {
             query_to_args("set=a+b%C3%A9").unwrap(),
             strings(&["world-simulator", "--set=a bé"])
         );
+    }
+
+    #[test]
+    fn implied_options_are_accepted() {
+        use clap::Parser;
+        for name in WEB_IMPLIED {
+            let args = query_to_args(&format!("?{name}")).unwrap();
+            assert_eq!(args, strings(&["world-simulator", &format!("--{name}")]));
+            assert!(crate::Cli::try_parse_from(&args).is_ok(), "{name}");
+        }
     }
 
     #[test]

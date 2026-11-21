@@ -43,6 +43,7 @@
 //! and a multigrid preconditioner (see [`crate::sparse`]) for the linear systems. After the first
 //! update, one month is refreshed per update in turn, starting from its previous state.
 
+use crate::math;
 use glam::DVec3;
 
 use crate::sparse::{Hierarchy, Multigrid};
@@ -302,10 +303,10 @@ impl Climate {
         );
         let cell_count = mesh.len();
         let latitude: Vec<f64> = (0..cell_count as u32)
-            .map(|cell| mesh.vertex(cell).z.clamp(-1.0, 1.0).asin())
+            .map(|cell| math::asin(mesh.vertex(cell).z.clamp(-1.0, 1.0)))
             .collect();
         let longitude: Vec<f64> = (0..cell_count as u32)
-            .map(|cell| mesh.vertex(cell).y.atan2(mesh.vertex(cell).x))
+            .map(|cell| math::atan2(mesh.vertex(cell).y, mesh.vertex(cell).x))
             .collect();
         let (area, edges) = voronoi_geometry(mesh, planet_radius);
 
@@ -506,7 +507,7 @@ impl Climate {
             let (column, scale_height) =
                 saturation_column(column_temperature[cell], params.lapse_rate);
             // Above high ground, the air column is shorter and colder.
-            let height = (-elevation[cell].max(0.0) / scale_height).exp();
+            let height = math::exp(-elevation[cell].max(0.0) / scale_height);
             saturation[cell] = column * height;
             vapour_per_humidity[cell] = params.air_density * scale_height * height;
         }
@@ -532,7 +533,7 @@ impl Climate {
             .iter()
             .map(|p| {
                 let sectors = thermal_equator.len();
-                let x = (p.y.atan2(p.x) + std::f64::consts::PI) / std::f64::consts::TAU
+                let x = (math::atan2(p.y, p.x) + std::f64::consts::PI) / std::f64::consts::TAU
                     * sectors as f64
                     - 0.5;
                 let lower = x.floor();
@@ -571,15 +572,15 @@ impl Climate {
             .iter()
             .zip(&local_equator)
             .map(|(position, &thermal_equator)| {
-                let latitude = position.z.clamp(-1.0, 1.0).asin().to_degrees();
+                let latitude = math::asin(position.z.clamp(-1.0, 1.0)).to_degrees();
                 let distance =
                     circulation_latitude(latitude, thermal_equator) / params.hadley_width;
                 // Weather systems also fade towards the poles, beyond the storm tracks.
                 let polar = (90.0 - circulation_latitude(latitude, thermal_equator).abs())
                     / params.polar_width;
                 params.eddy_diffusivity
-                    * (1.0 - (-distance * distance).exp())
-                    * (1.0 - (-polar * polar).exp())
+                    * (1.0 - math::exp(-distance * distance))
+                    * (1.0 - math::exp(-polar * polar))
             })
             .collect();
         Month {
@@ -651,8 +652,8 @@ impl Climate {
                 let coriolis = 2.0 * EARTH_ROTATION * position.z;
                 // Near the equator, where the balance would give unbounded winds, the convergence
                 // into the ITCZ (which follows the local thermal equator) takes over.
-                let latitude = position.z.clamp(-1.0, 1.0).asin().to_degrees();
-                let fade = 1.0 - (-(latitude / params.thermal_wind_equator).powi(2)).exp();
+                let latitude = math::asin(position.z.clamp(-1.0, 1.0)).to_degrees();
+                let fade = 1.0 - math::exp(-(latitude / params.thermal_wind_equator).powi(2));
                 let wind = (force * friction - position.cross(force) * coriolis)
                     / (friction * friction + coriolis * coriolis)
                     * fade;
@@ -686,7 +687,7 @@ impl Climate {
                 continue;
             }
             let bin = (((latitude + 30.0) * 2.0) as usize).min(BINS - 1);
-            let longitude = p.y.atan2(p.x);
+            let longitude = math::atan2(p.y, p.x);
             let value = energy(cell);
             for sector in 0..sectors {
                 let centre = (sector as f64 + 0.5) / sectors as f64 * std::f64::consts::TAU
@@ -697,7 +698,7 @@ impl Climate {
                 if difference.abs() > 2.0 * width {
                     continue;
                 }
-                let w = (-(difference / width).powi(2)).exp();
+                let w = math::exp(-(difference / width).powi(2));
                 sum[sector][bin] += w * value;
                 weight[sector][bin] += w;
             }
@@ -708,7 +709,7 @@ impl Climate {
                     let (mut s, mut c) = (0.0, 0.0);
                     for other in bin.saturating_sub(30)..(bin + 31).min(BINS) {
                         let d = (other as f64 - bin as f64) / 10.0;
-                        let w = (-0.5 * d * d).exp();
+                        let w = math::exp(-0.5 * d * d);
                         s += w * sum[sector][other];
                         c += w * weight[sector][other];
                     }
@@ -740,7 +741,7 @@ impl Climate {
                 let (mut s, mut c) = (0.0, 0.0);
                 for other in b.saturating_sub(9)..(b + 10).min(BINS) {
                     let d = (other as f64 - b as f64) / 3.0;
-                    let w = (-0.5 * d * d).exp();
+                    let w = math::exp(-0.5 * d * d);
                     s += w * sum[other];
                     c += w * count[other];
                 }
@@ -966,7 +967,7 @@ impl RainLaw {
         // Beyond twice saturation the growth is capped to avoid overflow; the column never gets
         // there in a solution.
         let humidity = (w / saturation).min(2.0);
-        let factor = (self.sensitivity * (humidity - self.reference)).exp() * self.rate;
+        let factor = math::exp(self.sensitivity * (humidity - self.reference)) * self.rate;
         let p = w * factor;
         let dp = if w / saturation < 2.0 {
             factor * (1.0 + self.sensitivity * humidity)
@@ -989,7 +990,7 @@ fn budyko_runoff(precipitation: f64, potential: f64, omega: f64) -> f64 {
     let scale = precipitation.max(potential);
     let p = precipitation / scale;
     let e = potential / scale;
-    let root = (p.powf(omega) + e.powf(omega)).powf(1.0 / omega);
+    let root = math::powf(math::powf(p, omega) + math::powf(e, omega), 1.0 / omega);
     ((root - e) * scale).max(0.0)
 }
 
@@ -997,7 +998,7 @@ fn budyko_runoff(precipitation: f64, potential: f64, omega: f64) -> f64 {
 /// 1996).
 fn saturation_vapour_pressure(t: f64) -> f64 {
     let t = t.max(-80.0);
-    610.94 * (17.625 * t / (t + 243.04)).exp()
+    610.94 * math::exp(17.625 * t / (t + 243.04))
 }
 
 /// Saturation specific humidity (kg/kg) at the surface at `t` °C.
@@ -1073,7 +1074,7 @@ pub fn low_level_wind(position: DVec3, thermal_equator: f64) -> DVec3 {
         east.normalize()
     };
     let north = position.cross(east);
-    let latitude = position.z.clamp(-1.0, 1.0).asin().to_degrees();
+    let latitude = math::asin(position.z.clamp(-1.0, 1.0)).to_degrees();
     let circulation = circulation_latitude(latitude, thermal_equator);
     let (eastward, poleward) = zonal_mean_wind(circulation.abs());
     east * eastward + north * poleward * circulation.signum()
@@ -1117,8 +1118,8 @@ fn voronoi_geometry(mesh: &SphereMesh, radius: f64) -> (Vec<f64>, Vec<Vec<Edge>>
                     let ends = &corners[&(cell.min(neighbor), cell.max(neighbor))];
                     Edge {
                         neighbor,
-                        length: ends[0].angle_between(ends[1]) * radius,
-                        distance: position.angle_between(other) * radius,
+                        length: math::angle_between(ends[0], ends[1]) * radius,
+                        distance: math::angle_between(position, other) * radius,
                         direction: (other - position).normalize(),
                     }
                 })
@@ -1138,7 +1139,7 @@ mod tests {
     fn winds_follow_three_cell_circulation() {
         let at = |latitude: f64| {
             let latitude = latitude.to_radians();
-            DVec3::new(latitude.cos(), 0.0, latitude.sin())
+            DVec3::new(math::cos(latitude), 0.0, math::sin(latitude))
         };
         // At longitude 0, east is +y.
         assert!(low_level_wind(at(15.0), 0.0).y < 0.0);
@@ -1174,8 +1175,8 @@ mod tests {
     fn temperatures(mesh: &SphereMesh, elevation: &[f64]) -> Vec<f64> {
         (0..mesh.len() as u32)
             .map(|c| {
-                let latitude = mesh.vertex(c).z.asin();
-                -25.0 + 52.0 * latitude.cos() - 0.0065 * elevation[c as usize].max(0.0)
+                let latitude = math::asin(mesh.vertex(c).z);
+                -25.0 + 52.0 * math::cos(latitude) - 0.0065 * elevation[c as usize].max(0.0)
             })
             .collect()
     }
@@ -1228,15 +1229,20 @@ mod tests {
         };
         let climate = Climate::new(&mesh, RADIUS, params);
         // A warm anomaly of 10 K centred at 20°N, 0°E with a radius of about 2000 km.
-        let centre = DVec3::new(20f64.to_radians().cos(), 0.0, 20f64.to_radians().sin());
-        let anomaly =
-            |c: usize| 10.0 * (-(climate.position[c].angle_between(centre) / 0.3).powi(2)).exp();
+        let centre = DVec3::new(
+            math::cos(20f64.to_radians()),
+            0.0,
+            math::sin(20f64.to_radians()),
+        );
+        let anomaly = |c: usize| {
+            10.0 * math::exp(-(math::angle_between(climate.position[c], centre) / 0.3).powi(2))
+        };
         let wind = climate.thermal_wind(&anomaly, &vec![0.0; mesh.len()]);
         // Inflow: the wind points towards the centre on its flanks.
         let mut inflow = 0.0;
         let mut count = 0.0;
         for c in 0..mesh.len() {
-            let distance = climate.position[c].angle_between(centre);
+            let distance = math::angle_between(climate.position[c], centre);
             if (0.25..0.4).contains(&distance) {
                 let towards = (centre - climate.position[c]).normalize();
                 inflow += wind[c].dot(towards);
@@ -1255,7 +1261,7 @@ mod tests {
         let mut climate = Climate::new(&mesh, RADIUS, ClimateParams::default());
         // The warmest (and moistest) air at 10°N.
         let warm: Vec<f64> = (0..mesh.len() as u32)
-            .map(|c| -25.0 + 52.0 * (mesh.vertex(c).z.asin() - 10f64.to_radians()).cos())
+            .map(|c| -25.0 + 52.0 * math::cos(math::asin(mesh.vertex(c).z) - 10f64.to_radians()))
             .collect();
         climate.update(&ocean, &vec![warm; 12], &vec![vec![10.0]; 12]);
         let precipitation = &climate.water_cycle().precipitation;
@@ -1274,8 +1280,8 @@ mod tests {
         let mesh = SphereMesh::icosphere(5);
         // A continent in the westerlies with a north-south mountain range.
         let mut elevation = vec![-4000.0; mesh.len()];
-        let longitude = |c: u32| mesh.vertex(c).y.atan2(mesh.vertex(c).x).to_degrees();
-        let latitude = |c: u32| mesh.vertex(c).z.asin().to_degrees();
+        let longitude = |c: u32| math::atan2(mesh.vertex(c).y, mesh.vertex(c).x).to_degrees();
+        let latitude = |c: u32| math::asin(mesh.vertex(c).z).to_degrees();
         for cell in 0..mesh.len() as u32 {
             if (35.0..55.0).contains(&latitude(cell)) && (-40.0..40.0).contains(&longitude(cell)) {
                 elevation[cell as usize] = if longitude(cell).abs() < 3.0 {

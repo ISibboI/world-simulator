@@ -140,7 +140,7 @@ impl Simulation {
         let new_side: Vec<bool> = (0..self.mesh.len() as u32)
             .map(|local| (rotation * self.mesh.vertex(local)).dot(normal) > 0.0)
             .collect();
-        let near = self.polarities.radius().sin();
+        let near = crate::math::sin(self.polarities.radius());
         self.split_plate_by(plate, new_side, move |_, r| {
             let side = r.dot(normal);
             polarity::Side {
