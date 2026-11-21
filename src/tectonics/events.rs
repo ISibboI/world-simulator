@@ -888,16 +888,23 @@ impl Simulation {
             }
             if !flipped {
                 if matches!(anchor, SplitAnchor::Rift { .. }) {
+                    let final_distance = break_distance(&new_side);
                     debug!(
                         cut_distance,
                         rigid_distance,
-                        final_distance = break_distance(&new_side),
+                        final_distance,
                         flipped_cells,
                         great_circle,
                         ?scale,
                         time = self.time,
                         "Rift break stages"
                     );
+                    // The plume breaks the lithosphere above its head. A division that
+                    // passes the plume at a distance (the plume is at the edge of the plate
+                    // and has no lithosphere of the plate on one side) is not its rift.
+                    if final_distance > 0.5 * PLUME_HEAD_RADIUS {
+                        return None;
+                    }
                 }
                 return Some((new_side, great_circle));
             }
@@ -2538,7 +2545,7 @@ mod tests {
         // larger block of its side lies elsewhere.
         let mut rifts = 0;
         for seed in 0..6 {
-            for z in [-0.7f64, -0.74, -0.77] {
+            for z in [-0.7f64, -0.74, -0.77, -0.79] {
                 let mut simulation = two_continents(TectonicParams::default(), seed);
                 let cap: Vec<u32> = (0..simulation.mesh.len() as u32)
                     .filter(|&cell| simulation.mesh.vertex(cell).z < -0.8)
@@ -2574,10 +2581,15 @@ mod tests {
                     })
                     .map(|cell| simulation.mesh.vertex(cell).angle_between(position))
                     .fold(f64::INFINITY, f64::min);
-                assert!(distance < 0.13, "seed {seed}, z {z}: {distance}");
+                assert!(
+                    distance <= 0.5 * PLUME_HEAD_RADIUS,
+                    "seed {seed}, z {z}: {distance}"
+                );
             }
         }
-        assert!(rifts > 0);
+        // Most of these plumes rift their plate (21 of 24; 15 when each side is anchored at
+        // its largest piece, because the break then leaves the plume and is rejected).
+        assert!(rifts >= 18, "{rifts}");
     }
 
     #[test]

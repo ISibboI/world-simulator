@@ -1663,6 +1663,31 @@ mod tests {
     }
 
     #[test]
+    fn collisions_deform_the_whole_sample() {
+        // A sample with a small orogenic share (from an old belt next to it) that is thickened
+        // by a collision is an orogenic belt as a whole.
+        let mut simulation = single_continent();
+        let cell = 100u32;
+        simulation.plates[0].crust[cell as usize]
+            .as_mut()
+            .unwrap()
+            .mix_orogeny(-500.0, 0.2);
+        simulation.apply_additions(&[CrustAddition {
+            cell,
+            plate: 0,
+            partner: 0,
+            thickness: 5000.0,
+            density: crate::isostasy::CONTINENTAL_DENSITY,
+            felsic: 1.0,
+            metasediment: 0.0,
+            kind: AdditionKind::Collision,
+        }]);
+        let crust = simulation.plates[0].crust[cell as usize].unwrap();
+        assert!(crust.thickness > OROGENIC_THICKNESS);
+        assert_eq!((crust.orogeny, crust.orogenic), (simulation.time, 1.0));
+    }
+
+    #[test]
     fn thick_crust_collapses_onto_its_surroundings() {
         let mut simulation = single_continent();
         let cell = 100u32;
