@@ -659,6 +659,7 @@ impl Simulation {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    orogenic: 0.0,
                     cohort: 0.0,
                 }
             } else {
@@ -1457,6 +1458,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            orogenic: 0.0,
             cohort: 0.0,
         };
         // Normal continental crust stands a few hundred metres above sea level, doubly
@@ -1482,6 +1484,7 @@ mod tests {
                         felsic: 1.0,
                         metasediment: 0.0,
                         orogeny: NO_OROGENY,
+                        orogenic: 0.0,
                         cohort: 0.0,
                     };
                     let elevation = crust.dry_elevation(0.0);
@@ -1511,6 +1514,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    orogenic: 0.0,
                     cohort: 0.0,
                 };
                 assert!(arc.buoyancy(0.0) > new_oceanic_crust(0.0).buoyancy(0.0));
@@ -1528,6 +1532,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            orogenic: 0.0,
             cohort: 0.0,
         };
         assert!(
@@ -1549,6 +1554,7 @@ mod tests {
                 felsic: 1.0,
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
+                orogenic: 0.0,
                 cohort: 0.0,
             };
             let removed = 10.0;
@@ -1579,6 +1585,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            orogenic: 0.0,
             cohort: 0.0,
         };
         assert!(!eroded.is_oceanic());

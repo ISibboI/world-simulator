@@ -737,6 +737,24 @@ impl Simulation {
                 majority[id as usize]
             };
         }
+        // Diagnostics for plume rifts: how far (rad) the break is from the plume at each stage.
+        let break_distance = |sides: &[bool]| -> f64 {
+            let SplitAnchor::Rift { nucleus, .. } = anchor else {
+                return f64::NAN;
+            };
+            let origin = self.mesh.vertex(nucleus);
+            (0..cell_count as u32)
+                .filter(|&cell| {
+                    in_plate(cell)
+                        && self.mesh.neighbors(cell).iter().any(|&neighbor| {
+                            in_plate(neighbor) && sides[neighbor as usize] != sides[cell as usize]
+                        })
+                })
+                .map(|cell| self.mesh.vertex(cell).angle_between(origin))
+                .fold(f64::INFINITY, f64::min)
+        };
+        let (cut_distance, rigid_distance) = (break_distance(&side), break_distance(&new_side));
+        let mut flipped_cells = 0usize;
         // Anchors of the main pieces: (new side, old side).
         let anchors = match anchor {
             SplitAnchor::Margin { cell } => {
@@ -836,9 +854,22 @@ impl Simulation {
                 if Some(piece[cell]) != mains[side as usize] && touches[piece[cell] as usize] {
                     new_side[cell] = !side;
                     flipped = true;
+                    flipped_cells += 1;
                 }
             }
             if !flipped {
+                if matches!(anchor, SplitAnchor::Rift { .. }) {
+                    debug!(
+                        cut_distance,
+                        rigid_distance,
+                        final_distance = break_distance(&new_side),
+                        flipped_cells,
+                        great_circle,
+                        ?scale,
+                        time = self.time,
+                        "Rift break stages"
+                    );
+                }
                 return Some((new_side, great_circle));
             }
         }
@@ -1104,7 +1135,7 @@ impl Simulation {
                 self.plates[owner.plate as usize].crust[owner.local as usize].as_mut()
                 && crust.is_continental_origin()
             {
-                crust.orogeny = time;
+                crust.mark_orogeny(time);
             }
         }
     }
@@ -1153,10 +1184,19 @@ impl Simulation {
                 .filter(|&(_, angle)| angle < params.rift_continent_radius)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(other, _)| other);
-            let large = self.plate_area_fractions()[plate as usize] >= params.min_oceanic_rift_area;
+            let area = self.plate_area_fractions()[plate as usize];
+            let large = area >= params.min_oceanic_rift_area;
             if continent.is_none() && !large {
                 continue;
             }
+            // Diagnostics of where the plume stands in its plate.
+            let edge = (0..self.mesh.len() as u32)
+                .filter(|&other| self.owners[other as usize].plate != plate)
+                .map(|other| self.mesh.vertex(other).angle_between(position))
+                .fold(f64::INFINITY, f64::min);
+            let nucleus_rigid = self.surface_crust(cell).resists_subduction();
+            let continent_distance =
+                continent.map(|other| self.mesh.vertex(other).angle_between(position));
             // The first reference circle through the plume crosses the nearest continent (else
             // a random one); the split tries the others too (see `local_split_piece`).
             let direction = random_unit_vector(&mut self.rng);
@@ -1182,7 +1222,16 @@ impl Simulation {
                 let (total, far) = self.split_contact_km(plate, new_plate, position);
                 self.event_counts.rift_contact_km += total;
                 self.event_counts.rift_far_contact_km += far;
-                debug!(plate, new_plate, time = self.time, "Plume rifted a plate");
+                debug!(
+                    plate,
+                    new_plate,
+                    edge,
+                    nucleus_rigid,
+                    ?continent_distance,
+                    area,
+                    time = self.time,
+                    "Plume rifted a plate"
+                );
             }
             // Each plume rifts at most once, also if the split was not possible.
             self.mantle.mark_rifted(index);
@@ -1992,6 +2041,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    orogenic: 0.0,
                     cohort: 0.0,
                 }
             } else {
@@ -2201,6 +2251,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    orogenic: 0.0,
                     cohort: 0.0,
                 }
             } else {
@@ -2262,6 +2313,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    orogenic: 0.0,
                     cohort: 0.0,
                 }
             });
@@ -2469,6 +2521,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: if suture { -500.0 } else { NO_OROGENY },
+                    orogenic: if suture { 1.0 } else { 0.0 },
                     cohort: 0.0,
                 });
             }
@@ -2596,6 +2649,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            orogenic: 0.0,
             cohort: 0.0,
         };
         let micro = |r: DVec3| r.x > 0.8 && r.z < 0.0 && r.z > -0.12;
@@ -2718,6 +2772,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    orogenic: 0.0,
                     cohort: 0.0,
                 };
             }

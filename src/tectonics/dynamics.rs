@@ -790,6 +790,7 @@ mod tests {
                             felsic: 1.0,
                             metasediment: 0.0,
                             orogeny: NO_OROGENY,
+                            orogenic: 0.0,
                             cohort: 0.0,
                         }
                     } else {
@@ -1055,6 +1056,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    orogenic: 0.0,
                     cohort: 0.0,
                 };
             }
@@ -1159,6 +1161,7 @@ mod tests {
                 felsic: 1.0,
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
+                orogenic: 0.0,
                 cohort: 0.0,
             };
         }

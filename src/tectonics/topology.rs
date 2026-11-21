@@ -52,6 +52,9 @@ fn add_crystalline(receiver: &mut Crust, thickness: f64, crust: &Crust) {
         return;
     }
     let mass = receiver.thickness * receiver.density + thickness * crust.density;
+    let orogenic = (receiver.thickness * receiver.density * receiver.orogenic
+        + thickness * crust.density * crust.orogenic)
+        / mass.max(1e-9);
     receiver.felsic =
         (receiver.felsic_mass() + thickness * crust.density * crust.felsic) / mass.max(1e-9);
     receiver.metasediment = (receiver.metasediment_mass()
@@ -59,7 +62,7 @@ fn add_crystalline(receiver: &mut Crust, thickness: f64, crust: &Crust) {
         / mass.max(1e-9);
     receiver.thickness += thickness;
     receiver.density = mass / receiver.thickness.max(1e-9);
-    receiver.mix_orogeny(crust.orogeny);
+    receiver.mix_orogeny(crust.orogeny, orogenic);
 }
 
 /// Adds `crust` to the sample of `plate` at `target` and its neighbours with crust in equal
@@ -459,6 +462,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: 400.0,
+            orogenic: 1.0,
             cohort: 0.0,
         };
         // A sample of an orogenic belt spread over sea floor: the mixtures stay oceanic or
@@ -473,13 +477,29 @@ mod tests {
         for vertex in std::iter::once(0).chain(neighbors.iter().copied()) {
             plate.crust[vertex as usize] = Some(Crust {
                 orogeny: NO_OROGENY,
+                orogenic: 0.0,
                 ..suture
             });
         }
         spread_crust(&simulation.mesh, plate, 0, suture, 75_000.0);
+        // The orogenic share is mixed by mass: every receiver gets a part of it, and their
+        // parts add up to the belt that was spread.
+        let mut orogenic_mass = 0.0;
         for vertex in std::iter::once(0).chain(neighbors) {
-            assert_eq!(plate.crust[vertex as usize].unwrap().orogeny, 400.0);
+            let crust = plate.crust[vertex as usize].unwrap();
+            assert_eq!(crust.orogeny, 400.0);
+            assert!(
+                crust.orogenic > 0.0 && crust.orogenic < 0.5,
+                "{}",
+                crust.orogenic
+            );
+            orogenic_mass += crust.thickness * crust.density * crust.orogenic;
         }
+        let spread = suture.thickness * suture.density;
+        assert!(
+            (orogenic_mass / spread - 1.0).abs() < 1e-9,
+            "{orogenic_mass}"
+        );
     }
 
     #[test]

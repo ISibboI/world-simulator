@@ -77,11 +77,7 @@ pub(super) fn lithosphere_strength(crust: &Crust, time: f64, plume_head: f64) ->
     } else {
         1.0
     };
-    let suture = if crust.orogeny > NO_OROGENY {
-        SUTURE_WEAKENING
-    } else {
-        1.0
-    };
+    let suture = 1.0 - (1.0 - SUTURE_WEAKENING) * crust.orogenic;
     (thermal * thinning * suture).max(MIN_STRENGTH)
 }
 
@@ -504,6 +500,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            orogenic: 0.0,
             cohort: 0.0,
         };
         let rifted = Crust {
@@ -518,9 +515,31 @@ mod tests {
         // Old sutures stay weak.
         let suture = Crust {
             orogeny: -400.0,
+            orogenic: 1.0,
             ..craton
         };
         assert_eq!(lithosphere_strength(&suture, 0.0, 1.0), SUTURE_WEAKENING);
+    }
+
+    #[test]
+    fn orogenic_lithosphere_is_weak_in_proportion_to_its_share() {
+        let craton = |orogenic: f64| Crust {
+            thickness: 35_000.0,
+            density: crate::isostasy::CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+            metasediment: 0.0,
+            orogeny: if orogenic > 0.0 { -400.0 } else { NO_OROGENY },
+            orogenic,
+            cohort: 0.0,
+        };
+        let strength = |orogenic: f64| lithosphere_strength(&craton(orogenic), 0.0, 1.0);
+        assert_eq!(strength(0.0), 1.0);
+        assert_eq!(strength(1.0), SUTURE_WEAKENING);
+        // A sample that received a tenth of a belt is weakened by a tenth of the belt's
+        // weakening, not like the belt.
+        assert!((strength(0.1) - (1.0 - 0.1 * (1.0 - SUTURE_WEAKENING))).abs() < 1e-12);
     }
 
     #[test]
