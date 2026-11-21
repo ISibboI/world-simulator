@@ -13,11 +13,12 @@ results evaluation)._
 
 ## Result in one sentence
 
-The new boundary state works as intended (slab-free, mass-conserving shortening at 0.3–0.5 cm/yr
-that localises into a trench when it yields), and it takes over most of the contacts that `main`
-locks; but it is **~1% of the converging oceanic contacts**, the trench length does not change,
-and on the current `main` (after #68) the "non-trench" share of converging ocean–ocean contacts is
-already 21%, so #42's literal question was largely answered by #68.
+The new boundary state works as intended where it applies (slab-free, mass-conserving shortening
+at 0.3–0.5 cm/yr that localises into a trench when it yields), but it is **~1% of the converging
+oceanic contacts** and the trench length does not change. On the current `main` (after #68) 21% of
+the converging ocean–ocean contact rows are already labelled non-trench, but crust is still
+subducted at most of them (see "Crust consumed without a thrust"), so #68 relabelled rather than
+answered #42.
 
 ## Contacts (headline)
 
@@ -42,10 +43,10 @@ of a segment (or has no segment and converges), locked rows (|v| ≤ 0.1 cm/yr) 
 | Localisations (diffuse → trench) per 100 Myr | — | 70 | |
 
 - **The trench rows stay the same in number** (394 → 397 per snapshot); the trench *share* rises
-  because the other lower-side rows fall by a fifth, mostly the locked ones: a contact that
-  `main` locks below 0.1 cm/yr now creeps (up to `diffuse_convergence`) and either stays a
-  diffuse zone or yields and localises. That is the intended physics; it does not create more
-  trench length (112 → 111 × 10³ km, t −0.2).
+  because the other lower-side rows fall by 26 per snapshot: 9 locked (t −5.7; contacts that
+  `main` locks below 0.1 cm/yr now creep up to `diffuse_convergence`) and 17 converging ones
+  (n.s.). The total number of lower-side rows falls by 18 (n.s.). No more trench length
+  (112 → 111 × 10³ km, t −0.2).
 - Diffuse rows converge at 0.3–0.5 cm/yr, like Earth's oceanic convergent boundaries (OCB, median
   0.67 cm/yr), but the speed is bounded by `diffuse_convergence` = 1 cm/yr by construction.
 - Diffuse segments with a mean rate ≤ 0.1 cm/yr are classified "other", so the diffuse *state*
@@ -54,6 +55,27 @@ of a segment (or has no segment and converges), locked rows (|v| ≤ 0.1 cm/yr) 
 - Grid: the zones are one or a few cells wide (~110 km), while Earth's diffuse zones are
   hundreds to a thousand km wide. The shortening is stacked over the collision profile
   (4 rings), not distributed over the true width. Accepted as a grid effect.
+
+### Crust consumed without a thrust
+
+The stacking applies where a thrust-less segment converges by the last velocity solve (#68's
+`subducting`: faster than 0.1 cm/yr and not nearly along strike). Overlaps at thrust-less segments
+that the solve judges slow, oblique or diverging (the "other" rows), and at segments created in the
+current step, are subducted as on `main`, with arc crust. The log counts them: **13.6 Gt/yr**
+(8–17 per seed; 500–1000 Myr), against 0.33 Gt/yr stacked and 132 Gt/yr of oceanic crust
+subducted in all. Most of it is at segments the solve has seen (results evaluation, re-check R1).
+On `main` the same overlaps are subducted too, so this is not new consumption, but it means that
+"no subduction without a thrust" holds only for the diffuse class. A first version stacked all
+overlaps at thrust-less segments; it thickened oceanic crust to 40–60 km next to slab-free boundaries
+within 300 Myr (seed 0), because many of these overlaps are resampling noise of the
+rigid plates on the grid, not convergence. **Decision for Sebastian:** whether slow or oblique
+overlaps at contacts without a thrust should be stacked (more conservative of crust, but it
+needs a way to tell real slow convergence from resampling noise) or keep subducting as now.
+
+**Weak thrusts:** 172 of 512 segments (snapshot means) have taken up ≥ 150 km on their thrust but
+have a shorter slab, so they feel no strength. They are pieces next to trenches that inherited the
+thrust along strike, and trenches whose slab decayed or broke off: the thrust stays a weak zone
+(on `main` these got the full strength back whenever their slab was short).
 
 ### Where diffuse zones occur
 
@@ -88,7 +110,7 @@ rows (and 17–19% of all boundary length, Earth 48%).
 | Subduction flux of crust younger than 20 Myr (%) | 22.6 | 22.4 | −0.1 |
 | Initiation segments / of them grown to 300 km (per 100 Myr) | 25.1 / 17.3 | 20.9 / 14.5 | −1.2 / −1.1 |
 | Mean sea-floor age (Myr) | 53.6 | 51.0 | −1.5 |
-| **Sea floor ≥ 200 Myr (%)** (#14) | 3.22 | **2.35** | −2.3 |
+| Sea floor ≥ 200 Myr (%) (#14) | 3.22 | 2.35 | −2.3 |
 | Ancient sea floor: within 300 km of its plate's continent / shallower than 2 km / sediment (%, %, km) | 71 / 46 / 7.0 | 82 / 61 / 9.0 | +3.0 / +4.0 / +5.2 |
 | Mean land / highest point (m) | 809 / 4910 | 805 / 5048 | −0.0 / +0.4 |
 | Crust thicker than 50 km (% of continental) | 4.3 | 4.5 | +0.2 |
@@ -104,8 +126,9 @@ rows (and 17–19% of all boundary length, Earth 48%).
 - The incipient trenches that remain converge faster: slow slab-free contacts are now diffuse
   zones, and re-segmented pieces next to a trench inherit its thrust (results evaluation,
   finding 3) and so feel no strength.
-- The old sea floor shrinks by a quarter and what remains is more clearly passive-margin
-  basement (near continents, shallow, under thick sediment), the #14 picture.
+- The old sea floor (≥ 200 Myr) is a quarter smaller, but this is not robust: t ranges from −1.7
+  to −2.6 with the averaging window, and in the first measurement (before #68) it moved the other
+  way (3.5 → 4.0%). Not claimed as an effect.
 - No relief guard rail moves. Thickened oceanic crust stays rare (0.26% of the surface above
   12 km against 0.19%; 0.02% above 17 km). The sediment part of the sea level is 16 m higher
   (t +1.6), within the seed scatter.

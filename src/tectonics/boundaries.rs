@@ -2057,10 +2057,6 @@ mod tests {
     #[test]
     fn diffuse_zones_shorten_instead_of_subducting() {
         let mut simulation = oceanic_plates_converging(false);
-        // Sediment on the lower plate moves along as sediment.
-        for crust in simulation.plates[0].crust.iter_mut().flatten() {
-            crust.sediment = 200.0;
-        }
         // The first overlaps create the segments (the contact spreads along the boundary), still
         // unseen by a velocity solve.
         for _ in 0..20 {
@@ -2073,6 +2069,18 @@ mod tests {
                 .segments()
                 .all(|segment| !segment.localised)
         );
+        // Sediment on the lower plate (polarity by buoyancy) moves along as sediment.
+        let upper = simulation
+            .polarities
+            .segments()
+            .next()
+            .expect("segments")
+            .overriding as usize;
+        for (index, plate) in simulation.plates.iter_mut().enumerate() {
+            for crust in plate.crust.iter_mut().flatten() {
+                crust.sediment = if index == upper { 0.0 } else { 200.0 };
+            }
+        }
         // A converging diffuse zone: the overlapping crust is stacked onto the upper plate
         // (distributed shortening), nothing subducts and no arc grows.
         let before = simulation.ledger.clone();
@@ -2090,13 +2098,17 @@ mod tests {
             "{subducted} {shortened}"
         );
         assert!(ledger.arcs - before.arcs <= 0.1 * shortened.abs());
-        let upper_sediment: f64 = simulation.plates[1]
-            .crust
-            .iter()
-            .flatten()
-            .map(|crust| crust.sediment)
-            .sum();
-        assert!(upper_sediment > 0.0);
+        // The sediment of the stacked crust moves along as sediment: it piles up on the
+        // receiving cells and hardly any subducts.
+        let max_sediment = |plate: usize| {
+            simulation.plates[plate]
+                .crust
+                .iter()
+                .flatten()
+                .map(|crust| crust.sediment)
+                .fold(0.0, f64::max)
+        };
+        assert!(max_sediment(upper) > 0.0);
         let subducted_sediment = ledger.subducted_sediment - before.subducted_sediment;
         assert!(
             subducted_sediment.abs() < 0.1 * shortened.abs(),

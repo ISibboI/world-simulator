@@ -227,3 +227,128 @@ Fix 2, add 3–4, and finish the attribution before the PR.
     *Change:* add sedimented crust to the stacking test (sediment stock conserved, no
     `SubductedSediment`), and add a solved strike-slip case to the non-converging test. Add
     small tests for `other_side_resists_subduction` and finding 2.
+
+## Re-check of the final measurement
+
+_2026-11-21, same evaluator. Re-checked the rewritten `results.md` against `runs/main68` and
+`runs/branch68` (s0..s7), and read the rebased diff
+`git diff e53b5f3 -- src` (e53b5f3 = the branch's merge base, `main` with #68). New parsers:
+`~/tasks/issue-42/tmp/eval/{contacts_eval68,counts68,incipient68,other_rows68}.py`;
+`logparse.py`, `budget.py` and `why.py` were rerun on the new run sets. Nothing was built or run._
+
+**Verdict: the numbers reproduce and the rebase is clean. The fixes for findings 2 and 4 and the
+revert of the ocean–continent strength are in, and they have tests. Three statements in
+results.md go beyond what the data show (R1–R3). The new log counters show that most of the
+crust consumed at non-localised segments still goes into the mantle, and results.md does not
+report this (R1).**
+
+R1. **The new counters are not reported, and they change the headline.**
+   - Over 500–1000 Myr the branch logs **13.6 Gt/yr "subducted at diffuse zones"** (seed range
+     8.2–17.1). For comparison: 0.33 Gt/yr is stacked by shortening, and 132 Gt/yr of oceanic
+     crust is subducted in total. So about 10% of all subduction happens at non-localised
+     segments, 40 times the stacked mass, and each of those overlaps also builds arc crust.
+   - The counter records every overlap that subducts at a segment with `!localised`. Its doc
+     comment says "not seen converging by the last solve". In practice it covers mostly segments
+     the solve *did* see and judged not subducting (slow or oblique, #68). These are the "other"
+     rows, 17.5% of ocean–ocean lower-side rows. All of them are slab-free, non-subducting
+     segments.
+   - The "weak thrusts" counter (localised, displacement ≥ 150 km, slab < 150 km) averages
+     **172 of 512 segments**: a third of all segments carry no strength although their slab is
+     short. `main` gives them part of the strength back.
+
+   *Change:*
+   - Quote both counters in results.md.
+   - Split the subducted mass at non-localised segments into: (a) segments not yet seen by a
+     solve; (b) seen, converging but ≤ 0.1 cm/yr or too oblique; (c) diverging or along
+     strike.
+   - Qualify the one-sentence result ("slab-free, mass-conserving shortening"): it holds for the
+     `d` class, not for the non-localised contacts as a whole.
+   - If (b) is large, whether slow or oblique convergence at a thrust-less contact should stack
+     instead of subduct is a physics decision. Name it as a follow-up or a decision for
+     Sebastian.
+
+R2. **"The trench share rises because the other rows fall, mostly the locked ones" is not what
+   the dumps show.** Lower-side ocean–ocean rows per snapshot (`counts68.py`):
+
+   | Row class | main | branch | t |
+   |---|---|---|---|
+   | Trench | 395 | 399 | +0.1 |
+   | Other, converging | 99.2 | 82.4 | −1.9 |
+   | Other, locked | 19.7 | 10.3 | −5.7 |
+   | Diffuse | 0 | 5.0 | |
+   | All rows | 514 | 496 | −0.3 |
+
+   - Trench rows reproduce: 395 → 399.
+   - The other rows fall by 26 per snapshot. Two thirds of that are *converging* other rows
+     (n.s.); one third are locked rows (highly significant).
+   - The total also falls by 18 rows (n.s.; one seed has 235 rows).
+
+   *Change:* write "trench rows stay the same in number; the share rises because the other
+   rows fall by about a fifth, mostly converging rows of slab-free segments (n.s.) and, highly
+   significantly, the locked ones".
+
+R3. **The change in ancient sea floor is not robust, so it should not be presented as an
+   effect.**
+   - Sea floor ≥ 200 Myr: 3.22 → 2.35% (t −2.3). The t value depends on the window: −2.6 for
+     (450, 1000], −1.7 for (600, 1000].
+   - The dump-based ancient share is 4.2 → 3.5% of the ocean floor (t −1.7).
+   - The first measurement moved the other way: ≥ 200 Myr 3.49 → 4.04%, and ancient sediment
+     −0.8 km (t −4.1), against +2.0 km (t +5.2) now.
+   - "Near continents, shallow, thick sediment" describes a set that shrinks, so these
+     conditional metrics shift with whatever cells leave it.
+
+   *Change:* report it as "−0.9 points, borderline, opposite sign before the rebase; probably
+   an interplay with #68 or chance", and drop "the #14 picture". If it matters for #14, confirm
+   it with more seeds.
+
+R4. **"#42's literal question was largely answered by #68" is overstated.** On `main68`, the
+   21% of converging ocean–ocean rows that are not part of a trench are, by the dumps, all rows
+   of slab-free segments that #68 judges not subducting. #68 changed their *label*, but overlaps
+   there still subduct and build arcs. On the branch this is the 13.6 Gt/yr of R1.
+   *Change:* say that #68 moved these contacts out of the trench class, but they are still
+   consumed like trenches. Whether they should shorten instead is the open part, linked to R1.
+
+R5. **The numbers reproduce.** With my own parsers:
+   - **Contacts**: B ocean–ocean trench 76.7 → 80.0%, diffuse 1.00%, locked 5.2 → 3.0%
+     (t −9.1), other 23.3 → 19.0%; ocean–ocean + ocean–continent diffuse 0.76%. The variants of
+     the lower-side rule move these by ≤ 0.5 points.
+   - **Diffuse rows** converge at 0.32 / 0.51 / 0.72 cm/yr (quartiles, from the dumps, against
+     0.33 cm/yr mean in the log); 6% are faster than 1 cm/yr.
+   - **Where diffuse zones occur** (`why.py`): reproduces the results table (both slab-free:
+     7.2% of the rows, 6.0% diffuse, 55% of all diffuse rows).
+   - **Log metrics**: trench length 111.5 → 110.8 ×10³ km; incipient trenches 13.1 → 11.5
+     ×10³ km; highest point 4910 → 5048 m; crust > 50 km 4.25 → 4.51%; collisions
+     22.1 → 22.1 ×10³ km; shortening consumed = stacked = 0.335 Gt/yr; diffuse length 1.07
+     ×10³ km.
+   - **No relief guard rail moves**: the ablation result holds on 8 seeds.
+   - **Incipient convergence +5.5 t**: both explanations in results.md hold. Pieces next to
+     mature trenches go from 2.21 to 2.54 cm/yr (t +3.4); isolated incipient rows fall from 25
+     to 19 per snapshot.
+
+R6. **Rebased diff: no merge mistakes found.** Checked:
+   - **Classification**: a trench requires `localised` across the whole #68 condition;
+     `Diffuse` = `!localised && subducting` on non-buoyant lower-side crust.
+   - **`update_segment_motion`**: the yield count is restricted to the same lower-side,
+     non-buoyant cells as #68's rate, and `yielding = subducting && majority fast`.
+   - **`update_slab_lengths`**: segment motion is recomputed first; slab and displacement grow
+     only on `localised && subducting`; localisation sets `slabs_changed`.
+   - **Stacking gate**: it uses `subducting`.
+   - **Revert**: the segment-less ocean–continent strength is back to 0.5 S, and
+     `other_side_resists_subduction` is removed.
+   - **Inheritance fix**: tested (`thrusts_propagate_…` now has the reversed case).
+   - **Ocean–continent stacking**: goes onto a neighbouring cell of the lower plate, tested by
+     `oceanic_crust_shortens_on_its_own_side_…`.
+
+   Small items:
+   - (a) `origin/main` has moved on to 74e80e3 (#71, workflows only).
+     `git diff origin/main` therefore shows deletions of `sweep.yml` and edits to `ci.yml` and
+     `pages.yml`. Rebase before opening the PR so that the PR diff does not look like it reverts
+     #71.
+   - (b) Doc comment of `SegmentStatistics::diffuse_subducted`: see R1.
+   - (c) One comment line in the stacking block of `resolve_ownership` is over 100 characters.
+   - (d) Stacking onto the lower plate's own cells next to the contact means the same mass is
+     overridden and stacked again as the plate advances (a bulldozer front). This fits a
+     thickening zone, but it explains the thick oceanic crust: > 17 km 0.00 → 0.02%, t +3.9, and
+     maximum shortening 246 km. Mention it next to that guard rail.
+   - (e) The sediment path of the stacking branch is still untested (test crust has
+     `sediment: 0`; finding 10).
