@@ -37,23 +37,40 @@ local radiative balance. Its ice does reflect sunlight, but the deficit is share
 
 Annual mean temperature of a land cell at elevation z:
 
-`T = T_local + w(z) × (T_regional − T_local) − lapse rate × z`, `w = min(z / 3 km, 1)`
+`T = T_local + w(z) × (T_free − T_local) − lapse rate × z`, `w = min(z / 3 km, 1)`
 
 - `T_local`: the land temperature of the cell's coarse cell (as now).
-- `T_regional`: the annual mean air temperature (land and ocean surfaces of the coarse cells by
-  area), smoothed over 1500 km on the coarse mesh.
-- New parameters `temperature.free_air_height` (3000 m; 0 turns the change off and reproduces
-  `main`) and `temperature.free_air_radius` (1.5 × 10⁶ m).
+- `T_free`: the annual mean sea-surface temperature of the cell's latitude band (the 18 bands
+  of the energy balance, interpolated between band centres; a band with less than 5% sea uses
+  the mean of all its surfaces). The free troposphere is mixed along latitude circles far more
+  than across them, and convection over the sea sets its temperature.
+- New parameter `temperature.free_air_height` (3000 m; 0 turns the change off and reproduces
+  `main` exactly).
 - The shift is the same in every month: the seasonal cycle stays the local one (plateaus are
   strong seasonal heat sources and sinks).
 - The same shifted temperature decides the ice cover that sets the land albedo in the energy
   balance, and the ice field of the output.
 - The energy balance itself is not changed: an iced highland still reflects, and its coarse
-  cell still cools at sea level. Only the highland no longer inherits all of that cooling.
+  cell still cools at sea level. Only the highland no longer inherits that cooling.
 
 Why 3 km: boundary layers are 1–3 km deep; ground above that is in the free troposphere all
 day. Why linear: no better knowledge; the weight is 0 at sea level, where the local balance
 certainly holds.
+
+Tried first and dropped: a regional reference (air or sea-surface temperature smoothed over
+1500 km). In the unit test below it failed for two reasons that would also occur in the
+simulation. The coarse cells around an iced plateau are themselves cold, so a regional mean
+of the air inherits the runaway it should break. And the nearest sea of a plateau inside a
+continent can lie at another latitude (in the test: 14 °C from the subtropics instead of 25 °C
+from the tropical ocean).
+
+Consequences to watch:
+- Land that is colder than the sea of its latitude (continental interiors at high latitudes)
+  gets warmer highlands: at 1.5 km half of the difference. That is the direction of real
+  plateaus (the free air in winter is warmer than a continental surface inversion), but the
+  size is not checked against data.
+- Land that is hotter than the sea of its latitude (tropical and subtropical continents) gets
+  cooler highlands than the lapse rate from the hot lowland gives.
 
 Not changed: the ice criterion itself. A summer-melt (degree-day) criterion would be more
 physical for seasonal climates, but #24 found that it tips the model into a snowball; it does
@@ -61,10 +78,12 @@ not address this issue, where the tropical highlands have no summer.
 
 ## Tests
 
-- A tropical continent with a 4.5 km plateau: without the change the plateau is several K
-  colder than the lowland around it at the same level and carries ice; with it, the difference
-  is below 3 K and the ice cover below 0.3.
-- Existing temperature tests unchanged (sea level and low land are not touched).
+- `tropical_plateaus_have_the_temperature_of_the_free_air_around_them`: a tropical continent
+  with a 4.5 km plateau. Without the change (`free_air_height = 0`) the plateau glaciates
+  completely and is more than 10 K colder than the open ocean at its latitude, both reduced to
+  sea level (measured: 9.4 against ~25 °C, ice cover 1). With it, the two agree within 2 K and
+  the ice cover is below 0.05 (measured: 24.8 °C, 0.0001).
+- Existing temperature tests unchanged.
 
 ## Validation
 
