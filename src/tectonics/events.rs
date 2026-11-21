@@ -249,6 +249,20 @@ pub struct EventCounts {
     /// rifts created and on the two rifted plates: rifts follow sutures if the first ratio is
     /// higher than the second.
     pub rift_suture_cells: [usize; 4],
+    /// Sums of the remaining orogenic weakening ([`Crust::orogenic`]) over the continental
+    /// cells counted in [`EventCounts::rift_suture_cells`]: on the rift boundaries, in the
+    /// rifted plates.
+    pub rift_orogenic: [f64; 2],
+    /// Continental cells with an orogenic weakening of at least [`WEAK_BELT_THRESHOLD`]: on the
+    /// rift boundaries, in the rifted plates.
+    pub rift_weak_cells: [usize; 2],
+    /// Sum over plume rifts of |cos| of the angle between the plate's motion at the plume and
+    /// the direction from the plume to the new boundary cells within half a plume head radius
+    /// (mean over those cells), and the number of rifts measured: a random orientation gives a
+    /// mean of 2/π, breaks along the plate's motion 1.
+    pub rift_motion_alignment: (f64, usize),
+    /// Plumes that tried to rift a plate but found no division.
+    pub failed_plume_rifts: usize,
     /// Sum of the root-mean-square distances (km) of new boundaries from their best-fitting
     /// great circle, and the number of splits measured: rifts, initiations.
     pub split_deviation_km: [f64; 2],
@@ -286,6 +300,10 @@ const MIN_FRACTURE_ZONE_CELLS: usize = 3;
 
 /// Initiations whose two parts merge again within this many Myr count as undone.
 const UNDONE_INITIATION_TIME: f64 = 50.0;
+
+/// Orogenic weakening ([`Crust::orogenic`]) from which a continental cell counts as part of a
+/// weak belt in the rift statistics: a strength of at most ~0.8 of undeformed lithosphere.
+pub const WEAK_BELT_THRESHOLD: f64 = 0.25;
 
 /// Why two plates merge.
 #[derive(Clone, Copy, Debug)]
@@ -990,6 +1008,8 @@ impl Simulation {
             "Rift boundary distance from the plume"
         );
         let mut counts = [0usize; 4];
+        let mut orogenic = [0.0; 2];
+        let mut weak = [0usize; 2];
         for cell in 0..self.mesh.len() as u32 {
             let plate = self.owners[cell as usize].plate;
             if plate != a && plate != b {
@@ -1000,15 +1020,44 @@ impl Simulation {
                 continue;
             }
             let suture = usize::from(crust.orogeny > NO_OROGENY);
+            let belt = usize::from(crust.orogenic >= WEAK_BELT_THRESHOLD);
             counts[2] += suture;
             counts[3] += 1;
+            orogenic[1] += crust.orogenic;
+            weak[1] += belt;
             if boundary.binary_search(&cell).is_ok() {
                 counts[0] += suture;
                 counts[1] += 1;
+                orogenic[0] += crust.orogenic;
+                weak[0] += belt;
             }
         }
         for (total, count) in self.event_counts.rift_suture_cells.iter_mut().zip(counts) {
             *total += count;
+        }
+        for i in 0..2 {
+            self.event_counts.rift_orogenic[i] += orogenic[i];
+            self.event_counts.rift_weak_cells[i] += weak[i];
+        }
+        // Orientation of the break near the plume relative to the plate's motion there.
+        let motion = self.plates[a as usize].angular_velocity.cross(origin);
+        if motion.length() > 0.0 {
+            let motion = motion.normalize();
+            let (sum, count) = boundary
+                .iter()
+                .map(|&cell| self.mesh.vertex(cell))
+                .filter(|r| {
+                    let angle = r.angle_between(origin);
+                    angle > 0.0 && angle <= 0.5 * PLUME_HEAD_RADIUS
+                })
+                .fold((0.0, 0usize), |(sum, count), r| {
+                    let direction = (r - origin * r.dot(origin)).normalize_or_zero();
+                    (sum + direction.dot(motion).abs(), count + 1)
+                });
+            if count > 0 {
+                self.event_counts.rift_motion_alignment.0 += sum / count as f64;
+                self.event_counts.rift_motion_alignment.1 += 1;
+            }
         }
     }
 
@@ -1260,7 +1309,11 @@ impl Simulation {
                 nucleus: cell,
                 cut: continent,
             };
-            if let Some(new_plate) = self.split_locally(plate, normal, anchor) {
+            let split = self.split_locally(plate, normal, anchor);
+            if split.is_none() {
+                self.event_counts.failed_plume_rifts += 1;
+            }
+            if let Some(new_plate) = split {
                 self.event_counts.rifts += 1;
                 let (total, far) = self.split_contact_km(plate, new_plate, position);
                 self.event_counts.rift_contact_km += total;
@@ -2104,6 +2157,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    reheated: NO_REHEATING,
                     cohort: 0.0,
                 }
             } else {
@@ -2314,6 +2368,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    reheated: NO_REHEATING,
                     cohort: 0.0,
                 }
             } else {
@@ -2376,6 +2431,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    reheated: NO_REHEATING,
                     cohort: 0.0,
                 }
             });
@@ -2512,6 +2568,7 @@ mod tests {
                 peak_flux: 5e-3,
                 has_rifted: false,
             });
+            simulation.reheat_above_plumes();
             simulation.rift_above_plumes();
             assert_eq!(simulation.plates.len(), 2, "seed {seed}");
             assert_eq!(plates_of_continent(&simulation, DVec3::X).len(), 2);
@@ -2538,6 +2595,7 @@ mod tests {
                 peak_flux: 5e-3,
                 has_rifted: false,
             });
+            simulation.reheat_above_plumes();
             simulation.rift_above_plumes();
             assert_eq!(simulation.event_counts.rifts, 1, "seed {seed}");
             let plume = simulation.mesh.nearest(position);
@@ -2577,6 +2635,7 @@ mod tests {
                     has_rifted: false,
                 });
                 let plates = simulation.plates.len() as u32;
+                simulation.reheat_above_plumes();
                 simulation.rift_above_plumes();
                 if simulation.event_counts.rifts == 0 {
                     continue;
@@ -2638,6 +2697,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: if suture { -500.0 } else { NO_OROGENY },
                     orogenic: if suture { 1.0 } else { 0.0 },
+                    reheated: NO_REHEATING,
                     cohort: 0.0,
                 });
             }
@@ -2653,6 +2713,7 @@ mod tests {
                 peak_flux: 5e-3,
                 has_rifted: false,
             });
+            simulation.reheat_above_plumes();
             simulation.rift_above_plumes();
             assert_eq!(simulation.event_counts.rifts, 1, "lean {lean}, seed {seed}");
             assert_eq!(
@@ -2766,6 +2827,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         let micro = |r: DVec3| r.x > 0.8 && r.z < 0.0 && r.z > -0.12;
@@ -2905,6 +2967,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    reheated: NO_REHEATING,
                     cohort: 0.0,
                 };
             }
@@ -2974,6 +3037,7 @@ mod tests {
             peak_flux: 5e-3,
             has_rifted: false,
         });
+        simulation.reheat_above_plumes();
         simulation.rift_above_plumes();
         assert_eq!(simulation.plates.len(), 2);
         assert_eq!(simulation.event_counts.rifts, 1);
@@ -3038,6 +3102,7 @@ mod tests {
             peak_flux: 5e-3,
             has_rifted: false,
         });
+        simulation.reheat_above_plumes();
         simulation.rift_above_plumes();
         assert_eq!(simulation.plates.len(), 2);
         for _ in 0..2 {

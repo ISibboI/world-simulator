@@ -319,6 +319,7 @@ mod tests {
                             c.sediment.to_bits(),
                             c.orogeny.to_bits(),
                             c.orogenic.to_bits(),
+                            c.reheated.to_bits(),
                         ]
                     })
                 };

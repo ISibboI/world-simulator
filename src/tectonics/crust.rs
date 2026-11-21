@@ -76,14 +76,24 @@ pub struct Crust {
     /// and passed on in mixtures only as continental lithosphere (see [`Crust::mix_orogeny`]);
     /// the lithosphere keeps it when it is thinned later.
     pub orogeny: f64,
-    /// Share of the sample's lithosphere that was deformed in an orogeny (0 to 1): 1 where a
-    /// collision, suture or accretion marks the sample ([`Crust::orogeny`]), and the
-    /// crust-mass-weighted mean of the contributors where samples are merged or split (merging
-    /// plates, stretching rifts, healing gaps), so that a mixing does not turn a little
-    /// orogenic lithosphere into a whole sample of it. Crust added on top or eroded off
-    /// (arcs, stacked crust, sediment turned to rock) leaves it unchanged: the weakness is in
-    /// the lithosphere. The lithosphere is weakened in proportion (see `weak_zones`).
+    /// Remaining orogenic weakening of the sample's lithosphere (0 to 1): 1 where a collision,
+    /// suture or accretion marks the sample ([`Crust::orogeny`]); the crust-mass-weighted mean
+    /// of the contributors where samples are merged or split (merging plates, stretching
+    /// rifts, healing gaps), so that a mixing does not turn a little orogenic lithosphere into
+    /// a whole sample of it; and decaying as the deformed lithosphere cools and re-thickens
+    /// (see [`Crust::heal_orogenic`]). The decay is linear, so it commutes with the mixing by
+    /// mass. Crust added on top or eroded off (arcs, stacked crust, sediment turned to rock)
+    /// leaves it unchanged: the weakness is in the lithosphere. The lithosphere is weakened in
+    /// proportion (see `weak_zones`).
     pub orogenic: f64,
+    /// Simulated time in Myr to which a plume last reset the thermal age of the lithosphere,
+    /// or [`NO_REHEATING`]: a plume heats and thins the lithosphere above it as if it had
+    /// formed at this time (thermal rejuvenation), and it cools again from there. Carried with
+    /// the plate. It only affects the strength of the lithosphere (see
+    /// [`Crust::strength_age`]), not the thermal subsidence or the sea-floor age, which follow
+    /// [`Crust::birth`]. Where samples are mixed it takes the latest of the contributors (like
+    /// `birth` in healed gaps); a sample receiving crust from a merging plate keeps its own.
+    pub reheated: f64,
     /// Diagnostic tracer: the mass fraction of the sediment that belongs to the tracked cohort
     /// of continental cover (see `Simulation::start_cover_cohort`). Mixed by mass where
     /// sediment is added; removal takes it in proportion (a well-mixed column).
@@ -93,10 +103,32 @@ pub struct Crust {
 /// [`Crust::orogeny`] of crust that never went through an orogeny in the simulation.
 pub const NO_OROGENY: f64 = f64::NEG_INFINITY;
 
+/// [`Crust::reheated`] of lithosphere that no plume has heated in the simulation.
+pub const NO_REHEATING: f64 = f64::NEG_INFINITY;
+
 impl Crust {
     /// Age of the lithosphere in Myr at the simulated time `time` (Myr).
     pub fn age(&self, time: f64) -> f64 {
         time - self.birth
+    }
+
+    /// Thermal age in Myr that sets the strength of the lithosphere at the simulated time
+    /// `time`: the age since its formation ([`Crust::age`]) or since a plume last reset it
+    /// ([`Crust::reheated`]), whichever is younger.
+    pub fn strength_age(&self, time: f64) -> f64 {
+        time - self.birth.max(self.reheated)
+    }
+
+    /// Resets the thermal age that sets the strength (see [`Crust::reheated`]) to `age` Myr at
+    /// the simulated time `time`, unless the lithosphere is already younger.
+    pub(super) fn reheat(&mut self, time: f64, age: f64) {
+        self.reheated = self.reheated.max(time - age);
+    }
+
+    /// Lets the orogenic weakening decay by `factor` (`exp(−dt / τ)`, see
+    /// `weak_zones::OROGENIC_HEALING_TIME`).
+    pub(super) fn heal_orogenic(&mut self, factor: f64) {
+        self.orogenic *= factor;
     }
 
     /// Elevation of the surface relative to sea level in metres at the simulated time `time`
@@ -427,6 +459,7 @@ pub(super) fn new_oceanic_crust(time: f64) -> Crust {
         metasediment: 0.0,
         orogeny: NO_OROGENY,
         orogenic: 0.0,
+        reheated: NO_REHEATING,
         cohort: 0.0,
     }
 }
@@ -455,6 +488,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         // A share of an old belt mixed in: the latest orogeny, a part of the lithosphere.
@@ -517,6 +551,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         assert!(!margin.resists_subduction());
@@ -544,6 +579,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: 200.0,
             orogenic: 1.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         let mut mixed = belt;
@@ -571,6 +607,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         assert!(!margin.resists_subduction() && !margin.is_continental_origin());

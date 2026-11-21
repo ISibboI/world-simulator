@@ -815,6 +815,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         }
     }
@@ -998,6 +999,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         let other_side = (DVec3::X - DVec3::Y * (1.5 * RADIUS).tan()).normalize();
@@ -1040,6 +1042,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         for _ in 0..100 {

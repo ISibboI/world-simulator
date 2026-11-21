@@ -11,7 +11,7 @@
 //! (through the plume, or along the margin), which stands in for the stress field: the break
 //! may wander from it within that band.
 //!
-//! Above a plume head the lithosphere is heated and thinned (see [`plume_head_strength`]), so
+//! Above a plume the lithosphere is heated and thinned (see [`plume_heating_age`]), so
 //! plume rifts break through the plume where that is the weakest way, and their arms leave it
 //! along whatever weak zones lie around it: the angle at the plume is an outcome of the cut.
 
@@ -29,16 +29,27 @@ const REFERENCE_CONTINENTAL_THICKNESS: f64 = 35e3;
 /// Thermal age (Myr) at which lithosphere reaches its full thickness (plate model).
 const FULL_STRENGTH_AGE: f64 = 100.0;
 
-/// Strength of lithosphere deformed in an orogeny (collision belts, sutures, accreted
-/// terranes) relative to undeformed lithosphere of the same thermal age, for good: orogenic
-/// belts keep their mantle fabric and faults and are reactivated in later rifting (the
-/// Atlantic opened along the Caledonian–Appalachian sutures ~200 Myr after they closed;
-/// Wilson 1966; Tommasi & Vauchez 2001; Buiter & Torsvik 2014), while cratons are avoided. The
-/// factor is the ratio of the lithosphere thickness of Phanerozoic orogenic belts to that of
-/// cratons, ~100–150 vs ~200–300 km (Artemieva & Mooney 2001).
-const SUTURE_WEAKENING: f64 = 0.5;
+/// Strength of freshly deformed orogenic lithosphere (collision belts, sutures, accreted
+/// terranes) relative to undeformed lithosphere of the same thermal age: young mobile belts and
+/// former back-arcs, where collisions concentrate, have hot lithosphere 50–60 km thick, against
+/// 150–300 km for cratons and regions with a thermotectonic age above ~300 Ma (Hyndman, Currie
+/// & Mazzotti 2005). The weakening heals as the belt cools (see [`OROGENIC_HEALING_TIME`]);
+/// while it lasts, rifts reactivate belts and sutures (the central Atlantic opened along the
+/// Alleghanian sutures ~100 Myr after they closed; Wilson 1966; Tommasi & Vauchez 2001;
+/// Buiter & Torsvik 2014) and avoid cratons. The permanent part of the inheritance (mantle
+/// fabric) and the compositional strength of cratonic keels are not modelled.
+const SUTURE_WEAKENING: f64 = 0.25;
 
-/// Thermal age (Myr) to which a plume head reheats the lithosphere at its centre: the
+/// Time constant (Myr) with which the orogenic weakening ([`Crust::orogenic`]) decays: the
+/// first mode of conductive re-thickening of continental lithosphere towards ~250 km,
+/// `L² / (π² κ)` with κ = 10⁻⁶ m²/s. Former back-arcs and mobile belts lose most of their
+/// thermal anomaly and become strong within ~300 Myr (Currie & Hyndman 2006; the Appalachians,
+/// last deformed ~300 Ma, are now nearly as cool as the adjacent craton). Slower than the
+/// recovery of the thermal boundary layer after stretching or plume heating
+/// ([`FULL_STRENGTH_AGE`]), which rebuilds only the plate-model thickness.
+pub(super) const OROGENIC_HEALING_TIME: f64 = 200.0;
+
+/// Thermal age (Myr) to which a plume reheats the lithosphere at its centre: the
 /// thermal-rejuvenation model of hotspot swells (Detrick & Crough 1978; Crough 1983). Heat-flow
 /// data suggest oceanic swells are reheated less (Von Herzen et al. 1989); continental plume
 /// heads such as Afar clearly thin the lithosphere.
@@ -47,6 +58,18 @@ const PLUME_HEAD_THERMAL_AGE: f64 = 25.0;
 /// Radius (rad, ~1000 km) of a plume head flattened below the lithosphere, ~2000 km across
 /// (Campbell & Griffiths 1990; White & McKenzie 1989).
 pub(super) const PLUME_HEAD_RADIUS: f64 = 0.157;
+
+/// Radius (rad, ~500 km) heated by a plume's tail after its head stage: hotspot swells such as
+/// Hawaii's are ~1000–1200 km wide (Crough 1983; Wessel 1993).
+const PLUME_TAIL_RADIUS: f64 = 0.0785;
+
+/// Age (Myr) of a plume up to which its head heats the lithosphere over [`PLUME_HEAD_RADIUS`]:
+/// the head arrives over 10 Myr ([`Plume::head_growth`]) and spreads; its flood basalts erupt
+/// within a few Myr (Courtillot & Renne 2003), and the ponded head is sheared off by the moving
+/// plate. Afterwards only the tail heats ([`PLUME_TAIL_RADIUS`]). It equals the default
+/// `rift_delay`; a plume rifting later finds the head-heated lithosphere where the plate has
+/// carried it, cooled by the time since (the reset is kept, see [`Crust::reheated`]).
+const PLUME_HEAD_STAGE: f64 = 20.0;
 
 /// Weakest lithosphere (the axis of a spreading ridge) relative to old lithosphere.
 const MIN_STRENGTH: f64 = 0.05;
@@ -62,16 +85,19 @@ const UNBREAKABLE: f64 = 1e12;
 /// ∝ its mechanical thickness: lithosphere thickens with the square root of its thermal age
 /// (half-space cooling, saturating like the plate model), which is the sea-floor age for
 /// oceanic crust, the time since formation for arcs and accreted belts, and the time since the
-/// last stretching for continental crust (see `boundaries::stretch_rift`); stretched continental
-/// lithosphere is also thinned with its crust (McKenzie 1978). Old cratons and old ocean are
-/// equally strong; rifted margins, orogenic belts and sutures of any age (see
-/// [`SUTURE_WEAKENING`]), young arcs and young sea floor are weak. `plume_head` caps the
-/// thermal thickness above plume heads (see [`plume_head_strength`]; 1 elsewhere).
-pub(super) fn lithosphere_strength(crust: &Crust, time: f64, plume_head: f64) -> f64 {
-    let thermal = (crust.age(time).max(0.0) / FULL_STRENGTH_AGE)
+/// last stretching for continental crust (see `boundaries::stretch_rift`), or the time since a
+/// plume last heated it, if younger ([`Crust::strength_age`]); stretched continental
+/// lithosphere is also thinned with its crust (McKenzie 1978), and orogenic lithosphere is
+/// weakened by its remaining orogenic weakening ([`Crust::orogenic`], [`SUTURE_WEAKENING`]).
+/// Old cratons and old ocean are equally strong; rifted margins, young orogenic belts and
+/// sutures, lithosphere above and behind plumes, young arcs and young sea floor are weak.
+///
+/// This is the one place where the strength history of the lithosphere is combined; code that
+/// needs the strength of a sample should call it.
+pub(super) fn lithosphere_strength(crust: &Crust, time: f64) -> f64 {
+    let thermal = (crust.strength_age(time).max(0.0) / FULL_STRENGTH_AGE)
         .sqrt()
-        .min(1.0)
-        .min(plume_head);
+        .min(1.0);
     let thinning = if crust.is_continental_origin() {
         (crust.basement().thickness / REFERENCE_CONTINENTAL_THICKNESS).min(1.0)
     } else {
@@ -81,26 +107,66 @@ pub(super) fn lithosphere_strength(crust: &Crust, time: f64, plume_head: f64) ->
     (thermal * thinning * suture).max(MIN_STRENGTH)
 }
 
-/// The largest relative thickness (strength) of the lithosphere at `r` above the given plume
-/// heads: a head heats and thins the lithosphere above it to the thickness of
+/// The thermal age (Myr) to which `plume` reheats the lithosphere at `r` now, or `None` outside
+/// its reach: a head heats and thins the lithosphere above it to the thickness of
 /// [`PLUME_HEAD_THERMAL_AGE`] old lithosphere at its centre, tapering with the head's flattened
-/// shape, `1 − (d/R)²`, back to the unaffected thickness at its edge ([`PLUME_HEAD_RADIUS`]),
-/// in proportion to how far the head has arrived ([`Plume::head_growth`]). The weakening is
-/// tied to the plume's position in the mantle, not carried along with the plate; the narrower
-/// swell of the later plume tail is not distinguished from the head. 1 away from plumes.
-pub(super) fn plume_head_strength(plumes: &[Plume], r: DVec3) -> f64 {
+/// shape, `1 − (d/R)²`, back to the unaffected thickness at its edge ([`PLUME_HEAD_RADIUS`];
+/// [`PLUME_TAIL_RADIUS`] after the head stage), in proportion to the plume's flux relative to
+/// its peak (the head arriving, the plume fading at the end of its life). The age is the one
+/// whose strength, `√(age / FULL_STRENGTH_AGE)`, is that relative thickness.
+pub(super) fn plume_heating_age(plume: &Plume, r: DVec3) -> Option<f64> {
+    let radius = if plume.age < PLUME_HEAD_STAGE {
+        PLUME_HEAD_RADIUS
+    } else {
+        PLUME_TAIL_RADIUS
+    };
+    if r.dot(plume.position) <= radius.cos() || plume.peak_flux <= 0.0 {
+        return None;
+    }
+    let x = r.angle_between(plume.position) / radius;
+    let intensity = (plume.flux() / plume.peak_flux).clamp(0.0, 1.0);
     let centre = (PLUME_HEAD_THERMAL_AGE / FULL_STRENGTH_AGE).sqrt();
-    plumes
-        .iter()
-        .map(|plume| {
-            let x = r.angle_between(plume.position) / PLUME_HEAD_RADIUS;
-            if x >= 1.0 {
-                1.0
-            } else {
-                1.0 - (1.0 - centre) * (1.0 - x * x) * plume.head_growth()
+    let thickness = 1.0 - (1.0 - centre) * (1.0 - x * x).max(0.0) * intensity;
+    (thickness < 1.0).then(|| FULL_STRENGTH_AGE * thickness * thickness)
+}
+
+impl Simulation {
+    /// Plumes heat the lithosphere above them: the thermal age that sets its strength is reset
+    /// on the crust samples at the surface (see [`plume_heating_age`], [`Crust::reheated`]),
+    /// which carry it along with the plate and cool from there. Runs once per step,
+    /// immediately before the plate events, so that splits see the heating of the plumes'
+    /// current positions.
+    pub(super) fn reheat_above_plumes(&mut self) {
+        let time = self.time;
+        for plume in self.mantle.plumes() {
+            for cell in 0..self.mesh.len() as u32 {
+                if let Some(age) = plume_heating_age(plume, self.mesh.vertex(cell)) {
+                    let owner = self.owners[cell as usize];
+                    if let Some(crust) =
+                        self.plates[owner.plate as usize].crust[owner.local as usize].as_mut()
+                    {
+                        crust.reheat(time, age);
+                    }
+                }
             }
-        })
-        .fold(1.0, f64::min)
+        }
+    }
+
+    /// The orogenic weakening of all crust samples (hidden ones too) decays over `dt` Myr (see
+    /// [`OROGENIC_HEALING_TIME`]).
+    pub(super) fn heal_orogenic_weakening(&mut self, dt: f64) {
+        let factor = (-dt / OROGENIC_HEALING_TIME).exp();
+        for plate in &mut self.plates {
+            for crust in plate.crust.iter_mut().flatten() {
+                crust.heal_orogenic(factor);
+            }
+        }
+    }
+
+    /// Relative strength of the lithosphere at a world cell (see [`lithosphere_strength`]).
+    pub fn lithosphere_strength(&self, cell: u32) -> f64 {
+        lithosphere_strength(&self.surface_crust(cell), self.time)
+    }
 }
 
 /// The reference geometry of a break, standing in for the stress field.
@@ -327,10 +393,7 @@ impl Simulation {
         }
         let strength: Vec<f64> = cells
             .iter()
-            .map(|&cell| {
-                let plume_head = plume_head_strength(self.mantle.plumes(), self.mesh.vertex(cell));
-                lithosphere_strength(&self.surface_crust(cell), self.time, plume_head)
-            })
+            .map(|&cell| lithosphere_strength(&self.surface_crust(cell), self.time))
             .collect();
         let (source, sink) = (cells.len(), cells.len() + 1);
         let mut network = Network::new(cells.len() + 2);
@@ -449,9 +512,10 @@ mod tests {
     #[test]
     fn breaks_through_a_belt_are_cheaper_than_through_its_diluted_remains() {
         // An old continent with an orogenic belt a few cells wide along the meridian at azimuth
-        // 75°: a break along the belt costs little more than half of one through the craton.
-        // The same orogenic lithosphere spread over a band three times as wide (a third in each
-        // sample) saves only a sixth: it attracts breaks over much shorter detours than a belt.
+        // 75°, freshly deformed: a break along the belt costs little more than a quarter of one
+        // through the craton. The same orogenic lithosphere spread over a band three times as
+        // wide (a third in each sample) saves only a fifth: it attracts breaks over much shorter
+        // detours than a belt.
         let continent = |half_width: f64, orogenic: f64| {
             let mut simulation = banded_ocean(75f64.to_radians());
             let band_normal = DVec3::new(-75f64.to_radians().sin(), 75f64.to_radians().cos(), 0.0);
@@ -471,6 +535,7 @@ mod tests {
                         metasediment: 0.0,
                         orogeny: if belt { -400.0 } else { NO_OROGENY },
                         orogenic: if belt { orogenic } else { 0.0 },
+                        reheated: NO_REHEATING,
                         cohort: 0.0,
                     };
                 }
@@ -488,9 +553,9 @@ mod tests {
         let craton = cost(&continent(0.1, 0.0));
         let belt = cost(&continent(0.1, 1.0));
         let diluted = cost(&continent(0.3, 1.0 / 3.0));
-        assert!(belt < 0.65 * craton, "{belt} / {craton}");
-        assert!(diluted > 0.8 * craton, "{diluted} / {craton}");
-        assert!(diluted < 0.9 * craton, "{diluted} / {craton}");
+        assert!(belt < 0.35 * craton, "{belt} / {craton}");
+        assert!(diluted > 0.75 * craton, "{diluted} / {craton}");
+        assert!(diluted < 0.85 * craton, "{diluted} / {craton}");
     }
 
     #[test]
@@ -548,6 +613,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         let rifted = Crust {
@@ -555,17 +621,17 @@ mod tests {
             birth: -4.0,
             ..craton
         };
-        assert_eq!(lithosphere_strength(&old_ocean, 0.0, 1.0), 1.0);
-        assert_eq!(lithosphere_strength(&craton, 0.0, 1.0), 1.0);
-        assert!(lithosphere_strength(&young_ocean, 0.0, 1.0) < 0.25);
-        assert!(lithosphere_strength(&rifted, 0.0, 1.0) < 0.25);
-        // Old sutures stay weak.
+        assert_eq!(lithosphere_strength(&old_ocean, 0.0), 1.0);
+        assert_eq!(lithosphere_strength(&craton, 0.0), 1.0);
+        assert!(lithosphere_strength(&young_ocean, 0.0) < 0.25);
+        assert!(lithosphere_strength(&rifted, 0.0) < 0.25);
+        // Sutures are weak as long as their orogenic weakening lasts.
         let suture = Crust {
             orogeny: -400.0,
             orogenic: 1.0,
             ..craton
         };
-        assert_eq!(lithosphere_strength(&suture, 0.0, 1.0), SUTURE_WEAKENING);
+        assert_eq!(lithosphere_strength(&suture, 0.0), SUTURE_WEAKENING);
     }
 
     #[test]
@@ -579,9 +645,10 @@ mod tests {
             metasediment: 0.0,
             orogeny: if orogenic > 0.0 { -400.0 } else { NO_OROGENY },
             orogenic,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
-        let strength = |orogenic: f64| lithosphere_strength(&craton(orogenic), 0.0, 1.0);
+        let strength = |orogenic: f64| lithosphere_strength(&craton(orogenic), 0.0);
         assert_eq!(strength(0.0), 1.0);
         assert_eq!(strength(1.0), SUTURE_WEAKENING);
         // A sample that received a tenth of a belt is weakened by a tenth of the belt's
@@ -599,23 +666,135 @@ mod tests {
             has_rifted: false,
         };
         let at = |angle: f64| DVec3::new(angle.sin(), 0.0, angle.cos());
-        let head = [plume(50.0)];
+        let strength = |plume: &Plume, r: DVec3| {
+            plume_heating_age(plume, r).map_or(1.0, |age| (age / FULL_STRENGTH_AGE).sqrt())
+        };
+        let head = plume(15.0);
         // As thick as 25 Myr old lithosphere at the centre, unaffected from the head's edge on.
-        let centre = plume_head_strength(&head, DVec3::Z);
-        assert!((centre - 0.5).abs() < 1e-9);
-        assert_eq!(plume_head_strength(&head, at(PLUME_HEAD_RADIUS)), 1.0);
-        assert_eq!(plume_head_strength(&head, at(0.5)), 1.0);
-        let middle = plume_head_strength(&head, at(0.5 * PLUME_HEAD_RADIUS));
-        assert!(centre < middle && middle < 1.0);
-        // A head that is still arriving weakens less.
-        assert!((plume_head_strength(&[plume(5.0)], DVec3::Z) - 0.75).abs() < 1e-9);
-        // Old lithosphere is weakened, young lithosphere does not become stronger.
-        let old_ocean = new_oceanic_crust(-250.0);
-        let young_ocean = new_oceanic_crust(-4.0);
-        assert_eq!(lithosphere_strength(&old_ocean, 0.0, centre), centre);
-        assert_eq!(
-            lithosphere_strength(&young_ocean, 0.0, centre),
-            lithosphere_strength(&young_ocean, 0.0, 1.0)
+        assert!(
+            (plume_heating_age(&head, DVec3::Z).unwrap() - PLUME_HEAD_THERMAL_AGE).abs() < 1e-9
         );
+        let centre = strength(&head, DVec3::Z);
+        assert!((centre - 0.5).abs() < 1e-9);
+        assert_eq!(plume_heating_age(&head, at(PLUME_HEAD_RADIUS)), None);
+        assert_eq!(plume_heating_age(&head, at(0.5)), None);
+        let middle = strength(&head, at(0.5 * PLUME_HEAD_RADIUS));
+        assert!(centre < middle && middle < 1.0);
+        // A head that is still arriving heats less.
+        assert!((strength(&plume(5.0), DVec3::Z) - 0.75).abs() < 1e-9);
+        // After the head stage only the tail's narrower swell is heated, as strongly.
+        let tail = plume(50.0);
+        assert!((strength(&tail, DVec3::Z) - 0.5).abs() < 1e-9);
+        assert_eq!(plume_heating_age(&tail, at(0.6 * PLUME_HEAD_RADIUS)), None);
+        assert!(plume_heating_age(&tail, at(0.4 * PLUME_HEAD_RADIUS)).is_some());
+        // A fading plume heats less.
+        assert!(strength(&plume(190.0), DVec3::Z) > 0.5);
+        // Reheating resets the strength age of old lithosphere; young lithosphere does not
+        // become stronger, and a reset is never undone by a weaker heating.
+        let mut old_ocean = new_oceanic_crust(-250.0);
+        old_ocean.reheat(0.0, PLUME_HEAD_THERMAL_AGE);
+        assert!((lithosphere_strength(&old_ocean, 0.0) - 0.5).abs() < 1e-9);
+        old_ocean.reheat(0.0, 80.0);
+        assert!((lithosphere_strength(&old_ocean, 0.0) - 0.5).abs() < 1e-9);
+        let young_ocean = new_oceanic_crust(-4.0);
+        let mut heated = young_ocean;
+        heated.reheat(0.0, PLUME_HEAD_THERMAL_AGE);
+        assert_eq!(
+            lithosphere_strength(&heated, 0.0),
+            lithosphere_strength(&young_ocean, 0.0)
+        );
+        // The heated lithosphere cools again: full strength 75 Myr later.
+        assert!(lithosphere_strength(&old_ocean, 40.0) < 1.0);
+        assert_eq!(lithosphere_strength(&old_ocean, 75.0), 1.0);
+    }
+
+    #[test]
+    fn orogenic_weakening_heals_and_commutes_with_mixing() {
+        let mut simulation =
+            Simulation::new(SphereMesh::icosphere(3), 1, TectonicParams::default(), 0);
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            crust.orogenic = 1.0;
+        }
+        for _ in 0..200 {
+            simulation.heal_orogenic_weakening(1.0);
+        }
+        for crust in simulation.plates[0].crust.iter().flatten() {
+            assert!((crust.orogenic - (-1.0f64).exp()).abs() < 1e-9);
+        }
+        // A belt 200 Myr after its orogeny has regained most of its strength.
+        let belt = Crust {
+            thickness: 40e3,
+            density: crate::isostasy::CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+            metasediment: 0.0,
+            orogeny: -200.0,
+            orogenic: (-1.0f64).exp(),
+            reheated: NO_REHEATING,
+            cohort: 0.0,
+        };
+        let healed = 1.0 - (1.0 - SUTURE_WEAKENING) * (-1.0f64).exp();
+        assert!((lithosphere_strength(&belt, 0.0) - healed).abs() < 1e-12);
+        assert!(healed > 0.7 && healed < 0.75);
+        // Mixing by mass, then healing, equals healing, then mixing.
+        let (a, b, wa, wb) = (1.0, 0.2, 3.0, 1.0);
+        let factor = (-37.0 / OROGENIC_HEALING_TIME).exp();
+        let mixed_then_healed = (wa * a + wb * b) / (wa + wb) * factor;
+        let healed_then_mixed = (wa * a * factor + wb * b * factor) / (wa + wb);
+        assert!((mixed_then_healed - healed_then_mixed).abs() < 1e-12);
+    }
+
+    #[test]
+    fn splits_see_only_the_heating_carried_by_the_crust() {
+        // A plume above old ocean: before the reheating ran, the lithosphere above it is not
+        // weakened (there is no field in the mantle frame any more); afterwards it is.
+        let mut simulation = banded_ocean(75f64.to_radians());
+        let position = DVec3::new(0.0, 1.0, 0.0);
+        simulation.mantle.insert_plume(Plume {
+            position,
+            age: 15.0,
+            lifetime: 200.0,
+            peak_flux: 5e-3,
+            has_rifted: false,
+        });
+        let cell = simulation.mesh.nearest(position);
+        assert_eq!(simulation.lithosphere_strength(cell), 1.0);
+        simulation.reheat_above_plumes();
+        assert!((simulation.lithosphere_strength(cell) - 0.5).abs() < 0.05);
+        // The plume dies: the lithosphere keeps the reset and cools.
+        simulation.mantle = mantle::MantleFlow::new(simulation.params.mantle.clone());
+        simulation.time += 30.0;
+        simulation.reheat_above_plumes();
+        let strength = simulation.lithosphere_strength(cell);
+        assert!(strength > 0.5 && strength < 1.0, "{strength}");
+    }
+
+    #[test]
+    fn steps_carry_plume_heating_with_the_plate() {
+        let mut simulation =
+            Simulation::new(SphereMesh::icosphere(4), 4, TectonicParams::default(), 1);
+        let position = DVec3::new(0.3, 0.2, 0.9).normalize();
+        simulation.mantle.insert_plume(Plume {
+            position,
+            age: 12.0,
+            lifetime: 200.0,
+            peak_flux: 5e-3,
+            has_rifted: true,
+        });
+        for _ in 0..5 {
+            simulation.step(1.0);
+        }
+        // The lithosphere above the plume was heated by this step's reheating.
+        let above = simulation.surface_crust(simulation.mesh.nearest(position));
+        assert!(above.reheated > NO_REHEATING);
+        // Samples heated in earlier steps keep their reset wherever the plate took them.
+        let heated = simulation
+            .plates
+            .iter()
+            .flat_map(|plate| plate.crust.iter().flatten())
+            .filter(|crust| crust.reheated > NO_REHEATING)
+            .count();
+        assert!(heated >= 10, "{heated}");
     }
 }

@@ -51,7 +51,7 @@ mod weak_zones;
 
 pub use boundaries::{GapStatistics, TrenchSediment};
 pub use crust::*;
-pub use events::{EventCounts, PlateEventParams};
+pub use events::{EventCounts, PlateEventParams, WEAK_BELT_THRESHOLD};
 pub use generation::InitialConfiguration;
 pub use initial_sediment::{InitialSedimentParams, PlatformEmplacement};
 pub use ledger::MassLedger;
@@ -682,6 +682,7 @@ impl Simulation {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    reheated: NO_REHEATING,
                     cohort: 0.0,
                 }
             } else {
@@ -910,6 +911,10 @@ impl Simulation {
             boundaries
         };
         let topology = self.configuration_changes;
+        // The strength history of the lithosphere: orogenic belts cool, plumes heat the
+        // lithosphere at their current positions, just before the splits read it.
+        self.heal_orogenic_weakening(dt);
+        self.reheat_above_plumes();
         self.plate_events(dt, &boundaries);
         let after_events = self.felsic_and_sediment();
         let budget = &mut self.material_budget;
@@ -1481,6 +1486,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         // Normal continental crust stands a few hundred metres above sea level, doubly
@@ -1507,6 +1513,7 @@ mod tests {
                         metasediment: 0.0,
                         orogeny: NO_OROGENY,
                         orogenic: 0.0,
+                        reheated: NO_REHEATING,
                         cohort: 0.0,
                     };
                     let elevation = crust.dry_elevation(0.0);
@@ -1537,6 +1544,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    reheated: NO_REHEATING,
                     cohort: 0.0,
                 };
                 assert!(arc.buoyancy(0.0) > new_oceanic_crust(0.0).buoyancy(0.0));
@@ -1555,6 +1563,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         assert!(
@@ -1577,6 +1586,7 @@ mod tests {
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
+                reheated: NO_REHEATING,
                 cohort: 0.0,
             };
             let removed = 10.0;
@@ -1608,6 +1618,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            reheated: NO_REHEATING,
             cohort: 0.0,
         };
         assert!(!eroded.is_oceanic());
