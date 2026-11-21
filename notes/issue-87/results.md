@@ -105,7 +105,12 @@ line excluded). Scripts in the task directory (`~/tasks/issue-87/tools/`, not in
 | --- | --- | --- | --- | --- |
 | A | `seed=0&subdivisions=5&duration=100&snapshot-interval=10` | 11 | 303 | 0 |
 | B | `seed=1&subdivisions=5&duration=100&snapshot-interval=10&epoch=2.5&biosphere=abiotic` | 11 | 303 | 0 |
-| E | `seed=0&subdivisions=5` (web defaults, 500 Myr) | 11 | E_LINES | E_DIFF |
+| E | `seed=0&subdivisions=5` (web defaults, 500 Myr) | 11 | 304 | 0 |
+
+A and B were run with a build before the `split` fix, A (again) and E with the final code; A
+gave the same lines with both. In E, both statistics are non-zero (stacked mass of transient
+zones up to 3.3 × 10⁶ Gt, mean shortening 2–61 km) and identical on web and desktop; final
+state hash at 500 Myr `c442af22cd0e8d03` on both.
 
 ## Test of 32/64-bit identity
 
@@ -135,3 +140,13 @@ alternating, other agents' jobs running):
 
 Medians 242.3 s vs 243.3 s (+0.4 %, noise; the hashes of the integer keys are bit-identical to
 before, so the maps do the same work).
+
+## Review
+
+An independent review ([review.md](review.md)) found no blocking issue: it re-derived 8 of the
+reference values, confirmed the equality with `rustc-hash` on 64-bit, checked that the Clippy
+entries fire (8 probes, including the `hash_map::` spellings) and followed every map use without
+finding a remaining order dependence. Addressed: the module documentation now states that
+integer slices/arrays in keys still hash by native bytes (no such key exists); `rustc_hash`'s
+`FxHashMap`/`FxHashSet` aliases are disallowed too (checked: a probe is flagged), and its
+entries carry `allow-invalid = true`, since `rustc-hash` is only a dev-dependency.
