@@ -1,7 +1,8 @@
 # Seed sweeps on GitHub-hosted runners, so that long simulation runs don't have to queue on the
 # agents' server. Started by hand or by the agents (`agent-sweep` on tktie):
 #
-#   gh workflow run sweep.yml -f ref=<branch|sha> -f seeds=0-15 -f args="--duration 500" -f label=<id>
+#   gh workflow run sweep.yml -f ref=<branch|sha> -f seeds=0-15 -f args="--duration 500" \
+#     [-f env="RUST_LOG=debug"] -f label=<id>
 #
 # One job builds the release binary of `ref`; then every runner (4 vCPUs) takes `per_job` seeds
 # and runs them in parallel with `--headless --seed S --output out/seed-S <args>`. Each seed
@@ -25,6 +26,10 @@ on:
         default: "0-3"
       args:
         description: "Further simulator arguments (split on whitespace, no quoting)"
+        required: false
+        default: ""
+      env:
+        description: "Environment for every seed: KEY=VALUE pairs separated by spaces, e.g. RUST_LOG=debug"
         required: false
         default: ""
       per_job:
@@ -127,17 +132,22 @@ jobs:
           SEEDS: ${{ matrix.chunk.seeds }}
           EVENT: ${{ github.event_name }}
           INPUT_ARGS: ${{ inputs.args }}
+          INPUT_ENV: ${{ inputs.env }}
         run: |
           set -uo pipefail
           if [ "$EVENT" = workflow_dispatch ]; then SIM_ARGS=$INPUT_ARGS
           else SIM_ARGS="--duration 10 --snapshot-interval 10 --subdivisions 4"; fi   # PR smoke test
           chmod +x dist/world-simulator
           read -ra args <<< "$SIM_ARGS"
+          read -ra envs <<< "${INPUT_ENV:-}"
+          for e in "${envs[@]}"; do
+            [[ "$e" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]] || { echo "::error::bad env entry: $e"; exit 1; }
+          done
           run_seed() {
             local s=$1 d="out/seed-$1" t0 rc
             mkdir -p "$d"
             t0=$(date +%s)
-            ./dist/world-simulator --headless --seed "$s" --output "$d" "${args[@]}" > "$d/log.txt" 2>&1
+            env "${envs[@]}" ./dist/world-simulator --headless --seed "$s" --output "$d" "${args[@]}" > "$d/log.txt" 2>&1
             rc=$?
             echo $rc > "$d/exit"; echo $(( $(date +%s) - t0 )) > "$d/seconds"
             echo "seed $s: exit $rc after $(cat "$d/seconds") s"
@@ -149,6 +159,7 @@ jobs:
           for p in "${pids[@]}"; do wait "$p" || fail=1; done
           cp dist/commit out/
           printf '%s\n' "$SIM_ARGS" > out/args
+          printf '%s\n' "${INPUT_ENV:-}" > out/env
           exit $fail
 
       - uses: actions/upload-artifact@v7
