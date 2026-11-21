@@ -3,6 +3,8 @@
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
 mod climate;
+#[cfg(any(target_arch = "wasm32", test))]
+mod device;
 mod erosion;
 mod isostasy;
 mod math;
@@ -27,6 +29,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
 use web_time::Instant;
 
@@ -162,15 +165,16 @@ struct Cli {
 
     /// Compute sin, exp, ln, atan2, … exactly as the web version does (the `libm` crate) instead
     /// of with the platform's math library, so that the same options give bit for bit the same
-    /// planet as on the web and on every other platform with this flag. To reproduce a web link,
-    /// also give `--subdivisions 5`, the web's default, unless the link sets it. Runs at about the
-    /// same speed. Always on in the web version. See `src/math.rs`.
+    /// planet as on the web and on every other platform with this flag. To reproduce a web link
+    /// that does not set the subdivisions, also give those of the web page (5 or 6, depending on
+    /// the device; its parameter panel shows them). Runs at about the same speed. Always on in the web version. See `src/math.rs`.
     #[arg(long)]
     web_math: bool,
 }
 
 /// Default icosphere subdivisions: 6 on the desktop, 5 on the web, where the simulation runs about
-/// 2.4× slower (~0.4 s per step at 5) and 6 would take more than a second per step.
+/// 2× slower. The web page always passes the subdivisions to its worker: those in the URL, the
+/// remembered ones or a guess for the device (5 or 6, see `crate::device`).
 #[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_SUBDIVISIONS: u32 = 6;
 #[cfg(target_arch = "wasm32")]
@@ -201,7 +205,7 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("creating output directory {}", cli.output.display()))?;
 
     if cli.headless {
-        return simulate(planet, &cli, |_| ControlFlow::Continue(()));
+        return simulate(planet, &cli, |_, _| ControlFlow::Continue(()));
     }
 
     // The parameter panel starts from the command line as given.
@@ -292,34 +296,39 @@ fn run_simulation_thread(
         }
     };
     let mut first_update = true;
-    simulate(planet, cli, |planet: &Planet| {
-        if cancelled.load(Ordering::Relaxed) {
-            return ControlFlow::Break(());
-        }
-        let mesh = planet.tectonics().mesh();
-        let start = Instant::now();
-        let vertices = viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
-        let vertices_built = start.elapsed();
-        let cells = viewer::cell_infos(planet);
-        debug!(
-            ?vertices_built,
-            cells_built = ?start.elapsed() - vertices_built,
-            "Surface update built"
-        );
-        let update = SurfaceUpdate {
-            time: planet.tectonics().time(),
-            vertices: Arc::new(vertices),
-            cells: Arc::new(cells),
-            // The triangles only with the first update of a simulation.
-            faces: std::mem::take(&mut first_update).then(|| Arc::new(mesh.faces().to_vec())),
-        };
-        // Sending fails once the view started another simulation or was closed.
-        if events.send(SimulationEvent::Surface(update)).is_err() {
-            return ControlFlow::Break(());
-        }
-        wake_up();
-        ControlFlow::Continue(())
-    })
+    simulate(
+        planet,
+        cli,
+        |planet: &Planet, step_time: Option<Duration>| {
+            if cancelled.load(Ordering::Relaxed) {
+                return ControlFlow::Break(());
+            }
+            let mesh = planet.tectonics().mesh();
+            let start = Instant::now();
+            let vertices = viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
+            let vertices_built = start.elapsed();
+            let cells = viewer::cell_infos(planet);
+            debug!(
+                ?vertices_built,
+                cells_built = ?start.elapsed() - vertices_built,
+                "Surface update built"
+            );
+            let update = SurfaceUpdate {
+                time: planet.tectonics().time(),
+                vertices: Arc::new(vertices),
+                cells: Arc::new(cells),
+                // The triangles only with the first update of a simulation.
+                faces: std::mem::take(&mut first_update).then(|| Arc::new(mesh.faces().to_vec())),
+                step_seconds: step_time.map(|time| time.as_secs_f64()),
+            };
+            // Sending fails once the view started another simulation or was closed.
+            if events.send(SimulationEvent::Surface(update)).is_err() {
+                return ControlFlow::Break(());
+            }
+            wake_up();
+            ControlFlow::Continue(())
+        },
+    )
 }
 
 /// On the web, the same binary is the page (3D view) and the simulation worker; see [`web`].
@@ -425,23 +434,29 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
 
 /// Runs the simulation, writing snapshots and calling `on_step` with the initial state and after
 /// every step. The simulation stops early, without a final snapshot, if `on_step` breaks.
+/// `on_step` also gets the time since its previous call (`None` for the initial state): the
+/// time of the step, with the previous update and snapshot, i.e. the pace at which the view
+/// gets new states.
 fn simulate(
     mut planet: Planet,
     cli: &Cli,
-    mut on_step: impl FnMut(&Planet) -> ControlFlow<()>,
+    mut on_step: impl FnMut(&Planet, Option<Duration>) -> ControlFlow<()>,
 ) -> anyhow::Result<()> {
     let steps = (cli.duration / cli.dt).round() as u64;
     let snapshot_every = ((cli.snapshot_interval / cli.dt).round() as u64).max(1);
     let start = Instant::now();
     let mut previous_ledger: Option<PreviousSnapshot> = None;
     snapshot(&planet, cli, &mut previous_ledger)?;
-    if on_step(&planet).is_break() {
+    let mut previous_update = Instant::now();
+    if on_step(&planet, None).is_break() {
         info!("Simulation stopped at the start");
         return Ok(());
     }
     for step in 1..=steps {
         planet.step(cli.dt);
-        if on_step(&planet).is_break() {
+        let now = Instant::now();
+        let step_time = now - std::mem::replace(&mut previous_update, now);
+        if on_step(&planet, Some(step_time)).is_break() {
             info!(time = planet.tectonics().time(), "Simulation stopped");
             return Ok(());
         }

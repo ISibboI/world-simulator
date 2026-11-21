@@ -10,9 +10,17 @@
 //! [`viewer::CellInfo`]s, and with the first update also `faces`, the triangles), with the buffers
 //! transferred rather than copied, or `{ error }` if the simulation fails. A restart from the
 //! parameter panel terminates the worker and starts a new one with the new query string, which
-//! also replaces the query of the page URL, so that the setting can be shared as a link.
+//! also replaces the query of the page URL, so that the setting can be shared as a link. Each
+//! update after the first also carries `step_seconds`, the time of the step in the worker.
+//!
+//! Without `subdivisions` in the URL, the page starts with the subdivisions remembered in the
+//! local storage from the last restart, or else with a guess for the device (see
+//! [`crate::device`]). The worker always gets them explicitly; the page URL only when the user
+//! chose them.
 
+use std::cell::Cell;
 use std::ops::ControlFlow;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
@@ -24,9 +32,13 @@ use tracing::{error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+use crate::device::{self, DeviceSignals, Source};
 use crate::planet::Planet;
 use crate::query::{args_to_query, query_to_args};
-use crate::viewer::{self, CellInfo, Launch, SimulationEvent, SurfaceUpdate, UiOptions, Vertex};
+use crate::viewer::{
+    self, CellInfo, Launch, SimulationEvent, SurfaceUpdate, UiOptions, Vertex, has_option,
+    with_default,
+};
 use crate::{Cli, build_planet, simulate};
 
 /// Id of the canvas in `web/index.html`.
@@ -111,7 +123,7 @@ fn show_status(text: &str) {
 /// Adapts the user interface to the browser: body text at the root font size of the page (the
 /// user's font size setting, usually 16 px), and larger targets if the main pointer is coarse
 /// (a touch screen).
-fn ui_options(window: &web_sys::Window) -> UiOptions {
+fn ui_options(window: &web_sys::Window, default_subdivisions: u32) -> UiOptions {
     let body_text_size = window
         .document()
         .and_then(|document| document.document_element())
@@ -119,17 +131,72 @@ fn ui_options(window: &web_sys::Window) -> UiOptions {
         .and_then(|style| style.get_property_value("font-size").ok())
         .and_then(|size| size.trim_end_matches("px").trim().parse::<f32>().ok())
         .filter(|size| size.is_finite() && *size > 0.0);
-    let touch = window
-        .match_media("(pointer: coarse)")
-        .ok()
-        .flatten()
-        .is_some_and(|query| query.matches());
+    let touch = media_matches(window, "(pointer: coarse)");
     let options = UiOptions {
         body_text_size,
         touch,
+        default_subdivisions: Some(default_subdivisions),
+        // 7 would need ×4 the memory and upload of 6.
+        max_recommended_subdivisions: Some(6),
     };
     info!(?options, "User interface options");
     options
+}
+
+fn media_matches(window: &web_sys::Window, query: &str) -> bool {
+    window
+        .match_media(query)
+        .ok()
+        .flatten()
+        .is_some_and(|query| query.matches())
+}
+
+/// What the browser tells about the device, for the guess of the subdivisions. Properties
+/// that a browser does not have are left out.
+fn device_signals(window: &web_sys::Window) -> DeviceSignals {
+    let navigator: JsValue = window.navigator().into();
+    let signals = DeviceSignals {
+        user_agent: get(&navigator, "userAgent").as_string().unwrap_or_default(),
+        mobile: get(&get(&navigator, "userAgentData"), "mobile").as_bool(),
+        max_touch_points: get(&navigator, "maxTouchPoints")
+            .as_f64()
+            .map_or(0, |points| points as u32),
+        touch_only: media_matches(window, "(pointer: coarse)")
+            && media_matches(window, "(hover: none)"),
+        device_memory: get(&navigator, "deviceMemory").as_f64(),
+    };
+    info!(?signals, guess = signals.guess(), "Device");
+    signals
+}
+
+/// The local storage of the page, if the browser allows it (not in some private modes, or if
+/// the user blocks site data).
+fn local_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok().flatten()
+}
+
+/// The remembered subdivisions, if there are valid ones.
+fn stored_subdivisions() -> Option<u32> {
+    let text = local_storage()?
+        .get_item(device::STORAGE_KEY)
+        .ok()
+        .flatten();
+    device::parse_stored(text.as_deref())
+}
+
+/// Remembers the subdivisions the user started a simulation with, or forgets them if they are
+/// the guess. Failures (no storage, quota) only cost the memory.
+fn store_subdivisions(subdivisions: u32, guess: u32) {
+    let Some(storage) = local_storage() else {
+        return;
+    };
+    let result = match device::to_store(subdivisions, guess) {
+        Some(subdivisions) => storage.set_item(device::STORAGE_KEY, &subdivisions.to_string()),
+        None => storage.remove_item(device::STORAGE_KEY),
+    };
+    if let Err(error) = result {
+        error!("Could not remember the subdivisions: {error:?}");
+    }
 }
 
 /// Starts the 3D view on the page and the simulation worker.
@@ -139,7 +206,31 @@ async fn run_page() -> anyhow::Result<()> {
         .location()
         .search()
         .map_err(|error| anyhow!("reading the URL: {error:?}"))?;
-    let launch = parse_query(&search)?;
+    let url_args = query_to_args(&search)?;
+    let guess = device_signals(&window).guess();
+    let source = device::source(has_option(&url_args, "subdivisions"), stored_subdivisions());
+    info!(?source, "Subdivisions");
+    let parse = |args: &[String]| {
+        let complete = with_default(args, "subdivisions", &guess.to_string());
+        Cli::try_parse_from(&complete).map_err(|error| anyhow!("invalid URL parameters: {error}"))
+    };
+    let mut launch = Launch {
+        cli: parse(&url_args)?,
+        args: url_args.clone(),
+    };
+    if let Source::Stored(subdivisions) = source {
+        let mut args = url_args;
+        args.insert(1, format!("--subdivisions={subdivisions}"));
+        // A remembered value that does not fit the options of the link (e.g. too few cells
+        // for its plates) is forgotten rather than failing on every visit.
+        match parse(&args).and_then(|cli| cli.validate().map(|()| cli)) {
+            Ok(cli) => launch = Launch { cli, args },
+            Err(error) => {
+                info!("Forgetting the remembered subdivisions: {error:#}");
+                store_subdivisions(guess, guess);
+            }
+        }
+    }
     ensure!(
         launch.cli.subdivisions <= 8,
         "at most 8 subdivisions are supported"
@@ -151,22 +242,31 @@ async fn run_page() -> anyhow::Result<()> {
         .map_err(|_| anyhow!("#{CANVAS_ID} is not a canvas"))?;
 
     show_status("Starting the simulation…");
+    let hidden = watch_hidden()?;
     let mut running: Option<RunningWorker> = None;
     let mut first = true;
     viewer::run_web(
         canvas,
         launch,
-        ui_options(&window),
+        ui_options(&window, guess),
         Box::new(move |launch, events, wake_up| {
             if let Some(previous) = running.take() {
                 previous.stop();
             }
-            let query = args_to_query(&launch.args);
+            // The worker always gets the subdivisions, the URL only chosen ones.
+            let subdivisions = launch.cli.subdivisions;
+            let worker_args = with_default(&launch.args, "subdivisions", &subdivisions.to_string());
             if !std::mem::take(&mut first) {
                 show_status("");
-                replace_query(&query);
+                replace_query(&args_to_query(&launch.args));
+                store_subdivisions(subdivisions, guess);
             }
-            match start_worker(&query, events.clone(), wake_up) {
+            match start_worker(
+                &args_to_query(&worker_args),
+                events.clone(),
+                wake_up,
+                hidden.clone(),
+            ) {
                 Ok(worker) => running = Some(worker),
                 Err(error) => {
                     error!("{error:#}");
@@ -179,6 +279,25 @@ async fn run_page() -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
+}
+
+/// Tracks whether the page was hidden: set when it gets hidden, cleared by whoever reads it.
+/// Mobile browsers freeze hidden pages and their workers, so a step that spans such a time says
+/// nothing about the speed of the device.
+fn watch_hidden() -> anyhow::Result<Rc<Cell<bool>>> {
+    let page = document()?;
+    let hidden = Rc::new(Cell::new(page.hidden()));
+    let flag = hidden.clone();
+    let listener = Closure::<dyn FnMut()>::new(move || {
+        if document().is_ok_and(|document| document.hidden()) {
+            flag.set(true);
+        }
+    });
+    page.add_event_listener_with_callback("visibilitychange", listener.as_ref().unchecked_ref())
+        .map_err(|error| anyhow!("watching the visibility of the page: {error:?}"))?;
+    // The page lives as long as the listener.
+    listener.forget();
+    Ok(hidden)
 }
 
 /// Replaces the query string of the page URL without reloading the page.
@@ -219,6 +338,7 @@ fn start_worker(
     query: &str,
     events: Sender<SimulationEvent>,
     wake_up: Box<dyn Fn() + Send>,
+    hidden: Rc<Cell<bool>>,
 ) -> anyhow::Result<RunningWorker> {
     let options = web_sys::WorkerOptions::new();
     options.set_type(web_sys::WorkerType::Module);
@@ -286,6 +406,15 @@ fn start_worker(
             if time == 0.0 {
                 show_status("");
             }
+            // Not representative if the page is or was hidden since the last update. The mark
+            // stays until an update arrives while the page is visible: that one still spans
+            // the hidden time.
+            let hidden_now = document().is_ok_and(|document| document.hidden());
+            let was_hidden = hidden.get() || hidden_now;
+            if !hidden_now {
+                hidden.set(false);
+            }
+            let step_seconds = get(&data, "step_seconds").as_f64().filter(|_| !was_hidden);
             if let Ok(document) = document() {
                 document.set_title(&format!("World Simulator — {time:.0} Myr"));
             }
@@ -294,6 +423,7 @@ fn start_worker(
                 vertices: Arc::new(vertices),
                 cells: Arc::new(cells),
                 faces,
+                step_seconds,
             }));
         });
     worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
@@ -325,7 +455,7 @@ fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()>
     info!(?search, "Simulation worker started");
     let planet = build_planet(&cli)?;
     let mut first_update = true;
-    let publish = |planet: &Planet| {
+    let publish = |planet: &Planet, step_time: Option<std::time::Duration>| {
         let vertices = viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
         let floats: &[f32] = bytemuck::cast_slice(&vertices);
         let array = js_sys::Float32Array::new_with_length(floats.len() as u32);
@@ -333,6 +463,9 @@ fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()>
         let buffer = array.buffer();
         let message = js_sys::Object::new();
         set(&message, "time", &planet.tectonics().time().into());
+        if let Some(step_time) = step_time {
+            set(&message, "step_seconds", &step_time.as_secs_f64().into());
+        }
         set(&message, "vertices", &buffer);
         let cells = viewer::cell_infos(planet);
         let words: &[u32] = bytemuck::cast_slice(&cells);

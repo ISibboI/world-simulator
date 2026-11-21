@@ -76,7 +76,8 @@ superseded by this section. Its still-binding user preferences are under "Workin
   git).
 - Determinism: a seed gives the same run every time on one platform. `--web-math` makes a
   desktop run bit-identical to the web version (and to `--web-math` on any other platform; give
-  `--subdivisions 5` for a web link without it), at about the same speed; each snapshot logs a
+  the subdivisions shown in the web page's parameter panel for a web link without them), at
+  about the same speed; each snapshot logs a
   `state hash` to compare runs. Transcendental math (`sin`, `exp`, `ln`, `atan2`, `powf`,
   glam's `angle_between`, …) must go through `src/math.rs`; Clippy (`clippy.toml`,
   `disallowed_methods`) rejects the direct calls outside it and the 3D view. See

@@ -1,7 +1,7 @@
 # Issue #78: subdivisions that fit the device (plan)
 
 Findings and sources: [research.md](research.md). Independent review: [plan-review.md](plan-review.md).
-No code has been written yet.
+Sebastian's decisions are below (2026-11-21); [results.md](results.md) describes the implementation.
 
 The plan has three parts. C works whatever A guesses.
 
@@ -185,3 +185,18 @@ The plan has three parts. C works whatever A guesses.
 - **Side note:** 5 → 4 speeds a step up only ~1.4×, because the temperature model has a fixed
   cost on its coarse grid. Making that part cheaper would help phones more than fewer
   subdivisions. That would be a separate issue, if wanted.
+
+## Decisions (Sebastian, 2026-11-21) and how they are implemented
+- **D1** use the guess · **D2** yes (`deviceMemory` ≤ 4 → 5) · **D3** yes (URL only names chosen
+  subdivisions).
+- **D4** thresholds as stated (hint above 1.2 s or below 0.2 s), proposals aim at **≤ 0.8 s**.
+- **D5** as recommended: at most **6 on the web, 7 natively**.
+- **D6** **also remember the choice in local storage**: a visit with no parameters starts with
+  the remembered subdivisions. Implemented as: the URL wins over the stored value, which wins
+  over the guess. The value is stored when the user starts a simulation from the panel
+  (Restart) or the hint; it is removed when that value equals the guess, so "Defaults" +
+  Restart resets it. Opening a link with `subdivisions` does not store anything.
+- **D7** the "Restart with N" button only early in the run (first 10% of the duration, 50 Myr
+  of the default 500); later the hint only informs.
+- **New:** never recommend fewer than **5** subdivisions. At 5 or below a slow device gets no
+  hint (there is nothing better to propose); from 3 or 4, a quick device is proposed 5 or more.

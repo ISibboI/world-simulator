@@ -8,13 +8,15 @@
 //! sends new surface meshes to the view through a channel, each with the attributes of every
 //! cell ([`CellInfo`]). The parameter panel ([`parameters`]) restarts it with other options; the
 //! cell widget ([`cell_info`]) shows the cell under the pointer (or the tapped one), whose
-//! outline is drawn on the planet ([`picking`]).
+//! outline is drawn on the planet ([`picking`]). The simulation reports how long each step
+//! took, and a hint proposes other subdivisions if steps are too slow or very quick ([`pace`]).
 
 // The view only shows the simulation and never changes it, so it may use the platform's math
 // functions directly instead of `crate::math` (see `clippy.toml`).
 #![allow(clippy::disallowed_methods)]
 
 mod cell_info;
+mod pace;
 mod parameters;
 mod picking;
 mod renderer;
@@ -31,7 +33,10 @@ use crate::render;
 use crate::sphere::SphereMesh;
 pub use cell_info::{CellInfo, cell_infos};
 use cell_info::{CellInfoPanel, ShownCell};
+use pace::{HintAction, Pace};
 use parameters::{ParameterPanel, SimulationStatus};
+#[cfg(target_arch = "wasm32")]
+pub use parameters::{has_option, with_default};
 #[cfg(target_arch = "wasm32")]
 pub use renderer::Vertex;
 #[cfg(not(target_arch = "wasm32"))]
@@ -66,6 +71,9 @@ pub struct SurfaceUpdate {
     pub cells: Arc<Vec<CellInfo>>,
     /// The triangles of the mesh: sent with the first update of a simulation, `None` after.
     pub faces: Option<Arc<Vec<[u32; 3]>>>,
+    /// Seconds since the previous update, i.e. the time of the step: `None` for the initial
+    /// state, or if it is not representative (the web page was hidden meanwhile).
+    pub step_seconds: Option<f64>,
 }
 
 /// A message from the simulation to the view.
@@ -91,6 +99,11 @@ pub struct UiOptions {
     pub body_text_size: Option<f32>,
     /// Whether the main pointer is coarse (a touch screen): larger targets and spacing.
     pub touch: bool,
+    /// The default of the subdivisions in the parameter panel if it differs from the
+    /// command-line default: on the web, the guess for the device (see `crate::device`).
+    pub default_subdivisions: Option<u32>,
+    /// Most subdivisions the step-time hint proposes, if not [`pace::MAX_RECOMMENDED`].
+    pub max_recommended_subdivisions: Option<u32>,
 }
 
 /// Smallest size of interactive elements on touch screens in points (CSS pixels on the web),
@@ -256,6 +269,7 @@ struct Viewer {
     start_simulation: StartSimulation,
     parameters: ParameterPanel,
     cell_panel: CellInfoPanel,
+    pace: Pace,
     /// Whether the main pointer is coarse (touch): cells are tapped rather than pointed at.
     touch: bool,
     /// The mesh of [`Viewer::surface`] for picking, with its cells' attributes.
@@ -300,13 +314,20 @@ impl Viewer {
         ui_options: UiOptions,
         start_simulation: StartSimulation,
     ) -> Self {
-        let parameters = ParameterPanel::new(&initial.args);
+        let parameters = ParameterPanel::new(&initial.args, ui_options.default_subdivisions);
+        let pace = Pace::new(
+            &initial.cli,
+            ui_options
+                .max_recommended_subdivisions
+                .unwrap_or(pace::MAX_RECOMMENDED),
+        );
         let (_, events) = std::sync::mpsc::channel();
         let mut viewer = Self {
             events,
             start_simulation,
             parameters,
             cell_panel: CellInfoPanel::default(),
+            pace,
             touch: ui_options.touch,
             picking: None,
             selected: None,
@@ -333,6 +354,7 @@ impl Viewer {
         self.time = None;
         self.duration = launch.cli.duration;
         self.failure = None;
+        self.pace.start(&launch.cli);
         let ctx = ctx.clone();
         (self.start_simulation)(launch, sender, Box::new(move || ctx.request_repaint()));
     }
@@ -354,6 +376,7 @@ impl Viewer {
             },
         };
         self.time = Some(update.time);
+        self.pace.record(update.step_seconds);
         let surface = Surface {
             mesh_id: self.meshes,
             faces,
@@ -601,8 +624,25 @@ impl eframe::App for Viewer {
             time: self.time,
             duration: self.duration,
             failure: self.failure.as_deref(),
+            step_seconds: self.pace.median(),
         };
-        if let Some(launch) = self.parameters.show(ui.ctx(), &status, cell_panel) {
+        let pace = &mut self.pace;
+        let mut hint_action = None;
+        let hint = pace
+            .has_hint(self.time, self.duration)
+            .then_some(|ui: &mut egui::Ui| {
+                hint_action = pace.ui(ui, self.time, self.duration);
+            });
+        let mut launch = self.parameters.show(ui.ctx(), &status, cell_panel, hint);
+        if let Some(HintAction::Restart(subdivisions)) = hint_action {
+            match self.parameters.launch_with_subdivisions(subdivisions) {
+                Ok(new) => launch = Some(new),
+                Err(error) => {
+                    tracing::error!("Cannot restart with the proposed subdivisions: {error}")
+                }
+            }
+        }
+        if let Some(launch) = launch {
             tracing::info!(args = ?launch.args, "Restarting the simulation");
             self.parameters.set_running(launch.args.clone());
             let ctx = ui.ctx().clone();
