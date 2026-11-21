@@ -64,6 +64,8 @@ pub struct SimulationStatus<'a> {
     pub duration: f64,
     /// Why the simulation failed, if it did.
     pub failure: Option<&'a str>,
+    /// What the simulation does until its first update (see `banner::starting_text`).
+    pub starting: &'a str,
     /// The median time per step in seconds, once known.
     pub step_seconds: Option<f64>,
 }
@@ -343,7 +345,18 @@ impl ParameterPanel {
                     .show(ui, |ui| launch = self.contents(ui, status, hint));
             });
         self.open = Some(open);
+        if launch.is_some() {
+            self.close_after_restart(ctx);
+        }
         launch
+    }
+
+    /// On narrow screens the panel covers most of the view: it closes on a restart (from the
+    /// panel or the step-time hint), so that the status banner behind it is seen.
+    pub fn close_after_restart(&mut self, ctx: &egui::Context) {
+        if ctx.content_rect().width() < NARROW_SCREEN {
+            self.open = Some(false);
+        }
     }
 
     fn contents(
@@ -365,7 +378,7 @@ impl ParameterPanel {
                 ui.label(format!("t = {time:.0} of {:.0} Myr{pace}", status.duration));
             }
             (None, None) => {
-                ui.label("Starting the simulation…");
+                ui.label(status.starting);
             }
         }
         if let Some(hint) = hint {
@@ -671,6 +684,7 @@ mod tests {
             time: Some(10.0),
             duration: 500.0,
             failure: None,
+            starting: "Starting the simulation…",
             step_seconds: Some(0.4),
         };
         let mut launch = None;
