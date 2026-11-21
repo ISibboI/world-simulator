@@ -127,7 +127,7 @@ pub(super) fn plume_heating_age(plume: &Plume, r: DVec3) -> Option<f64> {
     let intensity = (plume.flux() / plume.peak_flux).clamp(0.0, 1.0);
     let centre = (PLUME_HEAD_THERMAL_AGE / FULL_STRENGTH_AGE).sqrt();
     let thickness = 1.0 - (1.0 - centre) * (1.0 - x * x).max(0.0) * intensity;
-    (thickness < 1.0).then(|| FULL_STRENGTH_AGE * thickness * thickness)
+    (thickness < 1.0).then_some(FULL_STRENGTH_AGE * thickness * thickness)
 }
 
 impl Simulation {
