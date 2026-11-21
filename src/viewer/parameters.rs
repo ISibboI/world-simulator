@@ -6,12 +6,20 @@
 //! same defaults and the same validation: the panel turns its fields back into command-line
 //! arguments and parses them with clap, then checks them like [`crate::build_planet`] does
 //! ([`Cli::validate`]).
+//!
+//! On the web, the default of the subdivisions is the guess for the device rather than clap's
+//! (see `crate::device`): the fields show it, "Defaults" returns to it, and the arguments leave
+//! it out like any default, so that the page URL only names subdivisions the user chose. The
+//! simulation itself always gets them ([`launch_from`]).
 
 use clap::{ArgAction, CommandFactory, Parser};
 use eframe::egui;
 
 use super::Launch;
 use crate::Cli;
+
+/// The long name of the subdivisions option.
+const SUBDIVISIONS: &str = "subdivisions";
 
 /// Whether the panel hides an option: the 3D view is never headless, and on the web there are no
 /// files either, and `web-math` is always on there.
@@ -58,6 +66,8 @@ pub struct SimulationStatus<'a> {
     pub failure: Option<&'a str>,
     /// What the simulation does until its first update (see `banner::starting_text`).
     pub starting: &'a str,
+    /// The median time per step in seconds, once known.
+    pub step_seconds: Option<f64>,
 }
 
 /// How an option is edited.
@@ -129,12 +139,15 @@ pub struct ParameterPanel {
     /// The arguments of the fields when they were last validated, and the error, if any.
     checked: Vec<String>,
     error: Option<String>,
+    /// The default of the subdivisions if it is not clap's.
+    default_subdivisions: Option<u32>,
 }
 
 impl ParameterPanel {
     /// A panel with the options of the running simulation, given as command-line arguments
-    /// (starting with the program name).
-    pub fn new(args: &[String]) -> Self {
+    /// (starting with the program name), and the default of the subdivisions if it is not
+    /// clap's.
+    pub fn new(args: &[String], default_subdivisions: Option<u32>) -> Self {
         let command = Cli::command();
         let fields = command
             .get_arguments()
@@ -160,10 +173,13 @@ impl ParameterPanel {
                     .or(arg.get_help())
                     .map(ToString::to_string)
                     .unwrap_or_default();
-                let default = (kind != Kind::Flag)
-                    .then(|| arg.get_default_values().first())
-                    .flatten()
-                    .map(|value| value.to_string_lossy().into_owned());
+                let default = match default_subdivisions {
+                    Some(subdivisions) if name == SUBDIVISIONS => Some(subdivisions.to_string()),
+                    _ => (kind != Kind::Flag)
+                        .then(|| arg.get_default_values().first())
+                        .flatten()
+                        .map(|value| value.to_string_lossy().into_owned()),
+                };
                 let mut field = Field {
                     name: name.to_owned(),
                     help,
@@ -182,6 +198,7 @@ impl ParameterPanel {
             running: Vec::new(),
             checked: Vec::new(),
             error: None,
+            default_subdivisions,
         };
         panel.set_values(args);
         panel.running = panel.args();
@@ -211,7 +228,10 @@ impl ParameterPanel {
             match field.kind {
                 Kind::Flag => field.flag = matches.get_flag(id),
                 Kind::Choice(_) | Kind::Text | Kind::Lines => {
-                    if let Some(values) = matches.get_raw(id) {
+                    // Only given values: clap's defaults are not the panel's for every option.
+                    let given =
+                        matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine);
+                    if let Some(values) = matches.get_raw(id).filter(|_| given) {
                         let values: Vec<_> = values.map(|v| v.to_string_lossy()).collect();
                         field.text = values.join("\n");
                     }
@@ -235,18 +255,45 @@ impl ParameterPanel {
         self.running = args;
     }
 
+    /// The simulation to start for the hint of the view: the running one with other
+    /// subdivisions. The subdivisions field shows them too; other edits in the panel stay
+    /// pending.
+    pub fn launch_with_subdivisions(&mut self, subdivisions: u32) -> Result<Launch, String> {
+        let edited = self.fields.clone();
+        let running = self.running.clone();
+        self.set_values(&running);
+        self.set_subdivisions(subdivisions);
+        let args = self.args();
+        self.fields = edited;
+        self.set_subdivisions(subdivisions);
+        launch_from(args, self.default_subdivisions)
+    }
+
+    fn set_subdivisions(&mut self, subdivisions: u32) {
+        if let Some(field) = self
+            .fields
+            .iter_mut()
+            .find(|field| field.name == SUBDIVISIONS)
+        {
+            field.text = subdivisions.to_string();
+        }
+    }
+
     /// Shows the panel (or the button that shows it) and returns the simulation to start if
     /// the user asked for a restart. The panel stays above `avoid` (the area reserved for the
     /// cell widget in the bottom left corner) where the two could overlap, on narrow screens.
+    /// `hint` draws the step-time hint: under the status line of the panel, or under the
+    /// button while the panel is hidden, so that it is always visible.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
         status: &SimulationStatus,
         avoid: Option<egui::Rect>,
+        hint: Option<impl FnOnce(&mut egui::Ui)>,
     ) -> Option<Launch> {
         let args = self.args();
         if args != self.checked {
-            self.error = validate(&args).err();
+            self.error = validate(&args, self.default_subdivisions).err();
             self.checked = args;
         }
 
@@ -256,13 +303,20 @@ impl ParameterPanel {
             egui::Area::new(egui::Id::unique("parameter panel button"))
                 .anchor(egui::Align2::RIGHT_TOP, [-MARGIN, MARGIN])
                 .show(ctx, |ui| {
-                    if ui
-                        .button("⚙ Parameters")
-                        .on_hover_text("Show the simulation parameters")
-                        .clicked()
-                    {
-                        self.open = Some(true);
-                    }
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                        if ui
+                            .button("⚙ Parameters")
+                            .on_hover_text("Show the simulation parameters")
+                            .clicked()
+                        {
+                            self.open = Some(true);
+                        }
+                        if let Some(hint) = hint {
+                            let width = (screen.width() - 4.0 * MARGIN).clamp(100.0, MAX_WIDTH);
+                            ui.set_max_width(width);
+                            hint(ui);
+                        }
+                    });
                 });
             return None;
         }
@@ -288,26 +342,47 @@ impl ParameterPanel {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .max_height((bottom - screen.top() - 10.0 * MARGIN).max(100.0))
-                    .show(ui, |ui| launch = self.contents(ui, status));
+                    .show(ui, |ui| launch = self.contents(ui, status, hint));
             });
-        // On narrow screens the panel covers most of the view: close it on a restart, so the
-        // status banner behind it is seen.
-        self.open = Some(open && !(launch.is_some() && screen.width() < NARROW_SCREEN));
+        self.open = Some(open);
+        if launch.is_some() {
+            self.close_after_restart(ctx);
+        }
         launch
     }
 
-    fn contents(&mut self, ui: &mut egui::Ui, status: &SimulationStatus) -> Option<Launch> {
+    /// On narrow screens the panel covers most of the view: it closes on a restart (from the
+    /// panel or the step-time hint), so that the status banner behind it is seen.
+    pub fn close_after_restart(&mut self, ctx: &egui::Context) {
+        if ctx.content_rect().width() < NARROW_SCREEN {
+            self.open = Some(false);
+        }
+    }
+
+    fn contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        status: &SimulationStatus,
+        hint: Option<impl FnOnce(&mut egui::Ui)>,
+    ) -> Option<Launch> {
         match (status.failure, status.time) {
             (Some(failure), _) => {
                 ui.colored_label(ui.visuals().error_fg_color, "Simulation failed:");
                 ui.colored_label(ui.visuals().error_fg_color, failure);
             }
             (None, Some(time)) => {
-                ui.label(format!("t = {time:.0} of {:.0} Myr", status.duration));
+                let pace = status
+                    .step_seconds
+                    .map(|seconds| format!(" · {seconds:.2} s per step"))
+                    .unwrap_or_default();
+                ui.label(format!("t = {time:.0} of {:.0} Myr{pace}", status.duration));
             }
             (None, None) => {
                 ui.label(status.starting);
             }
+        }
+        if let Some(hint) = hint {
+            hint(ui);
         }
         ui.separator();
 
@@ -334,7 +409,7 @@ impl ParameterPanel {
                 .add_enabled(self.error.is_none(), egui::Button::new("Restart"))
                 .on_hover_text("Restart the simulation with these parameters");
             if restart.clicked() {
-                match launch_from(self.checked.clone()) {
+                match launch_from(self.checked.clone(), self.default_subdivisions) {
                     Ok(new) => launch = Some(new),
                     Err(error) => self.error = Some(error),
                 }
@@ -403,15 +478,41 @@ fn field_grid(ui: &mut egui::Ui, id: &str, fields: Vec<&mut Field>) {
         });
 }
 
-/// Parses and checks command-line arguments (starting with the program name).
-fn launch_from(args: Vec<String>) -> Result<Launch, String> {
-    let cli = Cli::try_parse_from(&args).map_err(|error| clap_message(&error))?;
+/// Whether the command-line arguments `args` (after the program name, as `--name=value` or
+/// `--name`) give the option `name`.
+pub fn has_option(args: &[String], name: &str) -> bool {
+    args.iter().skip(1).any(|arg| {
+        arg.strip_prefix("--")
+            .and_then(|arg| arg.strip_prefix(name))
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
+    })
+}
+
+/// `args` with `--name=value` added after the program name, unless they give `name` already:
+/// a default that differs from clap's (the subdivisions guessed for the device on the web).
+pub fn with_default(args: &[String], name: &str, value: &str) -> Vec<String> {
+    let mut args = args.to_vec();
+    if !has_option(&args, name) {
+        args.insert(1.min(args.len()), format!("--{name}={value}"));
+    }
+    args
+}
+
+/// Parses and checks command-line arguments (starting with the program name), with
+/// `default_subdivisions` where they give none. The arguments of the launch stay as given (the
+/// page URL), its options have the subdivisions.
+fn launch_from(args: Vec<String>, default_subdivisions: Option<u32>) -> Result<Launch, String> {
+    let complete = match default_subdivisions {
+        Some(subdivisions) => with_default(&args, SUBDIVISIONS, &subdivisions.to_string()),
+        None => args.clone(),
+    };
+    let cli = Cli::try_parse_from(&complete).map_err(|error| clap_message(&error))?;
     cli.validate().map_err(|error| format!("{error:#}"))?;
     Ok(Launch { cli, args })
 }
 
-fn validate(args: &[String]) -> Result<(), String> {
-    launch_from(args.to_vec()).map(|_| ())
+fn validate(args: &[String], default_subdivisions: Option<u32>) -> Result<(), String> {
+    launch_from(args.to_vec(), default_subdivisions).map(|_| ())
 }
 
 /// The message of a clap error without the usage hint.
@@ -428,6 +529,9 @@ fn clap_message(error: &clap::Error) -> String {
 mod tests {
     use super::*;
 
+    /// No step-time hint.
+    const NO_HINT: Option<fn(&mut egui::Ui)> = None;
+
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|&arg| arg.to_owned()).collect()
     }
@@ -442,7 +546,7 @@ mod tests {
 
     #[test]
     fn every_option_except_the_hidden_ones_has_a_field() {
-        let panel = ParameterPanel::new(&strings(&["world-simulator"]));
+        let panel = ParameterPanel::new(&strings(&["world-simulator"]), None);
         let names: Vec<&str> = panel.fields.iter().map(|f| f.name.as_str()).collect();
         for arg in Cli::command().get_arguments() {
             let name = arg.get_long().unwrap();
@@ -470,7 +574,7 @@ mod tests {
 
     #[test]
     fn defaults_give_no_arguments() {
-        let panel = ParameterPanel::new(&strings(&["world-simulator"]));
+        let panel = ParameterPanel::new(&strings(&["world-simulator"]), None);
         assert_eq!(panel.args(), strings(&["world-simulator"]));
         assert_eq!(panel.running, panel.args());
     }
@@ -490,7 +594,7 @@ mod tests {
             "--co2",
             "2",
         ]);
-        let mut panel = ParameterPanel::new(&given);
+        let mut panel = ParameterPanel::new(&given, None);
         assert_eq!(field(&mut panel, "seed").text, "3");
         assert!(field(&mut panel, "no-erosion").flag);
         assert_eq!(field(&mut panel, "biosphere").text, "abiotic");
@@ -520,7 +624,7 @@ mod tests {
 
     #[test]
     fn edits_become_arguments() {
-        let mut panel = ParameterPanel::new(&strings(&["world-simulator", "--plates=8"]));
+        let mut panel = ParameterPanel::new(&strings(&["world-simulator", "--plates=8"]), None);
         field(&mut panel, "seed").text = " 42 ".to_owned();
         field(&mut panel, "plates").text = String::new();
         field(&mut panel, "set").text = "\n a=1 \n\nb=2\n".to_owned();
@@ -528,8 +632,11 @@ mod tests {
             panel.args(),
             strings(&["world-simulator", "--seed=42", "--set=a=1", "--set=b=2"])
         );
-        let launch =
-            launch_from(strings(&["world-simulator", "--seed=42", "--duration=10"])).unwrap();
+        let launch = launch_from(
+            strings(&["world-simulator", "--seed=42", "--duration=10"]),
+            None,
+        )
+        .unwrap();
         assert_eq!(launch.cli.seed, 42);
         assert_eq!(launch.cli.duration, 10.0);
         panel.fields.iter_mut().for_each(Field::reset);
@@ -538,7 +645,7 @@ mod tests {
 
     #[test]
     fn invalid_values_are_reported() {
-        let error = |args: &[&str]| validate(&strings(args)).unwrap_err();
+        let error = |args: &[&str]| validate(&strings(args), None).unwrap_err();
         let message = error(&["world-simulator", "--seed=abc"]);
         assert!(message.contains("--seed"), "{message}");
         assert!(!message.contains("Usage"), "{message}");
@@ -547,17 +654,22 @@ mod tests {
         assert!(error(&["world-simulator", "--dt=0"]).contains("time step"));
         assert!(error(&["world-simulator", "--subdivisions=0", "--plates=13"]).contains("cells"));
         assert!(
-            validate(&strings(&[
-                "world-simulator",
-                "--subdivisions=0",
-                "--plates=12"
-            ]))
+            validate(
+                &strings(&["world-simulator", "--subdivisions=0", "--plates=12"]),
+                None
+            )
             .is_ok()
         );
         assert!(error(&["world-simulator", "--epoch=-1"]).contains("epoch"));
         assert!(error(&["world-simulator", "--set=nonexistent=1"]).contains("nonexistent"));
         assert!(error(&["world-simulator", "--set=basal_drag"]).contains("NAME=VALUE"));
-        assert!(validate(&strings(&["world-simulator", "--set=basal_drag=8e14"])).is_ok());
+        assert!(
+            validate(
+                &strings(&["world-simulator", "--set=basal_drag=8e14"]),
+                None
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -567,34 +679,35 @@ mod tests {
             ctx.run_ui(input, ui).textures_delta.clear();
         }
         let ctx = egui::Context::default();
-        let mut panel = ParameterPanel::new(&strings(&["world-simulator"]));
+        let mut panel = ParameterPanel::new(&strings(&["world-simulator"]), None);
         let status = SimulationStatus {
             time: Some(10.0),
             duration: 500.0,
             failure: None,
             starting: "Starting the simulation…",
+            step_seconds: Some(0.4),
         };
         let mut launch = None;
         run(&ctx, egui::RawInput::default(), |ui| {
-            launch = panel.show(ui.ctx(), &status, None);
+            launch = panel.show(ui.ctx(), &status, None, NO_HINT);
         });
         assert!(launch.is_none());
         assert!(panel.error.is_none());
         field(&mut panel, "plates").text = "0".to_owned();
         run(&ctx, egui::RawInput::default(), |ui| {
-            panel.show(ui.ctx(), &status, None);
+            panel.show(ui.ctx(), &status, None, NO_HINT);
         });
         assert!(panel.error.as_deref().unwrap().contains("plate"));
         // Hidden, the panel keeps its values.
         panel.open = Some(false);
         run(&ctx, egui::RawInput::default(), |ui| {
-            panel.show(ui.ctx(), &status, None);
+            panel.show(ui.ctx(), &status, None, NO_HINT);
         });
         assert_eq!(field(&mut panel, "plates").text, "0");
 
         // On a phone in portrait, the panel starts hidden.
         let ctx = egui::Context::default();
-        let mut panel = ParameterPanel::new(&strings(&["world-simulator"]));
+        let mut panel = ParameterPanel::new(&strings(&["world-simulator"]), None);
         let phone = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -603,8 +716,94 @@ mod tests {
             ..Default::default()
         };
         run(&ctx, phone, |ui| {
-            panel.show(ui.ctx(), &status, None);
+            panel.show(ui.ctx(), &status, None, NO_HINT);
         });
         assert_eq!(panel.open, Some(false));
+    }
+
+    #[test]
+    fn another_default_of_the_subdivisions_is_shown_and_left_out_of_the_arguments() {
+        let clap_default = Cli::try_parse_from(["world-simulator"])
+            .unwrap()
+            .subdivisions;
+        let guess = if clap_default == 6 { 5 } else { 6 };
+        let mut panel =
+            ParameterPanel::new(&strings(&["world-simulator", "--seed=3"]), Some(guess));
+        assert_eq!(field(&mut panel, "subdivisions").text, guess.to_string());
+        assert_eq!(panel.args(), strings(&["world-simulator", "--seed=3"]));
+        // The simulation gets them, the arguments (the URL) do not name them.
+        let launch = launch_from(panel.args(), Some(guess)).unwrap();
+        assert_eq!(launch.cli.subdivisions, guess);
+        assert_eq!(launch.args, strings(&["world-simulator", "--seed=3"]));
+        // Chosen values other than the default are named, also clap's default.
+        field(&mut panel, "subdivisions").text = clap_default.to_string();
+        assert!(
+            panel
+                .args()
+                .contains(&format!("--subdivisions={clap_default}"))
+        );
+        // "Defaults" returns to the guess.
+        panel.fields.iter_mut().for_each(Field::reset);
+        assert_eq!(field(&mut panel, "subdivisions").text, guess.to_string());
+        // Given subdivisions win over the default.
+        let launch = launch_from(
+            strings(&["world-simulator", "--subdivisions=4"]),
+            Some(guess),
+        );
+        assert_eq!(launch.unwrap().cli.subdivisions, 4);
+    }
+
+    #[test]
+    fn the_hint_restarts_the_running_simulation_with_other_subdivisions() {
+        let running = strings(&["world-simulator", "--seed=3"]);
+        let mut panel = ParameterPanel::new(&running, Some(6));
+        // A pending edit, not part of the restart.
+        field(&mut panel, "plates").text = "8".to_owned();
+        let launch = panel.launch_with_subdivisions(5).unwrap();
+        assert_eq!(launch.cli.subdivisions, 5);
+        assert_eq!(launch.cli.plates, 12);
+        assert_eq!(
+            launch.args,
+            strings(&["world-simulator", "--seed=3", "--subdivisions=5"])
+        );
+        // The fields show the new subdivisions and keep the edit.
+        assert_eq!(field(&mut panel, "subdivisions").text, "5");
+        assert_eq!(field(&mut panel, "plates").text, "8");
+        // Back to the default: left out of the arguments again.
+        panel.set_running(launch.args);
+        let launch = panel.launch_with_subdivisions(6).unwrap();
+        assert_eq!(launch.cli.subdivisions, 6);
+        assert_eq!(launch.args, strings(&["world-simulator", "--seed=3"]));
+    }
+
+    #[test]
+    fn options_are_found_and_defaults_added_only_where_missing() {
+        let args = strings(&[
+            "world-simulator",
+            "--seed=3",
+            "--subdivisions=4",
+            "--no-erosion",
+        ]);
+        assert!(has_option(&args, "subdivisions"));
+        assert!(has_option(&args, "no-erosion"));
+        assert!(!has_option(&args, "plates"));
+        // A prefix of another option's name does not count.
+        assert!(!has_option(&args, "subdiv"));
+        assert!(!has_option(&args, "no"));
+        assert_eq!(with_default(&args, "subdivisions", "6"), args);
+        let args = strings(&["world-simulator", "--seed=3"]);
+        assert_eq!(
+            with_default(&args, "subdivisions", "6"),
+            strings(&["world-simulator", "--subdivisions=6", "--seed=3"])
+        );
+    }
+
+    #[test]
+    fn nothing_is_pending_after_a_hint_restart() {
+        let mut panel = ParameterPanel::new(&strings(&["world-simulator", "--seed=3"]), Some(6));
+        let launch = panel.launch_with_subdivisions(5).unwrap();
+        panel.set_running(launch.args);
+        // The panel compares its arguments with the running ones for "Changed".
+        assert_eq!(panel.args(), panel.running);
     }
 }
