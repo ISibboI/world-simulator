@@ -811,7 +811,7 @@ impl Simulation {
                     && crust.is_continental_origin()
                     && crust.thickness > OROGENIC_THICKNESS
                 {
-                    crust.orogeny = time;
+                    crust.mark_orogeny(time);
                 }
             }
             for &(owner, _) in &reached {
@@ -1087,12 +1087,13 @@ fn stretch_rift(
     // Mass-weighted thickness and thermal fraction of the donors after stretching (repeated
     // stretching compounds in the donors).
     let (mut donor_thickness, mut donor_heat) = (0.0, 0.0);
-    let mut orogeny = NO_OROGENY;
+    let (mut orogeny, mut orogenic) = (NO_OROGENY, 0.0);
     for (&(donor, _), &share) in donors.iter().zip(&shares) {
         let crust = plate.crust[donor as usize]
             .as_mut()
             .expect("donors have crust");
         orogeny = orogeny.max(crust.orogeny);
+        orogenic += crust.thickness * share * crust.density * crust.orogenic;
         let beta = 1.0 / (1.0 - share);
         let fraction = 1.0 - (1.0 - thermal_fraction(crust.age(time))) / beta;
         if let Some(age) = age_for_thermal_fraction(fraction) {
@@ -1121,9 +1122,10 @@ fn stretch_rift(
         felsic: felsic / mass.max(1e-9),
         metasediment: metasediment / mass.max(1e-9),
         orogeny: NO_OROGENY,
+        orogenic: 0.0,
         cohort: cohort / sediment.max(1e-9),
     };
-    crust.mix_orogeny(orogeny);
+    crust.mix_orogeny(orogeny, orogenic / mass.max(1e-9));
     plate.crust[local as usize] = Some(crust);
     true
 }
@@ -1180,12 +1182,13 @@ fn heal_gap(
     let (mut thickness, mut mass, mut sediment, mut felsic) = (0.0, 0.0, 0.0, 0.0);
     let (mut metasediment, mut cohort) = (0.0, 0.0);
     let mut birth = f64::NEG_INFINITY;
-    let mut orogeny = NO_OROGENY;
+    let (mut orogeny, mut orogenic) = (NO_OROGENY, 0.0);
     for &neighbor in &neighbors {
         let crust = plate.crust[neighbor as usize]
             .as_mut()
             .expect("enclosed by crust");
         orogeny = orogeny.max(crust.orogeny);
+        orogenic += crust.thickness * share * crust.density * crust.orogenic;
         let given = crust.thickness * share;
         thickness += given;
         mass += given * crust.density;
@@ -1205,9 +1208,10 @@ fn heal_gap(
         felsic: felsic / mass.max(1e-9),
         metasediment: metasediment / mass.max(1e-9),
         orogeny: NO_OROGENY,
+        orogenic: 0.0,
         cohort: cohort / sediment.max(1e-9),
     };
-    crust.mix_orogeny(orogeny);
+    crust.mix_orogeny(orogeny, orogenic / mass.max(1e-9));
     plate.crust[local as usize] = Some(crust);
     plate.consumed[local as usize] = false;
     statistics.enclosed_fills += 1;
@@ -1327,6 +1331,7 @@ mod tests {
                             felsic: 1.0,
                             metasediment: 0.0,
                             orogeny: NO_OROGENY,
+                            orogenic: 0.0,
                             cohort: 0.0,
                         };
                         assert!(crust.resists_subduction() && !crust.is_continental());
@@ -1339,6 +1344,7 @@ mod tests {
                             felsic: 1.0,
                             metasediment: 0.0,
                             orogeny: NO_OROGENY,
+                            orogenic: 0.0,
                             cohort: 0.0,
                         };
                     }
@@ -1390,6 +1396,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: 400.0,
+            orogenic: 1.0,
             cohort: 0.0,
         }
     }
@@ -1522,6 +1529,7 @@ mod tests {
                 felsic: 1.0,
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
+                orogenic: 0.0,
                 cohort: 0.0,
             };
         }
@@ -1557,6 +1565,7 @@ mod tests {
             felsic: 0.4,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            orogenic: 0.0,
             cohort: 0.0,
         };
         assert!(!arc.is_oceanic() && !arc.resists_subduction());
@@ -1575,6 +1584,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            orogenic: 0.0,
             cohort: 0.0,
         };
         let ledger = wedged_margin_arriving_at_a_trench(Some(continent));
@@ -1651,6 +1661,7 @@ mod tests {
                 felsic: 1.0,
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
+                orogenic: 0.0,
                 cohort: 0.0,
             };
         }
@@ -1698,6 +1709,77 @@ mod tests {
         let now = neighbor.surface_elevation(time, 0.0);
         let later = neighbor.surface_elevation(time + 100.0, 0.0);
         assert!(later < now - 50.0, "{now} → {later}");
+    }
+
+    #[test]
+    fn stretched_rifts_take_the_orogenic_share_of_their_donors() {
+        // A gap next to one donor on an orogenic belt and others off it: the new cell gets the
+        // mass-weighted share, the donors keep theirs, and the orogenic mass is conserved.
+        let mut simulation = single_continent();
+        let local = 100u32;
+        let marked = simulation.mesh.neighbors(local)[0];
+        simulation.plates[0].crust[marked as usize]
+            .as_mut()
+            .unwrap()
+            .mark_orogeny(-300.0);
+        simulation.plates[0].crust[local as usize] = None;
+        let orogenic_mass = |simulation: &Simulation| -> f64 {
+            simulation.plates[0]
+                .crust
+                .iter()
+                .flatten()
+                .map(|crust| crust.thickness * crust.density * crust.orogenic)
+                .sum()
+        };
+        let before = orogenic_mass(&simulation);
+        assert!(stretch_rift(
+            &simulation.mesh,
+            &mut simulation.plates[0],
+            local,
+            1,
+            15e3,
+            0.0
+        ));
+        let crust = |vertex: u32| simulation.plates[0].crust[vertex as usize].unwrap();
+        let stretched = crust(local);
+        assert_eq!(stretched.orogeny, -300.0);
+        assert!(
+            stretched.orogenic > 0.0 && stretched.orogenic < 0.5,
+            "{}",
+            stretched.orogenic
+        );
+        assert_eq!(crust(marked).orogenic, 1.0);
+        for &neighbor in &simulation.mesh.neighbors(local)[1..] {
+            assert_eq!(crust(neighbor).orogenic, 0.0);
+        }
+        assert!((orogenic_mass(&simulation) / before - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn collisions_deform_the_whole_sample() {
+        // A sample with a small orogenic share (from an old belt next to it) that is thickened
+        // by a collision is an orogenic belt as a whole.
+        let mut simulation = single_continent();
+        let cell = 100u32;
+        simulation.plates[0].crust[cell as usize]
+            .as_mut()
+            .unwrap()
+            .mix_orogeny(-500.0, 0.2);
+        simulation.apply_additions(&[CrustAddition {
+            cell,
+            plate: 0,
+            partner: 0,
+            thickness: 5000.0,
+            density: crate::isostasy::CONTINENTAL_DENSITY,
+            felsic: 1.0,
+            metasediment: 0.0,
+            sediment: 0.0,
+            cohort: 0.0,
+            kind: AdditionKind::Collision,
+        }]);
+        let crust = simulation.plates[0].crust[cell as usize].unwrap();
+        assert!(crust.thickness > OROGENIC_THICKNESS);
+        assert_eq!((crust.orogeny, crust.orogenic), (simulation.time, 1.0));
     }
 
     #[test]
@@ -1770,6 +1852,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            orogenic: 0.0,
             cohort: 0.0,
         });
         simulation.crustal_flow(5.0);
@@ -1926,6 +2009,52 @@ mod tests {
         assert!(filled.thickness > 0.0);
         // No crust was created.
         assert!((simulation.total_mass() / before - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn filled_holes_take_the_orogenic_share_of_their_neighbours() {
+        // A hole next to one sample of an orogenic belt: the fill gets the mass-weighted share
+        // of its neighbours (not the belt's full mark), and the orogenic mass is conserved.
+        let mut simulation = single_continent();
+        let local = 100u32;
+        let marked = simulation.mesh.neighbors(local)[0];
+        simulation.plates[0].crust[marked as usize]
+            .as_mut()
+            .unwrap()
+            .mark_orogeny(-300.0);
+        simulation.plates[0].crust[local as usize] = None;
+        let orogenic_mass = |simulation: &Simulation| -> f64 {
+            simulation.plates[0]
+                .crust
+                .iter()
+                .flatten()
+                .map(|crust| crust.thickness * crust.density * crust.orogenic)
+                .sum()
+        };
+        let before = orogenic_mass(&simulation);
+        let parent = Ownership {
+            plate: 0,
+            local: marked,
+        };
+        heal_gap(
+            &simulation.mesh,
+            &mut simulation.plates[0],
+            parent,
+            local,
+            true,
+            &mut GapStatistics::default(),
+        );
+        let neighbours = simulation.mesh.neighbors(local).len() as f64;
+        let filled = simulation.plates[0].crust[local as usize].unwrap();
+        assert_eq!(filled.orogeny, -300.0);
+        assert!((filled.orogenic - 1.0 / neighbours).abs() < 1e-12);
+        assert_eq!(
+            simulation.plates[0].crust[marked as usize]
+                .unwrap()
+                .orogenic,
+            1.0
+        );
+        assert!((orogenic_mass(&simulation) / before - 1.0).abs() < 1e-12);
     }
 
     #[test]
@@ -2172,6 +2301,7 @@ mod tests {
                 felsic: 1.0,
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
+                orogenic: 0.0,
                 cohort: 0.0,
             };
         }

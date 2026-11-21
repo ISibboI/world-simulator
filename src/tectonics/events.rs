@@ -561,7 +561,8 @@ impl Simulation {
     ///   (subducting) side, so the new boundary follows the coast there; at a fracture zone the
     ///   younger side is new, the older side old;
     /// * pieces disconnected from their side's main piece (the one holding the margin cell or
-    ///   continent; for rifts the largest) move to the other side, so both parts are connected
+    ///   continent; for rifts the pieces on either side of the plume) move to the other side, so both
+    ///   parts are connected
     ///   (fragments of the plate that touch no other part of it stay where they are).
     ///
     /// Returns `None` if no consistent division is found.
@@ -752,6 +753,24 @@ impl Simulation {
                 majority[id as usize]
             };
         }
+        // Diagnostics for plume rifts: how far (rad) the break is from the plume at each stage.
+        let break_distance = |sides: &[bool]| -> f64 {
+            let SplitAnchor::Rift { nucleus, .. } = anchor else {
+                return f64::NAN;
+            };
+            let origin = self.mesh.vertex(nucleus);
+            (0..cell_count as u32)
+                .filter(|&cell| {
+                    in_plate(cell)
+                        && self.mesh.neighbors(cell).iter().any(|&neighbor| {
+                            in_plate(neighbor) && sides[neighbor as usize] != sides[cell as usize]
+                        })
+                })
+                .map(|cell| self.mesh.vertex(cell).angle_between(origin))
+                .fold(f64::INFINITY, f64::min)
+        };
+        let (cut_distance, rigid_distance) = (break_distance(&side), break_distance(&new_side));
+        let mut flipped_cells = 0usize;
         // Anchors of the main pieces: (new side, old side).
         let anchors = match anchor {
             SplitAnchor::Margin { cell } => {
@@ -788,7 +807,27 @@ impl Simulation {
                 new_side[young as usize] = true;
                 Some((young, cell))
             }
-            SplitAnchor::Rift { .. } => None,
+            SplitAnchor::Rift { nucleus, .. } => {
+                // The break nucleates at the plume: the two parts are the pieces on either
+                // side of it there. (Taking each side's largest piece instead let a far block
+                // of the plate win over the piece at the plume, which then changed sides and
+                // took the break at the plume with it.)
+                let origin = self.mesh.vertex(nucleus);
+                let nearest = |wanted: bool| {
+                    (0..cell_count as u32)
+                        .filter(|&cell| in_plate(cell) && new_side[cell as usize] == wanted)
+                        .min_by(|&a, &b| {
+                            self.mesh
+                                .vertex(a)
+                                .angle_between(origin)
+                                .total_cmp(&self.mesh.vertex(b).angle_between(origin))
+                        })
+                };
+                match (nearest(true), nearest(false)) {
+                    (Some(new), Some(old)) => Some((new, old)),
+                    _ => None,
+                }
+            }
         };
         // Move pieces disconnected from their side's main piece to the other side.
         let mut piece = vec![u32::MAX; cell_count];
@@ -851,9 +890,29 @@ impl Simulation {
                 if Some(piece[cell]) != mains[side as usize] && touches[piece[cell] as usize] {
                     new_side[cell] = !side;
                     flipped = true;
+                    flipped_cells += 1;
                 }
             }
             if !flipped {
+                if matches!(anchor, SplitAnchor::Rift { .. }) {
+                    let final_distance = break_distance(&new_side);
+                    debug!(
+                        cut_distance,
+                        rigid_distance,
+                        final_distance,
+                        flipped_cells,
+                        great_circle,
+                        ?scale,
+                        time = self.time,
+                        "Rift break stages"
+                    );
+                    // The plume breaks the lithosphere above its head. A division that
+                    // passes the plume at a distance (the plume is at the edge of the plate
+                    // and has no lithosphere of the plate on one side) is not its rift.
+                    if final_distance > 0.5 * PLUME_HEAD_RADIUS {
+                        return None;
+                    }
+                }
                 return Some((new_side, great_circle));
             }
         }
@@ -1119,7 +1178,7 @@ impl Simulation {
                 self.plates[owner.plate as usize].crust[owner.local as usize].as_mut()
                 && crust.is_continental_origin()
             {
-                crust.orogeny = time;
+                crust.mark_orogeny(time);
             }
         }
     }
@@ -1168,10 +1227,19 @@ impl Simulation {
                 .filter(|&(_, angle)| angle < params.rift_continent_radius)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(other, _)| other);
-            let large = self.plate_area_fractions()[plate as usize] >= params.min_oceanic_rift_area;
+            let area = self.plate_area_fractions()[plate as usize];
+            let large = area >= params.min_oceanic_rift_area;
             if continent.is_none() && !large {
                 continue;
             }
+            // Diagnostics of where the plume stands in its plate.
+            let edge = (0..self.mesh.len() as u32)
+                .filter(|&other| self.owners[other as usize].plate != plate)
+                .map(|other| self.mesh.vertex(other).angle_between(position))
+                .fold(f64::INFINITY, f64::min);
+            let nucleus_rigid = self.surface_crust(cell).resists_subduction();
+            let continent_distance =
+                continent.map(|other| self.mesh.vertex(other).angle_between(position));
             // The first reference circle through the plume crosses the nearest continent (else
             // a random one); the split tries the others too (see `local_split_piece`).
             let direction = random_unit_vector(&mut self.rng);
@@ -1197,7 +1265,16 @@ impl Simulation {
                 let (total, far) = self.split_contact_km(plate, new_plate, position);
                 self.event_counts.rift_contact_km += total;
                 self.event_counts.rift_far_contact_km += far;
-                debug!(plate, new_plate, time = self.time, "Plume rifted a plate");
+                debug!(
+                    plate,
+                    new_plate,
+                    edge,
+                    nucleus_rigid,
+                    ?continent_distance,
+                    area,
+                    time = self.time,
+                    "Plume rifted a plate"
+                );
             }
             // Each plume rifts at most once, also if the split was not possible.
             self.mantle.mark_rifted(index);
@@ -2026,6 +2103,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    orogenic: 0.0,
                     cohort: 0.0,
                 }
             } else {
@@ -2235,6 +2313,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    orogenic: 0.0,
                     cohort: 0.0,
                 }
             } else {
@@ -2296,6 +2375,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    orogenic: 0.0,
                     cohort: 0.0,
                 }
             });
@@ -2473,6 +2553,60 @@ mod tests {
     }
 
     #[test]
+    fn plume_rifts_near_a_plate_edge_stay_at_the_plume() {
+        // A plume a few cells inside the edge of its plate: the break still runs through the
+        // plume, or there is none; the piece at the plume does not change sides because a
+        // larger block of its side lies elsewhere.
+        let mut rifts = 0;
+        for seed in 0..6 {
+            for z in [-0.7f64, -0.74, -0.77, -0.79] {
+                let mut simulation = two_continents(TectonicParams::default(), seed);
+                let cap: Vec<u32> = (0..simulation.mesh.len() as u32)
+                    .filter(|&cell| simulation.mesh.vertex(cell).z < -0.8)
+                    .collect();
+                simulation.split_plate_cells(0, &cap).unwrap();
+                simulation.polarities.clear();
+                let position = DVec3::new((1.0 - z * z).sqrt(), 0.0, z);
+                let plume = simulation.mesh.nearest(position);
+                let plate = simulation.owners[plume as usize].plate;
+                simulation.mantle.insert_plume(Plume {
+                    position,
+                    age: 50.0,
+                    lifetime: 200.0,
+                    peak_flux: 5e-3,
+                    has_rifted: false,
+                });
+                let plates = simulation.plates.len() as u32;
+                simulation.rift_above_plumes();
+                if simulation.event_counts.rifts == 0 {
+                    continue;
+                }
+                rifts += 1;
+                // The boundary between the two parts of the rifted plate.
+                let parts = [plate, plates];
+                let distance = (0..simulation.mesh.len() as u32)
+                    .filter(|&cell| {
+                        let owner = simulation.owners[cell as usize].plate;
+                        parts.contains(&owner)
+                            && simulation.mesh.neighbors(cell).iter().any(|&neighbor| {
+                                let other = simulation.owners[neighbor as usize].plate;
+                                parts.contains(&other) && other != owner
+                            })
+                    })
+                    .map(|cell| simulation.mesh.vertex(cell).angle_between(position))
+                    .fold(f64::INFINITY, f64::min);
+                assert!(
+                    distance <= 0.5 * PLUME_HEAD_RADIUS,
+                    "seed {seed}, z {z}: {distance}"
+                );
+            }
+        }
+        // Most of these plumes rift their plate (21 of 24; 15 when each side is anchored at
+        // its largest piece, because the break then leaves the plume and is rejected).
+        assert!(rifts >= 18, "{rifts}");
+    }
+
+    #[test]
     fn plume_rift_arms_follow_sutures_around_the_plume() {
         // A belt of old continent around the equator between two polar caps of another plate,
         // a plume at +x, and two old sutures leaving the plume towards the caps, each leaning
@@ -2503,6 +2637,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: if suture { -500.0 } else { NO_OROGENY },
+                    orogenic: if suture { 1.0 } else { 0.0 },
                     cohort: 0.0,
                 });
             }
@@ -2630,6 +2765,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             orogeny: NO_OROGENY,
+            orogenic: 0.0,
             cohort: 0.0,
         };
         let micro = |r: DVec3| r.x > 0.8 && r.z < 0.0 && r.z > -0.12;
@@ -2768,6 +2904,7 @@ mod tests {
                     felsic: 1.0,
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
+                    orogenic: 0.0,
                     cohort: 0.0,
                 };
             }
