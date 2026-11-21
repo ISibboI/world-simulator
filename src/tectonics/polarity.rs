@@ -45,6 +45,17 @@ pub(super) struct Segment {
     pub(super) incoming: (f64, f64),
     /// Time (Myr) of the last update of [`Self::fill`].
     pub(super) fill_time: f64,
+    /// Motion of the plates across the segment from the last evaluation (see
+    /// `Simulation::update_segment_motion`): mean convergence normal to the boundary and mean
+    /// strike-slip speed (rad/Myr) over the boundary cells of its lower plate whose crust can
+    /// subduct, with the smoothed boundary normals.
+    pub(super) rate: f64,
+    pub(super) strike_rate: f64,
+    /// Whether the lower plate is thrust under the upper plate here: the segment converges
+    /// faster than [`TectonicParams::min_trench_convergence`] and not nearly along strike (see
+    /// [`TectonicParams::min_trench_obliquity`]). Only then does a slab grow, and only then are
+    /// converging cells without a slab trenches.
+    pub(super) subducting: bool,
     /// For segments seeded by subduction initiation: whether the slab grew to
     /// [`SUCCESSFUL_SLAB_LENGTH`].
     initiation: Option<bool>,
@@ -90,6 +101,10 @@ pub(super) struct PairState {
     pub(super) last_contact: f64,
     /// How long, in Myr, the continents of the two plates have been colliding without pause.
     pub(super) collision_time: f64,
+    /// How long, in Myr, the pair has been colliding with the collision stalled (see
+    /// [`PlateEventParams::suture_convergence`]); the pair sutures after
+    /// [`PlateEventParams::suture_time`].
+    pub(super) stall_time: f64,
     /// How long, in Myr, the pair has had colliding contacts, whatever its trenches (see
     /// [`PlateEventParams::terrane_accretion_time`]).
     pub(super) terrane_time: f64,
@@ -111,6 +126,8 @@ pub struct SegmentStatistics {
     /// Segments seeded by subduction initiation, and those whose slab grew to 300 km.
     pub initiation_segments: usize,
     pub successful_initiation_segments: usize,
+    /// Segments whose slab was decaying (not subducting) and that started subducting again.
+    pub resumed_subductions: usize,
 }
 
 /// Subduction polarity of all pairs of plates in contact, per boundary segment.
@@ -126,7 +143,7 @@ pub(super) struct Polarities {
 
 /// The bits of the state of a pair and its segments, for comparisons in tests.
 #[cfg(test)]
-pub(super) type PairSnapshot = ((u32, u32), Vec<[u64; 7]>);
+pub(super) type PairSnapshot = ((u32, u32), Vec<[u64; 10]>);
 
 /// World position of a segment.
 fn world(segment: &Segment, rotations: &[DQuat]) -> DVec3 {
@@ -223,6 +240,9 @@ impl Polarities {
             accretionary: false,
             incoming: (0.0, 0.0),
             fill_time: time,
+            rate: 0.0,
+            strike_rate: 0.0,
+            subducting: false,
             initiation: None,
             contact_sum: DVec3::ZERO,
             overlaps: 0,
@@ -363,6 +383,7 @@ impl Polarities {
                         }
                         kept.last_contact = kept.last_contact.max(removed.last_contact);
                         kept.arrival_time = kept.arrival_time.max(removed.arrival_time);
+                        kept.subducting |= removed.subducting;
                         kept.initiation = match (kept.initiation, removed.initiation) {
                             (Some(a), Some(b)) => Some(a || b),
                             (a, b) => a.or(b),
@@ -521,6 +542,7 @@ impl Polarities {
                 PairState {
                     last_contact: pair.last_contact,
                     collision_time: 0.0,
+                    stall_time: 0.0,
                     terrane_time: 0.0,
                     last_accretion: None,
                     segments: moving,
@@ -567,6 +589,7 @@ impl Polarities {
             let target = self.pairs.entry(pair_key(into, other)).or_default();
             target.last_contact = target.last_contact.max(pair.last_contact);
             target.collision_time = target.collision_time.max(pair.collision_time);
+            target.stall_time = target.stall_time.max(pair.stall_time);
             target.terrane_time = target.terrane_time.max(pair.terrane_time);
             target.last_accretion = match (target.last_accretion, pair.last_accretion) {
                 (Some(a), Some(b)) => Some(a.max(b)),
@@ -627,7 +650,7 @@ impl Polarities {
             .pairs
             .iter()
             .map(|(&key, pair)| {
-                let mut segments: Vec<[u64; 7]> = pair
+                let mut segments: Vec<[u64; 10]> = pair
                     .segments
                     .iter()
                     .map(|s| {
@@ -639,12 +662,18 @@ impl Polarities {
                             s.slab_length.to_bits(),
                             s.arrival_time.to_bits(),
                             s.last_contact.to_bits(),
+                            s.rate.to_bits(),
+                            s.strike_rate.to_bits(),
+                            u64::from(s.subducting),
                         ]
                     })
                     .collect();
                 segments.push([
                     pair.last_contact.to_bits(),
                     pair.collision_time.to_bits(),
+                    pair.stall_time.to_bits(),
+                    0,
+                    0,
                     0,
                     0,
                     0,
@@ -721,6 +750,23 @@ mod tests {
 
     fn identity() -> Vec<DQuat> {
         vec![DQuat::IDENTITY; 3]
+    }
+
+    #[test]
+    fn merged_pairs_keep_the_longer_stall() {
+        let mut polarities = Polarities::new(RADIUS);
+        for (key, stall_time) in [((0, 2), 5.0), ((1, 2), 12.0)] {
+            polarities.pairs.insert(
+                key,
+                PairState {
+                    stall_time,
+                    ..PairState::default()
+                },
+            );
+        }
+        polarities.merge(0, 1, &identity());
+        assert_eq!(polarities.pairs[&(0, 2)].stall_time, 12.0);
+        assert!(!polarities.pairs.contains_key(&(1, 2)));
     }
 
     #[test]

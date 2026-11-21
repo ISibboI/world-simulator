@@ -77,8 +77,15 @@ pub struct PlateEventParams {
     /// Length of slab (m) that a new subduction zone at a passive margin starts with: the
     /// foundering lithosphere that triggers it.
     pub initiation_slab_length: f64,
-    /// Plates whose continents have been colliding for this many Myr merge.
+    /// Plates whose continents have been colliding for this many Myr with the collision stalled
+    /// (see [`Self::suture_convergence`]) merge.
     pub suture_time: f64,
+    /// A collision counts as stalled while its colliding cells (those not clearly diverging)
+    /// converge on average slower than this (cm/yr). A collision that keeps converging stays
+    /// a plate boundary (India–Asia after 50 Myr at ~4 cm/yr, Arabia–Eurasia at ~2 cm/yr); plates
+    /// merge once convergence across the belt has ceased. The slowest active collision belts
+    /// that are still plate boundaries converge at ~0.2–0.5 cm/yr (Alps; PB2002).
+    pub suture_convergence: f64,
     /// Minimum number of colliding boundary cells for a pair of plates to count as colliding.
     pub suture_min_cells: usize,
     /// A colliding pair only sutures while its colliding cells are at least this fraction of
@@ -123,6 +130,7 @@ impl Default for PlateEventParams {
             weak_zone_splits: 1.0,
             initiation_slab_length: 150e3,
             suture_time: 30.0,
+            suture_convergence: 0.5,
             suture_min_cells: 10,
             suture_trench_ratio: 1.0,
             terrane_accretion_time: 12.0,
@@ -1683,18 +1691,21 @@ impl Simulation {
     }
 
     /// Tracks how long pairs of plates have been in continental collision (dominating their
-    /// convergent boundary over trenches), and merges them once the collision has lasted long
-    /// enough. Contacts count unless the plates clearly move
-    /// apart (collision resistance drives locked collisions to near-zero convergence).
+    /// convergent boundary over trenches) with the collision stalled, and merges them once it has
+    /// been stalled long enough. Contacts count unless the plates clearly move apart (collision
+    /// resistance drives locked collisions to near-zero convergence).
     fn suture_colliding_plates(&mut self, dt: f64, boundaries: &[BoundaryCell]) {
         let min_convergence =
             self.params.min_trench_convergence / (self.params.planet_radius * 100.0 / 1e6);
-        // Per pair: colliding cells (not clearly diverging), converging colliding cells and
-        // trench cells; collision motion along the smoothed boundary normals (like dynamics).
-        let mut contacts: HashMap<(u32, u32), (usize, usize, usize)> = HashMap::default();
+        let stall_convergence =
+            self.params.events.suture_convergence / (self.params.planet_radius * 100.0 / 1e6);
+        // Per pair: colliding cells (not clearly diverging), converging colliding cells, trench
+        // cells and the summed convergence (rad/Myr) of the colliding cells; collision motion
+        // along the smoothed boundary normals (like dynamics).
+        let mut contacts: HashMap<(u32, u32), (usize, usize, usize, f64)> = HashMap::default();
         // Colliding (cell, other plate) contacts that converge.
         let mut converging: HashSet<(u32, u32)> = HashSet::default();
-        let normals = self.smoothed_normals(boundaries);
+        let normals: Vec<DVec3> = boundaries.iter().map(|boundary| boundary.normal).collect();
         for (boundary, &normal) in boundaries.iter().zip(&normals) {
             let pair = pair_key(boundary.plate, boundary.other);
             if boundary.kind == BoundaryKind::Collision {
@@ -1706,6 +1717,7 @@ impl Simulation {
                 let entry = contacts.entry(pair).or_default();
                 if convergence > -min_convergence {
                     entry.0 += 1;
+                    entry.3 += convergence;
                 }
                 if convergence > min_convergence {
                     entry.1 += 1;
@@ -1721,15 +1733,23 @@ impl Simulation {
         for (pair, state) in &mut self.polarities.pairs {
             // The continents collide, and collision dominates the convergent boundary: plates
             // that still subduct along long trenches keep moving independently.
-            let (colliding, converging_cells, trenches) =
+            let (colliding, converging_cells, trenches, convergence) =
                 contacts.get(pair).copied().unwrap_or_default();
             if colliding >= min_cells
                 && colliding as f64 >= self.params.events.suture_trench_ratio * trenches as f64
             {
                 state.collision_time += dt;
-                suturing.insert(*pair);
+                // A collision that still converges across the belt is no suture in the making: it
+                // stays a plate boundary and may accrete terranes.
+                if convergence / (colliding as f64) < stall_convergence {
+                    state.stall_time += dt;
+                    suturing.insert(*pair);
+                } else {
+                    state.stall_time = (state.stall_time - dt).max(0.0);
+                }
             } else {
                 state.collision_time = (state.collision_time - dt).max(0.0);
+                state.stall_time = (state.stall_time - dt).max(0.0);
             }
             if converging_cells >= min_cells {
                 state.terrane_time += dt;
@@ -1745,7 +1765,7 @@ impl Simulation {
             .polarities
             .pairs
             .iter()
-            .filter(|(_, state)| state.collision_time >= suture_time)
+            .filter(|(_, state)| state.stall_time >= suture_time)
             .map(|(pair, _)| pair)
             .min()
         {
@@ -2800,9 +2820,10 @@ mod tests {
 
     #[test]
     fn suturing_pairs_do_not_accrete_terranes() {
-        // With the trench-ratio rule off, the pair sutures after `suture_time` (default 30 Myr)
-        // instead of accreting after the terrane accretion time.
-        let (mut simulation, _) = microcontinent_collision(0.05, 0.004, 0.0);
+        // With the trench-ratio rule off, a stalled collision (0.3 cm/yr, below
+        // `suture_convergence`) sutures after `suture_time` (default 30 Myr) instead of
+        // accreting after the terrane accretion time.
+        let (mut simulation, _) = microcontinent_collision(0.05, 0.0005, 0.0);
         for _ in 0..40 {
             let boundaries = simulation.boundary_cells();
             simulation.suture_colliding_plates(1.0, &boundaries);
@@ -2810,6 +2831,20 @@ mod tests {
         assert_eq!(simulation.event_counts.terrane_accretions, 0);
         assert_eq!(simulation.event_counts.sutures, 1);
         assert_eq!(simulation.plates.len(), 1);
+    }
+
+    #[test]
+    fn converging_collisions_do_not_suture_but_accrete_terranes() {
+        // The same pair converging at 2.5 cm/yr is no suture in the making: it stays a plate
+        // boundary and the microcontinent accretes.
+        let (mut simulation, _) = microcontinent_collision(0.05, 0.004, 0.0);
+        for _ in 0..40 {
+            let boundaries = simulation.boundary_cells();
+            simulation.suture_colliding_plates(1.0, &boundaries);
+        }
+        assert_eq!(simulation.event_counts.sutures, 0);
+        assert_eq!(simulation.event_counts.terrane_accretions, 1);
+        assert_eq!(simulation.plates.len(), 2);
     }
 
     #[test]
@@ -2827,8 +2862,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn long_collisions_suture_plates() {
+    /// Two continental plates (all crust continental) with suture time 3 Myr, plate 1 moving
+    /// towards plate 0 with `speed` rad/Myr along the y axis.
+    fn continental_collision(speed: f64) -> Simulation {
         let mut params = TectonicParams::default();
         params.events.suture_time = 3.0;
         let mut simulation = Simulation::new(SphereMesh::icosphere(4), 2, params, 4);
@@ -2848,12 +2884,57 @@ mod tests {
             }
         }
         simulation.seed_subduction((0, 1), 0, 0.0);
+        simulation.plates[0].angular_velocity = DVec3::ZERO;
+        simulation.plates[1].angular_velocity = DVec3::ZERO;
+        // Towards plate 0 along part of their boundary (away along the opposite part).
+        let normal_axis = towards_axis(&simulation);
+        simulation.plates[1].angular_velocity = normal_axis * speed;
+        simulation
+    }
+
+    /// A rotation axis (unit) about which plate 1 moves straight towards plate 0 at one of their
+    /// boundary cells (and nearly so along that part of the boundary).
+    fn towards_axis(simulation: &Simulation) -> DVec3 {
+        let boundary = simulation
+            .boundary_cells()
+            .into_iter()
+            .find(|boundary| boundary.plate == 1)
+            .expect("the plates share a boundary");
+        // (ω × r) · n = ω · (r × n): the motion is along n for ω ∥ r × n.
+        simulation
+            .mesh
+            .vertex(boundary.cell)
+            .cross(boundary.normal)
+            .normalize()
+    }
+
+    #[test]
+    fn stalled_collisions_suture_plates() {
+        let mut simulation = continental_collision(0.0);
         for _ in 0..5 {
             let boundaries = simulation.boundary_cells();
             simulation.suture_colliding_plates(1.0, &boundaries);
         }
         assert_eq!(simulation.plates.len(), 1);
         assert_eq!(simulation.event_counts.sutures, 1);
+    }
+
+    #[test]
+    fn converging_collisions_do_not_suture() {
+        // 3 cm/yr towards each other.
+        let mut simulation = continental_collision(3.0 / 637.1);
+        let converging = simulation
+            .boundary_cells()
+            .iter()
+            .filter(|b| b.convergence > 0.5 / 637.1)
+            .count();
+        assert!(converging > 20, "{converging}");
+        for _ in 0..10 {
+            let boundaries = simulation.boundary_cells();
+            simulation.suture_colliding_plates(1.0, &boundaries);
+        }
+        assert_eq!(simulation.plates.len(), 2);
+        assert_eq!(simulation.event_counts.sutures, 0);
     }
 
     #[test]
