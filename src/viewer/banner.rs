@@ -6,6 +6,9 @@
 //! 3D view, on top of the planet but below every window and button, so it never hides the
 //! parameter panel or its ⚙ button. It is centred vertically, where the user looks first, and
 //! covers only a strip of the planet.
+//!
+//! The loading banner of `web/index.html`, shown before the view exists, copies its look
+//! (colours, size, padding); keep them in step.
 
 use eframe::egui;
 
@@ -18,21 +21,33 @@ const HORIZONTAL_PADDING: f32 = 1.0;
 /// Rows of text at most; longer text ends with "…" (the panel shows a failure in full).
 const MAX_ROWS: usize = 4;
 
+/// What a simulation does before its first surface update: `restarted` tells whether it was
+/// started by a restart rather than when the view opened, `generating` whether it reported
+/// that it is generating its planet (before that, its thread or Web Worker is starting).
+pub fn starting_text(restarted: bool, generating: bool) -> &'static str {
+    match (restarted, generating) {
+        (false, false) => "Starting the simulation…",
+        (false, true) => "Generating the initial planet…",
+        (true, false) => "Restarting the simulation…",
+        (true, true) => "Restarting: generating a new planet…",
+    }
+}
+
 /// The text of the banner for the state of the simulation, or `None` if it is running normally.
 ///
-/// `restarted` tells whether the simulation was started by a restart rather than when the
-/// view opened; `time` is the simulated time of its latest surface update (`None` until the
-/// first arrives), `failure` why it failed, if it did.
+/// `restarted` and `generating` as for [`starting_text`]; `time` is the simulated time of the
+/// latest surface update of the simulation (`None` until the first arrives), `failure` why it
+/// failed, if it did.
 pub fn simulation_text(
     restarted: bool,
+    generating: bool,
     time: Option<f64>,
     failure: Option<&str>,
 ) -> Option<String> {
     match (failure, time) {
         (Some(failure), _) => Some(format!("Simulation failed: {failure}")),
         (None, Some(_)) => None,
-        (None, None) if restarted => Some("Restarting the simulation…".to_owned()),
-        (None, None) => Some("Starting the simulation…".to_owned()),
+        (None, None) => Some(starting_text(restarted, generating).to_owned()),
     }
 }
 
@@ -73,27 +88,42 @@ mod tests {
     #[test]
     fn starting_until_the_first_update() {
         assert_eq!(
-            simulation_text(false, None, None).as_deref(),
+            simulation_text(false, false, None, None).as_deref(),
             Some("Starting the simulation…")
         );
-        assert_eq!(simulation_text(false, Some(0.0), None), None);
-        assert_eq!(simulation_text(false, Some(120.0), None), None);
+        assert_eq!(
+            simulation_text(false, true, None, None).as_deref(),
+            Some("Generating the initial planet…")
+        );
+        for generating in [false, true] {
+            assert_eq!(simulation_text(false, generating, Some(0.0), None), None);
+            assert_eq!(simulation_text(false, generating, Some(120.0), None), None);
+        }
     }
 
     #[test]
     fn restarting_until_the_first_update_of_the_new_run() {
         assert_eq!(
-            simulation_text(true, None, None).as_deref(),
+            simulation_text(true, false, None, None).as_deref(),
             Some("Restarting the simulation…")
         );
-        assert_eq!(simulation_text(true, Some(0.0), None), None);
+        assert_eq!(
+            simulation_text(true, true, None, None).as_deref(),
+            Some("Restarting: generating a new planet…")
+        );
+        assert_eq!(simulation_text(true, true, Some(0.0), None), None);
     }
 
     #[test]
     fn failures_stay_shown() {
-        for (restarted, time) in [(false, None), (true, None), (false, Some(50.0))] {
+        for (restarted, generating, time) in [
+            (false, false, None),
+            (false, true, None),
+            (true, false, None),
+            (false, true, Some(50.0)),
+        ] {
             assert_eq!(
-                simulation_text(restarted, time, Some("no memory")).as_deref(),
+                simulation_text(restarted, generating, time, Some("no memory")).as_deref(),
                 Some("Simulation failed: no memory")
             );
         }

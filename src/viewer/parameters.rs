@@ -52,8 +52,8 @@ pub struct SimulationStatus<'a> {
     pub duration: f64,
     /// Why the simulation failed, if it did.
     pub failure: Option<&'a str>,
-    /// Whether the simulation was started by a restart rather than when the view opened.
-    pub restarted: bool,
+    /// What the simulation does until its first update (see `banner::starting_text`).
+    pub starting: &'a str,
 }
 
 /// How an option is edited.
@@ -302,11 +302,7 @@ impl ParameterPanel {
                 ui.label(format!("t = {time:.0} of {:.0} Myr", status.duration));
             }
             (None, None) => {
-                ui.label(if status.restarted {
-                    "Restarting the simulation…"
-                } else {
-                    "Starting the simulation…"
-                });
+                ui.label(status.starting);
             }
         }
         ui.separator();
@@ -572,7 +568,7 @@ mod tests {
             time: Some(10.0),
             duration: 500.0,
             failure: None,
-            restarted: false,
+            starting: "Starting the simulation…",
         };
         let mut launch = None;
         run(&ctx, egui::RawInput::default(), |ui| {

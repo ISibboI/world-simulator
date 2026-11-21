@@ -5,7 +5,8 @@
 //! loads it again in a module worker. [`start`] tells them apart by their global scope. The
 //! parameters are the command-line options, given as URL query parameters
 //! (`?seed=3&subdivisions=5&no-erosion&set=basal_drag=8e14`, see [`crate::query`]); the worker
-//! gets the same query string. It sends a surface update after every step as
+//! gets the same query string. It sends `{ generating: true }` before it builds the planet, then a
+//! surface update after every step as
 //! `{ time, vertices, cells }` (the vertices, the attributes of the cells as
 //! [`viewer::CellInfo`]s, and with the first update also `faces`, the triangles), with the buffers
 //! transferred rather than copied, or `{ error }` if the simulation fails. A restart from the
@@ -162,10 +163,7 @@ async fn run_page() -> anyhow::Result<()> {
                 previous.stop();
             }
             let query = args_to_query(&launch.args);
-            if std::mem::take(&mut first) {
-                // The view exists now and shows the state in its banner.
-                show_status("");
-            } else {
+            if !std::mem::take(&mut first) {
                 replace_query(&query);
             }
             match start_worker(&query, events.clone(), wake_up) {
@@ -177,6 +175,8 @@ async fn run_page() -> anyhow::Result<()> {
                 }
             }
         }),
+        // The view shows the state in its banner from its first frame on.
+        Box::new(|| show_status("")),
     )
     .await?;
     Ok(())
@@ -241,6 +241,10 @@ fn start_worker(
             let data = event.data();
             if let Some(message) = get(&data, "error").as_string() {
                 send(SimulationEvent::Failed(message));
+                return;
+            }
+            if get(&data, "generating").is_truthy() {
+                send(SimulationEvent::Generating);
                 return;
             }
             let (Some(time), Ok(buffer), Ok(cell_buffer)) = (
@@ -319,6 +323,11 @@ fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()>
     let search = scope.location().search();
     let Launch { cli, .. } = parse_query(&search)?;
     info!(?search, "Simulation worker started");
+    let message = js_sys::Object::new();
+    set(&message, "generating", &true.into());
+    if let Err(error) = scope.post_message(&message) {
+        error!("Could not send the state to the page: {error:?}");
+    }
     let planet = build_planet(&cli)?;
     let mut first_update = true;
     let publish = |planet: &Planet| {

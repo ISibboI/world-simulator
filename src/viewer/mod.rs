@@ -68,6 +68,8 @@ pub struct SurfaceUpdate {
 
 /// A message from the simulation to the view.
 pub enum SimulationEvent {
+    /// The simulation is generating its initial planet (it sends no surface before).
+    Generating,
     Surface(SurfaceUpdate),
     /// The simulation failed with this message.
     Failed(String),
@@ -182,6 +184,7 @@ fn app_creator(
     msaa_samples: u16,
     ui_options: UiOptions,
     start_simulation: StartSimulation,
+    on_first_frame: Option<Box<dyn FnOnce()>>,
 ) -> eframe::AppCreator<'static> {
     Box::new(move |creation_context| {
         let render_state = creation_context
@@ -195,6 +198,7 @@ fn app_creator(
             initial,
             ui_options,
             start_simulation,
+            on_first_frame,
         )))
     })
 }
@@ -220,6 +224,7 @@ pub fn run(initial: Launch, start_simulation: StartSimulation) -> anyhow::Result
             MSAA_SAMPLES,
             UiOptions::default(),
             start_simulation,
+            None,
         ),
     )
     .map_err(|error| anyhow::anyhow!("failed to run the 3D view: {error}"))?;
@@ -227,13 +232,17 @@ pub fn run(initial: Launch, start_simulation: StartSimulation) -> anyhow::Result
     Ok(())
 }
 
-/// Starts the 3D view in `canvas` of the web page. eframe's web painter does not multisample.
+/// Starts the 3D view in `canvas` of the web page and calls `on_first_frame` at the end of its
+/// first frame, which is shown together with the page changes made then (the page hides its
+/// loading banner, which the view's banner replaces in the same place). eframe's web painter
+/// does not multisample.
 #[cfg(target_arch = "wasm32")]
 pub async fn run_web(
     canvas: web_sys::HtmlCanvasElement,
     initial: Launch,
     ui_options: UiOptions,
     start_simulation: StartSimulation,
+    on_first_frame: Box<dyn FnOnce()>,
 ) -> anyhow::Result<()> {
     let options = eframe::WebOptions {
         depth_buffer: DEPTH_BUFFER_BITS,
@@ -243,7 +252,13 @@ pub async fn run_web(
         .start(
             canvas,
             options,
-            app_creator(initial, 1, ui_options, start_simulation),
+            app_creator(
+                initial,
+                1,
+                ui_options,
+                start_simulation,
+                Some(on_first_frame),
+            ),
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to start the 3D view: {error:?}"))
@@ -274,6 +289,10 @@ struct Viewer {
     failure: Option<String>,
     /// The number of simulations started: more than one after a restart.
     runs: u32,
+    /// Whether the running simulation reported that it is generating its planet.
+    generating: bool,
+    /// Called at the end of the first frame (the web page hides its loading banner then).
+    on_first_frame: Option<Box<dyn FnOnce()>>,
     /// The latest surface; the previous simulation's until the new one sends its first.
     surface: Option<Surface>,
     /// The number of meshes and surface states received, for [`Surface`]'s ids.
@@ -299,6 +318,7 @@ impl Viewer {
         initial: Launch,
         ui_options: UiOptions,
         start_simulation: StartSimulation,
+        on_first_frame: Option<Box<dyn FnOnce()>>,
     ) -> Self {
         let parameters = ParameterPanel::new(&initial.args);
         let (_, events) = std::sync::mpsc::channel();
@@ -317,6 +337,8 @@ impl Viewer {
             duration: initial.cli.duration,
             failure: None,
             runs: 0,
+            generating: false,
+            on_first_frame,
             surface: None,
             meshes: 0,
             surfaces: 0,
@@ -335,6 +357,7 @@ impl Viewer {
         self.duration = launch.cli.duration;
         self.failure = None;
         self.runs += 1;
+        self.generating = false;
         // Shows the banner at once, not only with the next input or event.
         ctx.request_repaint();
         let ctx = ctx.clone();
@@ -519,6 +542,7 @@ impl eframe::App for Viewer {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 SimulationEvent::Surface(update) => self.receive(update),
+                SimulationEvent::Generating => self.generating = true,
                 SimulationEvent::Failed(message) => self.failure = Some(message),
             }
             updated = true;
@@ -591,9 +615,13 @@ impl eframe::App for Viewer {
             });
 
         // Over the planet, below the parameter panel (see `banner`).
-        if let Some(text) =
-            banner::simulation_text(self.runs > 1, self.time, self.failure.as_deref())
-        {
+        let restarted = self.runs > 1;
+        if let Some(text) = banner::simulation_text(
+            restarted,
+            self.generating,
+            self.time,
+            self.failure.as_deref(),
+        ) {
             banner::show(ui, &text);
         }
 
@@ -612,13 +640,17 @@ impl eframe::App for Viewer {
             time: self.time,
             duration: self.duration,
             failure: self.failure.as_deref(),
-            restarted: self.runs > 1,
+            starting: banner::starting_text(restarted, self.generating),
         };
         if let Some(launch) = self.parameters.show(ui.ctx(), &status, cell_panel) {
             tracing::info!(args = ?launch.args, "Restarting the simulation");
             self.parameters.set_running(launch.args.clone());
             let ctx = ui.ctx().clone();
             self.start(&ctx, launch);
+        }
+
+        if let Some(on_first_frame) = self.on_first_frame.take() {
+            on_first_frame();
         }
     }
 }

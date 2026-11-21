@@ -22,7 +22,10 @@
             height: 100%;
             touch-action: none;
         }
-        /* Looks like the view's status banner (src/viewer/banner.rs), which replaces it. */
+        /* The loading banner, shown from the first paint until the view's first frame: the same
+           place, size and colours as the view's status banner (src/viewer/banner.rs), which
+           replaces it then. The font size is egui's heading size (1.44 × body text), the line
+           height that of egui's font (Ubuntu Light). */
         #status {
             position: absolute;
             top: 50%;
@@ -31,9 +34,10 @@
             transform: translateY(-50%);
             box-sizing: border-box;
             padding: 0.3em 1em;
-            background: rgba(255, 255, 255, 0.9);
+            background: rgba(255, 255, 255, 0.902);
             color: #000;
             font-size: 1.44rem;
+            line-height: 1.05;
             text-align: center;
             white-space: pre-wrap;
             overflow-wrap: anywhere;
@@ -42,6 +46,6 @@
 </head>
 <body>
     <canvas id="world_simulator"></canvas>
-    <div id="status">Loading…</div>
+    <div id="status">Loading the simulator…</div>
 </body>
 </html>
