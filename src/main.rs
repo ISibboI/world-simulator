@@ -673,12 +673,15 @@ fn snapshot(
     });
     let segments = &statistics.segment_events;
     info!(
-        "    segments {} ({} with slab; slab at trenches {:.0} km) | created {}, merged {}, expired {}, \
+        "    segments {} ({} with slab; slab at trenches {:.0} km; incipient trenches {:.0} km converging at {:.1} cm/yr, others at {:.1} cm/yr) | created {}, merged {}, expired {}, \
          flips {}, continental overrides {}, initiation segments {} ({} grew to 300 km), \
-         failed initiations {}",
+         failed initiations {} | unsettled velocity solves {}",
         statistics.segments,
         statistics.slab_segments,
         statistics.mean_slab_length,
+        statistics.incipient_trench_length,
+        statistics.incipient_convergence,
+        statistics.mature_convergence,
         segments.created,
         segments.merged,
         segments.expired,
@@ -687,6 +690,7 @@ fn snapshot(
         segments.initiation_segments,
         segments.successful_initiation_segments,
         statistics.events.failed_initiations,
+        statistics.unsettled_solves,
     );
     info!(
         "    crust mass (Gt): continental {:.3e}, transitional {:.3e}, oceanic {:.3e}, \
@@ -823,6 +827,9 @@ fn write_snapshot_files(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
     if cli.cell_dump {
         let path = cli.output.join(format!("cells_{time:05}.csv"));
         write_cell_dump(planet, &path).with_context(|| format!("writing {}", path.display()))?;
+        let path = cli.output.join(format!("boundaries_{time:05}.csv"));
+        write_boundary_dump(simulation, &path)
+            .with_context(|| format!("writing {}", path.display()))?;
         let path = cli.output.join("mesh.csv");
         if !path.exists() {
             write_mesh_dump(simulation.mesh(), &path)
@@ -999,6 +1006,46 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
         )?;
     }
     file.flush()?;
+    Ok(())
+}
+
+/// Writes the plate boundaries as CSV, for analysis: one line per boundary cell and neighbouring
+/// plate (see [`tectonics::BoundaryRecord`]), with the angular velocity (rad/Myr) of the cell's
+/// plate.
+fn write_boundary_dump(
+    simulation: &tectonics::Simulation,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    let omega = simulation.plate_angular_velocities();
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(
+        file,
+        "cell,plate,other,kind,conv,strike,segment,overriding,slab_km,age,oceanic,continental,wx,wy,wz"
+    )?;
+    let optional = |value: Option<u32>| value.map_or(String::new(), |value| value.to_string());
+    for record in simulation.boundary_records() {
+        let w = omega[record.plate as usize];
+        writeln!(
+            file,
+            "{},{},{},{},{:.3},{:.3},{},{},{:.0},{:.1},{},{},{:.6},{:.6},{:.6}",
+            record.cell,
+            record.plate,
+            record.other,
+            record.kind,
+            record.convergence,
+            record.strike_slip,
+            optional(record.segment),
+            optional(record.overriding),
+            record.slab_length / 1000.0,
+            record.age,
+            u8::from(record.oceanic),
+            u8::from(record.continental),
+            w.x,
+            w.y,
+            w.z,
+        )?;
+    }
     Ok(())
 }
 

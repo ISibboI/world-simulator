@@ -119,6 +119,15 @@ pub struct Statistics {
     pub segments: usize,
     pub slab_segments: usize,
     pub mean_slab_length: f64,
+    /// Length (km) of trenches whose slab is shorter than
+    /// [`TectonicParams::self_sustaining_slab_length`] (incipient subduction), and the mean
+    /// convergence there and at the other trenches (cm/yr).
+    pub incipient_trench_length: f64,
+    /// Velocity solves so far whose resistances did not settle (collisions, subduction
+    /// initiation), which then used the last iterate.
+    pub unsettled_solves: u64,
+    pub incipient_convergence: f64,
+    pub mature_convergence: f64,
     /// Segment events so far.
     pub segment_events: super::polarity::SegmentStatistics,
     /// Area fraction of the oceanic crust per 20 Myr age bin (the last bin is ≥ 200 Myr).
@@ -295,6 +304,55 @@ impl Simulation {
         boundary / circles.max(1e-9)
     }
 
+    /// The boundary cells with their kinematics, for analysis (see [`BoundaryRecord`]).
+    pub fn boundary_records(&self) -> Vec<BoundaryRecord> {
+        let boundaries = self.boundary_cells();
+        let normals = self.smoothed_normals(&boundaries);
+        // rad/Myr → cm/yr.
+        let speed = self.params.planet_radius * 100.0 / 1e6;
+        boundaries
+            .iter()
+            .zip(&normals)
+            .map(|(boundary, &normal)| {
+                let r = self.mesh.vertex(boundary.cell);
+                let relative = (self.plates[boundary.plate as usize].angular_velocity
+                    - self.plates[boundary.other as usize].angular_velocity)
+                    .cross(r);
+                let segment = boundary
+                    .segment
+                    .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id));
+                let crust = self.surface_crust(boundary.cell);
+                BoundaryRecord {
+                    cell: boundary.cell,
+                    plate: boundary.plate,
+                    other: boundary.other,
+                    kind: match boundary.kind {
+                        super::dynamics::BoundaryKind::Trench { .. } => 't',
+                        super::dynamics::BoundaryKind::Ridge => 'r',
+                        super::dynamics::BoundaryKind::Collision => 'c',
+                        super::dynamics::BoundaryKind::Other => 'o',
+                    },
+                    convergence: relative.dot(normal) * speed,
+                    strike_slip: relative.dot(r.cross(normal)) * speed,
+                    segment: boundary.segment,
+                    overriding: segment.map(|segment| segment.overriding),
+                    slab_length: segment.map_or(0.0, |segment| segment.slab_length),
+                    age: crust.age(self.time),
+                    oceanic: crust.is_oceanic(),
+                    continental: crust.is_continental_origin(),
+                }
+            })
+            .collect()
+    }
+
+    /// Angular velocity (rad/Myr, world frame) of every plate.
+    pub fn plate_angular_velocities(&self) -> Vec<glam::DVec3> {
+        self.plates
+            .iter()
+            .map(|plate| plate.angular_velocity)
+            .collect()
+    }
+
     pub fn statistics(&self) -> Statistics {
         let cell_count = self.mesh.len();
         let mut plate_areas = vec![0; self.plates.len()];
@@ -409,6 +467,8 @@ impl Simulation {
             (0.0, 0.0, 0.0, 0.0);
         let boundaries = self.boundary_cells();
         let (mut trench_cells, mut trench_slab) = (0usize, 0.0);
+        // Cells and summed convergence (rad/Myr) of incipient and mature trenches.
+        let mut by_stage = [(0usize, 0.0); 2];
         let mut accretionary_trench_length = 0.0;
         let (mut collision_length, mut collision_converging, mut collision_diverging) =
             (0.0, 0.0, 0.0);
@@ -424,7 +484,12 @@ impl Simulation {
                     let segment = boundary
                         .segment
                         .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id));
-                    trench_slab += segment.map_or(0.0, |segment| segment.slab_length);
+                    let slab = segment.map_or(0.0, |segment| segment.slab_length);
+                    trench_slab += slab;
+                    let stage =
+                        &mut by_stage[usize::from(slab >= self.params.self_sustaining_slab_length)];
+                    stage.0 += 1;
+                    stage.1 += boundary.convergence;
                     if segment.is_some_and(|segment| segment.accretionary) {
                         accretionary_trench_length += boundary_length;
                     }
@@ -615,6 +680,16 @@ impl Simulation {
             segments: self.polarities.segments().count(),
             slab_segments: slabs.len(),
             mean_slab_length: trench_slab / trench_cells.max(1) as f64 / 1000.0,
+            incipient_trench_length: by_stage[0].0 as f64 * boundary_length,
+            unsettled_solves: self.unsettled_solves,
+            incipient_convergence: by_stage[0].1 / by_stage[0].0.max(1) as f64
+                * self.params.planet_radius
+                * 100.0
+                / 1e6,
+            mature_convergence: by_stage[1].1 / by_stage[1].0.max(1) as f64
+                * self.params.planet_radius
+                * 100.0
+                / 1e6,
             segment_events: self.polarities.statistics.clone(),
             age_histogram,
             speed_p99,
@@ -672,6 +747,30 @@ impl Simulation {
             }),
         }
     }
+}
+
+/// A boundary cell seen from its plate towards one other plate, for analysis.
+#[derive(Clone, Copy, Debug)]
+pub struct BoundaryRecord {
+    pub cell: u32,
+    pub plate: u32,
+    pub other: u32,
+    /// `t` where the plate subducts, `r` at a ridge flank, `c` at a collision, `o` otherwise
+    /// (including the overriding side of a trench).
+    pub kind: char,
+    /// Relative speed (cm/yr) of the plate towards the other plate across the boundary
+    /// (smoothed normal; positive where they converge) and along it.
+    pub convergence: f64,
+    pub strike_slip: f64,
+    /// The boundary segment covering the cell, the plate that overrides in it, and the length
+    /// (m) of its slab.
+    pub segment: Option<u32>,
+    pub overriding: Option<u32>,
+    pub slab_length: f64,
+    /// Age (Myr) and kind of the plate's crust at the cell.
+    pub age: f64,
+    pub oceanic: bool,
+    pub continental: bool,
 }
 
 #[cfg(test)]

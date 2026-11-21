@@ -163,6 +163,11 @@ pub struct TectonicParams {
     /// Slab age in Myr at which slab pull reaches [`Self::slab_pull`]; it scales with the square
     /// root of the age, like the thickness of the lithosphere.
     pub slab_pull_reference_age: f64,
+    /// Age (Myr) at which oceanic lithosphere is as dense as the asthenosphere below it: younger
+    /// lithosphere is buoyant (its crust and depleted mantle outweigh the thermal contraction)
+    /// and resists subduction, older lithosphere pulls (~10 Myr, Cloos 1993; 10–30 Myr in other
+    /// estimates, Oxburgh & Parmentier 1977; Afonso et al. 2007).
+    pub neutral_buoyancy_age: f64,
     /// Lithosphere stops thickening after this age in Myr.
     pub slab_pull_max_age: f64,
     /// Plates must separate at least this fast (cm/yr) for a gap between them to become new sea
@@ -179,6 +184,20 @@ pub struct TectonicParams {
     /// Plates must converge at least this fast (cm/yr) for a new trench to act (an existing slab
     /// keeps acting until the plates diverge faster than this).
     pub min_trench_convergence: f64,
+    /// Resistance (N per metre of boundary) of oceanic lithosphere to starting to subduct: the
+    /// plate must be bent and a new thrust fault must break through it before a slab pulls. It
+    /// opposes convergence at trenches without a slab and fades as the slab grows to
+    /// [`Self::self_sustaining_slab_length`]. Initiation needs ~2–4 × 10¹² N/m of compression,
+    /// more than ridge push alone supplies (McKenzie 1977; Mueller & Phillips 1991; Toth &
+    /// Gurnis 1998; Gurnis et al. 2004), so most converging contacts of plates that are not
+    /// forced together stay locked. Zero disables it.
+    pub initiation_resistance: f64,
+    /// Slab length (m) at which subduction sustains itself: the initiation resistance is gone
+    /// (after ~100–150 km of convergence; Gurnis et al. 2004).
+    pub self_sustaining_slab_length: f64,
+    /// Convergence speed (cm/yr) below which a contact resisting subduction initiation is
+    /// locked (the resisting force then falls linearly with the speed).
+    pub locked_convergence: f64,
     /// Slab pull reaches full strength once this much slab (m) has subducted (about the depth
     /// of the upper mantle; Conrad & Lithgow-Bertelloni 2002).
     pub max_slab_length: f64,
@@ -266,12 +285,16 @@ impl Default for TectonicParams {
             planet_radius: 6.371e6,
             slab_pull: 2e13,
             slab_pull_reference_age: 100.0,
+            neutral_buoyancy_age: 10.0,
             slab_pull_max_age: 120.0,
             min_spreading_rate: 0.5,
             min_trench_convergence: 0.1,
             min_stretching_rate: 0.15,
             rift_width: 200e3,
             breakup_thickness: 15e3,
+            initiation_resistance: 3e12,
+            self_sustaining_slab_length: 150e3,
+            locked_convergence: 0.1,
             max_slab_length: 600e3,
             slab_decay_time: 10.0,
             min_slab_length: 20e3,
@@ -334,6 +357,10 @@ impl TectonicParams {
             "basal_drag" => &mut self.basal_drag,
             "continental_drag_factor" => &mut self.continental_drag_factor,
             "collision_resistance" => &mut self.collision_resistance,
+            "initiation_resistance" => &mut self.initiation_resistance,
+            "neutral_buoyancy_age" => &mut self.neutral_buoyancy_age,
+            "self_sustaining_slab_length" => &mut self.self_sustaining_slab_length,
+            "locked_convergence" => &mut self.locked_convergence,
             "collapse_diffusivity" => &mut self.collapse_diffusivity,
             "boundary_coupling_width" => &mut self.boundary_coupling_width,
             "slab_pull" => &mut self.slab_pull,
@@ -534,6 +561,9 @@ pub struct Simulation {
     /// Number of changes of the plate configuration (splits, merges, removals, induced
     /// subduction) so far; boundaries must be reclassified after each.
     configuration_changes: u64,
+    /// Number of velocity solves so far whose collision and subduction resistances did not
+    /// settle within the allowed iterations (see [`Self::update_plate_velocities`]).
+    unsettled_solves: u64,
     /// Area of sea floor opened by diverging plates so far (one flank), in km².
     opened_area: f64,
     /// Area opened so far at diverging boundary cells showing crust of continental origin (half
@@ -710,6 +740,7 @@ impl Simulation {
             matching_scratch: matching::MatchingScratch::default(),
             rng: owned_rng,
             configuration_changes: 0,
+            unsettled_solves: 0,
             opened_area: 0.0,
             continental_opened_area: 0.0,
             collision_inflow: 0.0,
