@@ -41,9 +41,11 @@ pub const SILL_TOLERANCE: f64 = 1e-6;
 pub const MIN_SEA_FRACTION: f64 = 0.002;
 
 /// The seeds of the ocean: the deepest cell of the largest connected body (by cell count) of the
-/// cells with `level < reference`, and of every other body of at least `min_sea_fraction` of
-/// the cells (connected to the ocean by straits narrower than a cell); the lowest cell of all
-/// if there is none.
+/// cells with `level < reference`, and of every other body whose basin, filled to its lowest
+/// pass, covers at least `min_sea_fraction` of the cells
+/// (a sea connected to the ocean by straits narrower than a cell); the lowest cell of all if
+/// there is none. The size at the pass does not depend on the sea level, so a body is a sea or
+/// not whichever reference the solve or a mask uses, as long as some of it is below it.
 fn seeds(mesh: &SphereMesh, level: &[f64], reference: f64, min_sea_fraction: f64) -> Vec<usize> {
     let cell_count = mesh.len();
     let min_cells = min_sea_fraction * cell_count as f64;
@@ -81,15 +83,56 @@ fn seeds(mesh: &SphereMesh, level: &[f64], reference: f64, min_sea_fraction: f64
                 .unwrap_or(0),
         ];
     };
-    bodies
-        .iter()
-        .filter(|&&(size, _)| size == largest || size as f64 >= min_cells)
-        .map(|&(_, deepest)| deepest)
-        .collect()
+    let Some(first) = bodies.iter().position(|&(size, _)| size == largest) else {
+        unreachable!("the largest body is one of them")
+    };
+    let mut seeds = vec![bodies[first].1];
+    if bodies.len() == 1 || min_cells > cell_count as f64 {
+        return seeds;
+    }
+    // Every other body's basin, filled to its lowest pass: grow it from its deepest cell in the
+    // order of the levels (a priority flood) until the flood passes a cell lower than the
+    // water level, i.e. it has crossed the pass, or it is large enough.
+    let mut visited = vec![false; cell_count];
+    let mut touched = Vec::new();
+    let mut heap = BinaryHeap::new();
+    for (index, &(_, deepest)) in bodies.iter().enumerate() {
+        if index == first {
+            continue;
+        }
+        heap.clear();
+        heap.push(Reverse((Ordered(level[deepest]), deepest as u32)));
+        visited[deepest] = true;
+        touched.push(deepest);
+        let (mut water, mut size) = (f64::NEG_INFINITY, 0usize);
+        while let Some(Reverse((Ordered(at), cell))) = heap.pop() {
+            if at < water {
+                break;
+            }
+            water = at;
+            size += 1;
+            if size as f64 >= min_cells {
+                seeds.push(deepest);
+                break;
+            }
+            for &neighbor in mesh.neighbors(cell) {
+                let n = neighbor as usize;
+                if !visited[n] {
+                    visited[n] = true;
+                    touched.push(n);
+                    heap.push(Reverse((Ordered(level[n]), neighbor)));
+                }
+            }
+        }
+        for cell in touched.drain(..) {
+            visited[cell] = false;
+        }
+    }
+    seeds
 }
 
 /// The pass level of every cell: the lowest possible highest `level` on a path of neighbouring
-/// cells from `seed` (Barnes et al., 2014: priority flood). [`sea_level`] floods the same way.
+/// cells from `seeds` (Barnes et al., 2014: priority flood). [`sea_level`] floods the same way.
 #[cfg(test)]
 fn pass_levels(mesh: &SphereMesh, level: &[f64], seeds: &[usize]) -> Vec<f64> {
     let cell_count = mesh.len();
@@ -323,6 +366,9 @@ mod tests {
                     -2000.0
                 } else if z > cap {
                     depression
+                } else if z > cap - 0.02 {
+                    // A rim around the depression, up to 100 m above the plateau.
+                    500.0 + 100.0 * (z - (cap - 0.02)) / 0.02
                 } else {
                     500.0
                 }
@@ -399,6 +445,34 @@ mod tests {
     }
 
     #[test]
+    fn the_size_rule_does_not_depend_on_the_sea_level() {
+        // A basin with a floor sloping from −1800 m to −1200 m: at different sea levels a
+        // different part of it is below sea level, but filled to its rim it covers 2.5% of the
+        // surface, so it is a sea at both.
+        let (mesh, mut dry) = world_with(-1800.0, 0.95);
+        for (cell, d) in dry.iter_mut().enumerate() {
+            if *d == -1800.0 {
+                *d += 600.0 * (1.0 - mesh.vertex(cell as u32).z) / 0.05;
+            }
+        }
+        for reference in [-1700.0, -1300.0] {
+            let below = |d: f64| d < reference;
+            assert!(dry.iter().filter(|&&d| d > -2000.0 && below(d)).count() > 0);
+            let seeds = seeds(&mesh, &dry, reference, MIN_SEA_FRACTION);
+            assert_eq!(seeds.len(), 2, "{reference}");
+            let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - reference)).collect();
+            let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
+            for (cell, &d) in dry.iter().enumerate() {
+                assert_eq!(ocean[cell], d < reference, "{reference} {cell}");
+            }
+        }
+        // A small basin is a lake at any sea level.
+        let (mesh, dry) = world(-1800.0);
+        let seeds = seeds(&mesh, &dry, -1000.0, MIN_SEA_FRACTION);
+        assert_eq!(seeds.len(), 1);
+    }
+
+    #[test]
     fn a_connected_depression_is_ocean() {
         let (mesh, mut dry) = world(-300.0);
         // A channel below sea level from the depression to the ocean along a meridian.
@@ -426,21 +500,27 @@ mod tests {
 
     #[test]
     fn the_sea_stands_at_a_sill_until_the_basin_behind_it_is_full() {
-        // The depression's rim is at 500 m. Water that just reaches the rim floods the basin
-        // behind it at once: in between, the sea stands at the rim and the deficit is the
-        // water that would spill over.
+        // Water that just reaches the depression's rim floods the basin behind it at once: in
+        // between, the sea stands at the rim and the deficit is the water that would spill
+        // over.
         let (mesh, dry) = world(-300.0);
         let area = 1e10;
         let pores = vec![0.0; dry.len()];
+        let passes = pass_levels(&mesh, &dry, &seeds(&mesh, &dry, 0.0, MIN_SEA_FRACTION));
+        let pit = (0..dry.len()).find(|&c| dry[c] == -300.0).unwrap();
+        let rim = passes[pit];
+        assert!(rim > 500.0);
         let at_rim = |extra: f64| {
-            let southern: f64 = dry
-                .iter()
-                .filter(|&&d| d < 500.0)
-                .map(|&d| if d < -1000.0 { 2500.0 } else { 0.0 })
+            let outside: f64 = (0..dry.len())
+                .filter(|&c| passes[c] < rim)
+                .map(|c| rim - dry[c])
                 .sum();
-            (southern + extra) * WATER_LOADING * area
+            (outside + extra) * WATER_LOADING * area
         };
-        let basin = dry.iter().filter(|&&d| d == -300.0).count() as f64 * 800.0;
+        let basin: f64 = (0..dry.len())
+            .filter(|&c| passes[c] == rim && dry[c] < rim)
+            .map(|c| rim - dry[c])
+            .sum();
         let solved = sea_level(
             &mesh,
             &dry,
@@ -449,7 +529,7 @@ mod tests {
             at_rim(0.5 * basin),
             (0.0, MIN_SEA_FRACTION),
         );
-        assert_eq!(solved.level, 500.0);
+        assert_eq!(solved.level, rim);
         let expected = 0.5 * basin * WATER_LOADING * area;
         assert!((solved.deficit / expected - 1.0).abs() < 1e-6, "{solved:?}");
         // The sea spills over the rim: the basin is an arm of the sea holding the deficit, the
@@ -457,7 +537,7 @@ mod tests {
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - solved.level)).collect();
         let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
         for (cell, &d) in dry.iter().enumerate() {
-            assert_eq!(ocean[cell], d < 500.0, "{cell}");
+            assert_eq!(ocean[cell], d < rim, "{cell}");
         }
         // Once the basin is full, it is ocean.
         let solved = sea_level(
@@ -468,7 +548,7 @@ mod tests {
             at_rim(1.5 * basin),
             (0.0, MIN_SEA_FRACTION),
         );
-        assert!(solved.level > 500.0 && solved.deficit == 0.0, "{solved:?}");
+        assert!(solved.level > rim && solved.deficit == 0.0, "{solved:?}");
     }
 
     #[test]
