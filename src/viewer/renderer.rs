@@ -1,4 +1,5 @@
-//! GPU resources and the egui paint callback that draws the planet with wgpu.
+//! GPU resources and the egui paint callback that draws the planet with wgpu, and the outline
+//! of the cell under the pointer on top of it.
 
 use std::sync::Arc;
 
@@ -24,13 +25,38 @@ pub struct Vertex {
 pub struct Uniforms {
     pub view_projection: [[f32; 4]; 4],
     pub light_direction: [f32; 4],
+    /// Size of the view in physical pixels (`x`, `y`; `z` and `w` unused), for lines of a
+    /// fixed width.
+    pub viewport: [f32; 4],
 }
+
+/// A straight piece of a line drawn over the planet with a constant width in pixels (see
+/// `outline.wgsl`). It is depth-tested against the planet, but does not write depth.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct LineSegment {
+    pub start: [f32; 3],
+    /// Width in physical pixels.
+    pub width: f32,
+    pub end: [f32; 3],
+    pub _padding: f32,
+    /// Colour with alpha (opaque colours only; the line is not blended).
+    pub color: [f32; 4],
+}
+
+/// The most line segments drawn in one frame.
+pub const MAX_LINE_SEGMENTS: usize = 64;
 
 /// GPU resources, stored in egui's callback resources.
 struct PlanetResources {
     pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    line_pipeline: wgpu::RenderPipeline,
+    /// Room for [`MAX_LINE_SEGMENTS`] segments.
+    line_buffer: wgpu::Buffer,
+    /// The number of segments in `line_buffer` for this frame.
+    line_count: u32,
     /// The mesh of the running simulation, once its first surface arrived.
     mesh: Option<MeshBuffers>,
 }
@@ -139,6 +165,19 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
         cache: None,
     });
 
+    let line_pipeline = line_pipeline(
+        device,
+        &pipeline_layout,
+        render_state.target_format,
+        msaa_samples,
+    );
+    let line_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("planet lines"),
+        size: (MAX_LINE_SEGMENTS * std::mem::size_of::<LineSegment>()) as wgpu::BufferAddress,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
     let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet uniforms"),
         size: std::mem::size_of::<Uniforms>() as wgpu::BufferAddress,
@@ -161,8 +200,64 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
             pipeline,
             uniform_buffer,
             bind_group,
+            line_pipeline,
+            line_buffer,
+            line_count: 0,
             mesh: None,
         });
+}
+
+/// The pipeline of [`LineSegment`]s: one instance per segment, drawn as a quad of six vertices
+/// that the vertex shader widens in screen space.
+fn line_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    target_format: wgpu::TextureFormat,
+    msaa_samples: u32,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("outline.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("planet lines"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<LineSegment>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3, 1 => Float32, 2 => Float32x3, 3 => Float32, 4 => Float32x4
+                ],
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        // Hidden behind the planet (mountains in front of the cell), but drawn over each other
+        // in order: the dark border first, the light line on top.
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: msaa_samples,
+            ..Default::default()
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(target_format.into())],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// The latest surface to draw. It is passed with every frame, and the renderer uploads only
@@ -181,6 +276,8 @@ pub struct Surface {
 pub struct PlanetCallback {
     pub uniforms: Uniforms,
     pub surface: Option<Surface>,
+    /// Lines to draw over the planet, at most [`MAX_LINE_SEGMENTS`] (the rest are dropped).
+    pub lines: Vec<LineSegment>,
 }
 
 impl egui_wgpu::CallbackTrait for PlanetCallback {
@@ -200,6 +297,11 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
             0,
             bytemuck::bytes_of(&self.uniforms),
         );
+        let lines = &self.lines[..self.lines.len().min(MAX_LINE_SEGMENTS)];
+        if !lines.is_empty() {
+            queue.write_buffer(&resources.line_buffer, 0, bytemuck::cast_slice(lines));
+        }
+        resources.line_count = lines.len() as u32;
         let Some(surface) = &self.surface else {
             return Vec::new();
         };
@@ -248,5 +350,10 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
         render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+        if resources.line_count > 0 {
+            render_pass.set_pipeline(&resources.line_pipeline);
+            render_pass.set_vertex_buffer(0, resources.line_buffer.slice(..));
+            render_pass.draw(0..6, 0..resources.line_count);
+        }
     }
 }

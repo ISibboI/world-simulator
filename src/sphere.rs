@@ -86,6 +86,14 @@ impl SphereMesh {
             faces = new_faces;
         }
 
+        Self::from_faces(vertices, faces, subdivisions)
+    }
+
+    /// Creates a mesh from its unit-length vertex positions and its triangles, wound
+    /// counter-clockwise when seen from outside, e.g. a copy of an icosphere's in the 3D view.
+    /// The first twelve vertices should be spread over the sphere (as the icosahedron corners
+    /// are) for [`SphereMesh::nearest`] to be fast.
+    pub fn from_faces(vertices: Vec<DVec3>, faces: Vec<[u32; 3]>, subdivisions: u32) -> Self {
         let mut neighbors: Vec<Vec<u32>> = vec![Vec::with_capacity(6); vertices.len()];
         for &[a, b, c] in &faces {
             for (from, to) in [(a, b), (b, c), (c, a), (b, a), (c, b), (a, c)] {
@@ -168,7 +176,7 @@ impl SphereMesh {
 
     /// Finds the vertex closest to `target` (a unit vector) without a starting hint.
     pub fn nearest(&self, target: DVec3) -> u32 {
-        let start = (0..ICOSAHEDRON_VERTEX_COUNT)
+        let start = (0..ICOSAHEDRON_VERTEX_COUNT.min(self.len() as u32))
             .max_by(|&a, &b| {
                 let a = self.vertices[a as usize].dot(target);
                 let b = self.vertices[b as usize].dot(target);
