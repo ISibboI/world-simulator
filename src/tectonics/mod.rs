@@ -510,7 +510,7 @@ pub struct MaterialBudget {
 
 /// Changes of the sea level (m, as an offset of dry elevations) so far per process. Each term is
 /// the difference between two exact solves of the sea level (see
-/// [`crate::isostasy::sea_level_for_volume_with_pores`]).
+/// [`crate::isostasy::sea_level_for_volume_with_passes`]).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SeaLevelBudget {
     /// Plate tectonics: motion, ageing and subsidence of the sea floor, subduction, accretion,
@@ -527,6 +527,8 @@ pub struct SeaLevelBudget {
     pub metamorphism: f64,
     /// Changes of the dynamic topography (ocean basins deepen or shallow with the mantle flow).
     pub mantle: f64,
+    /// Water held in lakes, which the ocean lacks (see [`Simulation::set_lake_water`]).
+    pub lakes: f64,
 }
 
 impl SeaLevelBudget {
@@ -537,6 +539,7 @@ impl SeaLevelBudget {
             + self.sharing
             + self.metamorphism
             + self.mantle
+            + self.lakes
     }
 }
 
@@ -619,6 +622,8 @@ pub struct Simulation {
     /// Sea level as an offset of dry elevations (m) relative to the datum of the isostasy, set
     /// so that the ocean holds [`TectonicParams::ocean_volume`].
     sea_level: f64,
+    /// Water held in lakes (m³, see [`Simulation::set_lake_water`]).
+    lake_water: f64,
     /// The sea level after the initial setup (m).
     initial_sea_level: f64,
     /// Changes of the sea level so far (m) per process.
@@ -787,6 +792,7 @@ impl Simulation {
             metamorphosed: (0.0, 0.0),
             material_budget: MaterialBudget::default(),
             sea_level: 0.0,
+            lake_water: 0.0,
             initial_sea_level: 0.0,
             sea_level_budget: SeaLevelBudget::default(),
             time: 0.0,
@@ -1015,9 +1021,22 @@ impl Simulation {
         ledger::plates_mass(&self.plates)
     }
 
-    /// Volume of the ocean in m³ (see [`TectonicParams::ocean_volume`]).
+    /// Volume of the ocean in m³: the water of the planet (see
+    /// [`TectonicParams::ocean_volume`]) less the water in lakes (see
+    /// [`Simulation::set_lake_water`]).
     pub fn ocean_volume(&self) -> f64 {
-        self.params.ocean_volume
+        self.params.ocean_volume - self.lake_water
+    }
+
+    /// Sets the water held in lakes (m³), which the ocean lacks: closed depressions, also those
+    /// below sea level that the ocean does not reach (see [`crate::sea`]), hold lakes fed by
+    /// their rivers, and their water is taken from the ocean, so that the planet's water is
+    /// conserved. The sea level is solved again.
+    pub fn set_lake_water(&mut self, volume: f64) {
+        self.lake_water = volume.clamp(0.0, self.params.ocean_volume);
+        let sea_level = self.solve_sea_level();
+        self.sea_level_budget.lakes += sea_level - self.sea_level;
+        self.sea_level = sea_level;
     }
 
     /// The active mantle plumes.
@@ -1100,12 +1119,15 @@ impl Simulation {
             .unzip();
         let cell_area =
             4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
-        let without = crate::isostasy::sea_level_for_volume_with_pores(
+        let without = crate::sea::sea_level(
+            &self.mesh,
             &dry,
             &pores,
             cell_area,
-            self.params.ocean_volume,
-        );
+            self.ocean_volume(),
+            self.sea_level,
+        )
+        .level;
         self.sea_level - without
     }
 
@@ -1143,8 +1165,25 @@ impl Simulation {
     }
 
     /// The sea level at which the ocean holds [`TectonicParams::ocean_volume`], of which the
-    /// pores of submerged sediment hold a part.
+    /// pores of submerged sediment hold a part. Only the water connected to the world ocean
+    /// counts (see [`crate::sea`]).
     fn solve_sea_level(&self) -> f64 {
+        self.solve_sea_level_with_deficit().level
+    }
+
+    /// The part of [`TectonicParams::ocean_volume`] (m³) that the ocean does not hold because
+    /// the sea level stands at a pass into a basin it cannot fill (see
+    /// [`crate::isostasy::sea_level_for_volume_with_passes`]); zero otherwise.
+    pub fn sea_level_deficit(&self) -> f64 {
+        self.solve_sea_level_with_deficit().deficit
+    }
+
+    /// The ocean: the cells below sea level connected to the world ocean (see [`crate::sea`]).
+    pub fn ocean_mask(&self) -> Vec<bool> {
+        crate::sea::ocean_mask(&self.mesh, &self.surface_elevations())
+    }
+
+    fn solve_sea_level_with_deficit(&self) -> crate::isostasy::SeaLevel {
         let (dry, sediment): (Vec<f64>, Vec<f64>) = (0..self.mesh.len() as u32)
             .map(|cell| {
                 let crust = self.surface_crust(cell);
@@ -1157,11 +1196,13 @@ impl Simulation {
             .iter()
             .map(|&s| crate::isostasy::sediment_pores(s))
             .collect();
-        crate::isostasy::sea_level_for_volume_with_pores(
+        crate::sea::sea_level(
+            &self.mesh,
             &dry,
             &pores,
             cell_area,
-            self.params.ocean_volume,
+            self.ocean_volume(),
+            self.sea_level,
         )
     }
 
@@ -1435,17 +1476,27 @@ mod tests {
         let cell_area = 4.0 * std::f64::consts::PI * simulation.params.planet_radius.powi(2)
             / simulation.mesh.len() as f64;
         let check = |simulation: &Simulation| {
-            // Open water plus the pore water of submerged sediment.
+            // Open water plus the pore water of submerged sediment, over the ocean only (not
+            // over closed depressions below sea level).
+            let ocean = simulation.ocean_mask();
             let pores: f64 = (0..simulation.mesh.len() as u32)
-                .filter(|&cell| simulation.surface_elevation(cell) < 0.0)
+                .filter(|&cell| ocean[cell as usize])
                 .map(|cell| {
                     crate::isostasy::sediment_pores(simulation.surface_crust(cell).sediment)
                 })
                 .sum::<f64>()
                 * cell_area;
-            let volume =
-                crate::isostasy::ocean_volume(&simulation.surface_elevations(), cell_area) + pores;
-            let target = simulation.params.ocean_volume;
+            let elevations: Vec<f64> = simulation
+                .surface_elevations()
+                .iter()
+                .zip(&ocean)
+                .map(|(&e, &o)| if o { e } else { 0.0 })
+                .collect();
+            // The water that would spill over a pass into a basin the ocean cannot fill.
+            let volume = crate::isostasy::ocean_volume(&elevations, cell_area)
+                + pores
+                + simulation.sea_level_deficit();
+            let target = simulation.ocean_volume();
             // When the volume falls into the pores of a cell right at sea level, the sea level
             // stays at that cell (the pores fill at once): allow the pores of shoreline cells.
             let shoreline_pores = (0..simulation.mesh.len() as u32)

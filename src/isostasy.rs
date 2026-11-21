@@ -216,65 +216,102 @@ pub fn sea_level_for_volume(dry_elevations: &[f64], cell_area: f64, volume: f64)
     )
 }
 
-/// The sea level (as an offset of dry elevations, m) at which the ocean holds `volume` (m³) of
-/// water, for cells of equal `cell_area` (m²) with the given dry elevations (m, relative to the
-/// same datum), where each submerged cell also holds `pores` (m of water, e.g. sediment
-/// thickness times porosity) in its sediment. The water depth over a cell with dry elevation `d`
-/// below sea level `S` is `(S − d) · ρm / (ρm − ρw)` (the water load depresses the floor), so the
-/// volume is piecewise linear and increasing in `S`, with a jump where a cell's pores fill; it
-/// is solved exactly. If the volume falls into such a jump, the sea level is that cell's dry
-/// elevation (its pores partly filled). A volume of zero gives the lowest dry elevation; a
-/// volume beyond all cells floods the planet.
+/// [`sea_level_for_volume_with_passes`] where every cell joins the ocean once the sea level
+/// rises above its own dry elevation (all water below sea level is ocean).
+#[cfg(test)]
 pub fn sea_level_for_volume_with_pores(
     dry_elevations: &[f64],
     pores: &[f64],
     cell_area: f64,
     volume: f64,
 ) -> f64 {
-    let mut cells: Vec<(f64, f64)> = dry_elevations
+    sea_level_for_volume_with_passes(dry_elevations, dry_elevations, pores, cell_area, volume).level
+}
+
+/// A solved sea level.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SeaLevel {
+    /// The sea level (an offset of dry elevations, m).
+    pub level: f64,
+    /// The part of the volume (m³) that the ocean does not hold at this level: non-zero only
+    /// when the level stands at a pass (or at a cell whose pores fill) and the volume would
+    /// spill over it into a basin it cannot fill (see [`sea_level_for_volume_with_passes`]).
+    pub deficit: f64,
+}
+
+/// The sea level (as an offset of dry elevations, m) at which the ocean holds `volume` (m³) of
+/// water, for cells of equal `cell_area` (m²) with the given dry elevations (m, relative to the
+/// same datum), where each submerged cell also holds `pores` (m of water, e.g. sediment
+/// thickness times porosity) in its sediment. A cell belongs to the ocean once the sea level
+/// is above its pass level `passes` (m, dry, at least its dry elevation): the level at which
+/// the ocean reaches it (see [`crate::sea`]); with the passes equal to the dry elevations all
+/// water below sea level is ocean.
+///
+/// The water depth over an ocean cell with dry elevation `d` below sea level `S` is
+/// `(S − d) · ρm / (ρm − ρw)` (the water load depresses the floor), so the volume is piecewise
+/// linear and increasing in `S`, with a jump where a cell joins below its pass (a basin behind
+/// a sill joins at once, filled to the sill) or its pores fill; it is solved exactly. If the
+/// volume falls into such a jump, the sea level is that pass: the sea stands at the sill, and
+/// the water that would spill into the basin is not represented (the returned deficit). A
+/// volume of zero gives the lowest pass; a volume beyond all cells floods the planet.
+pub fn sea_level_for_volume_with_passes(
+    dry_elevations: &[f64],
+    passes: &[f64],
+    pores: &[f64],
+    cell_area: f64,
+    volume: f64,
+) -> SeaLevel {
+    let mut cells: Vec<(f64, f64, f64)> = passes
         .iter()
-        .copied()
-        .zip(pores.iter().copied())
+        .zip(dry_elevations)
+        .zip(pores)
+        .map(|((&pass, &dry), &pore)| (pass, dry, pore))
         .collect();
     cells.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    let Some(&(lowest, _)) = cells.first() else {
-        return 0.0;
+    let Some(&(lowest, ..)) = cells.first() else {
+        return SeaLevel {
+            level: 0.0,
+            deficit: 0.0,
+        };
     };
-    // Σ over submerged cells of (S − dᵢ) + pᵢ / W that holds the volume.
+    // Σ over ocean cells of (S − dᵢ) + pᵢ / W that holds the volume.
     let target = volume / (cell_area * WATER_LOADING);
     if target <= 0.0 {
-        return lowest;
+        return SeaLevel {
+            level: lowest,
+            deficit: 0.0,
+        };
     }
     let (mut prefix, mut pore_prefix) = (0.0, 0.0);
+    // The cells with a lower pass than the current one: their count and sums.
+    let mut lower = (0, 0.0, 0.0);
     for k in 1..=cells.len() {
-        let (dry, pore) = cells[k - 1];
+        let (pass, dry, pore) = cells[k - 1];
+        if k == 1 || cells[k - 2].0 < pass {
+            lower = (k - 1, prefix, pore_prefix);
+        }
         prefix += dry;
         pore_prefix += pore / WATER_LOADING;
-        // With the k lowest cells below sea level: k S − Σ dᵢ + Σ pᵢ / W = target.
+        // With the k lowest cells in the ocean: k S − Σ dᵢ + Σ pᵢ / W = target.
         let level = (target + prefix - pore_prefix) / k as f64;
-        if level < dry {
-            // The volume runs out while the pores of cell k fill.
-            return dry;
+        if level < pass {
+            // The volume runs out while cell k joins (its basin below the pass, or its pores):
+            // the cells with a lower pass hold their share, the rest is the deficit.
+            let (count, dry_sum, pore_sum) = lower;
+            let held = count as f64 * pass - dry_sum + pore_sum;
+            return SeaLevel {
+                level: pass,
+                deficit: ((target - held) * cell_area * WATER_LOADING).max(0.0),
+            };
         }
         if k == cells.len() || level <= cells[k].0 {
-            return level;
+            return SeaLevel {
+                level,
+                deficit: 0.0,
+            };
         }
     }
     unreachable!("the loop returns at the last cell")
-}
-
-/// The sea level (as an offset of dry elevations, m) at which the ocean holds `volume` (m³),
-/// relative to the sea level that the surface `elevations` (m) refer to, for cells of equal
-/// `cell_area` (m²) carrying the given rock-equivalent `sediment` (m), whose pores hold water.
-pub fn relative_sea_level(
-    elevations: &[f64],
-    sediment: &[f64],
-    cell_area: f64,
-    volume: f64,
-) -> f64 {
-    let dry: Vec<f64> = elevations.iter().map(|&e| to_dry(e)).collect();
-    let pores: Vec<f64> = sediment.iter().map(|&s| sediment_pores(s)).collect();
-    sea_level_for_volume_with_pores(&dry, &pores, cell_area, volume)
 }
 
 /// Volume (m³) of the ocean over cells of equal `cell_area` with the given surface elevations
