@@ -157,8 +157,10 @@ pub struct SegmentStatistics {
     /// before the first velocity solve saw them).
     pub localisations: usize,
     pub transient_stacked: f64,
-    /// Crust and sediment mass (kg/m² summed over cells) subducted at diffuse segments that the
-    /// last velocity solve did not see converging (see `Simulation::resolve_ownership`).
+    /// Crust and sediment mass (kg/m² summed over cells) subducted at segments without a thrust
+    /// because the zone does not converge by the last velocity solve: slow or oblique zones,
+    /// resampling noise along transforms, segments not yet seen by a solve (see
+    /// `Simulation::resolve_ownership`).
     pub diffuse_subducted: f64,
 }
 

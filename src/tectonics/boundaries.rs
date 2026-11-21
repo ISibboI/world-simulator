@@ -285,9 +285,10 @@ impl Simulation {
             // is taken up by distributed shortening, which thickens the crust of the zone
             // (Central Indian Basin). Nothing goes into the mantle, and there is no arc.
             // This holds for all crust overlapped there, whichever side it comes from, where the
-            // zone converges by the last velocity solve (see `polarity::Segment::subducting`). Overlaps where it does not (resampling
-            // noise along transforms, or a segment the solve has not seen yet) are handled as
-            // everywhere else.
+            // zone converges by the last velocity solve (see `polarity::Segment::subducting`).
+            // Overlaps where it does not (slow or oblique zones, resampling noise along
+            // transforms, a segment the solve has not seen yet) are handled as everywhere else;
+            // stacking them thickened oceanic crust to 40–60 km in a first version.
             let diffuse = !loser_crust.resists_subduction()
                 && !overridden_upper_plate
                 && polarities
@@ -2056,6 +2057,10 @@ mod tests {
     #[test]
     fn diffuse_zones_shorten_instead_of_subducting() {
         let mut simulation = oceanic_plates_converging(false);
+        // Sediment on the lower plate moves along as sediment.
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            crust.sediment = 200.0;
+        }
         // The first overlaps create the segments (the contact spreads along the boundary), still
         // unseen by a velocity solve.
         for _ in 0..20 {
@@ -2085,6 +2090,18 @@ mod tests {
             "{subducted} {shortened}"
         );
         assert!(ledger.arcs - before.arcs <= 0.1 * shortened.abs());
+        let upper_sediment: f64 = simulation.plates[1]
+            .crust
+            .iter()
+            .flatten()
+            .map(|crust| crust.sediment)
+            .sum();
+        assert!(upper_sediment > 0.0);
+        let subducted_sediment = ledger.subducted_sediment - before.subducted_sediment;
+        assert!(
+            subducted_sediment.abs() < 0.1 * shortened.abs(),
+            "{subducted_sediment}"
+        );
         let lost = ledger.additions_lost.abs();
         assert!(
             (ledger.shortening_stacked + ledger.shortening_consumed).abs() <= lost + 1e-6,
