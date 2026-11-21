@@ -9,6 +9,13 @@ plausibility for an Earth-like planet: real physical processes, conservation, an
 plausible ranges. Earth's present-day numbers (including those in the archived notes) are
 orientation and plausibility checks, not exact targets to match.
 
+Physical inaccuracies caused by the coarse grid (by default an icosphere with 6 subdivisions,
+~41k cells about 110 km apart; 5 subdivisions and ~220 km on the web) are accepted, even when
+they are atypical for an Earth-like planet or any planet at all. Don't spend effort fixing
+sub-grid effects, e.g. transform-fault offsets shorter than a cell (why self-orienting ridges
+were declared out of scope on #43). Do explain such artefacts where relevant: in notes, PR
+descriptions and answers on issues.
+
 ## Issue and progress tracking
 
 Issues are tracked on **GitHub** (https://github.com/ISibboI/world-simulator/issues); new
