@@ -1492,11 +1492,18 @@ mod tests {
                 .zip(&ocean)
                 .map(|(&e, &o)| if o { e } else { 0.0 })
                 .collect();
-            // The water that would spill over a pass into a basin the ocean cannot fill.
-            let volume = crate::isostasy::ocean_volume(&elevations, cell_area)
-                + pores
-                + simulation.sea_level_deficit();
+            let volume = crate::isostasy::ocean_volume(&elevations, cell_area) + pores;
             let target = simulation.ocean_volume();
+            let deficit = simulation.sea_level_deficit();
+            if deficit > 0.0 {
+                // The sea level stands on a sill (or a cell whose pores fill) and spills into a
+                // basin it cannot fill: the basin counts as ocean, but holds only the deficit.
+                assert!(
+                    volume + deficit >= target * (1.0 - 1e-9),
+                    "{volume} vs {target}"
+                );
+                return;
+            }
             // When the volume falls into the pores of a cell right at sea level, the sea level
             // stays at that cell (the pores fill at once): allow the pores of shoreline cells.
             let shoreline_pores = (0..simulation.mesh.len() as u32)

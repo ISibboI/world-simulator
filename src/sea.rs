@@ -22,10 +22,14 @@ use std::collections::{BinaryHeap, VecDeque};
 use crate::isostasy::{self, SeaLevel};
 use crate::sphere::SphereMesh;
 
-/// A cell whose surface is less than this far (m) below sea level does not connect the ocean:
-/// a sill on which the solve left the sea level standing (exactly at the pass, see
-/// [`isostasy::sea_level_for_volume_with_passes`]) is not ocean, whatever the rounding of the
-/// elevations relative to it, as in the solve, which does not count the basin behind it.
+/// Cells whose surface lies within this distance (m) of sea level are sills on which the sea
+/// level stands: they connect the ocean to the basin behind them (whatever the rounding of the
+/// elevations relative to the sea level), but are not ocean themselves.
+///
+/// The sea level stands exactly on a pass when the ocean volume does not suffice to fill the
+/// basin behind it (see [`isostasy::sea_level_for_volume_with_passes`]): the sea spills over
+/// the sill into the basin, which holds the water the solve could not place (its deficit), and
+/// the basin is an arm of the sea fed over its sill, like the Mediterranean, not a lake.
 pub const SILL_TOLERANCE: f64 = 1e-6;
 
 /// The seed of the ocean: the deepest cell of the largest connected body (by cell count) of the
@@ -75,25 +79,23 @@ fn seed(mesh: &SphereMesh, level: &[f64], reference: f64) -> usize {
 fn pass_levels(mesh: &SphereMesh, level: &[f64], seed: usize) -> Vec<f64> {
     let cell_count = mesh.len();
     let mut pass = vec![f64::INFINITY; cell_count];
-    let mut done = vec![false; cell_count];
+    let mut reached = vec![false; cell_count];
     let mut heap = BinaryHeap::new();
     if cell_count == 0 {
         return pass;
     }
+    // Cells leave the queue in the order of their pass levels, so the first path to reach a
+    // cell is the lowest one.
     pass[seed] = level[seed];
+    reached[seed] = true;
     heap.push(Reverse((Ordered(level[seed]), seed as u32)));
     while let Some(Reverse((Ordered(at), cell))) = heap.pop() {
-        let cell = cell as usize;
-        if done[cell] {
-            continue;
-        }
-        done[cell] = true;
-        for &neighbor in mesh.neighbors(cell as u32) {
+        for &neighbor in mesh.neighbors(cell) {
             let n = neighbor as usize;
-            let through = level[n].max(at);
-            if !done[n] && through < pass[n] {
-                pass[n] = through;
-                heap.push(Reverse((Ordered(through), neighbor)));
+            if !reached[n] {
+                reached[n] = true;
+                pass[n] = level[n].max(at);
+                heap.push(Reverse((Ordered(pass[n]), neighbor)));
             }
         }
     }
@@ -101,38 +103,43 @@ fn pass_levels(mesh: &SphereMesh, level: &[f64], seed: usize) -> Vec<f64> {
 }
 
 /// The ocean among cells with the given surface elevations relative to sea level (m): the cells
-/// below sea level connected to the largest body of water below sea level.
+/// below sea level connected to the largest body of water below sea level, also over sills on
+/// which the sea level stands (see [`SILL_TOLERANCE`]).
 pub fn ocean_mask(mesh: &SphereMesh, elevation: &[f64]) -> Vec<bool> {
     let seed = seed(mesh, elevation, -SILL_TOLERANCE);
     ocean_from(mesh, elevation, std::iter::once(seed))
 }
 
 /// The cells below sea level (`elevation < 0`, less [`SILL_TOLERANCE`]) connected to the
-/// `seeds` (which are part of the ocean if they are below sea level).
+/// `seeds` through cells below sea level or sills at sea level.
 pub fn ocean_from(
     mesh: &SphereMesh,
     elevation: &[f64],
     seeds: impl IntoIterator<Item = usize>,
 ) -> Vec<bool> {
-    let below = |cell: usize| elevation[cell] < -SILL_TOLERANCE;
-    let mut ocean = vec![false; mesh.len()];
+    let passable = |cell: usize| elevation[cell] < SILL_TOLERANCE;
+    let mut reached = vec![false; mesh.len()];
     let mut queue = VecDeque::new();
     for seed in seeds {
-        if below(seed) && !ocean[seed] {
-            ocean[seed] = true;
+        if passable(seed) && !reached[seed] {
+            reached[seed] = true;
             queue.push_back(seed);
         }
     }
     while let Some(cell) = queue.pop_front() {
         for &neighbor in mesh.neighbors(cell as u32) {
             let n = neighbor as usize;
-            if !ocean[n] && below(n) {
-                ocean[n] = true;
+            if !reached[n] && passable(n) {
+                reached[n] = true;
                 queue.push_back(n);
             }
         }
     }
-    ocean
+    reached
+        .iter()
+        .zip(elevation)
+        .map(|(&reached, &e)| reached && e < -SILL_TOLERANCE)
+        .collect()
 }
 
 /// The sea level (an offset of dry elevations, m) at which the ocean holds `volume` (m³), for
@@ -302,10 +309,13 @@ mod tests {
         assert_eq!(solved.level, 500.0);
         let expected = 0.5 * basin * WATER_LOADING * area;
         assert!((solved.deficit / expected - 1.0).abs() < 1e-6, "{solved:?}");
-        // The rim is not ocean at that level, whatever the rounding.
+        // The sea spills over the rim: the basin is an arm of the sea holding the deficit, the
+        // rim (at sea level) is not ocean.
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - solved.level)).collect();
         let ocean = ocean_mask(&mesh, &elevation);
-        assert!(!ocean.iter().zip(&dry).any(|(&o, &d)| o && d >= -1000.0));
+        for (cell, &d) in dry.iter().enumerate() {
+            assert_eq!(ocean[cell], d < 500.0, "{cell}");
+        }
         // Once the basin is full, it is ocean.
         let solved = sea_level(&mesh, &dry, &pores, area, at_rim(1.5 * basin), 0.0);
         assert!(solved.level > 500.0 && solved.deficit == 0.0, "{solved:?}");
