@@ -204,6 +204,15 @@ pub struct TectonicParams {
     /// Convergence speed (cm/yr) below which a contact resisting subduction initiation is
     /// locked (the resisting force then falls linearly with the speed).
     pub locked_convergence: f64,
+    /// Convergence speed (cm/yr) at which a diffuse convergent zone (no through-going thrust
+    /// yet) reaches the strength [`Self::initiation_resistance`]. Below the strength, the zone creeps by distributed
+    /// shortening at a speed proportional to the force; at the strength it yields, localises on
+    /// a thrust and starts to subduct. Earth's diffuse oceanic convergent zones shorten at
+    /// 0.25–0.6 cm/yr (Central Indian Basin: Bull & Scrutton 1992; Gordon et al. 1998), and
+    /// three quarters of the length of PB2002's oceanic convergent boundaries without subduction
+    /// converge slower than 1.4 cm/yr (Bird 2003): strain rates of ~10⁻¹⁶–10⁻¹⁵ s⁻¹ over a few
+    /// hundred km.
+    pub diffuse_convergence: f64,
     /// Slab pull reaches full strength once this much slab (m) has subducted (about the depth
     /// of the upper mantle; Conrad & Lithgow-Bertelloni 2002).
     pub max_slab_length: f64,
@@ -302,6 +311,7 @@ impl Default for TectonicParams {
             initiation_resistance: 3e12,
             self_sustaining_slab_length: 150e3,
             locked_convergence: 0.1,
+            diffuse_convergence: 1.0,
             max_slab_length: 600e3,
             slab_decay_time: 10.0,
             min_slab_length: 20e3,
@@ -370,6 +380,7 @@ impl TectonicParams {
             "locked_convergence" => &mut self.locked_convergence,
             "min_trench_convergence" => &mut self.min_trench_convergence,
             "min_trench_obliquity" => &mut self.min_trench_obliquity,
+            "diffuse_convergence" => &mut self.diffuse_convergence,
             "collapse_diffusivity" => &mut self.collapse_diffusivity,
             "boundary_coupling_width" => &mut self.boundary_coupling_width,
             "slab_pull" => &mut self.slab_pull,
@@ -396,6 +407,7 @@ impl TectonicParams {
             "events.fracture_zone_initiation" => &mut self.events.fracture_zone_initiation,
             "events.weak_zone_splits" => &mut self.events.weak_zone_splits,
             "events.invasion_waiting_time" => &mut self.events.invasion_waiting_time,
+            "events.initiation_displacement" => &mut self.events.initiation_displacement,
             "events.invasion_reach" => &mut self.events.invasion_reach,
             "events.initiation_full_age" => &mut self.events.initiation_full_age,
             "events.initiation_waiting_time" => &mut self.events.initiation_waiting_time,

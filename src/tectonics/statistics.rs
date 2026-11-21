@@ -128,6 +128,18 @@ pub struct Statistics {
     pub unsettled_solves: u64,
     pub incipient_convergence: f64,
     pub mature_convergence: f64,
+    /// Length (km) of the converging lower side of diffuse convergent zones (distributed
+    /// shortening, no trench), and the mean convergence there (cm/yr).
+    pub diffuse_length: f64,
+    pub diffuse_convergence: f64,
+    /// Segments whose thrust is self-sustaining (displacement ≥
+    /// [`TectonicParams::self_sustaining_slab_length`]) while their slab is shorter (after
+    /// break-off, decay or inheritance along strike).
+    pub weak_thrust_segments: usize,
+    /// Diffuse segments that have shortened, with their mean and largest shortening (km).
+    pub shortened_segments: usize,
+    pub mean_shortening: f64,
+    pub max_shortening: f64,
     /// Segment events so far.
     pub segment_events: super::polarity::SegmentStatistics,
     /// Area fraction of the oceanic crust per 20 Myr age bin (the last bin is ≥ 200 Myr).
@@ -330,6 +342,7 @@ impl Simulation {
                         super::dynamics::BoundaryKind::Trench { .. } => 't',
                         super::dynamics::BoundaryKind::Ridge => 'r',
                         super::dynamics::BoundaryKind::Collision => 'c',
+                        super::dynamics::BoundaryKind::Diffuse => 'd',
                         super::dynamics::BoundaryKind::Other => 'o',
                     },
                     convergence: relative.dot(normal) * speed,
@@ -469,6 +482,8 @@ impl Simulation {
         let (mut trench_cells, mut trench_slab) = (0usize, 0.0);
         // Cells and summed convergence (rad/Myr) of incipient and mature trenches.
         let mut by_stage = [(0usize, 0.0); 2];
+        // Cells and summed convergence (rad/Myr) of diffuse zones.
+        let mut diffuse = (0usize, 0.0);
         let mut accretionary_trench_length = 0.0;
         let (mut collision_length, mut collision_converging, mut collision_diverging) =
             (0.0, 0.0, 0.0);
@@ -494,6 +509,10 @@ impl Simulation {
                         accretionary_trench_length += boundary_length;
                     }
                 }
+                super::dynamics::BoundaryKind::Diffuse => {
+                    diffuse.0 += 1;
+                    diffuse.1 += boundary.convergence;
+                }
                 super::dynamics::BoundaryKind::Ridge => {
                     ridge_flank_length += boundary_length;
                     ridge_push += force;
@@ -509,6 +528,12 @@ impl Simulation {
                 _ => {}
             }
         }
+        let shortenings: Vec<f64> = self
+            .polarities
+            .segments()
+            .filter(|segment| !segment.localised && segment.shortening > 0.0)
+            .map(|segment| segment.shortening)
+            .collect();
         let slabs: Vec<f64> = self
             .polarities
             .segments()
@@ -690,6 +715,26 @@ impl Simulation {
                 * self.params.planet_radius
                 * 100.0
                 / 1e6,
+            weak_thrust_segments: self
+                .polarities
+                .segments()
+                .filter(|segment| {
+                    let shallow = self.params.self_sustaining_slab_length;
+                    segment.localised
+                        && segment.displacement >= shallow
+                        && segment.slab_length < shallow
+                })
+                .count(),
+            shortened_segments: shortenings.len(),
+            mean_shortening: shortenings.iter().sum::<f64>()
+                / shortenings.len().max(1) as f64
+                / 1000.0,
+            max_shortening: shortenings.iter().copied().fold(0.0, f64::max) / 1000.0,
+            diffuse_length: diffuse.0 as f64 * boundary_length,
+            diffuse_convergence: diffuse.1 / diffuse.0.max(1) as f64
+                * self.params.planet_radius
+                * 100.0
+                / 1e6,
             segment_events: self.polarities.statistics.clone(),
             age_histogram,
             speed_p99,
@@ -755,7 +800,8 @@ pub struct BoundaryRecord {
     pub cell: u32,
     pub plate: u32,
     pub other: u32,
-    /// `t` where the plate subducts, `r` at a ridge flank, `c` at a collision, `o` otherwise
+    /// `t` where the plate subducts, `r` at a ridge flank, `c` at a collision, `d` where it is
+    /// the lower plate of a converging diffuse zone (distributed shortening), `o` otherwise
     /// (including the overriding side of a trench).
     pub kind: char,
     /// Relative speed (cm/yr) of the plate towards the other plate across the boundary

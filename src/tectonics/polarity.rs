@@ -31,6 +31,25 @@ pub(super) struct Segment {
     pub(super) overriding: u32,
     /// Length of slab (m) that has subducted below the overriding plate here.
     pub(super) slab_length: f64,
+    /// Whether the convergent zone has localised on one through-going thrust, so that the lower
+    /// plate underthrusts (a trench where the plates converge). Segments that start at a contact
+    /// are diffuse: their convergence is taken up by distributed shortening until it yields (see
+    /// [`TectonicParams::diffuse_convergence`]).
+    pub(super) localised: bool,
+    /// Convergence (m) taken up on the thrust since the zone localised. The strength against
+    /// subduction initiation fades with it (see
+    /// [`TectonicParams::self_sustaining_slab_length`]).
+    pub(super) displacement: f64,
+    /// Convergence (m) taken up by distributed shortening while the zone was diffuse.
+    pub(super) shortening: f64,
+    /// Whether the segment converges (see [`Self::subducting`]) and most of its converging cells
+    /// converge faster than a diffuse zone can creep: the zone has reached its strength and
+    /// yields.
+    pub(super) yielding: bool,
+    /// Time (Myr) the segment was created.
+    pub(super) created: f64,
+    /// Crust and sediment mass (kg/m² summed over cells) stacked here while diffuse.
+    pub(super) stacked: f64,
     /// Last time (Myr) the plates were in contact along this segment.
     pub(super) last_contact: f64,
     /// How long (Myr) continental crust has been arriving along most of the segment.
@@ -81,6 +100,11 @@ pub(super) struct Subduction {
     pub(super) overriding: u32,
     /// Initial slab length (m).
     pub(super) slab_length: f64,
+    /// Initial displacement on the thrust (m; see [`Segment::displacement`]): the slab length for
+    /// an established subduction zone; for initiation events
+    /// [`PlateEventParams::initiation_displacement`] (by default as much as the slab: a
+    /// completed initiation; 0 makes the foundering slab overcome the strength of the plate).
+    pub(super) displacement: f64,
     /// Whether the segment counts as seeded by subduction initiation.
     pub(super) initiation: bool,
 }
@@ -128,6 +152,14 @@ pub struct SegmentStatistics {
     pub successful_initiation_segments: usize,
     /// Segments whose slab was decaying (not subducting) and that started subducting again.
     pub resumed_subductions: usize,
+    /// Diffuse segments that localised (yielded), and the crust mass (kg/m² summed over cells)
+    /// they had stacked if they localised within 2 Myr of their creation (transient stacking
+    /// before the first velocity solve saw them).
+    pub localisations: usize,
+    pub transient_stacked: f64,
+    /// Crust and sediment mass (kg/m² summed over cells) subducted at diffuse segments that the
+    /// last velocity solve did not see converging (see `Simulation::resolve_ownership`).
+    pub diffuse_subducted: f64,
 }
 
 /// Subduction polarity of all pairs of plates in contact, per boundary segment.
@@ -218,11 +250,25 @@ impl Polarities {
         self.pairs.values().flat_map(|pair| &pair.segments)
     }
 
+    #[cfg(test)]
     fn new_segment(
         &mut self,
         r: DVec3,
         overriding: u32,
         slab_length: f64,
+        time: f64,
+        rotations: &[DQuat],
+    ) -> Segment {
+        self.new_segment_with(r, overriding, slab_length, None, time, rotations)
+    }
+
+    /// A new segment; localised with the given displacement, or diffuse (`None`).
+    fn new_segment_with(
+        &mut self,
+        r: DVec3,
+        overriding: u32,
+        slab_length: f64,
+        displacement: Option<f64>,
         time: f64,
         rotations: &[DQuat],
     ) -> Segment {
@@ -234,6 +280,12 @@ impl Polarities {
             anchor: rotations[overriding as usize].inverse() * r,
             overriding,
             slab_length,
+            localised: displacement.is_some(),
+            displacement: displacement.unwrap_or(0.0),
+            shortening: 0.0,
+            yielding: false,
+            created: time,
+            stacked: 0.0,
             last_contact: time,
             arrival_time: 0.0,
             fill: 0.0,
@@ -271,11 +323,17 @@ impl Polarities {
         let index = match found {
             Some(index) => index,
             None => {
-                // Polarity of a neighbouring segment along strike, else by buoyancy.
-                let inherited = self.pairs.get(&key).and_then(|pair| {
+                // Polarity of a neighbouring segment along strike, else by buoyancy. A thrust
+                // propagates along strike: next to a localised segment the new one is localised
+                // too, with its displacement.
+                let neighbour = self.pairs.get(&key).and_then(|pair| {
                     nearest(&pair.segments, r, 2.0 * radius, rotations)
-                        .map(|index| pair.segments[index].overriding)
+                        .map(|index| &pair.segments[index])
                 });
+                let inherited = neighbour.map(|segment| segment.overriding);
+                let thrust = neighbour
+                    .filter(|segment| segment.localised)
+                    .map(|segment| segment.displacement);
                 let mut overriding =
                     inherited.unwrap_or(if a_crust.buoyancy(time) >= b_crust.buoyancy(time) {
                         a
@@ -290,7 +348,10 @@ impl Polarities {
                 if bottom_crust.resists_subduction() && !top_crust.resists_subduction() {
                     overriding = other_of(key, overriding);
                 }
-                let segment = self.new_segment(r, overriding, 0.0, time, rotations);
+                // The thrust propagates only with its vergence: a new segment of the opposite
+                // polarity has to break its own thrust.
+                let thrust = thrust.filter(|_| inherited == Some(overriding));
+                let segment = self.new_segment_with(r, overriding, 0.0, thrust, time, rotations);
                 let pair = self.pairs.entry(key).or_default();
                 pair.segments.push(segment);
                 pair.segments.len() - 1
@@ -339,6 +400,8 @@ impl Polarities {
                     segment.overriding = other_of(key, segment.overriding);
                     segment.anchor = rotations[segment.overriding as usize].inverse() * position;
                     segment.slab_length = 0.0;
+                    // The thrust stays, with the other vergence, and has to grow a slab again.
+                    segment.displacement = 0.0;
                     segment.arrival_time = 0.0;
                     self.statistics.flips += 1;
                 }
@@ -381,6 +444,12 @@ impl Polarities {
                             kept.anchor = removed.anchor;
                             kept.slab_length = removed.slab_length;
                         }
+                        kept.localised |= removed.localised;
+                        kept.displacement = kept.displacement.max(removed.displacement);
+                        kept.shortening = kept.shortening.max(removed.shortening);
+                        kept.yielding |= removed.yielding;
+                        kept.stacked += removed.stacked;
+                        kept.created = kept.created.min(removed.created);
                         kept.last_contact = kept.last_contact.max(removed.last_contact);
                         kept.arrival_time = kept.arrival_time.max(removed.arrival_time);
                         kept.subducting |= removed.subducting;
@@ -419,6 +488,7 @@ impl Polarities {
         let Subduction {
             overriding,
             slab_length,
+            displacement,
             initiation,
         } = subduction;
         let key = pair_key(pair_plates.0, pair_plates.1);
@@ -439,12 +509,21 @@ impl Polarities {
                     segment.arrival_time = 0.0;
                 }
                 segment.slab_length = slab_length;
+                segment.localised = true;
+                segment.displacement = displacement;
                 segment.last_contact = time;
                 index
             }
             None => {
                 reversal = false;
-                let segment = self.new_segment(r, overriding, slab_length, time, rotations);
+                let segment = self.new_segment_with(
+                    r,
+                    overriding,
+                    slab_length,
+                    Some(displacement),
+                    time,
+                    rotations,
+                );
                 let pair = self.pairs.entry(key).or_default();
                 pair.segments.push(segment);
                 pair.segments.len() - 1
@@ -473,9 +552,11 @@ impl Polarities {
             .segment_at(pair_plates.0, pair_plates.1, r, rotations)
             .is_none()
         {
+            // An established subduction zone.
             let subduction = Subduction {
                 overriding,
                 slab_length,
+                displacement: slab_length,
                 initiation: false,
             };
             self.set(pair_plates, subduction, r, time, rotations);
@@ -743,6 +824,7 @@ mod tests {
         Subduction {
             overriding,
             slab_length,
+            displacement: slab_length,
             initiation: false,
         }
     }
@@ -889,6 +971,80 @@ mod tests {
         assert_eq!(top, 0);
         assert_eq!(polarities.pair_segments(0, 1).len(), 2);
         assert_eq!(polarities.pair_segments(0, 1)[1].slab_length, 0.0);
+    }
+
+    #[test]
+    fn thrusts_propagate_along_strike_and_new_contacts_elsewhere_are_diffuse() {
+        let mut polarities = Polarities::new(RADIUS);
+        let rotations = identity();
+        polarities.set((0, 1), sub(0, 600e3), DVec3::X, 0.0, &rotations);
+        // Next to a localised segment, a new one is localised with its displacement.
+        let near = (DVec3::X + DVec3::Y * (1.5 * RADIUS).tan()).normalize();
+        polarities.contact((0, ocean(150.0)), (1, ocean(10.0)), near, 0.0, &rotations);
+        let segment = &polarities.pair_segments(0, 1)[1];
+        assert!(segment.localised);
+        assert_eq!(segment.displacement, 600e3);
+        // Where buoyant crust of the would-be lower plate arrives, the new segment takes the
+        // opposite polarity and does not inherit the thrust.
+        let continent = Crust {
+            thickness: 35_000.0,
+            density: crate::isostasy::CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+            metasediment: 0.0,
+            orogeny: NO_OROGENY,
+            cohort: 0.0,
+        };
+        let other_side = (DVec3::X - DVec3::Y * (1.5 * RADIUS).tan()).normalize();
+        polarities.contact(
+            (0, ocean(150.0)),
+            (1, continent),
+            other_side,
+            0.0,
+            &rotations,
+        );
+        let segment = polarities.segment_at(0, 1, other_side, &rotations).unwrap();
+        assert_eq!(segment.overriding, 1);
+        assert!(!segment.localised);
+        assert_eq!(segment.displacement, 0.0);
+        // Far from it, a new contact starts as a diffuse zone.
+        polarities.contact(
+            (0, ocean(150.0)),
+            (1, ocean(10.0)),
+            DVec3::Z,
+            0.0,
+            &rotations,
+        );
+        let segment = polarities.segment_at(0, 1, DVec3::Z, &rotations).unwrap();
+        assert!(!segment.localised);
+        assert_eq!(segment.displacement, 0.0);
+    }
+
+    #[test]
+    fn a_flip_keeps_the_thrust() {
+        let mut polarities = Polarities::new(RADIUS);
+        let rotations = identity();
+        polarities.set((0, 1), sub(1, 600e3), DVec3::X, 0.0, &rotations);
+        // Continental crust of plate 0 keeps arriving below oceanic plate 1.
+        let continent = Crust {
+            thickness: 35_000.0,
+            density: crate::isostasy::CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+            metasediment: 0.0,
+            orogeny: NO_OROGENY,
+            cohort: 0.0,
+        };
+        for _ in 0..100 {
+            polarities.contact((0, continent), (1, ocean(50.0)), DVec3::X, 0.0, &rotations);
+            polarities.end_pass(0.1, 3.0, &rotations);
+        }
+        let segment = &polarities.pair_segments(0, 1)[0];
+        assert_eq!(segment.overriding, 0);
+        assert!(segment.localised);
+        assert_eq!(segment.displacement, 0.0);
     }
 
     #[test]
