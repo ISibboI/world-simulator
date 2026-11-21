@@ -13,7 +13,8 @@
 //! Step times grow during a run (more tectonic substeps as the plates speed up), so the margins
 //! are wide: see `notes/issue-78/research.md` for the measurements behind the numbers.
 
-use std::collections::{HashMap, VecDeque};
+use crate::hash::HashMap;
+use std::collections::VecDeque;
 
 use eframe::egui;
 
@@ -213,7 +214,7 @@ impl Pace {
     /// Measures the simulation with options `cli`, proposing at most `max` subdivisions.
     pub fn new(cli: &Cli, max: u32) -> Self {
         let mut pace = Self {
-            measured: HashMap::new(),
+            measured: HashMap::default(),
             options: String::new(),
             subdivisions: 0,
             times: StepTimes::default(),
