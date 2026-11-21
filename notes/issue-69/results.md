@@ -1,8 +1,9 @@
 # Results: deformable plate margins (#69)
 
 _2026-11-21. Plan: [`plan.md`](plan.md) (with its revisions after the [plan review](review-plan.md)).
-Goal: an Earth-like planet, not Earth; PB2002 and hypsometry numbers are plausibility checks.
-Plates stay rigid (#70)._
+Results review: [`review-results.md`](review-results.md) (of the first version of this file; its
+findings are worked in, see the end). Goal: an Earth-like planet, not Earth; PB2002 and
+hypsometry numbers are plausibility checks. Plates stay rigid (#70)._
 
 ## What changed
 
@@ -11,158 +12,180 @@ Plates stay rigid (#70)._
    [1, 0.75, 0.5, 0.25] over 4 rings, but distributed over a band of the overriding plate,
    `collision_band_width` = 500 km (5 rings), by weight = linear taper × softness s⁻³ (thin
    viscous sheet, n = 3; s = lithosphere strength, floored at 0.3) × room
-   1 − ΔGPE(h)/ΔGPE(70 km) (plateau force balance). Three weighted passes (water-filling), then
-   the rest spills nearest first as before. Only crust of continental origin takes part (else
-   the old profile). A collision marks a cell as orogenic only if it thickens it by ≥ 1%.
+   1 − ΔGPE(h)/ΔGPE(70 km) (plateau force balance). Each sample counts once (at its nearest
+   ring), three weighted passes (water-filling), then the rest spills nearest first as before.
+   Only crust of continental origin takes a share (none in reach: the old profile). A collision
+   marks a cell as orogenic only if it thickens it by ≥ 1%.
 2. **Belt resistance** (`Simulation::belt_resistance`, used in `dynamics.rs`). Each collision
    boundary cell resists convergence with the excess gravitational potential energy of the
    thickest continental crust at it and its neighbours, ½ g ρc (1 − ρc/ρm)(h² − h₀²)
-   (2.6·10¹² N/m at 50 km, 7.6·10¹² N/m at 70 km), as a plastic force like the initiation
-   resistance (released when the contact opens, linear below `locked_convergence`). Factor
-   `belt_gpe_resistance` = 1 (physical).
+   (2.6·10¹² N/m at 50 km, 7.6·10¹² N/m at 70 km), × ½ cell length (both sides have collision
+   cells), as a plastic force like the initiation resistance (released when the contact opens,
+   linear below `locked_convergence`). Factor `belt_gpe_resistance` = 1 (physical).
 3. **Rift band**: stretching donors are weighted (h/35 km)²/ring instead of 1/ring: thickened
-   crust stretches first (extensional collapse). Identical for crust ≤ 35 km.
-4. **`events.suture_convergence` 0.5 → 0.2 cm/yr**, by the decision rule written before the runs
-   (plan, revision 8): see "The suture threshold".
+   crust stretches first (extensional collapse; wide rifts). Identical for crust ≤ 35 km.
+4. **`events.suture_convergence` 0.5 → 0.2 cm/yr** (see "The suture threshold").
 
 Interface for #75: the band reads strength only through `deformation::band_strength`, which calls
 `weak_zones::lithosphere_strength(crust, time, 1.0)`.
 
 ## Runs
 
-`main` = 536cecb; the branch at e834b96 (before the rebase onto #77, which does not change
-simulation output). 1000 Myr, `--snapshot-interval 50 --width 256 --cell-dump`, scheduler runs
-(GitHub runners). Means over seeds of the 500–1000 Myr snapshot means, seed range, Welch t.
+`main` = 536cecb; the branch at 37f64ca (after the review fix; the rebase onto #77 does not
+touch the simulation). 1000 Myr, `--snapshot-interval 50 --width 256 --cell-dump`, scheduler runs.
+Means over seeds of the 500–1000 Myr snapshot means, seed range, Welch t.
 
 | set | code | suture threshold | seeds |
 |---|---|---|---|
 | `main` | main | 0.5 | 0–7 |
-| `main-s02` | main | 0.2 | 0–15 |
-| `full` | branch (1–3) | 0.5 | 0–7 |
-| **`full-s02`** | **branch (1–3) = the PR's defaults** | 0.2 | 0–15 |
-| `band-only` | branch, `belt_gpe_resistance=0` | 0.5 | 0–3 |
-| `gpe-only` | branch, `collision_band_width=0` | 0.5 | 0–3 |
+| `main-s02` | main, `--set events.suture_convergence=0.2` | 0.2 | 0–15 |
+| **`pr`** | **branch, defaults** | 0.2 | 0–15 |
+| `pr-s05` | branch, `--set events.suture_convergence=0.5` | 0.5 | 0–7 |
+| `gpe05` | branch, `--set belt_gpe_resistance=0.5` | 0.2 | 0–7 |
+| `band-only` | branch, `belt_gpe_resistance=0`, threshold 0.5 | 0.5 | 0–3 |
+| `gpe-only` | branch before the fix, `collision_band_width=0` (band path unused, so unaffected by the fix) | 0.5 | 0–3 |
 
-Scripts: [`scripts/analyse.sh`](scripts/analyse.sh) (runs notes/issue-43/compare.py with
+Scripts: [`scripts/analyse.sh`](scripts/analyse.sh) (notes/issue-43/compare.py with
 sim_classes.py, and notes/realism-batch-4/scripts/compare.py), [`scripts/belts.py`](scripts/belts.py)
-(thickness and orogenic share from the cell dumps).
+(thickness and orogenic share from the cell dumps). Tables: [`guard-pr.md`](guard-pr.md) (69
+metrics, `main` vs `pr`), [`guard-s02-pr.md`](guard-s02-pr.md) (`main-s02` vs `pr`),
+[`belts.md`](belts.md).
 
 ## Primary metrics
 
-| | main | main-s02 | full | **full-s02 (PR)** | t (PR vs main) | Earth / target |
-|---|---|---|---|---|---|---|
-| boundary slower than 2 cm/yr (%) | 13.1 | 18.3 | 12.1 | **16.9** | +2.4 | 39 |
-| continental boundaries (rift + transform + convergent, %) | 14.3 | 18.8 | 13.7 | **16.5** | +1.5 | ~30 |
-| continental crust > 50 km (%, cell dumps) | 6.8 | 10.3 | 2.1 | **3.0** | −2.6 | ~3–6 |
-| mean land (m) | 923 | 1128 | 598 | **679** | −2.0 | ~840 |
-| collision stacking (Gt/yr) | 24.3 | 33.7 | 17.1 | **18.9** | −1.4 | 13–23 band |
+| | main | main-s02 | pr-s05 | **pr** | t (pr vs main) | t (pr vs main-s02) | Earth / target |
+|---|---|---|---|---|---|---|---|
+| boundary slower than 2 cm/yr (%) | 13.1 | 18.3 | 13.0 | **18.6** | +3.2 | +0.2 | 39 |
+| continental boundaries (rift + transform + convergent, %) | 14.3 | 18.8 | 13.6 | **17.6** | +2.1 | −1.0 | ~30 |
+| continental crust > 50 km (%, log) | 6.9 | 10.3 | 2.4 | **3.1** | −2.2 | −4.6 | ~3–6 |
+| mean land (m) | 923 | 1128 | 591 | **718** | −1.6 | −4.1 | ~840 |
+| collision stacking (Gt/yr) | 24.3 | 33.7 | 16.5 | **20.4** | −1.0 | −3.9 | 13–23 band |
 
-(main-s02 and full-s02: 16 seeds; t of full-s02 vs main-s02 on crust > 50 km −2.4, mean land
-−4.7, stacking −4.6, slow share −1.4, continental share −2.3.)
+- **Crust thickness back in its band, while slow belts stay boundaries.** Lowering the suture
+  threshold on `main` alone gives the same slow share (18.3%) but pushes thickness, mean land and
+  stacking far out of their bands (10.3%, 1.13 km, 33.7 Gt/yr). With the band and the belt
+  resistance the same slow share comes with 3.1% crust > 50 km (1.0–7.2% by seed), 0.72 km mean
+  land and 20.4 Gt/yr stacking. The 99th percentile of continental thickness falls from 62 to
+  55 km, the area > 60 km from 2.2% to 0.6%; highest cell 5.4 → 4.8 km (cell means of ~110 km).
+- **The boundary shares move through the threshold; the band and the belt resistance make that
+  affordable.** At 0.5, the branch has `main`'s shares (13.0 vs 13.1%, 13.6 vs 14.3%); 0.2 adds
+  +5.6 points slow (t +3.3 vs `pr-s05`) and +4.0 points continental (t +2.7). Of the slow gain
+  over `main`, 2.0 points are collision boundaries and 3.6 points others; continental rifts grow
+  most (10.4 → 15.2·10³ km, t +3.8; Earth 28), continent–continent convergence 15.1 → 16.4,
+  continental transforms 11.2 → 13.8·10³ km. Median speeds of these classes: 0.8 / 1.3 /
+  1.3 cm/yr (Earth CCB 2.1, CRB 1.1, CTF 1.6). Collision cells converging slower than 0.2 cm/yr:
+  0.8 → 1.8% of the boundary cells.
+- Earth's shares (39%, ~30%) are not reached; the model goes a seventh to a quarter of the way.
 
-- **Thickness is fixed**: `main` is above the calibration band (6.8%, 1.5–13.9% by seed), and
-  keeping creeping belts made it worse (10.3%). With the band and the belt resistance it is
-  2–3% (1.0–6.6% by seed); the 99th percentile of continental thickness falls from 62 to 55 km,
-  the area > 60 km from 2.2% to 0.6%. Highest cell 5.4 → 4.7 km (cell means of ~110 km; Tibet
-  averages ~5 km). Seed scatter of the hypsometry shrinks (mean land 469–1397 → 438–904 m).
-- **Slow and continental boundaries move only through the suture threshold**, as the plan review
-  predicted: at 0.5 the branch has the same shares as `main` (12.1 vs 13.1%, 13.7 vs 14.3%);
-  with 0.2 they rise to 16.9% and 16.5% (vs 13.1% and 14.3% on `main`). That is a third of the
-  way to Earth for the slow share and a seventh for the continental share. The belt resistance
-  works against persistence: thick belts slow down and then stall and suture (sutures per 100 Myr
-  0.88 → 1.32 at 0.5; 0.35 → 0.99 at 0.2). So `main-s02` keeps more slow boundaries than
-  `full-s02` (18.3 vs 16.9%), but only by thickening crust far beyond the band.
-- **Mean land falls to 0.68 km** (Earth ~0.84; the calibration band of `collision_resistance`
-  was 0.6–0.8 km): less crust is stacked (18.9 vs 24.3 Gt/yr, inside its band), the same
-  continental volume covers more area (continental area 32.8 → 34.8% of the surface) at lower
-  elevation; flooded continental crust 25 → 29%.
+## Which change does what
 
-## Which change does what (4 seeds each for the ablations, against `main`)
+Paired against `main` on seeds 0–3 (crust > 50 km, mean land; t of the paired differences, n = 4):
 
-| | main | band-only | gpe-only | full |
-|---|---|---|---|---|
-| crust > 50 km (%) | 6.8 | 3.8 (t −1.9) | 1.4 (t −3.4) | 2.1 (t −2.9) |
-| thickness p99 (km) | 62 | 60 | 51 | 54 |
-| mean land (m) | 923 | 697 | 487 | 598 |
-| flooded continental crust (%) | 25 | 26 | 40 | 33 |
-| collision stacking (Gt/yr) | 24.3 | 15.7 | 12.2 | 17.1 |
-| slower than 2 cm/yr (%) | 13.1 | 12.1 | 11.4 | 12.1 |
-| orogenic share ≥ 0.5 (% of continental) | 39 | 28 | 27 | 27 |
+| | main | band-only | gpe-only | pr-s05 | pr |
+|---|---|---|---|---|---|
+| crust > 50 km (%) | 7.0 | 4.4 (t −1.5) | 1.4 (t −2.1) | 1.5 (t −2.1) | 2.3 (t −2.3) |
+| mean land (m) | 900 | 785 (t −1.0) | 487 (t −2.1) | 517 (t −2.1) | 631 (t −2.5) |
 
-- The belt resistance does most of the thinning (less convergence at thick belts: plate speed
-  4.11 → 3.69 cm/yr on its own), but alone it flattens the continents too much (mean land
-  0.49 km, 40% flooded). The band spreads the stacked crust (deterministic test below) and,
-  combined with it, gives the middle (0.60–0.68 km).
-- Band-only also lowers the stacking rate (15.7 Gt/yr) and the collision length (19 vs
-  27·10³ km); with 4 seeds this is within scatter (t −1.8 / −1.5), and band-only has fewer
-  rifts (1.5 vs 2.6 per 100 Myr, t −2.2), probably via the smaller orogenic (weak) area.
+- **The belt resistance does most of the thinning**: thick belts converge less (plate speed
+  4.11 → 3.97 cm/yr). Alone it flattens the continents (gpe-only: 0.49 km mean land, 40%
+  of continental crust flooded).
+- **The band reshapes rather than reduces**: it lowers the thick outlier seeds and evens out the
+  belts (in seeds that were thin on `main` it raised the area > 50 km a little, per the results
+  review); not significant on its own with 4 seeds.
+- The factor of the belt resistance is not a sensitive knob: at 0.5 (`gpe05`, 8 seeds) crust
+  > 50 km 3.4%, mean land 0.70 km, slow share 16.3%, all within the scatter of `pr`.
 
 Deterministic check (test `a_collision_band_spreads_the_belt_and_conserves_mass`, two continental
 hemispheres converging at 1 cm/yr for 40 Myr, ~220 km mesh, crustal flow on): with a 5-ring band
 the belt > 37 km is wider, the area > 50 km smaller, the peak lower (53 vs 58 km in the
-section), nothing lost at the cap. The difference is modest because crustal flow above 40 km
-already spreads thick crust and because 400 km of shortening of 35 km crust has to go
-somewhere: spread over ~500 km it still makes ~60 km crust. The band is a shape change; the
-amount of thickening is set by how much the belts converge, which the belt resistance limits.
+section), nothing lost at the cap. The difference is modest: crustal flow above 40 km already
+spreads thick crust, and 400 km of shortening of 35 km crust spread over ~500 km still makes
+~60 km crust. How much crust thickens is set by how much belts converge, which the belt
+resistance limits.
 
-## Guard rails (`main` vs `full-s02`, 69 metrics of batch 4)
+## Guard rails (`main` vs `pr`, 69 metrics)
 
-Full tables: [`guard-full-s02.md`](guard-full-s02.md) (and [`guard-full.md`](guard-full.md) for
-the 0.5 threshold). Notable (|t| ≥ 2 or relevant):
+All with |t| ≥ 2 (plus a few relevant ones):
 
-| | main | full-s02 | t |
+| | main | pr | t |
 |---|---|---|---|
-| mean plate speed (cm/yr) | 4.11 | 3.95 | −1.4 |
-| sea-floor production created (km²/yr) | 6.86 | 6.50 | −1.8 |
-| mean ocean age (Myr) / sea floor ≥ 200 Myr (%) | 52.3 / 2.1 | 57.3 / 3.1 | +2.7 / +2.8 |
-| slab pull (10²¹ N) | 1.15 | 1.10 | −2.1 |
-| subduction / ridge / transform (10³ km) | 118 / 101 / 33 | 113 / 97 / 33 | −1.1 / −1.1 / +0.3 |
-| continental rift (10³ km) | 10.4 | 12.6 | +1.9 |
-| continent–continent convergent (10³ km, sim_classes) | 15.1 | 15.4 | | 
-| continental (% of surface) | 32.8 | 34.8 | +1.9 |
+| relative speed median (cm/yr) | 6.23 | 5.92 | −2.0 |
+| convergence at incipient trenches (cm/yr) | 2.42 | 2.14 | −2.7 |
+| mean plate speed (cm/yr) | 4.11 | 3.97 | −1.1 |
+| sea-floor production created (km²/yr) | 6.86 | 6.60 | −1.4 |
+| mean ocean age (Myr) / sea floor ≥ 200 Myr (%) | 52.3 / 2.1 | 54.7 / 2.7 | +1.6 / +2.0 |
+| highest point (m), max over snapshots (m) | 5408, 6067 | 4750, 5673 | −3.5, −3.6 |
 | shelf mean sediment (km) | 4.18 | 3.60 | −2.0 |
-| highest point over all snapshots (m) | 6067 | 5678 | −3.5 |
-| sutures / rifts / plates born per 100 Myr | 0.88 / 2.60 / 9.3 | 0.99 / 2.69 / 10.0 | +0.6 / +0.3 / +0.8 |
-| crust lost at the cap (Gt/yr) | 0.08 | 0.05 | |
+| burial metamorphism on continental crust (Gt/yr) | 0.16 | 0.10 | −2.1 |
+| largest river (m³/s) | 115 000 | 85 000 | −3.0 |
+| terminal fans and deltas (km cells/100 Myr) | 15 300 | 9 500 | −2.2 |
+| flooded continental crust (%) | 25.4 | 29.5 | +1.5 |
+| subduction / ridge / transform (10³ km) | 118 / 101 / 33 | 117 / 99 / 35 | −0.1 / −0.5 / +0.9 |
+| sutures / rifts / plates born per 100 Myr | 0.88 / 2.60 / 9.3 | 0.78 / 2.34 / 10.0 | −0.5 / −0.8 / +0.7 |
+| stacked mass per collision length (Gt/yr per 10³ km) | 0.91 | 0.64 | |
+| crust lost at the thickness cap (Gt/yr) | 0.08 | ~0.05 | |
 
-Slower plates and less sea-floor production go towards Earth (production ~1.9× Earth's
-3.4 km²/yr), at the price of slightly older sea floor (still within the range of earlier
-batches). With ~70 metrics, a few |t| > 2 are expected by chance.
+Slower boundaries and less sea-floor production go towards Earth (production is still ~1.9×
+Earth's 3.4 km²/yr). Lower relief gives smaller rivers and fewer terminal fans; sea floor ≥ 200 Myr
+rises from 2.1 to 2.7% (earlier batches: 2–3.4%). With ~70 metrics a few |t| > 2 occur by chance.
 
-Runtime, paired on this machine (seed 0, 1000 Myr, same flags, run at the same time): `main` 498 s, branch (`full`) 486 s: no measurable cost (one extra BFS ring and a strength call per reached cell per collision addition; one more plastic term per collision cell in the velocity solve).
+Runtime, paired on this machine (seed 0, 1000 Myr, run at the same time; branch before the
+review fix): `main` 498 s, branch 486 s. No measurable cost.
 
 ## The suture threshold
 
-Rule fixed before the runs (plan, revision 8): propose 0.2 only if (a) `full-s02` is in band on
-crust > 50 km (≤ 6%: 3.0 ✓), mean land (≤ ~1.0 km: 0.68 ✓) and stacking (≤ 23 Gt/yr: 18.9 ✓);
-(b) `full-s02` beats `main-s02` on crust > 50 km with |t| > 2 (t −2.4 ✓); (c) the deterministic
-test shows the band widening the belt (✓). All three hold, so the PR sets 0.2. The physics
-behind it: the slowest active collision belts converge at ~0.2–0.5 cm/yr and Gordon's diffuse
-boundaries at 0.2–1.5 cm/yr; #68 chose 0.5 only to stop creeping belts piling crust onto their
-edges, which the belt resistance now prevents. `--set events.suture_convergence=0.5` restores
-#68's rule.
+The rule written before the runs (plan, revision 8) compared the band code with `main` (both at
+0.2) and holds for `pr`: (a) crust > 50 km 3.1% ≤ 6%, mean land 0.72 ≤ ~1.0 km, stacking 20.4 ≤ 23
+Gt/yr; (b) `pr` vs `main-s02` on crust > 50 km t −4.6; (c) the deterministic test shows a wider
+belt. As the results review noted, (b) tests the band, not the threshold. The evidence for the
+threshold itself is `pr` vs `pr-s05` (same code): slow share 13.0 → 18.6% (t +3.3), continental
+boundaries 13.6 → 17.6% (t +2.7), mean land 0.59 → 0.72 km (towards Earth), flooded continental
+crust 32 → 29%, crust > 50 km 2.4 → 3.1% (in band), rifts per 100 Myr 3.2 → 2.3 (t −3.7).
+
+It is a calibration choice within the physical range, not a consequence of the band: the slowest
+active collision belts converge at ~0.2–0.5 cm/yr and Gordon's diffuse boundaries at
+0.2–1.5 cm/yr. #68 chose 0.5 only to stop creeping belts from piling crust onto their edges,
+which the belt resistance now prevents. Part of what 0.2 does is offset the extra sutures the belt
+resistance causes (sutures per 100 Myr: `main` 0.88, `pr-s05` 1.15, `pr` 0.78): a thick belt
+whose driving force is used up slows below 0.1 cm/yr and sutures. `--set
+events.suture_convergence=0.5` restores #68's rule.
 
 ## Assessment
 
-- Physically better: shortening goes into a wide band preferentially where the lithosphere is
-  weak, thick belts resist their own collision with their potential energy (Tibet's force at
-  70 km), thick crust in rifts collapses first. Crust thickness moves from above the band
-  (6.8%) into it (3.0%), stacking into its band, plates and sea-floor production get slower.
-- Not reached: Earth's slow (39%) and continental (~30%) boundary shares; the model goes from
-  13 to 17% and from 14 to 16.5%. With rigid plates a slow continental boundary is a creeping
-  collision or a slow rift between two plates; the remaining gap needs intraplate diffuse zones
-  (deforming plates, #70) and more slab-free plates (#42 territory).
-- Mean land drops below Earth's (0.68 vs ~0.84 km). Not recalibrated: `collision_resistance`
-  (50) was tuned on main's thickness with no GPE term; with the physical GPE resistance part of
-  its role is now taken by a derived force. Lowering it towards the GPE-free share would raise
-  mean land again; that is a decision (see below), not done here.
+- Physically better: shortening goes into a wide band, preferentially where the lithosphere is
+  weak; thick belts resist their own collision with their potential energy (Tibet's force at
+  70 km); thick crust in rifts collapses first. Crust thickness moves from above its band (6.9%)
+  into it (3.1%), stacking stays in its band, and slow belts can stay plate boundaries without
+  piling crust: slow boundaries 13 → 19%, continental boundaries 14 → 18%.
+- Not reached: Earth's 39% / ~30%. With rigid plates a slow continental boundary is a creeping
+  collision or a slow rift between two plates; the rest needs intraplate diffuse zones (#70) and
+  more slab-free plates (#42 territory).
+- Mean land 0.72 km is below Earth's ~0.84 km (main: 0.92). Not recalibrated:
+  `collision_resistance` (50) was tuned on main's thickness without a GPE term, and the belt
+  resistance now takes part of its role. Lowering it would raise mean land; a decision, not done.
 
 ## Caveats
 
-- `main`, `full` and the ablations have 8 resp. 4 seeds; ablation statements are indicative.
-- The band is on the overriding plate only (the lower plate's side is consumed every substep).
+- Ablations have 4 seeds and are indicative; `gpe-only` ran on the code before the review fix
+  (its band path is not used, so the fix does not affect it).
+- The band is a disc on the overriding plate only (the lower plate's side is consumed every
+  substep); it reaches across oceanic cells of that plate, which take no share.
 - The belt resistance uses the thickest crust at the boundary cell and its neighbours, not a
-  belt-integrated GPE; the lithospheric mantle's thickening (which lowers ΔGPE) is neglected.
+  belt-integrated GPE, and neglects the thickening of the lithospheric mantle (an upper bound).
+- A stalled thick belt locks (below 0.1 cm/yr) and sutures; it does not collapse into extension.
+  A GPE push (collapse when the driving force goes away) is the natural follow-up.
 - #75 (healing of orogenic weakness, plume reheating) changes the strengths the band reads;
   measured here without it.
 - Runtimes of the scheduler runs are unpaired (GitHub runners).
+
+## Results review: what was done
+
+1. Wrong t values: corrected (now from the final runs). 2. Decision rule tests the band:
+   `pr` vs `pr-s05` added, the threshold is presented as a calibration choice. 3. Belt
+   resistance on top of a calibrated resistance: stated; sensitivity `gpe05` run. 4. Unpaired
+   ablations: paired on seeds 0–3, claims revised. 5. Duplicated samples weighted several times:
+   fixed (each sample once, at its nearest ring; test), `pr` and `pr-s05` re-run. 6. Band reach
+   across oceanic cells: named. 7. Doc points: done. 8. Lock/collapse: caveat. 9. Missing guard
+   rails: listed. 10. Diagnostics: stacked mass per collision length, runtime added; the
+   largest-receiver diagnostic and a "no softness" ablation were not run (the softness is bounded
+   at 37× and the deterministic and unit tests show the spread). 11. Housekeeping: done.
