@@ -18,6 +18,7 @@
 //! crust is only created where a cell is filled in a gap (and in splits and merges, which reset
 //! the tracking), so the list is updated from the matched and filled samples.
 
+use crate::math;
 use glam::DQuat;
 
 use super::*;
@@ -102,7 +103,7 @@ impl CellMatches {
 /// The angle (radians) by which any point moves when going from rotation `from` to `to`.
 fn rotation_angle(from: DQuat, to: DQuat) -> f64 {
     let difference = to * from.inverse();
-    2.0 * difference.w.abs().min(1.0).acos()
+    2.0 * math::acos(difference.w.abs().min(1.0))
 }
 
 /// Finds the crust samples of all plates at all cells. Returns the matches and, per plate, the

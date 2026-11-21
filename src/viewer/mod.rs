@@ -10,6 +10,10 @@
 //! cell widget ([`cell_info`]) shows the cell under the pointer (or the tapped one), whose
 //! outline is drawn on the planet ([`picking`]).
 
+// The view only shows the simulation and never changes it, so it may use the platform's math
+// functions directly instead of `crate::math` (see `clippy.toml`).
+#![allow(clippy::disallowed_methods)]
+
 mod cell_info;
 mod parameters;
 mod picking;

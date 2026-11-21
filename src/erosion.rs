@@ -23,6 +23,7 @@
 //!    the margin crust. Sediment loads the crust, so the sea floor rises by only ~0.44 of the
 //!    deposited thickness (see [`crate::isostasy`]).
 
+use crate::math;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
@@ -515,11 +516,10 @@ pub fn erode(
         if elevation[cell] <= base {
             continue; // Flat: no incision.
         }
-        let distance = mesh
-            .vertex(cell as u32)
-            .angle_between(mesh.vertex(receiver as u32))
+        let distance = math::angle_between(mesh.vertex(cell as u32), mesh.vertex(receiver as u32))
             * params.planet_radius;
-        let rate = params.erodibility * discharge[cell].powf(params.discharge_exponent) / distance;
+        let rate =
+            params.erodibility * math::powf(discharge[cell], params.discharge_exponent) / distance;
         let Incision {
             bulk: from_bulk,
             bedrock: from_bedrock,
@@ -1213,7 +1213,7 @@ fn wave_erosion(
                     Zone::Fan => (
                         params.slope_depth,
                         params.max_fan_sediment
-                            * (-f64::from(hops) * spacing / params.fan_length).exp(),
+                            * math::exp(-f64::from(hops) * spacing / params.fan_length),
                     ),
                 };
                 let thickness = remaining.min(seabed.room(cell, target.min(base), cap));
@@ -1321,7 +1321,7 @@ fn fill_fan(
         next += 1;
         if cell != mouth && zones[cell] == Zone::Fan {
             let cap =
-                params.max_fan_sediment * (-f64::from(hops) * spacing / params.fan_length).exp();
+                params.max_fan_sediment * math::exp(-f64::from(hops) * spacing / params.fan_length);
             let thickness = remaining.min(seabed.room(cell, params.slope_depth, cap));
             if thickness > 0.0 {
                 seabed.deposit(cell, thickness);
@@ -1356,7 +1356,7 @@ fn fill_fan(
             }
             let distance = f64::from(hops) * spacing;
             let surface = params.slope_depth
-                - params.fan_relief * (1.0 - (-distance / params.fan_length).exp());
+                - params.fan_relief * (1.0 - math::exp(-distance / params.fan_length));
             let thickness = remaining.min(seabed.room(cell, surface, f64::INFINITY));
             if thickness > 0.0 {
                 seabed.deposit(cell, thickness);
@@ -1788,7 +1788,7 @@ mod tests {
     fn island(mesh: &SphereMesh) -> Vec<f64> {
         (0..mesh.len() as u32)
             .map(|cell| {
-                let angle = mesh.vertex(cell).angle_between(glam::DVec3::Z).to_degrees();
+                let angle = math::angle_between(mesh.vertex(cell), glam::DVec3::Z).to_degrees();
                 if angle <= 30.0 {
                     3000.0 - angle * 150.0
                 } else {
@@ -2343,7 +2343,7 @@ mod tests {
         let mesh = SphereMesh::icosphere(4);
         let elevation: Vec<f64> = (0..mesh.len() as u32)
             .map(|cell| {
-                let angle = mesh.vertex(cell).angle_between(glam::DVec3::Z).to_degrees();
+                let angle = math::angle_between(mesh.vertex(cell), glam::DVec3::Z).to_degrees();
                 if angle <= 60.0 {
                     3000.0 - angle * 50.0
                 } else if angle <= 62.0 {
@@ -2459,10 +2459,8 @@ mod tests {
         for cell in 0..mesh.len() {
             if elevation[cell] < 0.0 {
                 assert!(result.sediment_delta[cell] <= params.max_fan_sediment + 1e-6);
-                let angle = mesh
-                    .vertex(cell as u32)
-                    .angle_between(glam::DVec3::Z)
-                    .to_degrees();
+                let angle =
+                    math::angle_between(mesh.vertex(cell as u32), glam::DVec3::Z).to_degrees();
                 let band = ((angle - 30.0) / 5.0) as usize;
                 if angle >= 30.0 && band < bands.len() {
                     bands[band].0 += result.sediment_delta[cell];
@@ -2663,7 +2661,7 @@ mod tests {
         let mesh = SphereMesh::icosphere(4);
         let elevation: Vec<f64> = (0..mesh.len() as u32)
             .map(|cell| {
-                let angle = mesh.vertex(cell).angle_between(glam::DVec3::Z).to_degrees();
+                let angle = math::angle_between(mesh.vertex(cell), glam::DVec3::Z).to_degrees();
                 if angle <= 20.0 {
                     3000.0 - angle * 150.0
                 } else if angle <= 40.0 {
@@ -2746,10 +2744,8 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(cell, &e)| {
-                let angle = mesh
-                    .vertex(cell as u32)
-                    .angle_between(glam::DVec3::Z)
-                    .to_degrees();
+                let angle =
+                    math::angle_between(mesh.vertex(cell as u32), glam::DVec3::Z).to_degrees();
                 if (40.0..45.0).contains(&angle) {
                     -1000.0
                 } else if angle >= 45.0 {
@@ -2763,10 +2759,7 @@ mod tests {
         let result = run(&mesh, &elevation, 20.0, &vec![0; mesh.len()], &class);
         assert!(result.deposited[Zone::Fan as usize] > 0.0);
         for (cell, &delta) in result.sediment_delta.iter().enumerate() {
-            let angle = mesh
-                .vertex(cell as u32)
-                .angle_between(glam::DVec3::Z)
-                .to_degrees();
+            let angle = math::angle_between(mesh.vertex(cell as u32), glam::DVec3::Z).to_degrees();
             if angle >= 45.0 {
                 assert_eq!(delta, 0.0, "{cell}");
             }
@@ -2821,7 +2814,7 @@ mod tests {
         let mesh = SphereMesh::icosphere(4);
         let elevation: Vec<f64> = (0..mesh.len() as u32)
             .map(|cell| {
-                let angle = mesh.vertex(cell).angle_between(glam::DVec3::Z).to_degrees();
+                let angle = math::angle_between(mesh.vertex(cell), glam::DVec3::Z).to_degrees();
                 if angle <= 20.0 {
                     3000.0 - angle * 150.0
                 } else if angle <= 40.0 {

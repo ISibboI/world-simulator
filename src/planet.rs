@@ -1,5 +1,6 @@
 //! The planet: tectonics coupled with the water cycle and erosion.
 
+use crate::math;
 use web_time::Instant;
 
 use tracing::{debug, debug_span};
@@ -229,6 +230,44 @@ impl Planet {
         &self.discharge
     }
 
+    /// A fingerprint of the state, the same on every platform for the same state: the time and,
+    /// per cell, the surface elevation, crust, owning plate, precipitation, discharge and annual
+    /// mean temperature, hashed bit for bit (FNV-1a, all NaNs alike). Logged with each snapshot, so that two runs
+    /// (e.g. on the web and with `--web-math`) can be checked for identical results.
+    pub fn state_hash(&self) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        let mut add = |value: u64| {
+            for byte in value.to_le_bytes() {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        let simulation = &self.tectonics;
+        add(simulation.time().to_bits());
+        let elevation = simulation.surface_elevations();
+        let temperature = &self.temperature().annual_mean;
+        for cell in 0..simulation.mesh().len() {
+            let crust = simulation.surface_crust(cell as u32);
+            let owner = simulation.owner(cell as u32);
+            for value in [
+                elevation[cell],
+                crust.thickness,
+                crust.density,
+                crust.birth,
+                crust.sediment,
+                crust.felsic,
+                crust.metasediment,
+                self.precipitation[cell],
+                self.discharge[cell],
+                temperature[cell],
+            ] {
+                // NaN payloads differ between platforms; all NaNs count as one.
+                add(if value.is_nan() { f64::NAN } else { value }.to_bits());
+            }
+            add(u64::from(owner.plate) << 32 | u64::from(owner.local));
+        }
+        hash
+    }
+
     /// Advances the planet by `dt` Myr: plate motion first, then one erosion step.
     pub fn step(&mut self, dt: f64) {
         let _span = debug_span!("step", time = self.tectonics.time() + dt).entered();
@@ -351,7 +390,7 @@ impl Planet {
 
         let mesh = self.tectonics.mesh();
         let fields = self.temperature.fields();
-        let latitude = |cell: usize| mesh.vertex(cell as u32).z.asin().to_degrees();
+        let latitude = |cell: usize| math::asin(mesh.vertex(cell as u32).z).to_degrees();
         let mean = |cells: &mut dyn Iterator<Item = usize>, value: &dyn Fn(usize) -> f64| {
             let (sum, count) =
                 cells.fold((0.0, 0usize), |(sum, count), c| (sum + value(c), count + 1));

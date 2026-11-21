@@ -6,7 +6,8 @@
 //! (which plate would subduct, by buoyancy) exists from their first contact, and the boundary
 //! becomes a trench as soon as they converge (see [`super::dynamics`]).
 
-use glam::{DQuat, DVec3};
+use crate::math;
+use glam::DVec3;
 use rand::RngExt;
 use tracing::debug;
 
@@ -674,7 +675,8 @@ impl Simulation {
                             .filter(|&other| {
                                 in_plate(other)
                                     && component[other as usize] == u32::MAX
-                                    && self.mesh.vertex(other).angle_between(origin) <= radius
+                                    && math::angle_between(self.mesh.vertex(other), origin)
+                                        <= radius
                             })
                             .map(|other| (other, false)),
                     );
@@ -709,7 +711,7 @@ impl Simulation {
                         .filter_map(|step| {
                             let angle =
                                 step as f64 * std::f64::consts::PI / RIFT_ORIENTATIONS as f64;
-                            let normal = DQuat::from_axis_angle(origin, angle) * normal;
+                            let normal = math::quat_from_axis_angle(origin, angle) * normal;
                             let geometry = Break::Circle { normal };
                             let across = origin.cross(normal);
                             let forced: Vec<(u32, bool)> = (0..cell_count as u32)
@@ -717,7 +719,7 @@ impl Simulation {
                                 .filter_map(|other| {
                                     let r = self.mesh.vertex(other);
                                     (r.dot(across).abs() < width
-                                        && r.angle_between(origin) <= SPINE_LENGTH)
+                                        && math::angle_between(r, origin) <= SPINE_LENGTH)
                                         .then(|| (other, r.dot(normal) > 0.0))
                                 })
                                 .collect();
@@ -784,7 +786,7 @@ impl Simulation {
                             in_plate(neighbor) && sides[neighbor as usize] != sides[cell as usize]
                         })
                 })
-                .map(|cell| self.mesh.vertex(cell).angle_between(origin))
+                .map(|cell| math::angle_between(self.mesh.vertex(cell), origin))
                 .fold(f64::INFINITY, f64::min)
         };
         let (cut_distance, rigid_distance) = (break_distance(&side), break_distance(&new_side));
@@ -812,7 +814,7 @@ impl Simulation {
                 for other in 0..cell_count as u32 {
                     if in_plate(other)
                         && component[other as usize] == u32::MAX
-                        && self.mesh.vertex(other).angle_between(origin) <= radius
+                        && math::angle_between(self.mesh.vertex(other), origin) <= radius
                     {
                         new_side[other as usize] = false;
                     }
@@ -835,10 +837,8 @@ impl Simulation {
                     (0..cell_count as u32)
                         .filter(|&cell| in_plate(cell) && new_side[cell as usize] == wanted)
                         .min_by(|&a, &b| {
-                            self.mesh
-                                .vertex(a)
-                                .angle_between(origin)
-                                .total_cmp(&self.mesh.vertex(b).angle_between(origin))
+                            math::angle_between(self.mesh.vertex(a), origin)
+                                .total_cmp(&math::angle_between(self.mesh.vertex(b), origin))
                         })
                 };
                 match (nearest(true), nearest(false)) {
@@ -996,7 +996,7 @@ impl Simulation {
         let origin = self.mesh.vertex(nucleus);
         let distance = boundary
             .iter()
-            .map(|&cell| self.mesh.vertex(cell).angle_between(origin))
+            .map(|&cell| math::angle_between(self.mesh.vertex(cell), origin))
             .fold(f64::INFINITY, f64::min);
         if distance <= 0.5 * PLUME_HEAD_RADIUS {
             self.event_counts.head_rifts += 1;
@@ -1047,7 +1047,7 @@ impl Simulation {
                 .iter()
                 .map(|&cell| self.mesh.vertex(cell))
                 .filter(|r| {
-                    let angle = r.angle_between(origin);
+                    let angle = math::angle_between(*r, origin);
                     angle > 0.0 && angle <= 0.5 * PLUME_HEAD_RADIUS
                 })
                 .fold((0.0, 0usize), |(sum, count), r| {
@@ -1189,7 +1189,7 @@ impl Simulation {
                     && self.surface_crust(neighbor).resists_subduction()
             }) {
                 total += km_per_cell;
-                if self.mesh.vertex(cell).angle_between(anchor) > radius {
+                if math::angle_between(self.mesh.vertex(cell), anchor) > radius {
                     far += km_per_cell;
                 }
             }
@@ -1272,7 +1272,12 @@ impl Simulation {
                     self.owners[other as usize].plate == plate
                         && self.surface_crust(other).is_continental_origin()
                 })
-                .map(|other| (other, self.mesh.vertex(other).angle_between(position)))
+                .map(|other| {
+                    (
+                        other,
+                        math::angle_between(self.mesh.vertex(other), position),
+                    )
+                })
                 .filter(|&(_, angle)| angle < params.rift_continent_radius)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(other, _)| other);
@@ -1284,11 +1289,11 @@ impl Simulation {
             // Diagnostics of where the plume stands in its plate.
             let edge = (0..self.mesh.len() as u32)
                 .filter(|&other| self.owners[other as usize].plate != plate)
-                .map(|other| self.mesh.vertex(other).angle_between(position))
+                .map(|other| math::angle_between(self.mesh.vertex(other), position))
                 .fold(f64::INFINITY, f64::min);
             let nucleus_rigid = self.surface_crust(cell).resists_subduction();
             let continent_distance =
-                continent.map(|other| self.mesh.vertex(other).angle_between(position));
+                continent.map(|other| math::angle_between(self.mesh.vertex(other), position));
             // The first reference circle through the plume crosses the nearest continent (else
             // a random one); the split tries the others too (see `local_split_piece`).
             let direction = random_unit_vector(&mut self.rng);
@@ -1365,7 +1370,7 @@ impl Simulation {
                 "Subduction initiation saturated: at most one per step"
             );
         }
-        if candidates.is_empty() || !self.rng.random_bool(1.0 - (-total * dt).exp()) {
+        if candidates.is_empty() || !self.rng.random_bool(1.0 - math::exp(-total * dt)) {
             return;
         }
 
@@ -1493,7 +1498,7 @@ impl Simulation {
                     } else {
                         other.is_continental_origin()
                     }
-            }) && self.mesh.vertex(candidate).angle_between(origin)
+            }) && math::angle_between(self.mesh.vertex(candidate), origin)
                 <= params.rift_continent_radius
             {
                 seeds.push(candidate);
@@ -2603,7 +2608,7 @@ mod tests {
             // The new boundary passes next to the plume.
             let distance = (0..simulation.mesh.len() as u32)
                 .filter(|&cell| simulation.owners[cell as usize].plate != plate)
-                .map(|cell| simulation.mesh.vertex(cell).angle_between(position))
+                .map(|cell| math::angle_between(simulation.mesh.vertex(cell), position))
                 .fold(f64::INFINITY, f64::min);
             assert!(distance < 0.13, "seed {seed}: {distance}");
             assert_eq!(simulation.event_counts.head_rifts, 1, "seed {seed}");
@@ -2652,7 +2657,7 @@ mod tests {
                                 parts.contains(&other) && other != owner
                             })
                     })
-                    .map(|cell| simulation.mesh.vertex(cell).angle_between(position))
+                    .map(|cell| math::angle_between(simulation.mesh.vertex(cell), position))
                     .fold(f64::INFINITY, f64::min);
                 assert!(
                     distance <= 0.5 * PLUME_HEAD_RADIUS,
@@ -2677,16 +2682,16 @@ mod tests {
                 Simulation::new(SphereMesh::icosphere(5), 1, TectonicParams::default(), seed);
             let lean_rad = lean.to_radians();
             let arms = [
-                -DVec3::Z * lean_rad.cos() - DVec3::Y * lean_rad.sin(),
-                DVec3::Z * lean_rad.cos() - DVec3::Y * lean_rad.sin(),
+                -DVec3::Z * math::cos(lean_rad) - DVec3::Y * math::sin(lean_rad),
+                DVec3::Z * math::cos(lean_rad) - DVec3::Y * math::sin(lean_rad),
             ];
             let width = simulation.mesh.mean_edge_angle();
             for (local, crust) in simulation.plates[0].crust.iter_mut().enumerate() {
                 let r = simulation.mesh.vertex(local as u32);
                 let suture = arms.iter().any(|&arm| {
                     r.dot(arm) > 0.0
-                        && r.angle_between(plume) < 0.9
-                        && r.dot(plume.cross(arm)).abs().asin() < width
+                        && math::angle_between(r, plume) < 0.9
+                        && math::asin(r.dot(plume.cross(arm)).abs()) < width
                 });
                 *crust = Some(Crust {
                     thickness: 35_000.0,
@@ -2726,7 +2731,7 @@ mod tests {
             for cell in 0..simulation.mesh.len() as u32 {
                 let r = simulation.mesh.vertex(cell);
                 let plate = simulation.owners[cell as usize].plate;
-                let distance = r.angle_between(plume);
+                let distance = math::angle_between(r, plume);
                 if plate == 1
                     || !(0.25..=0.45).contains(&distance)
                     || simulation
@@ -2740,7 +2745,7 @@ mod tests {
                 let tangent = (r - plume * r.dot(plume)).normalize();
                 directions[usize::from(r.z > 0.0)] += tangent;
             }
-            let angle = directions[0].angle_between(directions[1]).to_degrees();
+            let angle = math::angle_between(directions[0], directions[1]).to_degrees();
             let expected = 180.0 - 2.0 * lean;
             assert!(
                 (angle - expected).abs() < 20.0,
@@ -2759,7 +2764,7 @@ mod tests {
         // around -z (moving the samples shown there; plate 0's own area stays its largest piece).
         let cap = |axis: DVec3, angle: f64| -> Vec<u32> {
             (0..cells)
-                .filter(|&cell| simulation.mesh.vertex(cell).angle_between(axis) < angle)
+                .filter(|&cell| math::angle_between(simulation.mesh.vertex(cell), axis) < angle)
                 .collect()
         };
         let large = cap(DVec3::Z, 0.5);

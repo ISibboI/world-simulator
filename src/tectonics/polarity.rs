@@ -16,6 +16,7 @@
 //! segment flip (subduction polarity reversal after arc–continent collision); the old slab
 //! breaks off.
 
+use crate::math;
 use glam::{DQuat, DVec3};
 
 use super::*;
@@ -191,7 +192,7 @@ fn other_of(pair: (u32, u32), plate: u32) -> u32 {
 
 /// Index of the segment nearest to `r` within `max_angle`, ties to the lower index.
 fn nearest(segments: &[Segment], r: DVec3, max_angle: f64, rotations: &[DQuat]) -> Option<usize> {
-    let min_dot = max_angle.cos();
+    let min_dot = math::cos(max_angle);
     let mut best: Option<(usize, f64)> = None;
     for (index, segment) in segments.iter().enumerate() {
         let dot = world(segment, rotations).dot(r);
@@ -418,7 +419,7 @@ impl Polarities {
     /// that came close, and forgets segments without contact or trench for `memory` Myr and
     /// pairs without segments and contact.
     pub(super) fn end_step(&mut self, time: f64, memory: f64, rotations: &[DQuat]) {
-        let merge_dot = (0.5 * self.radius).cos();
+        let merge_dot = math::cos(0.5 * self.radius);
         let statistics = &mut self.statistics;
         for pair in self.pairs.values_mut() {
             for segment in &mut pair.segments {
@@ -692,7 +693,7 @@ impl Polarities {
         max_angle: f64,
         rotations: &[DQuat],
     ) -> usize {
-        let min_dot = max_angle.cos();
+        let min_dot = math::cos(max_angle);
         let Some(pair) = self.pairs.get_mut(&pair_key(a, b)) else {
             return 0;
         };
@@ -922,7 +923,7 @@ mod tests {
         // Plate 1 rotated, so that the anchor conversion matters.
         let rotations = vec![
             DQuat::IDENTITY,
-            DQuat::from_rotation_z(0.3),
+            crate::math::quat_from_axis_angle(DVec3::Z, 0.3),
             DQuat::IDENTITY,
         ];
         polarities.set((0, 1), sub(1, 600e3), DVec3::X, 0.0, &rotations);
@@ -970,7 +971,7 @@ mod tests {
         let rotations = identity();
         polarities.set((0, 1), sub(0, 600e3), DVec3::X, 0.0, &rotations);
         // Just beyond the segment radius, plate 0 would be denser, but the neighbour decides.
-        let r = (DVec3::X + DVec3::Y * (1.5 * RADIUS).tan()).normalize();
+        let r = (DVec3::X + DVec3::Y * math::tan(1.5 * RADIUS)).normalize();
         let top = polarities.contact((0, ocean(150.0)), (1, ocean(10.0)), r, 0.0, &rotations);
         assert_eq!(top, 0);
         assert_eq!(polarities.pair_segments(0, 1).len(), 2);
@@ -983,7 +984,7 @@ mod tests {
         let rotations = identity();
         polarities.set((0, 1), sub(0, 600e3), DVec3::X, 0.0, &rotations);
         // Next to a localised segment, a new one is localised with its displacement.
-        let near = (DVec3::X + DVec3::Y * (1.5 * RADIUS).tan()).normalize();
+        let near = (DVec3::X + DVec3::Y * math::tan(1.5 * RADIUS)).normalize();
         polarities.contact((0, ocean(150.0)), (1, ocean(10.0)), near, 0.0, &rotations);
         let segment = &polarities.pair_segments(0, 1)[1];
         assert!(segment.localised);
@@ -1002,7 +1003,7 @@ mod tests {
             reheated: NO_REHEATING,
             cohort: 0.0,
         };
-        let other_side = (DVec3::X - DVec3::Y * (1.5 * RADIUS).tan()).normalize();
+        let other_side = (DVec3::X - DVec3::Y * math::tan(1.5 * RADIUS)).normalize();
         polarities.contact(
             (0, ocean(150.0)),
             (1, continent),
@@ -1072,7 +1073,7 @@ mod tests {
         let mut polarities = Polarities::new(RADIUS);
         let rotations = identity();
         polarities.set((0, 1), sub(1, 600e3), DVec3::X, 0.0, &rotations);
-        let close = (DVec3::X + DVec3::Y * (0.3 * RADIUS).tan()).normalize();
+        let close = (DVec3::X + DVec3::Y * math::tan(0.3 * RADIUS)).normalize();
         let segment = polarities.new_segment(close, 0, 0.0, 0.0, &rotations);
         polarities
             .pairs
@@ -1090,7 +1091,7 @@ mod tests {
         let mut polarities = Polarities::new(RADIUS);
         let rotations = identity();
         polarities.set((0, 1), sub(1, 100e3), DVec3::X, 0.0, &rotations);
-        let close = (DVec3::X + DVec3::Y * (0.6 * RADIUS).tan()).normalize();
+        let close = (DVec3::X + DVec3::Y * math::tan(0.6 * RADIUS)).normalize();
         // Created directly, as a separate segment just outside the first one's reach.
         let segment = polarities.new_segment(close, 1, 300e3, 0.0, &rotations);
         polarities
@@ -1103,7 +1104,7 @@ mod tests {
         let segments = polarities.pair_segments(0, 1);
         // 0.6 R apart: not merged (merge distance R / 2).
         assert_eq!(segments.len(), 2);
-        let closer = (DVec3::X + DVec3::Y * (0.3 * RADIUS).tan()).normalize();
+        let closer = (DVec3::X + DVec3::Y * math::tan(0.3 * RADIUS)).normalize();
         let segment = polarities.new_segment(closer, 1, 200e3, 0.0, &rotations);
         polarities
             .pairs

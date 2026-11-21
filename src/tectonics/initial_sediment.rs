@@ -29,6 +29,7 @@ use crate::isostasy::{
     dry_response, sediment_bulk_thickness, sediment_dry_elevation, sediment_for_bulk_thickness,
     sediment_for_dry_elevation, sediment_for_rise,
 };
+use crate::math;
 
 /// How the platform cover is placed on the continental basement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,7 +164,7 @@ impl InitialSedimentParams {
         if !distance.is_finite() {
             return 0.0;
         }
-        self.terrigenous_rate * age.max(0.0) * (-distance / self.terrigenous_length).exp()
+        self.terrigenous_rate * age.max(0.0) * math::exp(-distance / self.terrigenous_length)
     }
 }
 

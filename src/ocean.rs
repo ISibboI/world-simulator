@@ -19,6 +19,7 @@
 //! where `γ` is the share of the wind-driven transport that flows at the temperature of the
 //! surface (the warm water above the thermocline).
 
+use crate::math;
 use glam::DVec3;
 
 use crate::sparse::{Hierarchy, Multigrid};
@@ -100,9 +101,9 @@ impl GyreModel {
                 continue;
             }
             let position = mesh.vertex(cell);
-            let latitude = position.z.clamp(-1.0, 1.0).asin();
+            let latitude = math::asin(position.z.clamp(-1.0, 1.0));
             let east = east_of(position);
-            let beta = 2.0 * EARTH_ROTATION * latitude.cos() / self.radius;
+            let beta = 2.0 * EARTH_ROTATION * math::cos(latitude) / self.radius;
             // Forward (eastward) difference for ∂ψ/∂x: the Sverdrup interior is integrated
             // westward from the eastern coast.
             let weights: Vec<f64> = neighbors
@@ -210,8 +211,8 @@ fn east_of(position: DVec3) -> DVec3 {
 /// `−(1 / (R cos φ)) ∂(τ cos φ)/∂φ`.
 fn wind_stress_curl(latitude: f64, stress: &dyn Fn(f64) -> f64, radius: f64) -> f64 {
     let h = 0.5f64.to_radians();
-    let at = |l: f64| stress(l.to_degrees()) * l.cos();
-    -(at(latitude + h) - at(latitude - h)) / (2.0 * h) / (radius * latitude.cos().max(0.05))
+    let at = |l: f64| stress(l.to_degrees()) * math::cos(l);
+    -(at(latitude + h) - at(latitude - h)) / (2.0 * h) / (radius * math::cos(latitude).max(0.05))
 }
 
 #[cfg(test)]
@@ -226,7 +227,7 @@ mod tests {
         let ocean: Vec<bool> = (0..mesh.len() as u32)
             .map(|c| {
                 let p = mesh.vertex(c);
-                let longitude = p.y.atan2(p.x).to_degrees();
+                let longitude = math::atan2(p.y, p.x).to_degrees();
                 longitude.abs() < 60.0 && p.z.abs() < 0.9
             })
             .collect();
@@ -243,8 +244,8 @@ mod tests {
             let cells: Vec<usize> = (0..mesh.len())
                 .filter(|&c| {
                     let p = mesh.vertex(c as u32);
-                    let latitude = p.z.asin().to_degrees();
-                    let longitude = p.y.atan2(p.x).to_degrees();
+                    let latitude = math::asin(p.z).to_degrees();
+                    let longitude = math::atan2(p.y, p.x).to_degrees();
                     ocean[c]
                         && (latitude - lat).abs() < 4.0
                         && (lon_from..lon_to).contains(&longitude)
@@ -274,11 +275,11 @@ mod tests {
         // The western boundary current carries warm water poleward: with warm water in the
         // south, the northern half of the basin gains heat.
         let temperature: Vec<f64> = (0..mesh.len() as u32)
-            .map(|c| 25.0 - 20.0 * mesh.vertex(c).z.asin().abs() / 1.0)
+            .map(|c| 25.0 - 20.0 * math::asin(mesh.vertex(c).z).abs() / 1.0)
             .collect();
         gyres.heat_convergence(&temperature, 0.0, 0.5, 3990.0, &mut heat);
         let gain: f64 = (0..mesh.len())
-            .filter(|&c| (35f64.to_radians().sin()..0.9).contains(&mesh.vertex(c as u32).z))
+            .filter(|&c| (math::sin(35f64.to_radians())..0.9).contains(&mesh.vertex(c as u32).z))
             .map(|c| heat[c])
             .sum();
         assert!(gain > 0.0, "{gain:e} W");

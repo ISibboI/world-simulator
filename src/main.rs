@@ -5,6 +5,7 @@
 mod climate;
 mod erosion;
 mod isostasy;
+mod math;
 mod ocean;
 mod planet;
 mod presets;
@@ -158,6 +159,14 @@ struct Cli {
     /// after the presets (`--biosphere`, `--epoch`, `--co2`).
     #[arg(long = "set", value_name = "NAME=VALUE")]
     overrides: Vec<String>,
+
+    /// Compute sin, exp, ln, atan2, … exactly as the web version does (the `libm` crate) instead
+    /// of with the platform's math library, so that the same options give bit for bit the same
+    /// planet as on the web and on every other platform with this flag. To reproduce a web link,
+    /// also give `--subdivisions 5`, the web's default, unless the link sets it. Runs at about the
+    /// same speed. Always on in the web version. See `src/math.rs`.
+    #[arg(long)]
+    web_math: bool,
 }
 
 /// Default icosphere subdivisions: 6 on the desktop, 5 on the web, where the simulation runs about
@@ -375,6 +384,11 @@ impl Cli {
 /// Checks the parameters and creates the initial planet.
 fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
     cli.check()?;
+    // Before anything is computed; only one simulation runs at a time.
+    math::set_web_math(cli.web_math);
+    if math::web_math() {
+        info!("Using the math functions of the web version (`libm`)");
+    }
 
     let mesh = SphereMesh::icosphere(cli.subdivisions);
     info!(cells = mesh.len(), "Created planet mesh");
@@ -758,7 +772,7 @@ fn snapshot(
                 100.0 * left,
                 100.0 * cohort.anywhere / cohort.initial.max(1e-9),
                 if elapsed > 0.0 && left < 1.0 {
-                    elapsed * std::f64::consts::LN_2 / -left.max(1e-12).ln()
+                    elapsed * std::f64::consts::LN_2 / -math::ln(left.max(1e-12))
                 } else {
                     f64::INFINITY
                 },
@@ -985,6 +999,8 @@ fn snapshot(
         planet_statistics.gyre_transport,
     );
 
+    info!("    state hash {:016x}", planet.state_hash());
+
     #[cfg(not(target_arch = "wasm32"))]
     write_snapshot_files(planet, cli)?;
     #[cfg(target_arch = "wasm32")]
@@ -1151,7 +1167,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
              {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3}",
-            mesh.vertex(cell).z.asin().to_degrees(),
+            math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
             crust.thickness,
@@ -1164,7 +1180,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             u8::from(coast),
             planet.precipitation()[cell as usize],
             planet.discharge()[cell as usize],
-            mesh.vertex(cell).y.atan2(mesh.vertex(cell).x).to_degrees(),
+            math::atan2(mesh.vertex(cell).y, mesh.vertex(cell).x).to_degrees(),
             temperature.annual_mean[cell as usize],
             temperature.monthly[0][cell as usize],
             temperature.monthly[6][cell as usize],
