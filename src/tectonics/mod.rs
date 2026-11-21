@@ -63,11 +63,7 @@ pub use statistics::*;
 use boundaries::{METASEDIMENT_DENSITY, ResolvedBoundaries, pair_key};
 use generation::*;
 
-/// Hash map with the hasher used throughout the tectonics (keys are small integers).
-pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, Hasher>;
-/// Hash set with the hasher used throughout the tectonics.
-pub(crate) type HashSet<T> = std::collections::HashSet<T, Hasher>;
-type Hasher = rustc_hash::FxBuildHasher;
+pub(crate) use crate::hash::{HashMap, HashSet};
 
 use glam::{DQuat, DVec3};
 use rand::rngs::ChaCha8Rng;

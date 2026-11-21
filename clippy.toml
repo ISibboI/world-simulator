@@ -102,3 +102,18 @@ disallowed-methods = [
     { path = "glam::DAffine3::from_rotation_y", reason = "uses the platform's math functions; use or add a function in `crate::math`" },
     { path = "glam::DAffine3::from_rotation_z", reason = "uses the platform's math functions; use or add a function in `crate::math`" },
 ]
+
+# Hash maps must hash the same on every platform (32-bit wasm and 64-bit desktops), so they use
+# `crate::hash::{HashMap, HashSet}` (see src/hash.rs). std's default hasher is randomly seeded,
+# and `rustc_hash`'s hashes depend on the pointer width.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "use `crate::hash::HashMap` (see src/hash.rs)" },
+    { path = "std::collections::HashSet", reason = "use `crate::hash::HashSet` (see src/hash.rs)" },
+    { path = "std::hash::RandomState", reason = "randomly seeded; use `crate::hash::Fx64BuildHasher`" },
+    { path = "std::collections::hash_map::DefaultHasher", reason = "not guaranteed stable; use `crate::hash::Fx64Hasher`" },
+    # `allow-invalid`: rustc-hash is only a dev-dependency (and an indirect one of egui).
+    { path = "rustc_hash::FxHasher", reason = "depends on the pointer width; use `crate::hash::Fx64Hasher`", allow-invalid = true },
+    { path = "rustc_hash::FxBuildHasher", reason = "depends on the pointer width; use `crate::hash::Fx64BuildHasher`", allow-invalid = true },
+    { path = "rustc_hash::FxHashMap", reason = "depends on the pointer width; use `crate::hash::HashMap`", allow-invalid = true },
+    { path = "rustc_hash::FxHashSet", reason = "depends on the pointer width; use `crate::hash::HashSet`", allow-invalid = true },
+]

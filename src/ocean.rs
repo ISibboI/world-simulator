@@ -47,7 +47,7 @@ pub struct GyreModel {
 
 impl GyreModel {
     pub fn new(mesh: &SphereMesh, radius: f64) -> Self {
-        let mut third: std::collections::HashMap<(u32, u32), Vec<u32>> = Default::default();
+        let mut third: crate::hash::HashMap<(u32, u32), Vec<u32>> = Default::default();
         for &[a, b, c] in mesh.faces() {
             for (i, j, k) in [(a, b, c), (b, c, a), (c, a, b)] {
                 third.entry((i.min(j), i.max(j))).or_default().push(k);

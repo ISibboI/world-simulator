@@ -6,6 +6,7 @@ mod climate;
 #[cfg(any(target_arch = "wasm32", test))]
 mod device;
 mod erosion;
+mod hash;
 mod isostasy;
 mod math;
 mod ocean;
@@ -1148,7 +1149,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             .get(slot)
             .map_or(0.0, |p| p[cell as usize])
     };
-    let mut shown = std::collections::HashMap::new();
+    let mut shown = hash::HashMap::default();
     for cell in 0..cell_count {
         *shown.entry(simulation.owner(cell)).or_insert(0u32) += 1;
     }

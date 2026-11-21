@@ -709,6 +709,8 @@ impl Simulation {
         let polarity::Polarities {
             pairs, statistics, ..
         } = &mut self.polarities;
+        // Summed in a defined order below (hash-map order differs between platforms).
+        let mut transient_stacked = Vec::new();
         for pair in pairs.values_mut() {
             for segment in &mut pair.segments {
                 let had_slab = segment.slab_length > 0.0;
@@ -758,13 +760,17 @@ impl Simulation {
                     slabs_changed = true;
                     statistics.localisations += 1;
                     if self.time - segment.created <= 2.0 {
-                        statistics.transient_stacked += segment.stacked;
+                        transient_stacked.push(segment.stacked);
                     }
                 } else if !segment.localised {
                     segment.shortening += segment.rate.max(0.0) * params.planet_radius * dt;
                 }
                 slabs_changed |= had_slab != (segment.slab_length > 0.0);
             }
+        }
+        transient_stacked.sort_by(f64::total_cmp);
+        for stacked in transient_stacked {
+            statistics.transient_stacked += stacked;
         }
         slabs_changed
     }
