@@ -737,6 +737,8 @@ impl Simulation {
         // Reached crust samples with their ring and profile weight (0 beyond the profile).
         let mut reached: Vec<(Ownership, usize, f64)> = Vec::new();
         let mut weights: Vec<f64> = Vec::new();
+        let mut first_seen: Vec<bool> = Vec::new();
+        let mut seen: HashSet<Ownership> = HashSet::default();
         let max_thickness = self.params.max_crust_thickness;
         let band_rings = deformation::band_rings(
             self.params.collision_band_width,
@@ -792,6 +794,15 @@ impl Simulation {
                 std::mem::swap(&mut frontier, &mut next_frontier);
             }
 
+            // A sample shown at several cells takes part in the band once, at its nearest
+            // ring (`reached` is in ring order).
+            if band {
+                first_seen.clear();
+                for &(owner, ..) in &reached {
+                    first_seen.push(seen.insert(owner));
+                }
+                seen.clear();
+            }
             let time = self.time;
             let crust_at = |plates: &[Plate], owner: Ownership| {
                 plates[owner.plate as usize].crust[owner.local as usize]
@@ -802,9 +813,20 @@ impl Simulation {
             // plateau thickness): then the profile is used.
             let band_weights = |plates: &[Plate], weights: &mut Vec<f64>| {
                 weights.clear();
-                weights.extend(reached.iter().map(|&(owner, ring, _)| {
-                    deformation::band_weight(&crust_at(plates, owner), time, ring, band_rings)
-                }));
+                weights.extend(reached.iter().zip(&first_seen).map(
+                    |(&(owner, ring, _), &first)| {
+                        if first {
+                            deformation::band_weight(
+                                &crust_at(plates, owner),
+                                time,
+                                ring,
+                                band_rings,
+                            )
+                        } else {
+                            0.0
+                        }
+                    },
+                ));
                 weights.iter().sum::<f64>()
             };
             let use_band = band && band_weights(&self.plates, &mut weights) > 0.0;
@@ -1982,6 +2004,33 @@ mod tests {
             by_ring[ring] / n
         };
         assert!((1..=5).all(|ring| per_cell(ring) < per_cell(ring - 1)));
+    }
+
+    #[test]
+    fn samples_shown_at_several_cells_take_their_band_share_once() {
+        // Two cells of ring 1 show the same sample: it gets one share, like any other sample of
+        // its ring, and mass is conserved.
+        let mut simulation = banded_continent();
+        let cell = 100u32;
+        let rings = rings_from(&simulation, cell);
+        let ring_1: Vec<u32> = (0..simulation.mesh.len() as u32)
+            .filter(|&c| rings[c as usize] == 1)
+            .collect();
+        let (shown_twice, other) = (ring_1[0], ring_1[2]);
+        let duplicate = ring_1[1];
+        simulation.owners[duplicate as usize] = simulation.owners[shown_twice as usize];
+        let mass = simulation.total_mass();
+        let addition = collision_addition(cell, 35e3);
+        let added = addition.thickness * addition.density;
+        simulation.apply_additions(&[addition]);
+        assert!((simulation.total_mass() - mass - added).abs() < 1e-9 * added);
+        let gained = |c: u32| simulation.surface_crust(c).thickness - 35e3;
+        assert!(
+            (gained(shown_twice) / gained(other) - 1.0).abs() < 1e-9,
+            "{} vs {}",
+            gained(shown_twice),
+            gained(other)
+        );
     }
 
     #[test]
