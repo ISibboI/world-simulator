@@ -5,6 +5,31 @@ Results review: [`review-results.md`](review-results.md) (of the first version o
 findings are worked in, see the end). Goal: an Earth-like planet, not Earth; PB2002 and
 hypsometry numbers are plausibility checks. Plates stay rigid (#70)._
 
+## Current state (after #82 merged and `collision_resistance` recalibrated)
+
+Requested on PR #81: recalibrate `collision_resistance`. #82 (healing orogenic weakness, plume
+reheating) merged meanwhile; the branch is rebased on it, the band reads strength through
+`lithosphere_strength(crust, time)`, and the band's strength floor is 0.5 (with #82 fresh belts
+have strength 0.25; with the old floor of 0.3 the band localised in its own fresh marks and made
+the belt narrower than no band, see `MIN_BAND_STRENGTH`). Calibration plan, sweep and choice:
+[`calibration.md`](calibration.md). **`collision_resistance` 50 → 0**: the old value stood in for
+the potential energy of thick belts, which the belt resistance now models.
+
+16 seeds × 1000 Myr each, 500–1000 Myr means, `main82` = main at 1a4c25b (with #82):
+
+| | main82 | PR at 50 (8 seeds) | **PR, recalibrated (0)** | t (vs main82) | Earth / target |
+|---|---|---|---|---|---|
+| mean land (m) | 876 | 685 | **801** | −1.1 | ~840 |
+| crust > 50 km (% of continental) | 5.6 | 2.4 | **4.5** | −1.1 | ~3–6 |
+| boundary slower than 2 cm/yr (%) | 11.3 | 16.7 | **15.6** | +3.6 | 39 |
+| continental boundaries (%) | 13.0 | 16.5 | **15.9** | +2.5 | ~30 |
+| collision stacking (Gt/yr) | 20.5 | 19.1 | **21.9** | +0.4 | 13–23 |
+| flooded continental crust (%) | 24.9 | 31.3 | **24.9** | 0.0 | |
+
+The sections below describe the measurement on the old base (main 536cecb, `collision_resistance`
+50); their mechanisms and attributions still hold, their absolute numbers are superseded by this
+table.
+
 ## What changed
 
 1. **Collision band** (`deformation.rs`, `boundaries.rs::apply_additions_inner`). Crust of the

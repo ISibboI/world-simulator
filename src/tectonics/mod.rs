@@ -250,6 +250,10 @@ pub struct TectonicParams {
     /// local splits and terrane accretion) on continental thickness, mean land and collision
     /// stacking: 50 (~2–3e12 N/m at 1–2 cm/yr, below Tibet's ~5–8e12; mean land 0.6–0.8 km,
     /// 2–6% > 50 km, stacking 13–23 Gt/yr; 30–100 give similar land within seed scatter).
+    /// That force stood in for the potential energy of thickened belts, which
+    /// [`Self::belt_gpe_resistance`] now models explicitly; recalibrated with it (#69, PR #81):
+    /// 0 (mean land 0.80 km, 4.5% > 50 km, stacking 22 Gt/yr; 5–50 give 0.63–0.72 km), so
+    /// collisions are resisted by the belts they build, not by a viscous stand-in.
     pub collision_resistance: f64,
     /// Resistance of plate boundaries to strike-slip motion along them: each
     /// metre of boundary resists like the basal drag under this many metres times a metre.
@@ -333,7 +337,7 @@ impl Default for TectonicParams {
             ridge_age: 20.0,
             basal_drag: 1e15,
             continental_drag_factor: 4.0,
-            collision_resistance: 50.0,
+            collision_resistance: 0.0,
             boundary_coupling_width: 200e3,
             track_material_budget: false,
             ocean_volume: 1.335e18,

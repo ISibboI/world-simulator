@@ -34,3 +34,31 @@ Mean land does not respond to `collision_resistance` between 20 and 50 (all with
 ~0.63–0.71 km): with the belt resistance, thick belts stop converging by their potential energy
 whatever the viscous term, so a weaker viscous term does not stack more crust. The search was
 extended to 0 and 10 to see whether the effect appears at all.
+
+## Extension and confirmation
+
+| collision_resistance | seeds | mean land (m) | crust > 50 km (%) | stacking (Gt/yr) | slow (%) | continental (%) | flooded (%) |
+|---|---|---|---|---|---|---|---|
+| 10 | 8 | 668 | 3.2 | 20.4 | 16.3 | 16.0 | 26.9 |
+| 5 | 8 | 726 | 3.6 | 20.8 | 15.9 | 15.7 | 25.0 |
+| 0 | 8 (0–7) | 825 | 5.2 | 23.1 | 15.8 | 16.4 | 23.1 |
+| **0** | **16 (0–15)** | **801** | **4.5** | **21.9** | **15.6** | **15.9** | **24.9** |
+| main82 | 16 | 876 | 5.6 | 20.5 | 11.3 | 13.0 | 24.9 |
+
+16 seeds at 0 against `main82` (Welch t): slow +3.6, continental +2.5, crust > 50 km −1.1,
+mean land −1.1, stacking +0.4, flooded 0.0, sea-floor production +0.9, plate speed −0.5,
+runtime +0.1.
+
+**Chosen: 0.** It meets all four targets: crust > 50 km 4.5% (≤ 6; seeds 0.8–9.6), stacking
+21.9 ≤ 23 Gt/yr, slow and continental shares 15.6 / 15.9% (PR at 50 on this base: 16.7 / 16.5%,
+within seed scatter), mean land 0.80 km (closest to 0.84 of all values).
+
+Why the response is so flat and then jumps at 0: with any viscous term, collisions between
+unthickened continents (where the belt resistance is still zero) are slowed from the start, and
+belts that do thicken are stopped by their potential energy whatever the viscous term. Only
+without it do young collisions converge freely until their own belt stops them, which stacks a
+little more crust (21.9 vs ~20 Gt/yr) and raises the land. Physically, the old value was
+justified as a force "below Tibet's ~5–8·10¹² N/m", i.e. as a stand-in for exactly the belt's
+potential energy that is now modelled; keeping both counted it twice. What 0 leaves out: the
+viscous strength of the deforming lithosphere itself, which rigid plates cannot represent
+(#70).
