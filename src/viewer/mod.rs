@@ -5,8 +5,10 @@
 //! drawn with wgpu through an egui paint callback (see [`renderer`]).
 //!
 //! The simulation runs on a separate thread (in a Web Worker on the web, see `crate::web`) and
-//! sends new surface meshes to the view through a channel.
+//! sends new surface meshes to the view through a channel. The parameter panel
+//! ([`parameters`]) restarts it with other options.
 
+mod parameters;
 mod renderer;
 
 use std::sync::Arc;
@@ -15,8 +17,10 @@ use std::sync::mpsc::{Receiver, Sender};
 use eframe::egui;
 use glam::Vec3;
 
+use crate::Cli;
 use crate::planet::Planet;
 use crate::render;
+use parameters::{ParameterPanel, SimulationStatus};
 #[cfg(target_arch = "wasm32")]
 pub use renderer::Vertex;
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,6 +44,64 @@ pub struct SurfaceUpdate {
     /// Simulated time in Myr.
     pub time: f64,
     pub vertices: Arc<Vec<Vertex>>,
+    /// The triangles of the mesh: sent with the first update of a simulation, `None` after.
+    pub faces: Option<Arc<Vec<[u32; 3]>>>,
+}
+
+/// A message from the simulation to the view.
+pub enum SimulationEvent {
+    Surface(SurfaceUpdate),
+    /// The simulation failed with this message.
+    Failed(String),
+}
+
+/// A simulation to start: its options and the command-line arguments they came from (starting
+/// with the program name; the web version passes them to the worker as its URL query).
+pub struct Launch {
+    pub cli: Cli,
+    pub args: Vec<String>,
+}
+
+/// Adjustments of the user interface to the device, see [`UiOptions::apply`]. The default
+/// keeps egui's style (the desktop).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UiOptions {
+    /// Size of body text in points; the other text styles are scaled with it. On the web it is
+    /// the browser's root font size in CSS pixels, which follows the user's font size setting.
+    pub body_text_size: Option<f32>,
+    /// Whether the main pointer is coarse (a touch screen): larger targets and spacing.
+    pub touch: bool,
+}
+
+/// Smallest size of interactive elements on touch screens in points (CSS pixels on the web),
+/// as recommended by Apple (44 pt) and Google (48 dp).
+const TOUCH_TARGET: f32 = 44.0;
+
+impl UiOptions {
+    fn apply(&self, ctx: &egui::Context) {
+        let options = *self;
+        ctx.all_styles_mut(move |style| {
+            if let Some(body_text_size) = options.body_text_size
+                && let Some(body) = style.text_styles.get(&egui::TextStyle::Body)
+                && body.size > 0.0
+            {
+                let scale = body_text_size / body.size;
+                for font in style.text_styles.values_mut() {
+                    font.size *= scale;
+                }
+            }
+            if options.touch {
+                let spacing = &mut style.spacing;
+                spacing.interact_size = egui::vec2(TOUCH_TARGET, TOUCH_TARGET);
+                spacing.button_padding = egui::vec2(12.0, 10.0);
+                spacing.item_spacing = egui::vec2(10.0, 10.0);
+                spacing.icon_width = 28.0;
+                spacing.icon_width_inner = 16.0;
+                spacing.icon_spacing = 8.0;
+                spacing.combo_height = 400.0;
+            }
+        });
+    }
 }
 
 /// Builds the surface mesh vertices for the current state of the planet.
@@ -90,15 +152,17 @@ pub fn surface_vertices(planet: &Planet, exaggeration: f64, river_threshold: f64
         .collect()
 }
 
-/// Called once the view exists, with a sender for surface updates and a callback that wakes up the
-/// view; it should start the simulation (on another thread, or in a Web Worker on the web).
-pub type StartSimulation = Box<dyn FnOnce(Sender<SurfaceUpdate>, Box<dyn Fn() + Send>)>;
+/// Starts a simulation (on another thread, or in a Web Worker on the web) that sends its events
+/// through the sender and calls the callback to wake up the view after each. Called once the
+/// view exists, and again on every restart from the parameter panel, with a new channel: a
+/// previous simulation should stop when sending to its channel fails.
+pub type StartSimulation = Box<dyn FnMut(Launch, Sender<SimulationEvent>, Box<dyn Fn() + Send>)>;
 
 /// Creates the viewer app; shared by the desktop window and the web page.
 fn app_creator(
-    vertex_count: usize,
-    faces: Vec<[u32; 3]>,
+    initial: Launch,
     msaa_samples: u16,
+    ui_options: UiOptions,
     start_simulation: StartSimulation,
 ) -> eframe::AppCreator<'static> {
     Box::new(move |creation_context| {
@@ -106,22 +170,19 @@ fn app_creator(
             .wgpu_render_state
             .as_ref()
             .ok_or("the wgpu renderer is not available")?;
-        renderer::initialize(render_state, vertex_count, &faces, u32::from(msaa_samples));
-
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let context = creation_context.egui_ctx.clone();
-        start_simulation(sender, Box::new(move || context.request_repaint()));
-        Ok(Box::new(Viewer::new(receiver)))
+        renderer::initialize(render_state, u32::from(msaa_samples));
+        ui_options.apply(&creation_context.egui_ctx);
+        Ok(Box::new(Viewer::new(
+            &creation_context.egui_ctx,
+            initial,
+            start_simulation,
+        )))
     })
 }
 
 /// Opens the 3D view and blocks until the window is closed.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run(
-    vertex_count: usize,
-    faces: Vec<[u32; 3]>,
-    start_simulation: impl FnOnce(Sender<SurfaceUpdate>, Box<dyn Fn() + Send>) + 'static,
-) -> anyhow::Result<()> {
+pub fn run(initial: Launch, start_simulation: StartSimulation) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("World Simulator")
@@ -136,10 +197,10 @@ pub fn run(
         "World Simulator",
         options,
         app_creator(
-            vertex_count,
-            faces,
+            initial,
             MSAA_SAMPLES,
-            Box::new(start_simulation),
+            UiOptions::default(),
+            start_simulation,
         ),
     )
     .map_err(|error| anyhow::anyhow!("failed to run the 3D view: {error}"))?;
@@ -151,8 +212,8 @@ pub fn run(
 #[cfg(target_arch = "wasm32")]
 pub async fn run_web(
     canvas: web_sys::HtmlCanvasElement,
-    vertex_count: usize,
-    faces: Vec<[u32; 3]>,
+    initial: Launch,
+    ui_options: UiOptions,
     start_simulation: StartSimulation,
 ) -> anyhow::Result<()> {
     let options = eframe::WebOptions {
@@ -163,30 +224,57 @@ pub async fn run_web(
         .start(
             canvas,
             options,
-            app_creator(vertex_count, faces, 1, start_simulation),
+            app_creator(initial, 1, ui_options, start_simulation),
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to start the 3D view: {error:?}"))
 }
 
 struct Viewer {
-    updates: Receiver<SurfaceUpdate>,
+    events: Receiver<SimulationEvent>,
+    start_simulation: StartSimulation,
+    parameters: ParameterPanel,
     /// Rotation of the camera around the planet's axis in radians.
     yaw: f32,
     /// Elevation angle of the camera above the equator in radians.
     pitch: f32,
-    /// Simulated time of the displayed state.
+    /// Simulated time of the displayed state of the running simulation.
     time: Option<f64>,
+    /// Simulated duration of the running simulation in Myr.
+    duration: f64,
+    /// Why the running simulation failed, if it did.
+    failure: Option<String>,
 }
 
 impl Viewer {
-    fn new(updates: Receiver<SurfaceUpdate>) -> Self {
-        Self {
-            updates,
+    fn new(ctx: &egui::Context, initial: Launch, start_simulation: StartSimulation) -> Self {
+        let parameters = ParameterPanel::new(&initial.args);
+        let (_, events) = std::sync::mpsc::channel();
+        let mut viewer = Self {
+            events,
+            start_simulation,
+            parameters,
             yaw: 0.0,
             pitch: 0.4,
             time: None,
-        }
+            duration: initial.cli.duration,
+            failure: None,
+        };
+        viewer.start(ctx, initial);
+        viewer
+    }
+
+    /// Starts a simulation with a new channel, which also stops the previous one (see
+    /// [`StartSimulation`]). The view keeps showing the previous planet until the new one
+    /// arrives.
+    fn start(&mut self, ctx: &egui::Context, launch: Launch) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.events = receiver;
+        self.time = None;
+        self.duration = launch.cli.duration;
+        self.failure = None;
+        let ctx = ctx.clone();
+        (self.start_simulation)(launch, sender, Box::new(move || ctx.request_repaint()));
     }
 
     fn camera_position(&self) -> Vec3 {
@@ -216,11 +304,18 @@ impl Viewer {
 
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Only the latest update matters.
+        // Only the latest update matters, but the triangles come with the first one.
         let mut vertices = None;
-        while let Ok(update) = self.updates.try_recv() {
-            self.time = Some(update.time);
-            vertices = Some(update.vertices);
+        let mut faces = None;
+        while let Ok(event) = self.events.try_recv() {
+            match event {
+                SimulationEvent::Surface(update) => {
+                    self.time = Some(update.time);
+                    vertices = Some(update.vertices);
+                    faces = update.faces.or(faces);
+                }
+                SimulationEvent::Failed(message) => self.failure = Some(message),
+            }
         }
         if vertices.is_some()
             && let Some(time) = self.time
@@ -247,8 +342,21 @@ impl eframe::App for Viewer {
                         PlanetCallback {
                             uniforms: self.uniforms(aspect_ratio),
                             vertices,
+                            faces,
                         },
                     ));
             });
+
+        let status = SimulationStatus {
+            time: self.time,
+            duration: self.duration,
+            failure: self.failure.as_deref(),
+        };
+        if let Some(launch) = self.parameters.show(ui.ctx(), &status) {
+            tracing::info!(args = ?launch.args, "Restarting the simulation");
+            self.parameters.set_running(launch.args.clone());
+            let ctx = ui.ctx().clone();
+            self.start(&ctx, launch);
+        }
     }
 }

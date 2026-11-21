@@ -31,20 +31,43 @@ struct PlanetResources {
     pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    index_count: u32,
-    /// Whether the vertex buffer contains data yet.
-    has_vertices: bool,
+    /// The mesh of the running simulation, once its first surface arrived.
+    mesh: Option<MeshBuffers>,
 }
 
-/// Creates the GPU resources for a mesh with `vertex_count` vertices and the given triangles.
-pub fn initialize(
-    render_state: &egui_wgpu::RenderState,
+/// Vertex and index buffers of the planet mesh. They are replaced when a simulation with
+/// another mesh starts.
+struct MeshBuffers {
+    vertex_buffer: wgpu::Buffer,
     vertex_count: usize,
-    faces: &[[u32; 3]],
-    msaa_samples: u32,
-) {
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
+impl MeshBuffers {
+    fn new(device: &wgpu::Device, vertex_count: usize, faces: &[[u32; 3]]) -> Self {
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("planet vertices"),
+            size: (vertex_count * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("planet indices"),
+            contents: bytemuck::cast_slice(faces),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Self {
+            vertex_buffer,
+            vertex_count,
+            index_buffer,
+            index_count: (faces.len() * 3) as u32,
+        }
+    }
+}
+
+/// Creates the GPU pipeline; the mesh buffers follow with the first surface of a simulation.
+pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
     let device = &render_state.device;
     let shader = device.create_shader_module(wgpu::include_wgsl!("planet.wgsl"));
 
@@ -121,18 +144,6 @@ pub fn initialize(
             resource: uniform_buffer.as_entire_binding(),
         }],
     });
-    let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("planet vertices"),
-        size: (vertex_count * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("planet indices"),
-        contents: bytemuck::cast_slice(faces),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-
     render_state
         .renderer
         .write()
@@ -141,10 +152,7 @@ pub fn initialize(
             pipeline,
             uniform_buffer,
             bind_group,
-            vertex_buffer,
-            index_buffer,
-            index_count: (faces.len() * 3) as u32,
-            has_vertices: false,
+            mesh: None,
         });
 }
 
@@ -153,12 +161,14 @@ pub struct PlanetCallback {
     pub uniforms: Uniforms,
     /// New vertex data to upload before drawing, if the planet changed.
     pub vertices: Option<Arc<Vec<Vertex>>>,
+    /// The triangles of a new mesh, with the first vertices of a new simulation.
+    pub faces: Option<Arc<Vec<[u32; 3]>>>,
 }
 
 impl egui_wgpu::CallbackTrait for PlanetCallback {
     fn prepare(
         &self,
-        _device: &wgpu::Device,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         _screen_descriptor: &egui_wgpu::ScreenDescriptor,
         _egui_encoder: &mut wgpu::CommandEncoder,
@@ -172,9 +182,20 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
             0,
             bytemuck::bytes_of(&self.uniforms),
         );
-        if let Some(vertices) = &self.vertices {
-            queue.write_buffer(&resources.vertex_buffer, 0, bytemuck::cast_slice(vertices));
-            resources.has_vertices = true;
+        if let (Some(faces), Some(vertices)) = (&self.faces, &self.vertices) {
+            resources.mesh = Some(MeshBuffers::new(device, vertices.len(), faces));
+        }
+        if let (Some(vertices), Some(mesh)) = (&self.vertices, &resources.mesh) {
+            // Vertices of another mesh (which should not happen) are not drawn.
+            if vertices.len() == mesh.vertex_count {
+                queue.write_buffer(&mesh.vertex_buffer, 0, bytemuck::cast_slice(vertices));
+            } else {
+                tracing::error!(
+                    vertices = vertices.len(),
+                    expected = mesh.vertex_count,
+                    "Surface update of the wrong size"
+                );
+            }
         }
         Vec::new()
     }
@@ -188,13 +209,13 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
         let resources: &PlanetResources = callback_resources
             .get()
             .expect("planet resources are initialised at startup");
-        if !resources.has_vertices {
+        let Some(mesh) = &resources.mesh else {
             return;
-        }
+        };
         render_pass.set_pipeline(&resources.pipeline);
         render_pass.set_bind_group(0, &resources.bind_group, &[]);
-        render_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
-        render_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        render_pass.draw_indexed(0..resources.index_count, 0, 0..1);
+        render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
     }
 }

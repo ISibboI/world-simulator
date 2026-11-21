@@ -8,6 +8,8 @@ mod isostasy;
 mod ocean;
 mod planet;
 mod presets;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod query;
 mod render;
 mod sparse;
 mod sphere;
@@ -17,6 +19,7 @@ mod viewer;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 use web_time::Instant;
@@ -184,29 +187,76 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("creating output directory {}", cli.output.display()))?;
 
     if cli.headless {
-        return simulate(planet, &cli, |_| {});
+        return simulate(planet, &cli, |_| ControlFlow::Continue(()));
     }
 
-    let mesh = planet.tectonics().mesh();
-    let (vertex_count, faces) = (mesh.len(), mesh.faces().to_vec());
-    viewer::run(vertex_count, faces, move |updates, wake_up| {
-        std::thread::spawn(move || {
+    // The parameter panel starts from the command line as given.
+    let args = std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    viewer::run(
+        viewer::Launch { cli, args },
+        simulation_thread_launcher(planet),
+    )
+}
+
+/// Starts the simulations of the 3D view on a thread each: the first one with the planet built
+/// at start-up, later ones (restarts from the parameter panel) with a new planet. A restarted
+/// simulation first waits for the previous thread to end, so only one simulation runs at a time.
+/// The previous simulation stops after its current step, because the view no longer receives
+/// its updates.
+#[cfg(not(target_arch = "wasm32"))]
+fn simulation_thread_launcher(planet: Planet) -> viewer::StartSimulation {
+    use viewer::{SimulationEvent, SurfaceUpdate};
+
+    let mut initial_planet = Some(planet);
+    let mut previous: Option<std::thread::JoinHandle<()>> = None;
+    Box::new(move |launch, events, wake_up| {
+        let planet = initial_planet.take();
+        let previous_thread = previous.take();
+        previous = Some(std::thread::spawn(move || {
+            if let Some(thread) = previous_thread
+                && thread.join().is_err()
+            {
+                error!("The previous simulation thread panicked");
+            }
+            let cli = launch.cli;
+            let mut first_update = true;
             let publish = |planet: &Planet| {
+                let mesh = planet.tectonics().mesh();
                 let vertices =
                     viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
-                let update = viewer::SurfaceUpdate {
+                let update = SurfaceUpdate {
                     time: planet.tectonics().time(),
                     vertices: std::sync::Arc::new(vertices),
+                    // The triangles only with the first update of a simulation.
+                    faces: std::mem::take(&mut first_update)
+                        .then(|| std::sync::Arc::new(mesh.faces().to_vec())),
                 };
-                // Sending fails once the window was closed; the process then exits anyway.
-                if updates.send(update).is_ok() {
+                // Sending fails once the view started another simulation or was closed.
+                if events.send(SimulationEvent::Surface(update)).is_err() {
+                    return ControlFlow::Break(());
+                }
+                wake_up();
+                ControlFlow::Continue(())
+            };
+            let result = match planet {
+                Some(planet) => simulate(planet, &cli, publish),
+                None => std::fs::create_dir_all(&cli.output)
+                    .with_context(|| format!("creating output directory {}", cli.output.display()))
+                    .and_then(|()| build_planet(&cli))
+                    .and_then(|planet| simulate(planet, &cli, publish)),
+            };
+            if let Err(error) = result {
+                error!("Simulation failed: {error:#}");
+                if events
+                    .send(SimulationEvent::Failed(format!("{error:#}")))
+                    .is_ok()
+                {
                     wake_up();
                 }
-            };
-            if let Err(error) = simulate(planet, &cli, publish) {
-                error!("Simulation failed: {error:#}");
             }
-        });
+        }));
     })
 }
 
@@ -216,41 +266,67 @@ fn main() {
     web::start();
 }
 
+impl Cli {
+    /// Checks the options that clap does not check itself.
+    fn check(&self) -> anyhow::Result<()> {
+        ensure!(
+            self.subdivisions <= 8,
+            "at most 8 subdivisions are supported"
+        );
+        ensure!(self.plates >= 1, "there must be at least one plate");
+        ensure!(self.dt > 0.0, "the time step must be positive");
+        ensure!(self.duration >= 0.0, "the duration must not be negative");
+        ensure!(self.width >= 2, "the image width must be at least 2");
+        Ok(())
+    }
+
+    /// The parameters of the run: the presets, then the options, then the overrides
+    /// (`--set`), which are also returned in order.
+    fn parameters(&self) -> anyhow::Result<(Parameters, Vec<(&str, f64)>)> {
+        let epoch = Epoch::new(self.epoch, self.co2)?;
+        let mut parameters = Parameters::new(EARTH_RADIUS, self.biosphere, epoch);
+        let params = &mut parameters.tectonics;
+        params.continental_fraction = self.continental_fraction;
+        params.initial = self.initial;
+        params.matching.verify = self.verify_matching;
+        params.initial_sediment.enabled = !self.no_initial_sediment;
+        params.track_material_budget = self.material_budget;
+        let mut overrides = Vec::with_capacity(self.overrides.len());
+        for assignment in &self.overrides {
+            let (name, value) = assignment
+                .split_once('=')
+                .with_context(|| format!("expected NAME=VALUE, got {assignment}"))?;
+            let value: f64 = value
+                .parse()
+                .with_context(|| format!("parsing the value of {name}"))?;
+            parameters.set(name, value)?;
+            overrides.push((name, value));
+        }
+        Ok((parameters, overrides))
+    }
+
+    /// Checks everything [`build_planet`] checks, without building the planet; used by the
+    /// parameter panel of the 3D view before a restart.
+    fn validate(&self) -> anyhow::Result<()> {
+        self.check()?;
+        self.parameters().map(|_| ())
+    }
+}
+
 /// Checks the parameters and creates the initial planet.
 fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
-    ensure!(
-        cli.subdivisions <= 8,
-        "at most 8 subdivisions are supported"
-    );
-    ensure!(cli.plates >= 1, "there must be at least one plate");
-    ensure!(cli.dt > 0.0, "the time step must be positive");
-    ensure!(cli.duration >= 0.0, "the duration must not be negative");
-    ensure!(cli.width >= 2, "the image width must be at least 2");
+    cli.check()?;
 
     let mesh = SphereMesh::icosphere(cli.subdivisions);
     info!(cells = mesh.len(), "Created planet mesh");
-    let epoch = Epoch::new(cli.epoch, cli.co2)?;
+    let (parameters, overrides) = cli.parameters()?;
     if cli.co2.is_some_and(|co2| co2 > 30.0) {
         warn!(
             "the logarithmic CO₂ forcing (Myhre et al., 1998) holds up to a few tens of times the \
              pre-industrial CO₂; above that it underestimates the forcing (Byrne & Goldblatt, 2014)"
         );
     }
-    let mut parameters = Parameters::new(EARTH_RADIUS, cli.biosphere, epoch);
-    let params = &mut parameters.tectonics;
-    params.continental_fraction = cli.continental_fraction;
-    params.initial = cli.initial;
-    params.matching.verify = cli.verify_matching;
-    params.initial_sediment.enabled = !cli.no_initial_sediment;
-    params.track_material_budget = cli.material_budget;
-    for assignment in &cli.overrides {
-        let (name, value) = assignment
-            .split_once('=')
-            .with_context(|| format!("expected NAME=VALUE, got {assignment}"))?;
-        let value: f64 = value
-            .parse()
-            .with_context(|| format!("parsing the value of {name}"))?;
-        parameters.set(name, value)?;
+    for (name, value) in overrides {
         info!(name, value, "Overrode parameter");
     }
     info!(
@@ -275,17 +351,27 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
 }
 
 /// Runs the simulation, writing snapshots and calling `on_step` with the initial state and after
-/// every step.
-fn simulate(mut planet: Planet, cli: &Cli, mut on_step: impl FnMut(&Planet)) -> anyhow::Result<()> {
+/// every step. The simulation stops early, without a final snapshot, if `on_step` breaks.
+fn simulate(
+    mut planet: Planet,
+    cli: &Cli,
+    mut on_step: impl FnMut(&Planet) -> ControlFlow<()>,
+) -> anyhow::Result<()> {
     let steps = (cli.duration / cli.dt).round() as u64;
     let snapshot_every = ((cli.snapshot_interval / cli.dt).round() as u64).max(1);
     let start = Instant::now();
     let mut previous_ledger: Option<PreviousSnapshot> = None;
     snapshot(&planet, cli, &mut previous_ledger)?;
-    on_step(&planet);
+    if on_step(&planet).is_break() {
+        info!("Simulation stopped at the start");
+        return Ok(());
+    }
     for step in 1..=steps {
         planet.step(cli.dt);
-        on_step(&planet);
+        if on_step(&planet).is_break() {
+            info!(time = planet.tectonics().time(), "Simulation stopped");
+            return Ok(());
+        }
         if step % snapshot_every == 0 || step == steps {
             snapshot(&planet, cli, &mut previous_ledger)?;
         }
