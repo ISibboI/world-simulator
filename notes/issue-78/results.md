@@ -115,12 +115,17 @@ Plan and decisions: [plan.md](plan.md). Research: [research.md](research.md).
   the page URL after the next restart, because the URL names only values that differ from the
   guess (D3). Any restart from the panel or the hint stores the running subdivisions, also when
   they came from a link.
-- **Interaction with PR #84 (#80, start/restart banner):**
-  - Both PRs touch `viewer/mod.rs`, `parameters.rs` and `web.rs`, so whichever lands second
-    rebases.
-  - The banner is a non-interactive full-width strip for waiting states. The hint needs buttons
-    and sits next to the parameters, so it does not reuse the banner.
-  - They do not overlap in time: the hint needs measured steps, and the banner disappears with
-    the first update.
-  - #84 closes the panel on narrow screens after a panel restart. The hint restart happens
-    outside `show()` and would need the same rule.
+- **#84 (start/restart banner, merged first; main merged into this branch):**
+  - #84's behaviour is kept.
+  - The hint's "Restart with N" now also closes the panel on narrow screens, like a panel
+    restart (`ParameterPanel::close_after_restart`).
+  - The hint and the banner never overlap. The banner shows only until the first update of a
+    run; the hint needs a displayed state and measured steps, and a restart resets it.
+  - The hint does not reuse the banner: the banner is a non-interactive strip, and the hint
+    needs buttons next to the parameters.
+  - Checked in headless Chromium at 500×800:
+    - at 7, the hint below ⚙ proposed 6 at 0.79 s;
+    - clicking "Restart with 6" restarted with the guess, so the URL was left without
+      parameters and nothing was stored;
+    - the "Restarting: generating a new planet…" banner then shows alone
+      ([screenshot](web-hint-restart-banner.png)).
