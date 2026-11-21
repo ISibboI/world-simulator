@@ -1892,6 +1892,52 @@ mod tests {
     }
 
     #[test]
+    fn filled_holes_take_the_orogenic_share_of_their_neighbours() {
+        // A hole next to one sample of an orogenic belt: the fill gets the mass-weighted share
+        // of its neighbours (not the belt's full mark), and the orogenic mass is conserved.
+        let mut simulation = single_continent();
+        let local = 100u32;
+        let marked = simulation.mesh.neighbors(local)[0];
+        simulation.plates[0].crust[marked as usize]
+            .as_mut()
+            .unwrap()
+            .mark_orogeny(-300.0);
+        simulation.plates[0].crust[local as usize] = None;
+        let orogenic_mass = |simulation: &Simulation| -> f64 {
+            simulation.plates[0]
+                .crust
+                .iter()
+                .flatten()
+                .map(|crust| crust.thickness * crust.density * crust.orogenic)
+                .sum()
+        };
+        let before = orogenic_mass(&simulation);
+        let parent = Ownership {
+            plate: 0,
+            local: marked,
+        };
+        heal_gap(
+            &simulation.mesh,
+            &mut simulation.plates[0],
+            parent,
+            local,
+            true,
+            &mut GapStatistics::default(),
+        );
+        let neighbours = simulation.mesh.neighbors(local).len() as f64;
+        let filled = simulation.plates[0].crust[local as usize].unwrap();
+        assert_eq!(filled.orogeny, -300.0);
+        assert!((filled.orogenic - 1.0 / neighbours).abs() < 1e-12);
+        assert_eq!(
+            simulation.plates[0].crust[marked as usize]
+                .unwrap()
+                .orogenic,
+            1.0
+        );
+        assert!((orogenic_mass(&simulation) / before - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn holes_of_a_few_vertices_inside_a_plate_are_filled_from_their_rim() {
         let mut simulation = single_plate();
         // Two neighbouring empty vertices: neither is fully enclosed.

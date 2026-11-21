@@ -447,6 +447,53 @@ mod tests {
     }
 
     #[test]
+    fn breaks_through_a_belt_are_cheaper_than_through_its_diluted_remains() {
+        // An old continent with an orogenic belt a few cells wide along the meridian at azimuth
+        // 75°: a break along the belt costs little more than half of one through the craton.
+        // The same orogenic lithosphere spread over a band three times as wide (a third in each
+        // sample) saves only a sixth: it attracts breaks over much shorter detours than a belt.
+        let continent = |half_width: f64, orogenic: f64| {
+            let mut simulation = banded_ocean(75f64.to_radians());
+            let band_normal = DVec3::new(-75f64.to_radians().sin(), 75f64.to_radians().cos(), 0.0);
+            for plate in 0..simulation.plates.len() {
+                for local in 0..simulation.mesh.len() {
+                    let r = simulation.mesh.vertex(local as u32);
+                    let Some(crust) = simulation.plates[plate].crust[local].as_mut() else {
+                        continue;
+                    };
+                    let belt = r.dot(band_normal).abs() < half_width;
+                    *crust = Crust {
+                        thickness: 35_000.0,
+                        density: crate::isostasy::CONTINENTAL_DENSITY,
+                        birth: -1000.0,
+                        sediment: 0.0,
+                        felsic: 1.0,
+                        metasediment: 0.0,
+                        orogeny: if belt { -400.0 } else { NO_OROGENY },
+                        orogenic: if belt { orogenic } else { 0.0 },
+                        cohort: 0.0,
+                    };
+                }
+            }
+            simulation
+        };
+        let circle = Break::Circle { normal: DVec3::X };
+        let cost = |simulation: &Simulation| {
+            let free = vec![u32::MAX; simulation.mesh.len()];
+            simulation
+                .weak_zone_cut(0, &circle, [1.0, 1.0], &[], &free)
+                .map(|(_, cost)| cost)
+                .expect("the plate can be divided")
+        };
+        let craton = cost(&continent(0.1, 0.0));
+        let belt = cost(&continent(0.1, 1.0));
+        let diluted = cost(&continent(0.3, 1.0 / 3.0));
+        assert!(belt < 0.65 * craton, "{belt} / {craton}");
+        assert!(diluted > 0.8 * craton, "{diluted} / {craton}");
+        assert!(diluted < 0.9 * craton, "{diluted} / {craton}");
+    }
+
+    #[test]
     fn rigid_crust_stays_whole_and_forced_cells_keep_their_side() {
         let simulation = banded_ocean(75f64.to_radians());
         // A block straddling the reference circle at the equator.

@@ -445,6 +445,34 @@ mod tests {
     }
 
     #[test]
+    fn a_new_orogeny_deforms_the_whole_sample() {
+        let mut crust = Crust {
+            thickness: 35_000.0,
+            density: CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+            metasediment: 0.0,
+            orogeny: NO_OROGENY,
+            orogenic: 0.0,
+            cohort: 0.0,
+        };
+        // A share of an old belt mixed in: the latest orogeny, a part of the lithosphere.
+        crust.mix_orogeny(-500.0, 0.2);
+        assert_eq!((crust.orogeny, crust.orogenic), (-500.0, 0.2));
+        // An older mark does not replace the time.
+        crust.mix_orogeny(-800.0, 0.3);
+        assert_eq!((crust.orogeny, crust.orogenic), (-500.0, 0.3));
+        // A collision at the sample deforms all of it.
+        crust.mark_orogeny(-100.0);
+        assert_eq!((crust.orogeny, crust.orogenic), (-100.0, 1.0));
+        // Oceanic lithosphere carries no mark.
+        let mut ocean = new_oceanic_crust(-50.0);
+        ocean.mix_orogeny(-100.0, 0.5);
+        assert_eq!((ocean.orogeny, ocean.orogenic), (NO_OROGENY, 0.0));
+    }
+
+    #[test]
     fn felsic_mass_is_conserved_when_mixing() {
         let mut crust = new_oceanic_crust(0.0);
         let before = crust.felsic_mass();

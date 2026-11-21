@@ -546,7 +546,8 @@ impl Simulation {
     ///   (subducting) side, so the new boundary follows the coast there; at a fracture zone the
     ///   younger side is new, the older side old;
     /// * pieces disconnected from their side's main piece (the one holding the margin cell or
-    ///   continent; for rifts the largest) move to the other side, so both parts are connected
+    ///   continent; for rifts the pieces on either side of the plume) move to the other side, so both
+    ///   parts are connected
     ///   (fragments of the plate that touch no other part of it stay where they are).
     ///
     /// Returns `None` if no consistent division is found.
@@ -791,7 +792,27 @@ impl Simulation {
                 new_side[young as usize] = true;
                 Some((young, cell))
             }
-            SplitAnchor::Rift { .. } => None,
+            SplitAnchor::Rift { nucleus, .. } => {
+                // The break nucleates at the plume: the two parts are the pieces on either
+                // side of it there. (Taking each side's largest piece instead let a far block
+                // of the plate win over the piece at the plume, which then changed sides and
+                // took the break at the plume with it.)
+                let origin = self.mesh.vertex(nucleus);
+                let nearest = |wanted: bool| {
+                    (0..cell_count as u32)
+                        .filter(|&cell| in_plate(cell) && new_side[cell as usize] == wanted)
+                        .min_by(|&a, &b| {
+                            self.mesh
+                                .vertex(a)
+                                .angle_between(origin)
+                                .total_cmp(&self.mesh.vertex(b).angle_between(origin))
+                        })
+                };
+                match (nearest(true), nearest(false)) {
+                    (Some(new), Some(old)) => Some((new, old)),
+                    _ => None,
+                }
+            }
         };
         // Move pieces disconnected from their side's main piece to the other side.
         let mut piece = vec![u32::MAX; cell_count];
@@ -2488,6 +2509,55 @@ mod tests {
             assert!(distance < 0.13, "seed {seed}: {distance}");
             assert_eq!(simulation.event_counts.head_rifts, 1, "seed {seed}");
         }
+    }
+
+    #[test]
+    fn plume_rifts_near_a_plate_edge_stay_at_the_plume() {
+        // A plume a few cells inside the edge of its plate: the break still runs through the
+        // plume, or there is none; the piece at the plume does not change sides because a
+        // larger block of its side lies elsewhere.
+        let mut rifts = 0;
+        for seed in 0..6 {
+            for z in [-0.7f64, -0.74, -0.77] {
+                let mut simulation = two_continents(TectonicParams::default(), seed);
+                let cap: Vec<u32> = (0..simulation.mesh.len() as u32)
+                    .filter(|&cell| simulation.mesh.vertex(cell).z < -0.8)
+                    .collect();
+                simulation.split_plate_cells(0, &cap).unwrap();
+                simulation.polarities.clear();
+                let position = DVec3::new((1.0 - z * z).sqrt(), 0.0, z);
+                let plume = simulation.mesh.nearest(position);
+                let plate = simulation.owners[plume as usize].plate;
+                simulation.mantle.insert_plume(Plume {
+                    position,
+                    age: 50.0,
+                    lifetime: 200.0,
+                    peak_flux: 5e-3,
+                    has_rifted: false,
+                });
+                let plates = simulation.plates.len() as u32;
+                simulation.rift_above_plumes();
+                if simulation.event_counts.rifts == 0 {
+                    continue;
+                }
+                rifts += 1;
+                // The boundary between the two parts of the rifted plate.
+                let parts = [plate, plates];
+                let distance = (0..simulation.mesh.len() as u32)
+                    .filter(|&cell| {
+                        let owner = simulation.owners[cell as usize].plate;
+                        parts.contains(&owner)
+                            && simulation.mesh.neighbors(cell).iter().any(|&neighbor| {
+                                let other = simulation.owners[neighbor as usize].plate;
+                                parts.contains(&other) && other != owner
+                            })
+                    })
+                    .map(|cell| simulation.mesh.vertex(cell).angle_between(position))
+                    .fold(f64::INFINITY, f64::min);
+                assert!(distance < 0.13, "seed {seed}, z {z}: {distance}");
+            }
+        }
+        assert!(rifts > 0);
     }
 
     #[test]
