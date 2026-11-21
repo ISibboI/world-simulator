@@ -44,7 +44,7 @@ of K colder than the air around it.
    of a land cell at elevation z and latitude φ:
 
    `T = T_local + w × max(0, T_free − T_local) − lapse rate × z`,
-   `w = min(z / 3 km, 1) × clamp((45° − |φ|) / 15°, 0, 1)`
+   `w = clamp((z − 1 km) / 2 km, 0, 1) × clamp((45° − |φ|) / 15°, 0, 1)`
 
    - `T_local`: the land temperature of the cell's coarse cell (as now).
    - `T_free`: the annual mean sea-surface temperature of the latitude band (the 18 bands of
@@ -56,8 +56,12 @@ of K colder than the air around it.
      (`temperature.free_air_latitude`). A large cold plateau at high latitude makes its own
      climate under a surface inversion (the Antarctic plateau is ~30 K colder than the free
      air at its height), and its ice must keep its own feedback.
-   - `temperature.free_air_height` (3000 m; 0 turns part 2 off). Boundary layers are 1–3 km
-     deep; the weight is 0 at sea level, where the local balance certainly holds.
+   - `temperature.free_air_height` (3000 m; 0 turns part 2 off) and
+     `temperature.free_air_base` (1000 m). Boundary layers are 1–3 km deep: ground below 1 km
+     lies inside one and keeps its own balance; ground above 3 km is in the free air all day.
+     The first two versions let the weight grow from sea level. The results evaluation found
+     that this warmed ordinary tropical uplands by 2–5 K (300 m to 2 km), because tropical
+     lowland in the model is ~5 K colder than the sea of its latitude, a separate bias.
    - The shift is the same in every month: the seasonal cycle stays the local one.
    - The same shifted temperature decides the ice cover that sets the land albedo in the
      energy balance, and the ice field of the output. The energy balance itself is unchanged:
