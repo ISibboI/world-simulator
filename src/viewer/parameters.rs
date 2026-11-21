@@ -286,7 +286,9 @@ impl ParameterPanel {
                     .max_height((bottom - screen.top() - 10.0 * MARGIN).max(100.0))
                     .show(ui, |ui| launch = self.contents(ui, status));
             });
-        self.open = Some(open);
+        // On narrow screens the panel covers most of the view: close it on a restart, so the
+        // status banner behind it is seen.
+        self.open = Some(open && !(launch.is_some() && screen.width() < NARROW_SCREEN));
         launch
     }
 

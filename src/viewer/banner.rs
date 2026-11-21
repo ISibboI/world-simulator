@@ -15,6 +15,8 @@ const BACKGROUND_ALPHA: u8 = 230;
 const VERTICAL_PADDING: f32 = 0.3;
 /// Padding left and right of the text, as a fraction of the font size.
 const HORIZONTAL_PADDING: f32 = 1.0;
+/// Rows of text at most; longer text ends with "…" (the panel shows a failure in full).
+const MAX_ROWS: usize = 4;
 
 /// The text of the banner for the state of the simulation, or `None` if it is running normally.
 ///
@@ -35,7 +37,7 @@ pub fn simulation_text(
 }
 
 /// Draws the banner with `text` across the view of the root `ui` for this frame. Text that
-/// does not fit the width wraps, and the banner grows with it.
+/// does not fit the width wraps, and the banner grows with it, up to [`MAX_ROWS`] rows.
 pub fn show(ui: &egui::Ui, text: &str) {
     let screen = ui.ctx().content_rect();
     let font = egui::TextStyle::Heading.resolve(ui.style());
@@ -48,6 +50,7 @@ pub fn show(ui: &egui::Ui, text: &str) {
         (screen.width() - 2.0 * horizontal_padding).max(1.0),
     );
     job.halign = egui::Align::Center;
+    job.wrap.max_rows = MAX_ROWS;
     let galley = ui.painter().layout_job(job);
 
     let height = galley.size().y + 2.0 * vertical_padding;

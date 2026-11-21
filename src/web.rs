@@ -172,7 +172,7 @@ async fn run_page() -> anyhow::Result<()> {
                 Ok(worker) => running = Some(worker),
                 Err(error) => {
                     error!("{error:#}");
-                    // Shown in the banner and the panel (the view repaints on its next input).
+                    // Shown in the banner and the panel.
                     let _ = events.send(SimulationEvent::Failed(format!("{error:#}")));
                 }
             }
