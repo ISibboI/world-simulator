@@ -1029,6 +1029,15 @@ fn snapshot(
         100.0 * statistics.continental_fraction,
         100.0 * statistics.continental_sample_fraction,
     );
+    let sharing = simulation.surface_sharing();
+    info!(
+        "    surface changes of duplicated samples so far: {:.2}% of the gross change ({:.3e} Gt) \
+         to hidden samples, {:.2}% kept (too few hidden samples), {:.3e} Gt found no bedrock",
+        100.0 * sharing.to_hidden / sharing.gross.max(1e-30),
+        sharing.gross,
+        100.0 * sharing.kept / sharing.gross.max(1e-30),
+        sharing.clamped,
+    );
     info!(
         "    land masses {} ({} specks, largest {:.0}%) | continental crust masses {} ({} specks, \
          largest {:.0}%)",
