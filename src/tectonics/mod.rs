@@ -945,6 +945,11 @@ impl Simulation {
         self.owners[cell as usize]
     }
 
+    /// The rotation axis of a plate scaled by its rotation speed in rad/Myr.
+    pub fn angular_velocity(&self, plate: u32) -> DVec3 {
+        self.plates[plate as usize].angular_velocity
+    }
+
     /// The crust at the surface of a world cell.
     pub fn surface_crust(&self, cell: u32) -> Crust {
         let owner = self.owner(cell);

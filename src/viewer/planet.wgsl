@@ -4,7 +4,8 @@ struct Uniforms {
     view_projection: mat4x4<f32>,
     // Direction towards the light, in world space (w unused).
     light_direction: vec4<f32>,
-    // Size of the view in physical pixels (x, y); used by outline.wgsl.
+    // Size of the view in physical pixels (x, y; used by outline.wgsl), and 1 in z if the
+    // render mode shows its colours unlit (0: lit).
     viewport: vec4<f32>,
 };
 
@@ -35,6 +36,6 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse = max(dot(normalize(input.normal), uniforms.light_direction.xyz), 0.0);
-    let light = 0.3 + 0.7 * diffuse;
+    let light = mix(0.3 + 0.7 * diffuse, 1.0, uniforms.viewport.z);
     return vec4<f32>(input.color.rgb * light, 1.0);
 }
