@@ -8,7 +8,9 @@
 use glam::DVec3;
 
 use super::super::arrows::{ArrowStyle, Sample, base_point};
-use super::super::overlay::{LineStyle, OverlayBuilder, anchored, category_boundaries};
+use super::super::overlay::{
+    BoundaryPiece, LineStyle, OverlayBuilder, anchored, category_boundaries,
+};
 use super::super::plate_colors::PALETTE;
 use super::{
     ArrowScale, DEFAULT_ARROW_SPACING, Legend, ModeData, OptionValues, RenderMode, Swatch,
@@ -23,7 +25,7 @@ const OCEANIC_SHADE: f32 = 0.72;
 
 /// What a boundary line shows: the classes of the cells on its two sides combined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Line {
+pub(super) enum Line {
     Subduction,
     Collision,
     Diffuse,
@@ -171,6 +173,108 @@ impl Plates {
     }
 }
 
+/// Stipples the cells in deforming bands (see [`crate::viewer::CellInfo::in_deforming_band`]).
+pub(super) fn deforming_bands(data: &ModeData, overlay: &mut OverlayBuilder) {
+    if data.cells.len() != data.mesh.len() {
+        return;
+    }
+    let dot_radius = (DOT_RADIUS * data.mesh.mean_edge_angle()).max(MIN_DOT_RADIUS);
+    let dot_color = rgba(DOT_COLOR);
+    for (cell, info) in data.cells.iter().enumerate() {
+        if info.in_deforming_band() {
+            let point = data.position(cell as u32).as_dvec3();
+            overlay.dot(
+                point + point.normalize_or_zero() * LIFT,
+                dot_radius,
+                dot_color,
+            );
+        }
+    }
+}
+
+/// The swatch of [`deforming_bands`].
+pub(super) fn deforming_swatch() -> Swatch {
+    Swatch::new(PALETTE[8], SwatchShape::Dots, "Deforming")
+}
+
+/// Draws the plate boundaries by what they do, with teeth on the upper plate of subduction
+/// zones, `scale` times as wide as in this mode; returns the pieces of the boundaries and
+/// their lines.
+pub(super) fn boundaries(
+    data: &ModeData,
+    overlay: &mut OverlayBuilder,
+    scale: f64,
+) -> (Vec<BoundaryPiece>, Vec<(Line, Option<usize>)>) {
+    if data.cells.len() != data.mesh.len() {
+        return (Vec::new(), Vec::new());
+    }
+    let spacing = data.arrow_spacing;
+    let position = |cell: u32| data.position(cell).as_dvec3();
+    let up = |point: DVec3| point.normalize_or_zero();
+    let pieces = category_boundaries(
+        data.mesh.faces(),
+        |cell| data.cells[cell as usize].plate,
+        position,
+    );
+    let lines: Vec<(Line, Option<usize>)> = pieces
+        .iter()
+        .map(|piece| Line::of(piece.sides.map(|cell| data.cells[cell as usize].boundary())))
+        .collect();
+    let width = LINE_WIDTH * spacing * scale;
+    for (piece, &(line, _)) in pieces.iter().zip(&lines) {
+        let style = LineStyle {
+            width: width * line.width(),
+            border: 0.3 * width,
+            color: rgba(line.color()),
+            border_color: BORDER_COLOR,
+            lift: LIFT,
+        };
+        overlay.line(piece.from, piece.to, &style);
+    }
+    let subduction: Vec<usize> = (0..pieces.len())
+        .filter(|&index| lines[index].0 == Line::Subduction)
+        .collect();
+    let tooth = TOOTH_LENGTH * spacing * scale;
+    for kept in anchored(
+        subduction.iter().map(|&index| pieces[index].middle()),
+        TOOTH_SPACING * spacing,
+    ) {
+        let index = subduction[kept];
+        let piece = &pieces[index];
+        let Some(upper) = lines[index].1 else {
+            continue;
+        };
+        let middle = piece.middle();
+        let lift = up(middle) * LIFT;
+        let towards = piece.towards(upper, position);
+        let along = up(middle).cross(towards);
+        let base = middle + lift + towards * (width / 2.0);
+        overlay.triangle(
+            [
+                base - along * (tooth / 2.0),
+                base + along * (tooth / 2.0),
+                base + towards * tooth,
+            ],
+            rgba(Line::Subduction.color()),
+            0.3 * width,
+            BORDER_COLOR,
+        );
+    }
+    (pieces, lines)
+}
+
+/// The swatches of the boundary lines of [`boundaries`].
+pub(super) fn boundary_swatches() -> impl Iterator<Item = Swatch> {
+    Line::ALL.into_iter().map(|line| {
+        let shape = if line == Line::Subduction {
+            SwatchShape::Teeth
+        } else {
+            SwatchShape::Line
+        };
+        Swatch::new(line.color(), shape, line.label())
+    })
+}
+
 impl RenderMode for Plates {
     fn label(&self) -> &'static str {
         "Plates"
@@ -201,67 +305,10 @@ impl RenderMode for Plates {
         let position = |cell: u32| data.position(cell).as_dvec3();
         let up = |point: DVec3| point.normalize_or_zero();
 
-        // The deforming bands, stippled.
-        let dot_radius = (DOT_RADIUS * data.mesh.mean_edge_angle()).max(MIN_DOT_RADIUS);
-        let dot_color = rgba(DOT_COLOR);
-        for (cell, info) in data.cells.iter().enumerate() {
-            if info.in_deforming_band() {
-                let point = position(cell as u32);
-                overlay.dot(point + up(point) * LIFT, dot_radius, dot_color);
-            }
-        }
+        deforming_bands(data, overlay);
         overlay.next_layer();
-
-        // The boundaries, with teeth on the upper plate of subduction zones.
-        let pieces = category_boundaries(
-            data.mesh.faces(),
-            |cell| data.cells[cell as usize].plate,
-            position,
-        );
-        let lines: Vec<(Line, Option<usize>)> = pieces
-            .iter()
-            .map(|piece| Line::of(piece.sides.map(|cell| data.cells[cell as usize].boundary())))
-            .collect();
+        let (pieces, lines) = boundaries(data, overlay, 1.0);
         let width = LINE_WIDTH * spacing;
-        for (piece, &(line, _)) in pieces.iter().zip(&lines) {
-            let style = LineStyle {
-                width: width * line.width(),
-                border: 0.3 * width,
-                color: rgba(line.color()),
-                border_color: BORDER_COLOR,
-                lift: LIFT,
-            };
-            overlay.line(piece.from, piece.to, &style);
-        }
-        let subduction: Vec<usize> = (0..pieces.len())
-            .filter(|&index| lines[index].0 == Line::Subduction)
-            .collect();
-        let tooth = TOOTH_LENGTH * spacing;
-        for kept in anchored(
-            subduction.iter().map(|&index| pieces[index].middle()),
-            TOOTH_SPACING * spacing,
-        ) {
-            let index = subduction[kept];
-            let piece = &pieces[index];
-            let Some(upper) = lines[index].1 else {
-                continue;
-            };
-            let middle = piece.middle();
-            let lift = up(middle) * LIFT;
-            let towards = piece.towards(upper, position);
-            let along = up(middle).cross(towards);
-            let base = middle + lift + towards * (width / 2.0);
-            overlay.triangle(
-                [
-                    base - along * (tooth / 2.0),
-                    base + along * (tooth / 2.0),
-                    base + towards * tooth,
-                ],
-                rgba(Line::Subduction.color()),
-                0.3 * width,
-                BORDER_COLOR,
-            );
-        }
         overlay.next_layer();
 
         // Relative motion across the boundaries: on each side, the motion of that plate
@@ -344,15 +391,8 @@ impl RenderMode for Plates {
             SwatchShape::Palette(PALETTE[..8].to_vec()),
             "Plates",
         )];
-        swatches.extend(Line::ALL.into_iter().map(|line| {
-            let shape = if line == Line::Subduction {
-                SwatchShape::Teeth
-            } else {
-                SwatchShape::Line
-            };
-            Swatch::new(line.color(), shape, line.label())
-        }));
-        swatches.push(Swatch::new(PALETTE[8], SwatchShape::Dots, "Deforming"));
+        swatches.extend(boundary_swatches());
+        swatches.push(deforming_swatch());
         Legend {
             description: "Each plate in its own colour for its life (oceanic crust darker), its \
                           boundaries by what they do, and its motion. Teeth point into the \

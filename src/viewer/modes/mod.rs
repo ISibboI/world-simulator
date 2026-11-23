@@ -23,6 +23,7 @@ mod moisture;
 mod ocean_currents;
 mod plate_motion;
 mod plates;
+mod strength;
 pub mod switcher;
 mod temperature;
 mod topographic;
@@ -54,6 +55,8 @@ pub enum RenderModeId {
     Moisture,
     /// The wind-driven ocean gyres as arrows.
     OceanCurrents,
+    /// Lithosphere strength: weak zones and what weakens them.
+    LithosphereStrength,
 }
 
 impl RenderModeId {
@@ -66,6 +69,7 @@ impl RenderModeId {
             RenderModeId::Temperature => &temperature::Temperature,
             RenderModeId::Moisture => &moisture::Moisture,
             RenderModeId::OceanCurrents => &ocean_currents::OceanCurrents,
+            RenderModeId::LithosphereStrength => &strength::LithosphereStrength,
         }
     }
 
@@ -89,6 +93,7 @@ impl RenderModeId {
             RenderModeId::Temperature => "temperature",
             RenderModeId::Moisture => "moisture",
             RenderModeId::OceanCurrents => "ocean-currents",
+            RenderModeId::LithosphereStrength => "lithosphere-strength",
         }
     }
 
