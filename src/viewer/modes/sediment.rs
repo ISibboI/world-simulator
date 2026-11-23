@@ -66,7 +66,8 @@ const OPTIONS: [ModeOption; 2] = [
         hover: "Bulk: the thickness of the compacted sediment with its pores, as seismic surveys \
                 measure it. As rock: its mass as a layer of a fixed density of 2050 kg/m³, \
                 what the simulation keeps; thinner than the bulk where the sediment is porous, \
-                thicker below about 5 km, where the column is compacted to a higher density",
+                thicker than the bulk for columns over about 4.4 km, which are compacted to a \
+                higher density",
         kind: OptionKind::Choice(&["Bulk", "As rock"]),
     },
     ModeOption {
@@ -95,15 +96,15 @@ const YL_OR_BR: [[u8; 3]; 9] = [
 /// all but name (young ocean floor at the ridges, eroding mountains); the thickest basins of
 /// Earth hold 15–20 km.
 const RANGE: (f64, f64) = (10.0, 20_000.0);
-/// Ticks in metres with their labels in km.
-const TICKS: [(f64, &str); 7] = [
+/// Ticks in metres with their labels in km (none at the end, which would crowd the 10 on
+/// phones).
+const TICKS: [(f64, &str); 6] = [
     (10.0, "0.01"),
     (100.0, "0.1"),
     (300.0, "0.3"),
     (1000.0, "1"),
     (3000.0, "3"),
     (10_000.0, "10"),
-    (20_000.0, "20"),
 ];
 
 /// The isopachs: thickness (m) and line width in multiples of the arrow spacing.

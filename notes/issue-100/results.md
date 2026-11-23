@@ -6,12 +6,12 @@
   `?render-mode=sediment`), `src/viewer/modes/sediment.rs`:
   - Sediment thickness on land and sea floor on ColorBrewer's YlOrBr (sequential, colour-blind
     safe, lightness monotonic), logarithmic from 10 m (palest, also for bare rock) to 20 km
-    (darkest); ticks 0.01, 0.1, 0.3, 1, 3, 10, 20 km. Unlit, so the colours match the legend.
+    (darkest); ticks 0.01, 0.1, 0.3, 1, 3, 10 km. Unlit, so the colours match the legend.
   - Option **Thickness: Bulk | As rock**. Bulk (default) is the compacted column with its pores,
     what seismic isopach maps of Earth show; "as rock" is what the simulation stores (mass at
     2050 kg/m³). Bulk follows from it by the simulation's own compaction law
-    (`isostasy::sediment_bulk_thickness`): ~1.5–1.9× the rock equivalent for thin, porous
-    sediment, equal at ~5 km, less below (a compacted column is denser than 2050 kg/m³).
+    (`isostasy::sediment_bulk_thickness`): 1.9× the rock equivalent near 0, 1.35× at 1 km,
+    equal at ~4.4 km, less for thicker columns (a compacted column is denser than 2050 kg/m³).
   - Option **Isopachs**: lines at 0.1, 1 and 10 km of the shown thickness (wider for thicker),
     drawn on the log axis so that they follow the colour steps.
   - Coastlines in blue with a thin white border (stand out on the yellows and the dark browns
@@ -35,13 +35,18 @@ fmt, clippy (native and wasm32), tests and doc pass with warnings denied.
   [desktop-isopachs.png](desktop-isopachs.png) (5 subdivisions, seed 0, ~200 Myr).
 - Web at phone width (400 px): [web-phone.png](web-phone.png) (panels collapsed),
   [web-phone-legend-cell.png](web-phone-legend-cell.png) (legend with options, cell widget). The
-  option buttons and the checkbox are the switcher's existing widgets, touch-sized on coarse
-  pointers.
+  option buttons and the checkbox are the switcher's existing widgets (touch sizing on coarse
+  pointers comes from them; these screenshots use a mouse, so they show the fine-pointer sizes).
+  With legend and cell widget both open, a phone screen is mostly covered (existing layout).
+  The isopach swatch in the legend looks like a white double line on the dark desktop theme
+  (the dark line vanishes on the dark panel, its white border remains), as the temperature
+  mode's 0 °C swatch does.
 
 ## Plausibility (4 seeds, 500 Myr, 6 subdivisions, main at 72d612b)
 
 Bulk thickness from `--cell-dump` (`bulk` column, the same function the mode uses); medians
-in m; "bare" = < 10 m.
+in m; "bare" = < 10 m. Ocean floor = oceanic crust under the sea; land = cells outside
+the dump's ocean mask (includes the few land basins below sea level).
 
 | Setting | seed 0 | seed 1 | seed 2 | seed 3 | Earth (orientation) |
 | --- | --- | --- | --- | --- | --- |
@@ -56,8 +61,13 @@ in m; "bare" = < 10 m.
 
 Reading:
 - Plausible for an Earth-like planet: bare young ocean floor at the ridges, a few hundred metres
-  on mid-aged ocean floor, km-thick shelves and margins, about half the land bare (shields,
-  mountains) with basins of several km.
+  on mid-aged ocean floor (thin in seeds 2–3), km-thick shelves and margins, about half the land
+  bare (shields, mountains) with basins of several km.
+- **Not plausible: old ocean floor is bimodal.** Ocean floor older than 100 Myr is either nearly
+  bare (median 17–30 m in seeds 2–3) or several km thick (p90 8.5–10 km), without the
+  0.5–1 km blanket of pelagic sediment that accumulates on Earth's old abyssal plains. Pelagic
+  rain far from margins seems too weak or not to stay; reported on #14 with the trapped-sediment
+  point below.
 - **Maximum 11 km bulk everywhere** (300–370 cells per seed): sediment buried deeper than
   `metamorphic_depth` (11 km bulk) turns into felsic crust, so the thickest piles saturate
   there; Earth's thickest basins (Bengal, Gulf of Mexico, South Caspian) reach 15–20 km. The
@@ -69,3 +79,12 @@ Reading:
 - Grid: at ~110 km cells (220 km on the web) narrow features (deltas, fans, accretionary
   wedges, shelves of tens of km) are averaged over a cell, so their peaks are lower and their
   outlines blockier than on Earth; accepted per the project goal.
+
+## Independent results review
+
+No code bugs found; the table was re-derived from the dumps (ocean, shelf, cap numbers match;
+land p90 differs slightly with another land definition, now stated). Fixed: the bulk/rock
+crossover is ~4.4 km (hover text and notes), ratio wording, the bimodal old ocean floor is now
+called out, the crowded 20 km tick on phones is gone, the touch-size claim is softened. Left as
+is (existing patterns): the isopach legend swatch on the dark theme, the coastline width (same
+as the other unlit modes), legend plus cell widget covering a phone screen.

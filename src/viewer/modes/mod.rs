@@ -25,10 +25,10 @@ mod plate_motion;
 mod plates;
 mod sediment;
 pub mod switcher;
-
-pub use sediment::bulk as bulk_sediment;
 mod temperature;
 mod topographic;
+
+pub use sediment::bulk as bulk_sediment;
 
 use clap::ValueEnum;
 use glam::Vec3;
