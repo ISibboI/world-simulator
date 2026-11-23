@@ -778,7 +778,10 @@ mod tests {
             wind_east: f32::NAN,
             ..info()
         };
-        assert_eq!(row(&format_rows(&unknown, None, 0.0, 0.0), "Wind (year)"), None);
+        assert_eq!(
+            row(&format_rows(&unknown, None, 0.0, 0.0), "Wind (year)"),
+            None
+        );
     }
 
     fn ocean() -> CellInfo {
