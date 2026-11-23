@@ -408,7 +408,10 @@ pub fn sea_level_from(
     unreachable!("the flood returns at the last cell")
 }
 
-/// [`relative_sea_level`] for given seeds of the ocean (see [`ocean_seeds`]).
+/// The sea level (as an offset of dry elevations, m) at which the ocean, seeded at `seeds` (see
+/// [`ocean_seeds`]), holds `volume` (m³), relative to the sea level that the surface
+/// `elevations` (m) refer to, for cells of equal `cell_area` (m²) carrying the given
+/// rock-equivalent `sediment` (m), whose pores hold water.
 pub fn relative_sea_level_from(
     mesh: &SphereMesh,
     elevations: &[f64],

@@ -146,3 +146,10 @@ whichever lands second rebases and re-measures briefly.
 - Flicker: per snapshot the number and area of inland below-sea-level bodies and dry vs lake;
   per step changes of the inland area are accumulated (|Δ area|, cells per 100 Myr).
 - Tests as listed in the review; the existing volume tests use the mask and allow the jump.
+
+## After the runs
+
+The measurements added two rules (a sill on which the sea level stands connects the basin
+behind it; closed bodies whose basin covers ≥ 0.2% of the surface at its pass towards the ocean
+are seas), lake water taken from the ocean volume, and the seas found once per step; see
+[`results.md`](results.md).
