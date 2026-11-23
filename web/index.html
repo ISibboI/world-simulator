@@ -4,6 +4,90 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>World Simulator</title>
+    <script>
+        // Reports failures while the simulator loads in the loading banner (#status), until the
+        // view drew its first frame (issue #122): files that do not load (network errors, 404,
+        // a mismatched integrity hash), errors while instantiating or starting the wasm module,
+        // and other uncaught errors and promise rejections. The banner says what failed and
+        // suggests a reload; the details go to the console. A failure before the simulator
+        // started reloads the page once, fetching the page itself anew (a page from the cache
+        // could name files that a new deploy removed). After 30 s without a frame the banner
+        // says that loading takes long. The failure is also recorded as `data-load-failed` of
+        // the root element, for the browser tests (web/tests/). Failures of the simulation
+        // worker are shown by the view (src/web.rs).
+        (() => {
+            const STALL_SECONDS = 30;
+            const RETRY_KEY = "world-simulator-load-retry";
+            const LOADING = "Loading the simulator…";
+            const root = document.documentElement;
+            let started = false;
+            let failed = false;
+            const running = () => root.dataset.firstFrame === "true";
+            const show = (text) => {
+                const status = document.getElementById("status");
+                if (status) {
+                    status.textContent = text;
+                    status.style.display = "block";
+                }
+            };
+            // At most one automatic reload per minute, so that a lasting failure cannot loop.
+            const retry = (urls) => {
+                try {
+                    if (Date.now() - Number(sessionStorage.getItem(RETRY_KEY) ?? 0) < 60000) {
+                        return false;
+                    }
+                    sessionStorage.setItem(RETRY_KEY, String(Date.now()));
+                } catch {
+                    return false;
+                }
+                const fresh = [location.href, ...urls].map((url) =>
+                    fetch(url, { cache: "reload" }).catch(() => {}));
+                Promise.all(fresh).finally(() => location.reload());
+                return true;
+            };
+            const fail = (what, detail, urls = []) => {
+                if (failed || running()) {
+                    return;
+                }
+                failed = true;
+                console.error(`World Simulator: ${what}.`, detail);
+                root.dataset.loadFailed = `${what}. Reload the page.`;
+                if (!started && retry(urls)) {
+                    show(`${what}.\nReloading the page…`);
+                } else {
+                    show(`${what}.\nPlease reload the page.`);
+                }
+            };
+            addEventListener("TrunkApplicationStarted", () => { started = true; });
+            // Before the module started: getting or compiling it failed (a trap is a crash).
+            const failure = (error) => !started && !(error instanceof WebAssembly.RuntimeError)
+                ? "Could not load the simulator"
+                : "The simulator could not start";
+            // Capturing: errors of <script> and <link> elements do not bubble.
+            addEventListener("error", (event) => {
+                const target = event.target;
+                if (target instanceof HTMLScriptElement || target instanceof HTMLLinkElement) {
+                    const url = target.src || target.href;
+                    const file = url ? new URL(url, location.href).pathname.split("/").pop() : "";
+                    fail(`Could not load the simulator${file ? ` (${file})` : ""}`, event,
+                        url ? [url] : []);
+                } else if (event instanceof ErrorEvent
+                    && !String(event.message).startsWith("ResizeObserver loop")) {
+                    fail(failure(event.error), event.error ?? event.message);
+                }
+            }, true);
+            addEventListener("unhandledrejection", (event) =>
+                fail(failure(event.reason), event.reason));
+            setTimeout(() => {
+                const status = document.getElementById("status");
+                if (!failed && !running() && status?.textContent === LOADING) {
+                    console.warn(`World Simulator: still loading after ${STALL_SECONDS} s.`);
+                    show(`Still loading the simulator after ${STALL_SECONDS} s…\n`
+                        + "If nothing happens, reload the page.");
+                }
+            }, STALL_SECONDS * 1000);
+        })();
+    </script>
     <!-- The simulator (src/web.rs); the same module also runs the simulation in worker.js. -->
     <link data-trunk rel="rust" href="../Cargo.toml" data-bin="world-simulator" data-wasm-opt="3">
     <link data-trunk rel="copy-file" href="worker.js">

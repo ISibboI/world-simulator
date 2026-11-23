@@ -5,7 +5,11 @@
 //! loads it again in a module worker. [`start`] tells them apart by their global scope. The
 //! parameters are the command-line options, given as URL query parameters
 //! (`?seed=3&subdivisions=5&no-erosion&set=basal_drag=8e14`, see [`crate::query`]); the worker
-//! gets the same query string. It sends `{ generating: true }` before it builds the planet, then a
+//! gets the same query string, after the files of the page's build that it loads (`module` and
+//! `wasm`, see [`crate::query::worker_query`]). Their names carry content hashes (Trunk's
+//! `filehash`), so that a page never runs with cached files of another build (issue #122).
+//! Failures while the page loads are shown in its loading banner by the script in
+//! `web/index.html`. It sends `{ generating: true }` before it builds the planet, then a
 //! surface update after every step as
 //! `{ time, cells, plates }` (the attributes of the cells as [`viewer::CellInfo`]s, the
 //! [`viewer::PlateInfo`] of every plate, and with the first update also `directions` and `faces`, the mesh),
@@ -51,7 +55,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::device::{self, DeviceSignals, Source};
-use crate::query::{args_to_query, query_to_args};
+use crate::query::{args_to_query, query_to_args, without_worker_files, worker_query};
 use crate::viewer::{
     self, CellInfo, Fields, FrameStore, Launch, Layer, Layers, MeshUpdate, PlateInfo, RenderModeId,
     SimulationControl, SimulationEvent, SurfaceUpdate, UiOptions, has_option, with_default,
@@ -67,6 +71,9 @@ const CANVAS_ID: &str = "world_simulator";
 const STATUS_ID: &str = "status";
 /// Script of the simulation worker, relative to the page.
 const WORKER_SCRIPT: &str = "./worker.js";
+/// What the banner says after a failure to load a file, also in `web/index.html` and
+/// `web/worker.js`.
+const RELOAD_HINT: &str = "Reload the page.";
 
 /// Entry point of the page and of the worker.
 pub fn start() {
@@ -433,7 +440,7 @@ fn replace_query(query: &str) {
 struct RunningWorker {
     worker: web_sys::Worker,
     _on_message: Closure<dyn FnMut(web_sys::MessageEvent)>,
-    _on_error: Closure<dyn FnMut(web_sys::ErrorEvent)>,
+    _on_error: Closure<dyn FnMut(web_sys::Event)>,
 }
 
 impl RunningWorker {
@@ -445,6 +452,24 @@ impl RunningWorker {
     }
 }
 
+/// The simulator's JavaScript module and wasm file that the page loaded, as Trunk's preload links
+/// in `web/index.html` name them (relative to the page, with the content hashes of this build).
+fn module_files() -> anyhow::Result<(String, String)> {
+    let document = document()?;
+    let href = |selector: &str| {
+        document
+            .query_selector(selector)
+            .ok()
+            .flatten()
+            .and_then(|link| link.get_attribute("href"))
+            .with_context(|| format!("no `{selector}` in the page"))
+    };
+    Ok((
+        href(r#"link[rel="modulepreload"]"#)?,
+        href(r#"link[rel="preload"][type="application/wasm"]"#)?,
+    ))
+}
+
 /// Starts the simulation worker with the query string `query` and forwards its events to the
 /// view.
 fn start_worker(
@@ -453,9 +478,11 @@ fn start_worker(
     wake_up: Box<dyn Fn() + Send>,
     hidden: Rc<Cell<bool>>,
 ) -> anyhow::Result<RunningWorker> {
+    let (module, wasm) = module_files()?;
     let options = web_sys::WorkerOptions::new();
     options.set_type(web_sys::WorkerType::Module);
-    let worker = web_sys::Worker::new_with_options(&format!("{WORKER_SCRIPT}{query}"), &options)
+    let url = format!("{WORKER_SCRIPT}{}", worker_query(&module, &wasm, query));
+    let worker = web_sys::Worker::new_with_options(&url, &options)
         .map_err(|error| anyhow!("starting the simulation worker: {error:?}"))?;
 
     let wake_up: Arc<dyn Fn() + Send> = Arc::from(wake_up);
@@ -559,17 +586,21 @@ fn start_worker(
             }));
         });
     worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
-    // Errors while loading the worker script or module (a failure inside the simulation arrives
-    // as an `{ error }` message, see `web/worker.js`).
-    let on_error =
-        Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |event: web_sys::ErrorEvent| {
-            let message = event.message();
-            error!("Simulation worker error: {message}");
-            mark("simulation-failed", &message);
-            if events.send(SimulationEvent::Failed(message)).is_ok() {
-                wake_up();
-            }
-        });
+    // Errors while loading the worker script (a failure to load the module, or inside the
+    // simulation, arrives as an `{ error }` message, see `web/worker.js`). A script that does
+    // not load gives a plain `Event` without a message, not an `ErrorEvent`.
+    let on_error = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let detail = get(&event, "message")
+            .as_string()
+            .filter(|message| !message.is_empty());
+        error!("Simulation worker error: {detail:?}");
+        // Short, for the banner; the details are in the console.
+        let message = format!("its worker did not start. {RELOAD_HINT}");
+        mark("simulation-failed", &message);
+        if events.send(SimulationEvent::Failed(message)).is_ok() {
+            wake_up();
+        }
+    });
     worker.set_onerror(Some(on_error.as_ref().unchecked_ref()));
     Ok(RunningWorker {
         worker,
@@ -743,7 +774,7 @@ fn schedule_step(state: Rc<RefCell<WorkerState>>) {
 /// from the page are requests for other fields (`{ layers }`), to pause or resume
 /// (`{ paused }`) and for one step while paused (`{ step }`), handled between steps.
 fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()> {
-    let search = scope.location().search();
+    let search = without_worker_files(&scope.location().search());
     let Launch { cli, .. } = parse_query(&search)?;
     info!(?search, "Simulation worker started");
     let message = js_sys::Object::new();

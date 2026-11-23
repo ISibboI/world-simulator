@@ -2,7 +2,10 @@ name: Browser tests
 
 # Basic tests of the web version in the supported browsers (issue #117, see web/tests/): the
 # simulator loads, the 3D view draws a frame, and the frame history is stored in IndexedDB and
-# read back. Desktop: Linux (Chrome, Firefox, WebKit), Windows (Chrome, Firefox). Mobile: Chrome
+# read back. Desktop: Linux (Chrome, Firefox, WebKit), Windows (Chrome, Firefox). On Linux also the
+# failure scenarios of issue #122: a broken JavaScript module, wasm file or worker script must
+# show an error in the loading banner, and a new deploy must not mix with cached files of the old
+# one (`--scenario`, see web/tests/browser_test.py). Mobile: Chrome
 # and Firefox in an Android emulator set up like a low-end phone. The runners have no GPU, so
 # everything renders in software. No macOS/iOS jobs: Safari has no working WebGL on GitHub's macOS
 # runners (no GPU), so they could not pass; WebKit on Linux stands in for Safari's engine.
@@ -77,8 +80,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: Linux, os: ubuntu-latest, browsers: chrome firefox webkit }
-          - { name: Windows, os: windows-latest, browsers: chrome firefox }
+          - { name: Linux, os: ubuntu-latest, browsers: chrome firefox webkit,
+              scenarios: load redeploy broken-js broken-wasm broken-worker }
+          - { name: Windows, os: windows-latest, browsers: chrome firefox, scenarios: load }
 
     steps:
       - uses: actions/checkout@v7
@@ -108,14 +112,21 @@ jobs:
           echo "| --- | --- | --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
           status=0
           for browser in ${{ matrix.browsers }}; do
-            command=(python web/tests/browser_test.py --browser "$browser" --dist dist
-              --query "$QUICK_QUERY" --out "results/${{ matrix.name }}-$browser")
-            # Linux: the browsers run with a window on a virtual screen (headless Firefox has
-            # no WebGL).
-            if [ "$RUNNER_OS" = Linux ]; then
-              command=(xvfb-run --auto-servernum --server-args="-screen 0 1400x900x24" "${command[@]}")
-            fi
-            "${command[@]}" || status=1
+            for scenario in ${{ matrix.scenarios }}; do
+              command=(python web/tests/browser_test.py --browser "$browser" --dist dist
+                --query "$QUICK_QUERY" --scenario "$scenario"
+                --out "results/${{ matrix.name }}-$browser-$scenario")
+              # The failure scenarios need not run long.
+              if [ "$scenario" != load ]; then
+                command+=(--hold 5)
+              fi
+              # Linux: the browsers run with a window on a virtual screen (headless Firefox has
+              # no WebGL).
+              if [ "$RUNNER_OS" = Linux ]; then
+                command=(xvfb-run --auto-servernum --server-args="-screen 0 1400x900x24" "${command[@]}")
+              fi
+              "${command[@]}" || status=1
+            done
           done
           exit $status
 

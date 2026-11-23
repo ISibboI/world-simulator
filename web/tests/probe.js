@@ -3,7 +3,8 @@
 // the page records on its root element (`data-*`, see `mark` in src/web.rs) to the test server
 // every half second, until the server says it has seen enough. The test passes or fails on the
 // server, so that it works the same with every way of opening the page (WebDriver, Playwright,
-// an Android intent, the iOS Simulator).
+// an Android intent, the iOS Simulator). The server can also ask the page to reload (the
+// `redeploy` scenario).
 (() => {
     const logs = [];
     const errors = [];
@@ -56,6 +57,9 @@
         const body = {
             seconds: (Date.now() - started) / 1000,
             hash: location.hash,
+            // Tells page loads apart, and which build the page is (its module's hash).
+            timeOrigin: performance.timeOrigin,
+            build: document.querySelector('link[rel="modulepreload"]')?.integrity ?? null,
             userAgent: navigator.userAgent,
             data: { ...document.documentElement.dataset },
             status: status ? { text: status.textContent, display: status.style.display } : null,
@@ -70,6 +74,10 @@
             sent += body.logs.length;
             const answer = await response.json();
             if (answer.stop) {
+                return;
+            }
+            if (answer.reload) {
+                location.reload();
                 return;
             }
         } catch (error) {
