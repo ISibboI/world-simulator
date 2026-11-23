@@ -19,6 +19,7 @@
 //! which lines) lists them in [`RenderMode::options`]; the switcher shows them above the
 //! legend and the mode reads their values from [`ModeData::options`].
 
+mod moisture;
 mod plate_motion;
 mod plates;
 pub mod switcher;
@@ -48,6 +49,8 @@ pub enum RenderModeId {
     Plates,
     /// Surface temperature: annual mean, January or July.
     Temperature,
+    /// Precipitation (annual, January or July) or the aridity index of land.
+    Moisture,
 }
 
 impl RenderModeId {
@@ -58,6 +61,7 @@ impl RenderModeId {
             RenderModeId::PlateMotion => &plate_motion::PlateMotion,
             RenderModeId::Plates => &plates::Plates,
             RenderModeId::Temperature => &temperature::Temperature,
+            RenderModeId::Moisture => &moisture::Moisture,
         }
     }
 
@@ -79,6 +83,7 @@ impl RenderModeId {
             RenderModeId::PlateMotion => "plate-motion",
             RenderModeId::Plates => "plates",
             RenderModeId::Temperature => "temperature",
+            RenderModeId::Moisture => "moisture",
         }
     }
 

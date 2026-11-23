@@ -11,7 +11,7 @@ use crate::tectonics::BoundaryClass;
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 56 bytes per cell, 2.3 MB
+/// buffer (to the page on the web) and read back without parsing: 68 bytes per cell, 2.8 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -34,8 +34,15 @@ pub struct CellInfo {
     /// starting at perihelion) and of the seventh (July) in °C, or NaN.
     pub temperature_january: f32,
     pub temperature_july: f32,
-    /// Precipitation in m/yr.
+    /// Annual precipitation in m/yr.
     pub precipitation: f32,
+    /// Precipitation of January and of July as a rate in m/yr, or NaN if the water cycle does
+    /// not solve that month (see `ClimateParams::months`).
+    pub precipitation_january: f32,
+    pub precipitation_july: f32,
+    /// Annual potential evaporation of land in m/yr (zero over the ocean, see
+    /// [`crate::climate::WaterCycle::potential_evaporation`]).
+    pub potential_evaporation: f32,
     /// Permanent ice cover (sea ice, ice sheets), 0 to 1.
     pub ice: f32,
     /// Water discharge in m³/yr (zero while erosion is disabled).
@@ -67,6 +74,18 @@ impl CellInfo {
     /// What the plate boundary at the cell does, if the cell is at one.
     pub fn boundary(&self) -> Option<BoundaryClass> {
         BoundaryClass::from_code(((self.flags & Self::BOUNDARY_MASK) >> Self::BOUNDARY_SHIFT) as u8)
+    }
+
+    /// The aridity index of land (UNEP): annual precipitation over potential evaporation, NaN
+    /// over the ocean and where the potential evaporation is not known (zero). Capped far
+    /// beyond any scale, so that it stays finite.
+    pub fn aridity_index(&self) -> f32 {
+        let (p, pet) = (self.precipitation, self.potential_evaporation);
+        if self.elevation >= 0.0 && pet > 0.0 && p >= 0.0 {
+            (p / pet).min(1e4)
+        } else {
+            f32::NAN
+        }
     }
 
     pub fn in_deforming_band(&self) -> bool {
@@ -104,6 +123,15 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
             .get(month)
             .map_or(f32::NAN, |values| field(values, cell))
     };
+    let cycle = planet.water_cycle();
+    // The solved months are spread evenly from January; the slot of a month, if it is solved.
+    let solved = cycle.monthly_precipitation.len();
+    let precipitation_of = |month: usize, cell: usize| {
+        (solved > 0 && (month * solved).is_multiple_of(12))
+            .then(|| cycle.monthly_precipitation.get(month * solved / 12))
+            .flatten()
+            .map_or(f32::NAN, |values| field(values, cell))
+    };
     (0..simulation.mesh().len())
         .map(|index| {
             let cell = index as u32;
@@ -123,6 +151,9 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 temperature_january: month(0, index),
                 temperature_july: month(6, index),
                 precipitation: field(planet.precipitation(), index),
+                precipitation_january: precipitation_of(0, index),
+                precipitation_july: precipitation_of(6, index),
+                potential_evaporation: field(&cycle.potential_evaporation, index),
                 ice: field(&temperature.ice, index),
                 discharge: field(planet.discharge(), index),
                 plate: simulation.owner(cell).plate,
@@ -180,7 +211,7 @@ pub struct Row {
 
 /// The labels of the rows, always all of them in this order, so that the widget does not
 /// change its layout from cell to cell.
-pub const ROW_LABELS: [&str; 14] = [
+pub const ROW_LABELS: [&str; 16] = [
     "Position",
     "Elevation",
     "Surface",
@@ -193,6 +224,8 @@ pub const ROW_LABELS: [&str; 14] = [
     "Temperature",
     "Jan / Jul",
     "Precipitation",
+    "Precip. Jan / Jul",
+    "Aridity index",
     "Permanent ice",
     "River discharge",
 ];
@@ -232,7 +265,7 @@ pub fn format_rows(
     longitude: f64,
 ) -> Vec<Row> {
     let land = info.elevation >= 0.0;
-    let values: [Option<String>; 14] = [
+    let values: [Option<String>; 16] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
         Some(
@@ -288,6 +321,26 @@ pub fn format_rows(
             )
         }),
         known(info.precipitation, |p| format!("{:.0} mm/yr", p * 1000.0)),
+        (info.precipitation_january.is_finite() || info.precipitation_july.is_finite()).then(
+            || {
+                let month = |p: f32| {
+                    known(p, |p| format!("{:.0}", p * 1000.0))
+                        .unwrap_or_else(|| NOT_APPLICABLE.to_owned())
+                };
+                format!(
+                    "{} / {} mm/yr",
+                    month(info.precipitation_january),
+                    month(info.precipitation_july)
+                )
+            },
+        ),
+        (land && info.ice < 0.5)
+            .then(|| info.aridity_index())
+            .and_then(|index| {
+                known(index, |index| {
+                    format!("{} ({})", format_aridity(index), aridity_class(index))
+                })
+            }),
         (info.ice > 0.0).then(|| format!("{:.0}%", 100.0 * info.ice)),
         (land && info.discharge > 0.0).then(|| {
             format!(
@@ -301,6 +354,28 @@ pub fn format_rows(
         .zip(values)
         .map(|(label, value)| row(label, value))
         .collect()
+}
+
+/// An aridity index with about two significant digits.
+fn format_aridity(index: f32) -> String {
+    if index < 0.1 {
+        format!("{index:.3}")
+    } else if index < 10.0 {
+        format!("{index:.2}")
+    } else {
+        format!("{index:.0}")
+    }
+}
+
+/// UNEP's class of an aridity index (Middleton & Thomas, 1997).
+pub fn aridity_class(index: f32) -> &'static str {
+    match index {
+        index if index < 0.05 => "hyper-arid",
+        index if index < 0.2 => "arid",
+        index if index < 0.5 => "semi-arid",
+        index if index < 0.65 => "dry sub-humid",
+        _ => "humid",
+    }
 }
 
 /// The rows of the widget while no cell is shown: all of them, without values.
@@ -493,6 +568,9 @@ mod tests {
             temperature_january: -3.21,
             temperature_july: 25.0,
             precipitation: 0.8124,
+            precipitation_january: 0.0404,
+            precipitation_july: 0.1205,
+            potential_evaporation: 1.0,
             ice: 0.0,
             discharge: 3.15576e11,
             plate: 7,
@@ -562,6 +640,17 @@ mod tests {
         assert_eq!(row(&rows, "Temperature").unwrap(), "12.3 °C");
         assert_eq!(row(&rows, "Jan / Jul").unwrap(), "-3.2 °C / 25.0 °C");
         assert_eq!(row(&rows, "Precipitation").unwrap(), "812 mm/yr");
+        assert_eq!(row(&rows, "Precip. Jan / Jul").unwrap(), "40 / 120 mm/yr");
+        assert_eq!(row(&rows, "Aridity index").unwrap(), "0.81 (humid)");
+        let dry = CellInfo {
+            precipitation: 0.1,
+            potential_evaporation: 2.0,
+            ..info()
+        };
+        assert_eq!(
+            row(&format_rows(&dry, None, 0.0, 0.0), "Aridity index").unwrap(),
+            "0.050 (arid)"
+        );
         assert_eq!(row(&rows, "Permanent ice"), None);
         // 3.15576e11 m³/yr = 10000 m³/s.
         assert_eq!(row(&rows, "River discharge").unwrap(), "10000 m³/s");
@@ -577,6 +666,9 @@ mod tests {
             temperature: f32::NAN,
             temperature_january: f32::NAN,
             temperature_july: f32::NAN,
+            precipitation_january: f32::NAN,
+            precipitation_july: f32::NAN,
+            potential_evaporation: 0.0,
             ice: 0.75,
             flags: 0,
             ..info()
@@ -596,6 +688,8 @@ mod tests {
         assert_eq!(row(&rows, "Orogeny"), None);
         assert_eq!(row(&rows, "Temperature"), None);
         assert_eq!(row(&rows, "Jan / Jul"), None);
+        assert_eq!(row(&rows, "Precip. Jan / Jul"), None);
+        assert_eq!(row(&rows, "Aridity index"), None);
         assert_eq!(row(&rows, "Permanent ice").unwrap(), "75%");
         // No rivers in the ocean.
         assert_eq!(row(&rows, "River discharge"), None);
@@ -644,7 +738,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 56);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 68);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 
