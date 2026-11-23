@@ -381,8 +381,13 @@ pub async fn run_web(
     remember_render_mode: RememberRenderMode,
     on_first_frame: Box<dyn FnOnce()>,
 ) -> anyhow::Result<()> {
+    let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
+        setup.device_descriptor = std::sync::Arc::new(web_device_descriptor);
+    }
     let options = eframe::WebOptions {
         depth_buffer: DEPTH_BUFFER_BITS,
+        wgpu_options,
         ..Default::default()
     };
     eframe::WebRunner::new()
@@ -401,6 +406,29 @@ pub async fn run_web(
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to start the 3D view: {error:?}"))
+}
+
+/// The device of the web view: egui's default (WebGL 2 limits on WebGL), but textures only as
+/// large as the adapter allows. egui asks for 8192 pixels (for depth buffers of 4K+ screens),
+/// which some phones' and emulators' WebGL do not have (4096), and then the view did not start.
+#[cfg(target_arch = "wasm32")]
+fn web_device_descriptor(
+    adapter: &eframe::wgpu::Adapter,
+) -> eframe::wgpu::DeviceDescriptor<'static> {
+    let base = if adapter.get_info().backend == eframe::wgpu::Backend::Gl {
+        eframe::wgpu::Limits::downlevel_webgl2_defaults()
+    } else {
+        eframe::wgpu::Limits::default()
+    };
+    let available = adapter.limits().max_texture_dimension_2d;
+    eframe::wgpu::DeviceDescriptor {
+        label: Some("egui wgpu device"),
+        required_limits: eframe::wgpu::Limits {
+            max_texture_dimension_2d: available.min(8192),
+            ..base
+        },
+        ..Default::default()
+    }
 }
 
 struct Viewer {

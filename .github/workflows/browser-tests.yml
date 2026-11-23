@@ -1,0 +1,188 @@
+name: Browser tests
+
+# Basic tests of the web version in the supported browsers (issue #117, see web/tests/): the
+# simulator loads, the 3D view draws a frame, and the frame history is stored in IndexedDB and
+# read back. Desktop: Linux (Chrome, Firefox, WebKit), Windows (Chrome, Firefox). Mobile: Chrome
+# and Firefox in an Android emulator set up like a low-end phone. The runners have no GPU, so
+# everything renders in software. No macOS/iOS jobs: Safari has no working WebGL on GitHub's macOS
+# runners (no GPU), so they could not pass; WebKit on Linux stands in for Safari's engine.
+#
+# Only on request: started by hand (Actions → Browser tests → Run workflow), or on a pull request
+# that carries the label `browser-tests` (when it is added, and on every push while it is there).
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+# A newer run of the same branch cancels the older one. Adding another label to a pull request
+# starts a run that does nothing; it gets its own group, so that it cancels nothing.
+concurrency:
+  group: >-
+    browser-tests-${{ github.ref }}-${{
+    (github.event.action == 'labeled' && github.event.label.name != 'browser-tests')
+    && github.run_id || 'tests' }}
+  cancel-in-progress: true
+
+env:
+  TRUNK_VERSION: v0.22.2
+  # The page parameters of the quick test: a small planet and a short run.
+  QUICK_QUERY: subdivisions=3&duration=50
+
+jobs:
+  build:
+    name: Build web version
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (contains(github.event.pull_request.labels.*.name, 'browser-tests') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'browser-tests'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: wasm32-unknown-unknown
+
+      - name: Install trunk
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin" trunk
+          trunk --version
+
+      - name: Build
+        run: trunk build --release
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist
+          retention-days: 3
+
+  desktop:
+    name: ${{ matrix.name }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    # One job per system, the browsers one after the other (fewer runners).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux, os: ubuntu-latest, browsers: chrome firefox webkit }
+          - { name: Windows, os: windows-latest, browsers: chrome firefox }
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        shell: bash
+        run: |
+          python -m pip install --quiet selenium pillow
+          if [[ " ${{ matrix.browsers }} " == *" webkit "* ]]; then
+            python -m pip install --quiet playwright
+            python -m playwright install --with-deps webkit
+          fi
+
+      - name: Test
+        shell: bash
+        run: |
+          echo "| Browser | Parameters | Result | Seconds | Planet pixels | User agent |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          for browser in ${{ matrix.browsers }}; do
+            command=(python web/tests/browser_test.py --browser "$browser" --dist dist
+              --query "$QUICK_QUERY" --out "results/${{ matrix.name }}-$browser")
+            # Linux: the browsers run with a window on a virtual screen (headless Firefox has
+            # no WebGL).
+            if [ "$RUNNER_OS" = Linux ]; then
+              command=(xvfb-run --auto-servernum --server-args="-screen 0 1400x900x24" "${command[@]}")
+            fi
+            "${command[@]}" || status=1
+          done
+          exit $status
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: results-${{ matrix.name }}
+          path: results
+          retention-days: 14
+
+  android:
+    name: Android ${{ matrix.browser }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chrome, firefox]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install test dependencies
+        run: python3 -m pip install --quiet --break-system-packages pillow
+
+      - name: Download Firefox for Android
+        if: matrix.browser == 'firefox'
+        run: |
+          version=$(curl --fail --silent --show-error https://product-details.mozilla.org/1.0/mobile_versions.json \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')
+          echo "Firefox for Android $version"
+          curl --fail --location --silent --show-error --output fenix.apk \
+            "https://archive.mozilla.org/pub/fenix/releases/$version/android/fenix-$version-android-x86_64/fenix-$version.multi.android-x86_64.apk"
+
+      - name: Test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          # A low-end phone: 2 GB of memory.
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          ram-size: 2048M
+          disk-size: 4096M
+          emulator-options: -no-window -gpu swangle_indirect -no-snapshot -noaudio -no-boot-anim
+          disable-animations: true
+          script: |
+            echo "| Browser | Parameters | Result | Seconds | Planet pixels | User agent |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| --- | --- | --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+            status=0; python3 web/tests/browser_test.py --browser android-${{ matrix.browser }} --apk fenix.apk --dist dist --query "$QUICK_QUERY" --timeout 600 --out results/android-${{ matrix.browser }}-quick || status=1; python3 web/tests/browser_test.py --browser android-${{ matrix.browser }} --dist dist --query "" --min-updates 1 --timeout 900 --out results/android-${{ matrix.browser }}-default || status=1; exit $status
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: results-android-${{ matrix.browser }}
+          path: results
+          retention-days: 14

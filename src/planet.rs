@@ -44,6 +44,8 @@ pub struct Planet {
     /// time and the cohort's initial mass (Gt).
     cover_cohort_time: f64,
     cover_cohort: Option<(f64, f64)>,
+    /// Changes of the area of closed depressions below sea level between steps, summed (cells).
+    inland_change: f64,
 }
 
 /// The continental cover of [`CoverCohort::start`] and how much of it is left (Gt).
@@ -128,6 +130,16 @@ pub struct PlanetStatistics {
     pub cover_turnover: CoverTurnover,
     /// The tracked cohort of continental cover, once started.
     pub cover_cohort: Option<CoverCohort>,
+    /// Fraction of the surface that is ocean, and that lies below sea level (the ocean and
+    /// closed depressions, see [`crate::sea`]).
+    pub ocean_fraction: f64,
+    pub below_sea_level_fraction: f64,
+    /// Changes of the area of closed depressions below sea level between steps so far, summed
+    /// (cells): how much they come and go.
+    pub inland_change: f64,
+    /// The ocean volume (m³) that the ocean does not hold because the sea level stands at a
+    /// pass into a basin it cannot fill (see [`crate::isostasy::SeaLevel::deficit`]).
+    pub sea_level_deficit: f64,
 }
 
 /// The part of the sea level (m) due to the sediment of groups of cells (see
@@ -183,7 +195,15 @@ impl Planet {
     ) -> Self {
         let climate = Climate::new(tectonics.mesh(), planet_radius, climate);
         let mut temperature = TemperatureModel::new(tectonics.mesh(), temperature);
-        temperature.update(&tectonics.surface_elevations(), None);
+        let elevation = tectonics.surface_elevations();
+        let seeds = crate::sea::ocean_seeds(
+            tectonics.mesh(),
+            &elevation,
+            -crate::sea::SILL_TOLERANCE,
+            tectonics.min_sea_fraction(),
+        );
+        let view = climate_elevations(tectonics.mesh(), &elevation, &seeds);
+        temperature.update(&view, None);
         let cell_count = tectonics.mesh().len();
         let mut planet = Self {
             tectonics,
@@ -203,8 +223,9 @@ impl Planet {
             cover_turnover: CoverTurnover::default(),
             cover_cohort_time: f64::INFINITY,
             cover_cohort: None,
+            inland_change: 0.0,
         };
-        planet.update_water_cycle(&planet.tectonics.surface_elevations());
+        planet.update_water_cycle(&view);
         planet
     }
 
@@ -278,9 +299,16 @@ impl Planet {
         let start = Instant::now();
         let elevation = self.tectonics.surface_elevations();
         // Ice sheets depend on last step's snowfall.
-        self.temperature
-            .update(&elevation, Some(&self.precipitation));
-        self.update_water_cycle(&elevation);
+        // The seas of this topography, for the climate and the erosion.
+        let seeds = crate::sea::ocean_seeds(
+            self.tectonics.mesh(),
+            &elevation,
+            -crate::sea::SILL_TOLERANCE,
+            self.tectonics.min_sea_fraction(),
+        );
+        let view = climate_elevations(self.tectonics.mesh(), &elevation, &seeds);
+        self.temperature.update(&view, Some(&self.precipitation));
+        self.update_water_cycle(&view);
         let climate_time = start.elapsed();
 
         if let Some(params) = &self.erosion {
@@ -300,6 +328,7 @@ impl Planet {
                     plate: &plate,
                     class: &class,
                     ocean_volume: self.tectonics.ocean_volume(),
+                    ocean_seeds: &seeds,
                 },
                 params,
                 dt_years,
@@ -318,8 +347,20 @@ impl Planet {
                 &result.sediment_delta,
                 result.sea_level_change,
             );
+            // The lakes' water comes from the ocean.
+            self.tectonics.set_lake_water(result.hydrology.lake_volume);
             self.discharge = result.discharge;
             self.sediment_flux = result.sediment_to_ocean / dt_years;
+            if self.tectonics.time() > dt + 1e-9 {
+                self.inland_change +=
+                    (result.hydrology.inland_cells - self.hydrology.inland_cells).abs();
+            }
+            debug!(
+                inland_cells = result.hydrology.inland_cells,
+                inland_depressions = result.hydrology.inland_depressions,
+                dry = result.hydrology.dry_inland_depressions,
+                "Closed depressions below sea level"
+            );
             self.hydrology = result.hydrology;
             self.sediment_overfill += result.sediment_overfill;
             self.terminal_fans += result.terminal_fan;
@@ -375,16 +416,20 @@ impl Planet {
 
     pub fn statistics(&self) -> PlanetStatistics {
         let elevation = self.tectonics.surface_elevations();
-        let land: Vec<usize> = (0..elevation.len())
-            .filter(|&cell| elevation[cell] >= 0.0)
-            .collect();
+        let ocean = crate::sea::ocean_mask(
+            self.tectonics.mesh(),
+            &elevation,
+            self.tectonics.min_sea_fraction(),
+        );
+        // Land includes closed depressions below sea level (dry or holding lakes).
+        let land: Vec<usize> = (0..elevation.len()).filter(|&cell| !ocean[cell]).collect();
         let mean_land_precipitation = if land.is_empty() {
             0.0
         } else {
             land.iter().map(|&c| self.precipitation[c]).sum::<f64>() / land.len() as f64
         };
         let largest_river = (0..elevation.len())
-            .filter(|&cell| elevation[cell] < 0.0)
+            .filter(|&cell| ocean[cell])
             .map(|cell| self.discharge[cell])
             .fold(0.0, f64::max);
 
@@ -464,7 +509,12 @@ impl Planet {
             terminal_fans: self.terminal_fans,
             sediment_deposition: self.sediment_deposition,
             sediment_stock,
-            sediment_reservoirs: self.sediment_reservoirs(&elevation),
+            sediment_reservoirs: self.sediment_reservoirs(&elevation, &ocean),
+            ocean_fraction: ocean.iter().filter(|&&o| o).count() as f64 / ocean.len() as f64,
+            below_sea_level_fraction: elevation.iter().filter(|&&e| e < 0.0).count() as f64
+                / elevation.len() as f64,
+            inland_change: self.inland_change,
+            sea_level_deficit: self.tectonics.sea_level_deficit(),
             wave_erosion: {
                 let to_gt = cell_area * crate::isostasy::SEDIMENT_ROCK_DENSITY / 1e12;
                 let w = &self.wave_erosion;
@@ -496,21 +546,23 @@ impl Planet {
         }
     }
 
-    fn sediment_reservoirs(&self, elevation: &[f64]) -> SedimentReservoirs {
+    fn sediment_reservoirs(&self, elevation: &[f64], ocean: &[bool]) -> SedimentReservoirs {
         let tectonics = &self.tectonics;
-        let part = |select: &dyn Fn(&Crust, f64) -> bool| {
-            tectonics.sediment_sea_level_of(|_, c, e| select(c, e), false)
+        // The selection gets the crust and whether the cell is ocean.
+        let part = |select: &dyn Fn(&Crust, bool) -> bool| {
+            tectonics.sediment_sea_level_of(|cell, c, _| select(c, ocean[cell as usize]), false)
         };
         let filled_basin = |crust: &Crust| crust.is_continental_origin() && crust.felsic < 0.8;
         let default = ErosionParams::default();
         let wave_base = crate::erosion::wave_bases(
             tectonics.mesh(),
             elevation,
+            tectonics.min_sea_fraction(),
             self.erosion.as_ref().unwrap_or(&default),
         );
         let (cell_sediment, all_sediment) = tectonics.sediment_totals();
         let cell_count = elevation.len();
-        let land = elevation.iter().filter(|&&e| e >= 0.0).count();
+        let land = ocean.iter().filter(|&&o| !o).count();
         let low_land = elevation
             .iter()
             .filter(|&&e| (0.0..10.0).contains(&e))
@@ -526,7 +578,7 @@ impl Planet {
             if crust.is_continental_origin_column() && !crust.is_continental_origin() {
                 metasediment_basins += 1;
             }
-            if (-200.0..0.0).contains(&e) {
+            if ocean[cell] && e >= -200.0 {
                 shelf += 1;
                 shelf_sediment += crust.sediment;
                 shelf_oceanic += usize::from(crust.is_oceanic());
@@ -535,16 +587,16 @@ impl Planet {
         }
         SedimentReservoirs {
             all: part(&|_, _| true),
-            continental_land: part(&|c, e| c.is_continental_origin() && e >= 0.0),
-            continental_flooded: part(&|c, e| c.is_continental_origin() && e < 0.0),
+            continental_land: part(&|c, marine| c.is_continental_origin() && !marine),
+            continental_flooded: part(&|c, marine| c.is_continental_origin() && marine),
             transitional: part(&|c, _| crust_class(c) == CrustClass::Transitional),
             oceanic: part(&|c, _| crust_class(c) == CrustClass::Oceanic),
-            marine: part(&|_, e| e < 0.0),
+            marine: part(&|_, marine| marine),
             filled_basins: part(&|c, _| filled_basin(c)),
             filled_basin_fraction: basins as f64 / cell_count as f64,
             metasediment_basin_fraction: metasediment_basins as f64 / cell_count as f64,
             above_wave_base: tectonics.sediment_sea_level_of(
-                |cell, _, e| e < 0.0 && e >= wave_base[cell as usize],
+                |cell, _, e| ocean[cell as usize] && e >= wave_base[cell as usize],
                 false,
             ),
             with_metasediment: tectonics.sediment_sea_level_of(|_, _, _| true, true),
@@ -568,4 +620,22 @@ fn crust_class(crust: &Crust) -> CrustClass {
     } else {
         CrustClass::Transitional
     }
+}
+
+/// The surface elevations as the climate and temperature models see them: closed depressions
+/// below sea level are land (raised to sea level; the lapse rate ignores elevations below it
+/// anyway), so that they get runoff and potential evaporation instead of ocean evaporation.
+fn climate_elevations(
+    mesh: &crate::sphere::SphereMesh,
+    elevation: &[f64],
+    seeds: &[usize],
+) -> Vec<f64> {
+    let ocean = crate::sea::ocean_from(mesh, elevation, seeds.iter().copied());
+    let mut elevation = elevation.to_vec();
+    for (e, ocean) in elevation.iter_mut().zip(ocean) {
+        if !ocean {
+            *e = e.max(0.0);
+        }
+    }
+    elevation
 }

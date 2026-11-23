@@ -1,5 +1,5 @@
 //! Where the encoded frames of the history are kept: [`FrameStore`], with a store in memory
-//! ([`MemoryStore`]) and one in an anonymous temporary file ([`FileStore`], desktop). The web
+//! ([`MemoryStore`]) and one in an anonymous temporary file (`FileStore`, desktop). The web
 //! version keeps them in IndexedDB (`crate::web`).
 
 use std::ops::Range;
