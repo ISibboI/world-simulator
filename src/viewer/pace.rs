@@ -15,11 +15,10 @@
 
 use std::collections::VecDeque;
 
-use crate::hash::HashMap;
-
 use eframe::egui;
 
 use crate::Cli;
+use crate::hash::HashMap;
 
 /// Steps per median.
 const WINDOW: usize = 10;
@@ -240,6 +239,7 @@ impl Pace {
         options.width = 0;
         options.river_threshold = 0.0;
         options.exaggeration = 0.0;
+        options.render_mode = Default::default();
         self.options = format!("{options:?}");
         self.subdivisions = cli.subdivisions;
         self.times = StepTimes::default();

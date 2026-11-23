@@ -42,12 +42,17 @@ pub fn render_elevation(planet: &Planet, width: u32, river_threshold: f64) -> Rg
     render(simulation, width, |cell| {
         let elevation = simulation.surface_elevation(cell);
         if elevation >= 0.0 && planet.discharge()[cell as usize] >= river_threshold {
-            Rgb([30, 80, 200])
+            Rgb(RIVER_COLOR)
         } else {
             elevation_color(elevation)
         }
     })
 }
+
+/// Colours of rivers, of ice sheets and of sea ice.
+pub const RIVER_COLOR: [u8; 3] = [30, 80, 200];
+pub const ICE_SHEET_COLOR: [u8; 3] = [240, 245, 250];
+pub const SEA_ICE_COLOR: [u8; 3] = [200, 220, 235];
 
 /// The colour of a cell on the planet surface for the 3D view: elevation colours, rivers, and
 /// permanent ice (sea ice and ice sheets).
@@ -61,12 +66,12 @@ pub fn surface_color(planet: &Planet, cell: u32, river_threshold: f64) -> Rgb<u8
         .is_some_and(|&ice| ice > 0.5);
     if frozen {
         if elevation >= 0.0 {
-            Rgb([240, 245, 250])
+            Rgb(ICE_SHEET_COLOR)
         } else {
-            Rgb([200, 220, 235])
+            Rgb(SEA_ICE_COLOR)
         }
     } else if elevation >= 0.0 && planet.discharge()[cell as usize] >= river_threshold {
-        Rgb([30, 80, 200])
+        Rgb(RIVER_COLOR)
     } else {
         elevation_color(elevation)
     }
@@ -168,7 +173,7 @@ fn hsv_to_rgb(hue: f64, saturation: f64, value: f64) -> [u8; 3] {
     [r, g, b].map(|channel| ((channel + m) * 255.0).round() as u8)
 }
 
-fn elevation_color(elevation: f64) -> Rgb<u8> {
+pub fn elevation_color(elevation: f64) -> Rgb<u8> {
     gradient(ELEVATION_STOPS, elevation)
 }
 
@@ -186,7 +191,8 @@ fn gradient(stops: &[(f64, [f64; 3])], value: f64) -> Rgb<u8> {
     Rgb([0, 1, 2].map(|i| (low_color[i] + (high_color[i] - low_color[i]) * t).round() as u8))
 }
 
-const ELEVATION_STOPS: &[(f64, [f64; 3])] = &[
+/// The hypsometric colour scale of elevation in metres.
+pub const ELEVATION_STOPS: &[(f64, [f64; 3])] = &[
     (-7000.0, [5.0, 15.0, 60.0]),
     (-4000.0, [20.0, 50.0, 130.0]),
     (-200.0, [60.0, 130.0, 200.0]),

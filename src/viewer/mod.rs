@@ -12,13 +12,20 @@
 //! simulation is doing until its first update (starting, generating the planet), or that it
 //! failed. The simulation reports how long each step
 //! took, and a hint proposes other subdivisions if steps are too slow or very quick ([`pace`]).
+//! The render mode ([`modes`]) decides what the planet shows: the topographic colours by
+//! default, or others chosen in the mode switcher, with a legend. Modes that need more than the
+//! cell attributes request extra fields ([`fields`]) from the simulation, which sends them with
+//! its updates; vector modes draw arrows ([`arrows`]).
 
 // The view only shows the simulation and never changes it, so it may use the platform's math
 // functions directly instead of `crate::math` (see `clippy.toml`).
 #![allow(clippy::disallowed_methods)]
 
+mod arrows;
 mod banner;
 mod cell_info;
+mod fields;
+mod modes;
 mod pace;
 mod parameters;
 mod picking;
@@ -34,8 +41,20 @@ use crate::Cli;
 use crate::planet::Planet;
 use crate::render;
 use crate::sphere::SphereMesh;
+use arrows::OverlayVertex;
 pub use cell_info::{CellInfo, cell_infos};
 use cell_info::{CellInfoPanel, ShownCell};
+#[cfg(target_arch = "wasm32")]
+pub use fields::Layer;
+pub use fields::{Fields, Layers};
+pub use modes::RenderModeId;
+use modes::switcher::{ModeSwitcher, SwitcherView};
+use modes::{ModeData, Shading, recolored};
+#[cfg(target_arch = "wasm32")]
+pub use modes::{
+    STORAGE_KEY as RENDER_MODE_STORAGE_KEY, initial as initial_render_mode, to_store,
+    with_render_mode,
+};
 use pace::{HintAction, Pace};
 use parameters::{ParameterPanel, SimulationStatus};
 #[cfg(target_arch = "wasm32")]
@@ -44,7 +63,7 @@ pub use parameters::{has_option, with_default};
 pub use renderer::Vertex;
 #[cfg(not(target_arch = "wasm32"))]
 use renderer::Vertex;
-use renderer::{LineSegment, PlanetCallback, Surface, Uniforms};
+use renderer::{LineSegment, Overlay, PlanetCallback, Surface, Uniforms};
 
 /// Bits of the depth buffer requested from eframe; must match [`renderer::DEPTH_FORMAT`].
 const DEPTH_BUFFER_BITS: u8 = 32;
@@ -64,6 +83,9 @@ const OUTLINE_BORDER_WIDTH: f32 = 3.5;
 /// The outline is moved towards the camera by this fraction of the cell spacing, so that it is
 /// not hidden by the surface it lies on (also where its width reaches over a slope).
 const OUTLINE_LIFT: f64 = 0.5;
+/// Arrows of vector modes stand on the cells nearest to the vertices of an icosphere with this
+/// many subdivisions: 642 arrows about 8° (900 km) apart, readable at the default zoom.
+const ARROW_SUBDIVISIONS: u32 = 3;
 
 /// A new state of the planet surface to display.
 pub struct SurfaceUpdate {
@@ -75,8 +97,11 @@ pub struct SurfaceUpdate {
     /// The triangles of the mesh: sent with the first update of a simulation, `None` after.
     pub faces: Option<Arc<Vec<[u32; 3]>>>,
     /// Seconds since the previous update, i.e. the time of the step: `None` for the initial
-    /// state, or if it is not representative (the web page was hidden meanwhile).
+    /// state, for a repeated state (sent again with other fields), or if it is not
+    /// representative (the web page was hidden meanwhile).
     pub step_seconds: Option<f64>,
+    /// The extra fields the view requested (see [`SimulationControl::request_layers`]).
+    pub fields: Fields,
 }
 
 /// A message from the simulation to the view.
@@ -191,10 +216,26 @@ pub fn surface_vertices(planet: &Planet, exaggeration: f64, river_threshold: f64
 }
 
 /// Starts a simulation (on another thread, or in a Web Worker on the web) that sends its events
-/// through the sender and calls the callback to wake up the view after each. Called once the
-/// view exists, and again on every restart from the parameter panel, with a new channel: a
-/// previous simulation should stop when sending to its channel fails.
-pub type StartSimulation = Box<dyn FnMut(Launch, Sender<SimulationEvent>, Box<dyn Fn() + Send>)>;
+/// through the sender and calls the callback to wake up the view after each, and returns its
+/// control. Called once the view exists, and again on every restart from the parameter panel,
+/// with a new channel: a previous simulation should stop when sending to its channel fails or
+/// its control is dropped. The simulation starts with the layers of `launch.cli.render_mode`.
+pub type StartSimulation = Box<
+    dyn FnMut(Launch, Sender<SimulationEvent>, Box<dyn Fn() + Send>) -> Box<dyn SimulationControl>,
+>;
+
+/// The view's line to a running simulation.
+pub trait SimulationControl {
+    /// Asks the simulation to send these extra fields with its updates from now on. A
+    /// simulation sends its current state again with them if they include new ones, as soon
+    /// as it can (the web worker between steps, or at once once it has finished; the desktop
+    /// thread with its next step, which comes as soon), so that a new mode does not wait long.
+    fn request_layers(&mut self, layers: Layers);
+}
+
+/// Called when the user chose another render mode (the web page puts it into its URL and
+/// remembers it).
+pub type RememberRenderMode = Box<dyn FnMut(RenderModeId)>;
 
 /// Creates the viewer app; shared by the desktop window and the web page.
 fn app_creator(
@@ -202,6 +243,7 @@ fn app_creator(
     msaa_samples: u16,
     ui_options: UiOptions,
     start_simulation: StartSimulation,
+    remember_render_mode: Option<RememberRenderMode>,
     on_first_frame: Option<Box<dyn FnOnce()>>,
 ) -> eframe::AppCreator<'static> {
     Box::new(move |creation_context| {
@@ -216,6 +258,7 @@ fn app_creator(
             initial,
             ui_options,
             start_simulation,
+            remember_render_mode,
             on_first_frame,
         )))
     })
@@ -243,6 +286,7 @@ pub fn run(initial: Launch, start_simulation: StartSimulation) -> anyhow::Result
             UiOptions::default(),
             start_simulation,
             None,
+            None,
         ),
     )
     .map_err(|error| anyhow::anyhow!("failed to run the 3D view: {error}"))?;
@@ -260,6 +304,7 @@ pub async fn run_web(
     initial: Launch,
     ui_options: UiOptions,
     start_simulation: StartSimulation,
+    remember_render_mode: RememberRenderMode,
     on_first_frame: Box<dyn FnOnce()>,
 ) -> anyhow::Result<()> {
     let options = eframe::WebOptions {
@@ -275,6 +320,7 @@ pub async fn run_web(
                 1,
                 ui_options,
                 start_simulation,
+                Some(remember_render_mode),
                 Some(on_first_frame),
             ),
         )
@@ -285,6 +331,28 @@ pub async fn run_web(
 struct Viewer {
     events: Receiver<SimulationEvent>,
     start_simulation: StartSimulation,
+    /// The control of the running simulation.
+    control: Option<Box<dyn SimulationControl>>,
+    remember_render_mode: Option<RememberRenderMode>,
+    /// The active render mode, its switcher, and the layers requested for it.
+    mode: RenderModeId,
+    switcher: ModeSwitcher,
+    requested: Layers,
+    /// The extra fields of the latest surface.
+    fields: Fields,
+    /// What is drawn: the latest surface in the colours of the mode, and the mode's overlay;
+    /// rebuilt when the surface or the mode changes ([`Viewer::refresh_display`]).
+    display: Option<Surface>,
+    overlay: Option<Overlay>,
+    display_outdated: bool,
+    /// Ids of the displayed vertices and overlays, for the renderer.
+    displays: u64,
+    /// The cells arrows stand on, for [`Picking::mesh_id`], and their spacing.
+    arrow_cells: Option<(u64, Vec<u32>, f64)>,
+    /// Points per planet radius on the planet's front in the last frame.
+    points_per_radius: f32,
+    /// The legend of the active mode for the displayed state.
+    legend: modes::Legend,
     parameters: ParameterPanel,
     cell_panel: CellInfoPanel,
     pace: Pace,
@@ -337,6 +405,7 @@ impl Viewer {
         initial: Launch,
         ui_options: UiOptions,
         start_simulation: StartSimulation,
+        remember_render_mode: Option<RememberRenderMode>,
         on_first_frame: Option<Box<dyn FnOnce()>>,
     ) -> Self {
         let parameters = ParameterPanel::new(&initial.args, ui_options.default_subdivisions);
@@ -350,6 +419,19 @@ impl Viewer {
         let mut viewer = Self {
             events,
             start_simulation,
+            control: None,
+            remember_render_mode,
+            mode: initial.cli.render_mode,
+            switcher: ModeSwitcher::default(),
+            requested: Layers::NONE,
+            fields: Fields::default(),
+            display: None,
+            overlay: None,
+            display_outdated: false,
+            displays: 0,
+            arrow_cells: None,
+            points_per_radius: 100.0,
+            legend: initial.cli.render_mode.mode().legend(None),
             parameters,
             cell_panel: CellInfoPanel::default(),
             pace,
@@ -376,7 +458,14 @@ impl Viewer {
     /// Starts a simulation with a new channel, which also stops the previous one (see
     /// [`StartSimulation`]). The view keeps showing the previous planet until the new one
     /// arrives.
-    fn start(&mut self, ctx: &egui::Context, launch: Launch) {
+    fn start(&mut self, ctx: &egui::Context, mut launch: Launch) {
+        // Dropping the control first lets a finished simulation end (see `StartSimulation`).
+        self.control = None;
+        // The simulation starts with the fields of the active mode, and the web page puts the
+        // mode into its URL with the other options.
+        launch.args = modes::with_render_mode(&launch.args, self.mode);
+        launch.cli.render_mode = self.mode;
+        self.requested = self.mode.mode().layers();
         let (sender, receiver) = std::sync::mpsc::channel();
         self.events = receiver;
         self.time = None;
@@ -388,7 +477,98 @@ impl Viewer {
         ctx.request_repaint();
         self.pace.start(&launch.cli);
         let ctx = ctx.clone();
-        (self.start_simulation)(launch, sender, Box::new(move || ctx.request_repaint()));
+        self.control = Some((self.start_simulation)(
+            launch,
+            sender,
+            Box::new(move || ctx.request_repaint()),
+        ));
+    }
+
+    /// Switches to another render mode: requests its fields and remembers it.
+    fn set_mode(&mut self, mode: RenderModeId) {
+        tracing::info!(mode = mode.name(), "Render mode");
+        self.mode = mode;
+        self.display_outdated = true;
+        let layers = mode.mode().layers();
+        if layers != self.requested {
+            self.requested = layers;
+            if let Some(control) = &mut self.control {
+                control.request_layers(layers);
+            }
+        }
+        if let Some(remember) = &mut self.remember_render_mode {
+            remember(mode);
+        }
+    }
+
+    /// Rebuilds what is drawn for the latest surface and the active mode, if either changed.
+    fn refresh_display(&mut self) {
+        if !std::mem::take(&mut self.display_outdated) {
+            return;
+        }
+        let (Some(surface), Some(picking)) = (&self.surface, &self.picking) else {
+            // A fresh id, so that the renderer uploads these vertices.
+            self.displays += 1;
+            self.display = self.surface.clone().map(|surface| Surface {
+                vertices_id: self.displays,
+                ..surface
+            });
+            self.overlay = None;
+            self.legend = self.mode.mode().legend(None);
+            return;
+        };
+        let start = web_time::Instant::now();
+        if self
+            .arrow_cells
+            .as_ref()
+            .is_none_or(|(mesh_id, ..)| *mesh_id != picking.mesh_id)
+        {
+            let (cells, spacing) = arrows::sample_cells(&picking.mesh, ARROW_SUBDIVISIONS);
+            self.arrow_cells = Some((picking.mesh_id, cells, spacing));
+        }
+        let (arrow_cells, arrow_spacing) = match &self.arrow_cells {
+            Some((_, cells, spacing)) => (cells.as_slice(), *spacing),
+            None => (&[][..], 0.1),
+        };
+        let data = ModeData {
+            mesh: &picking.mesh,
+            vertices: &surface.vertices,
+            cells: &picking.cells,
+            fields: &self.fields,
+            arrow_cells,
+            arrow_spacing,
+        };
+        let mode = self.mode.mode();
+        self.displays += 1;
+        let vertices = mode
+            .colors(&data)
+            .and_then(|colors| recolored(&surface.vertices, &colors))
+            .map_or_else(|| surface.vertices.clone(), Arc::new);
+        let overlay = mode
+            .arrows(&data)
+            .map(|(samples, style)| arrows::triangles(&arrows::arrows(&samples, &style), &style));
+        self.display = Some(Surface {
+            vertices_id: self.displays,
+            vertices,
+            ..surface.clone()
+        });
+        self.overlay = overlay.map(|vertices: Vec<OverlayVertex>| Overlay {
+            id: self.displays,
+            vertices: Arc::new(vertices),
+        });
+        self.legend = mode.legend(Some(&data));
+        tracing::debug!(
+            mode = self.mode.name(),
+            elapsed = ?start.elapsed(),
+            overlay_vertices = self.overlay.as_ref().map_or(0, |o| o.vertices.len()),
+            "Display refreshed"
+        );
+    }
+
+    /// Whether the active mode waits for fields that have not arrived.
+    fn waiting_for_fields(&self) -> bool {
+        let needed = self.mode.mode().layers();
+        self.surface.is_some() && self.fields.layers().0 & needed.0 != needed.0
     }
 
     /// Takes a new surface state. The first one of a simulation brings its triangles.
@@ -417,6 +597,8 @@ impl Viewer {
         };
         self.update_picking(&surface, update.cells);
         self.surface = Some(surface);
+        self.fields = update.fields;
+        self.display_outdated = true;
     }
 
     /// Updates the picking data for a new surface: the mesh when it changed, the radii and
@@ -545,12 +727,7 @@ impl Viewer {
         let eye = self.camera_position();
         let view = glam::camera::rh::view::look_at_mat4(eye, Vec3::ZERO, Vec3::Z);
         // wgpu uses normalised device coordinates with Z in [0, 1] and Y up.
-        // In portrait (phones), the field of view applies horizontally, so the planet fits.
-        let field_of_view = if aspect_ratio < 1.0 {
-            2.0 * ((FIELD_OF_VIEW / 2.0).tan() / aspect_ratio.max(0.01)).atan()
-        } else {
-            FIELD_OF_VIEW
-        };
+        let field_of_view = vertical_field_of_view(aspect_ratio);
         let projection =
             glam::camera::rh::proj::directx::perspective(field_of_view, aspect_ratio, 0.1, 10.0);
         // Light from the upper left of the camera, so the visible side is always lit.
@@ -559,9 +736,34 @@ impl Viewer {
         Uniforms {
             view_projection: (projection * view).to_cols_array_2d(),
             light_direction: light.extend(0.0).to_array(),
-            viewport: [viewport.x, viewport.y, 0.0, 0.0],
+            viewport: [
+                viewport.x,
+                viewport.y,
+                match self.mode.mode().shading() {
+                    Shading::Lit => 0.0,
+                    Shading::Unlit => 1.0,
+                },
+                0.0,
+            ],
         }
     }
+}
+
+/// The vertical field of view for a view of this aspect ratio: [`FIELD_OF_VIEW`], or in
+/// portrait (phones) wider, so that it applies horizontally and the planet fits.
+fn vertical_field_of_view(aspect_ratio: f32) -> f32 {
+    if aspect_ratio < 1.0 {
+        2.0 * ((FIELD_OF_VIEW / 2.0).tan() / aspect_ratio.max(0.01)).atan()
+    } else {
+        FIELD_OF_VIEW
+    }
+}
+
+/// Points per planet radius at the point of the planet nearest to the camera, in a view of
+/// `size` points.
+fn points_per_radius(size: egui::Vec2) -> f32 {
+    let field_of_view = vertical_field_of_view(size.x / size.y.max(1.0));
+    size.y / (2.0 * (CAMERA_DISTANCE - 1.0) * (field_of_view / 2.0).tan())
 }
 
 impl eframe::App for Viewer {
@@ -609,6 +811,8 @@ impl eframe::App for Viewer {
 
                 let pixels_per_point = ui.ctx().pixels_per_point();
                 let uniforms = self.uniforms(rect.size() * pixels_per_point);
+                self.points_per_radius = points_per_radius(rect.size());
+                self.refresh_display();
                 let view_projection = glam::Mat4::from_cols_array_2d(&uniforms.view_projection);
                 if response.clicked()
                     && let Some(point) = response.interact_pointer_pos()
@@ -636,7 +840,8 @@ impl eframe::App for Viewer {
                         rect,
                         PlanetCallback {
                             uniforms,
-                            surface: self.surface.clone(),
+                            surface: self.display.clone(),
+                            overlay: self.overlay.clone(),
                             lines,
                         },
                     ));
@@ -664,6 +869,18 @@ impl eframe::App for Viewer {
         });
         let cell_panel = self.cell_panel.show(ui.ctx(), shown, self.touch);
 
+        let mut mode = self.mode;
+        let view = SwitcherView {
+            legend: &self.legend,
+            points_per_radius: self.points_per_radius,
+            waiting: self.waiting_for_fields(),
+        };
+        let (changed, switcher) = self.switcher.show(ui.ctx(), &mut mode, &view);
+        if changed && mode != self.mode {
+            self.set_mode(mode);
+            ui.ctx().request_repaint();
+        }
+
         let status = SimulationStatus {
             time: self.time,
             duration: self.duration,
@@ -678,7 +895,9 @@ impl eframe::App for Viewer {
             .then_some(|ui: &mut egui::Ui| {
                 hint_action = pace.ui(ui, self.time, self.duration);
             });
-        let mut launch = self.parameters.show(ui.ctx(), &status, cell_panel, hint);
+        let mut launch = self
+            .parameters
+            .show(ui.ctx(), &status, cell_panel, switcher, hint);
         if let Some(HintAction::Restart(subdivisions)) = hint_action {
             match self.parameters.launch_with_subdivisions(subdivisions) {
                 Ok(new) => {
