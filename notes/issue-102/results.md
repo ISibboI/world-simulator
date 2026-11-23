@@ -58,8 +58,7 @@ snapshots each) and with `--no-erosion` (seed 3).
 `HYDROLOGY_STEPS=600`, `HYDROLOGY_EVERY=100`). "Endorheic" is the land whose basin has no
 outlet to the ocean (the view's labelling); "sim." is the simulation's own count
 (`Hydrology::endorheic_cells`); lakes are cells with ≥ 1 m of water against the simulation's
-fractional lake cover. Basins counted at ≥ 8 cells (the plausibility run used the first
-threshold).
+fractional lake cover.
 
 | seed, t | largest basins (% of land; e = endorheic) | endorheic % (sim.) | in single-cell pits | lakes ≥ 1 m % (sim. fractional) | closed lakes % | dry depr. % |
 |---|---|---|---|---|---|---|
@@ -71,7 +70,7 @@ threshold).
 | 2, 300 | 11.6 6.0 3.4 3.3 3.2 | 10.2 (10.2) | 4.4 | 2.9 (2.6) | 0.6 | 1.5 |
 | 2, 600 | 3.7 2.2 2.2 1.8 1.6 | 14.0 (14.0) | 9.4 | 3.0 (2.6) | 0.9 | 1.2 |
 
-Full output per 100 Myr: seeds 0–2 in the task's scratch (`agent-scratch/stats/`).
+Full output per 100 Myr: [`stats/`](stats/) (its count of larger basins used an earlier threshold of 8 cells).
 
 - **Consistency**: the view's endorheic share equals the simulation's to the cell in every
   snapshot (the receivers survive the coding; endorheic exits are cut exactly where the
