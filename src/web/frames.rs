@@ -15,7 +15,7 @@
 //!
 //! If IndexedDB cannot be opened (some private modes), does not open within [`TIMEOUT_MS`], or
 //! the first frame does not read back as written (checked once per run, also within
-//! [`TIMEOUT_MS`]), the frames are kept in memory, up to [`MEMORY_CAPACITY`]: the frames written
+//! [`TIMEOUT_MS`]; both counted while the page responds, see [`deadline`]), the frames are kept in memory, up to [`MEMORY_CAPACITY`]: the frames written
 //! to IndexedDB until then are kept in memory as well, so none is lost. Storage never holds up
 //! the view. The outcome is set as `data-frame-history` (`indexeddb` or `memory`) on the root
 //! element of the page (see `web::mark`), for the browser tests in `web/tests/`.
@@ -210,7 +210,7 @@ impl IdbStore {
         match open(&name, &shared) {
             Ok(()) => {
                 let weak = Rc::downgrade(&shared);
-                after(TIMEOUT_MS, move || {
+                deadline(move || {
                     if let Some(shared) = weak.upgrade() {
                         let waiting = {
                             let state = shared.borrow();
@@ -230,6 +230,26 @@ impl IdbStore {
             release,
         }
     }
+}
+
+/// Calls `on_timeout` after [`TIMEOUT_MS`] of a responsive page. A timer that fires more than a
+/// second late means that the page was stalled (e.g. a long first frame of the view in
+/// software rendering), and the event it waits for may be queued behind it: it waits once more
+/// then, up to six times.
+fn deadline(on_timeout: impl FnOnce() + 'static) {
+    fn arm(on_timeout: Box<dyn FnOnce()>, retries: u32) {
+        let armed = js_sys::Date::now();
+        after(TIMEOUT_MS, move || {
+            let late = js_sys::Date::now() - armed > f64::from(TIMEOUT_MS) + 1000.0;
+            if late && retries > 0 {
+                info!("The page was stalled; waiting for IndexedDB a little longer");
+                arm(on_timeout, retries - 1);
+            } else {
+                on_timeout();
+            }
+        });
+    }
+    arm(Box::new(on_timeout), 6);
 }
 
 /// Calls `callback` after `milliseconds` (on the page or in a worker).
@@ -523,7 +543,7 @@ fn verify(shared: &Rc<RefCell<Shared>>) {
     });
     request.set_onerror(Some(failure.unchecked_ref()));
     let weak = Rc::downgrade(shared);
-    after(TIMEOUT_MS, move || {
+    deadline(move || {
         if let Some(shared) = weak.upgrade()
             && shared.borrow().unverified.is_some()
         {

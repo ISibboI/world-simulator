@@ -172,6 +172,9 @@ def open_playwright(name, url):
     browser = getattr(playwright, kind).launch(**launch)
     print("browser:", kind, browser.version)
     page = browser.new_page(viewport={"width": 1280, "height": 800})
+    if os.environ.get("INIT_SCRIPT"):
+        # For trying failures by hand, e.g. a broken IndexedDB.
+        page.add_init_script(path=os.environ["INIT_SCRIPT"])
     page.goto(url)
 
     def close():

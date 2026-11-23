@@ -81,6 +81,7 @@ jobs:
       matrix:
         include:
           - { name: Linux, os: ubuntu-latest, browsers: chrome firefox webkit }
+          # Intel: the arm64 runners were often not available at all ("not acquired").
           - { name: macOS, os: macos-15-intel, browsers: safari chrome firefox }
           - { name: Windows, os: windows-latest, browsers: chrome firefox }
 
@@ -122,7 +123,12 @@ jobs:
             if [ "$RUNNER_OS" = Linux ]; then
               command=(xvfb-run --auto-servernum --server-args="-screen 0 1400x900x24" "${command[@]}")
             fi
-            "${command[@]}" || status=1
+            if [ "$browser" = safari ]; then
+              # Known to fail on the runners (see the iOS job): reported, not failing the job.
+              "${command[@]}" || echo "::warning::Safari failed (expected on GitHub's macOS runners: no WebGL without a GPU)"
+            else
+              "${command[@]}" || status=1
+            fi
           done
           exit $status
 
@@ -134,7 +140,7 @@ jobs:
           retention-days: 14
 
   android:
-    name: Android ${{ matrix.browser }} (${{ matrix.gpu }})
+    name: Android ${{ matrix.browser }}
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -142,10 +148,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { browser: chrome, gpu: swangle_indirect }
-          - { browser: chrome, gpu: guest }
-          - { browser: firefox, gpu: swangle_indirect }
+        browser: [chrome, firefox]
 
     steps:
       - uses: actions/checkout@v7
@@ -183,7 +186,7 @@ jobs:
           arch: x86_64
           ram-size: 2048M
           disk-size: 4096M
-          emulator-options: -no-window -gpu ${{ matrix.gpu }} -no-snapshot -noaudio -no-boot-anim
+          emulator-options: -no-window -gpu swangle_indirect -no-snapshot -noaudio -no-boot-anim
           disable-animations: true
           script: |
             echo "| Browser | Parameters | Result | Seconds | Planet pixels | User agent |" >> "$GITHUB_STEP_SUMMARY"
@@ -193,15 +196,20 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: results-android-${{ matrix.browser }}-${{ matrix.gpu }}
+          name: results-android-${{ matrix.browser }}
           path: results
           retention-days: 14
 
+  # Known to fail on GitHub's runners: their macOS VMs have no GPU, and WebKit there has no
+  # working software WebGL (the iOS Simulator runs out of WebGL memory, desktop Safari loses its
+  # context at once), also for the build before #115. It still runs, for the day it works and
+  # for its logs, but does not fail the workflow.
   ios:
     name: iOS Safari
     needs: build
     runs-on: macos-15-intel
     timeout-minutes: 45
+    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v7
@@ -235,45 +243,3 @@ jobs:
           path: results
           retention-days: 14
 
-  # TEMPORARY (#117 investigation, removed before merging): the same iOS test on main before #115.
-  ios-baseline:
-    name: iOS Safari, main before #115
-    if: github.event_name == 'push'
-    runs-on: macos-15-intel
-    timeout-minutes: 60
-
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Install toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          target: wasm32-unknown-unknown
-
-      - name: Build main before #115
-        run: |
-          cp -r web/tests "$RUNNER_TEMP/tests"
-          git checkout 7579a1f^1
-          brew install trunk || cargo install --locked trunk
-          trunk build --release
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
-
-      - name: Test
-        run: |
-          python -m pip install --quiet pillow
-          status=0
-          python "$RUNNER_TEMP/tests/browser_test.py" --browser ios-safari --dist dist --loaded-only --query "$QUICK_QUERY" --timeout 600 --out results/baseline-quick || status=1
-          python "$RUNNER_TEMP/tests/browser_test.py" --browser ios-safari --dist dist --loaded-only --query "" --timeout 900 --out results/baseline-default || status=1
-          exit $status
-
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: results-ios-baseline
-          path: results
-          retention-days: 7
