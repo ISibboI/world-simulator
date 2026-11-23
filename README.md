@@ -29,7 +29,10 @@ stored in IndexedDB and read back. The workflow `.github/workflows/browser-tests
 on Linux (Chrome, Firefox, WebKit), macOS (Safari, Chrome, Firefox), Windows (Chrome, Firefox),
 in an Android emulator set up like a low-end phone (Chrome, Firefox) and in the iOS Simulator
 (Safari). It runs only on request: by hand (Actions → Browser tests → Run workflow), or on a
-pull request with the label `browser-tests`. Locally, e.g.:
+pull request with the label `browser-tests`. The runners have no GPU, so everything renders in
+software; Safari and the iOS Simulator cannot run the 3D view there at all (WebKit on GitHub's
+macOS VMs has no working WebGL), so their results are reported but do not fail the workflow.
+WebKit itself is covered by the Linux WebKit test. Locally, e.g.:
 
 ```sh
 trunk build --release
