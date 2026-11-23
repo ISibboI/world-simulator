@@ -19,6 +19,7 @@
 //! which lines) lists them in [`RenderMode::options`]; the switcher shows them above the
 //! legend and the mode reads their values from [`ModeData::options`].
 
+mod crust;
 mod moisture;
 mod ocean_currents;
 mod plate_motion;
@@ -54,6 +55,8 @@ pub enum RenderModeId {
     Moisture,
     /// The wind-driven ocean gyres as arrows.
     OceanCurrents,
+    /// Crust type (oceanic, transitional, continental) and thickness.
+    Crust,
 }
 
 impl RenderModeId {
@@ -66,6 +69,7 @@ impl RenderModeId {
             RenderModeId::Temperature => &temperature::Temperature,
             RenderModeId::Moisture => &moisture::Moisture,
             RenderModeId::OceanCurrents => &ocean_currents::OceanCurrents,
+            RenderModeId::Crust => &crust::Crust,
         }
     }
 
@@ -89,6 +93,7 @@ impl RenderModeId {
             RenderModeId::Temperature => "temperature",
             RenderModeId::Moisture => "moisture",
             RenderModeId::OceanCurrents => "ocean-currents",
+            RenderModeId::Crust => "crust",
         }
     }
 
