@@ -15,6 +15,7 @@ mod presets;
 #[cfg(any(test, target_arch = "wasm32"))]
 mod query;
 mod render;
+mod sea;
 mod sparse;
 mod sphere;
 mod tectonics;
@@ -866,6 +867,7 @@ fn snapshot(
                 previous_sea_level.metamorphism,
             ),
             ("mantle", sea_level_budget.mantle, previous_sea_level.mantle),
+            ("lakes", sea_level_budget.lakes, previous_sea_level.lakes),
         ];
         let parts: Vec<String> = terms
             .iter()
@@ -1153,6 +1155,26 @@ fn snapshot(
         hydrology.nested_lakes,
         hydrology.lake_sediment / 1e9,
     );
+    // Metres of sea level per m³ of water over the ocean.
+    let per_ocean_area = 1.0
+        / (planet_statistics.ocean_fraction.max(1e-9) * cell_area * simulation.mesh().len() as f64);
+    info!(
+        "    inland: below sea level {:.2}% of the surface, ocean {:.2}% | closed depressions \
+         below sea level {:.0} cells (lake water on {:.1}), depressions reaching below sea level \
+         {} (dry {}) | lake water {:.0} km³ ({:.2} m of sea level) | sea level at a pass: \
+         deficit {:.0} km³ ({:.2} m) | depression area changes {:.0} cells",
+        100.0 * planet_statistics.below_sea_level_fraction,
+        100.0 * planet_statistics.ocean_fraction,
+        hydrology.inland_cells,
+        hydrology.inland_water_cells,
+        hydrology.inland_depressions,
+        hydrology.dry_inland_depressions,
+        hydrology.lake_volume / 1e9,
+        hydrology.lake_volume * per_ocean_area,
+        planet_statistics.sea_level_deficit / 1e9,
+        planet_statistics.sea_level_deficit * per_ocean_area,
+        planet_statistics.inland_change,
+    );
     info!(
         "    temperature global {:5.1} °C, equator {:5.1} °C, poles {:6.1} °C | \
          land seasonal range {:4.1} K | permanently frozen {:4.1}% | heat transport {:+.1}/{:+.1} PW \
@@ -1298,6 +1320,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     let mesh = simulation.mesh();
     let cell_count = mesh.len() as u32;
     let elevation = simulation.surface_elevations();
+    let ocean = sea::ocean_mask(mesh, &elevation, simulation.min_sea_fraction());
     let temperature = planet.temperature();
     // Precipitation of the solved month nearest to `month` (0 = January).
     let cycle = planet.water_cycle();
@@ -1317,7 +1340,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -1329,14 +1352,15 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             1
         };
         let e = elevation[cell as usize];
+        let marine = ocean[cell as usize];
         let coast = mesh
             .neighbors(cell)
             .iter()
-            .any(|&m| (elevation[m as usize] < 0.0) != (e < 0.0));
+            .any(|&m| ocean[m as usize] != marine);
         writeln!(
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
-             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3}",
+             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -1366,6 +1390,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             crust.orogenic,
             crust.strength_age(simulation.time()).min(1e4),
             simulation.lithosphere_strength(cell),
+            u8::from(marine),
         )?;
     }
     file.flush()?;

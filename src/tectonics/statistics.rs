@@ -23,7 +23,7 @@ pub struct Statistics {
     pub mean_continental_speed: f64,
     /// Fastest plate surface speed in rad/Myr.
     pub max_speed: f64,
-    /// Mean surface elevation of cells above sea level.
+    /// Mean surface elevation of land (cells not in the ocean, see [`crate::sea`]).
     pub mean_land_elevation: f64,
     pub max_elevation: f64,
     pub min_elevation: f64,
@@ -390,6 +390,8 @@ impl Simulation {
         // oceanic crust at least 200 Myr old above sea level (filled basins).
         let mut sea_floor = (0usize, 0.0, 0usize);
         let mut ancient_land = 0usize;
+        // Closed depressions below sea level are land, not sea (see `crate::sea`).
+        let ocean = self.ocean_mask();
 
         for cell in 0..cell_count as u32 {
             let plate = self.owner(cell).plate as usize;
@@ -413,9 +415,10 @@ impl Simulation {
                 oceanic_speed += speed;
             }
             let elevation = self.surface_elevation(cell);
+            let marine = ocean[cell as usize];
             if crust.is_oceanic() {
                 let age = crust.age(self.time);
-                if elevation < 0.0 {
+                if marine {
                     sea_floor.0 += 1;
                     sea_floor.1 += age;
                     if age >= 200.0 {
@@ -428,17 +431,17 @@ impl Simulation {
             if crust.is_continental_origin() {
                 origin_cells += 1;
                 freeboard_sum += elevation;
-                if elevation < 0.0 {
+                if marine {
                     flooded_continental += 1;
                 }
             }
-            if elevation < 0.0 {
+            if marine {
                 water_depth_sum -= elevation;
             }
             if elevation < -6000.0 {
                 deep += 1;
             }
-            if elevation > 0.0 {
+            if !marine {
                 land += 1;
                 land_elevation_sum += elevation;
             }
@@ -790,7 +793,7 @@ impl Simulation {
             ancient_ocean_at_continents: ancient_at_continents as f64 / ancient.max(1) as f64,
             slab_pull,
             ridge_push,
-            land_masses: components(&self.mesh, |cell| self.surface_elevation(cell) >= 0.0),
+            land_masses: components(&self.mesh, |cell| !ocean[cell as usize]),
             continental_masses: components(&self.mesh, |cell| {
                 self.surface_crust(cell).is_continental()
             }),
