@@ -28,6 +28,7 @@ mod banner;
 mod cell_info;
 mod fields;
 mod history;
+mod hydrology;
 mod modes;
 mod overlay;
 mod pace;
@@ -528,6 +529,8 @@ struct Picking {
     /// The attributes of the cells of the displayed state, and its plates.
     cells: Arc<Vec<CellInfo>>,
     plates: Arc<Vec<PlateInfo>>,
+    /// The drainage basins of the displayed state, for the cell widget.
+    drainage: hydrology::Drainage,
     /// The largest displayed radius of a vertex.
     max_radius: f64,
 }
@@ -804,6 +807,7 @@ impl Viewer {
             mesh,
             faces: Arc::new(update.faces.clone()),
             cells: Arc::new(Vec::new()),
+            drainage: hydrology::Drainage::default(),
             plates: Arc::new(Vec::new()),
             max_radius: 1.0,
         });
@@ -832,6 +836,7 @@ impl Viewer {
             .iter()
             .map(|vertex| f64::from(Vec3::from(vertex.position).length()))
             .fold(1.0, f64::max);
+        picking.drainage = hydrology::Drainage::of(&picking.mesh, &cells);
         picking.cells = cells;
         picking.plates = plates;
         self.surfaces += 1;
@@ -1226,6 +1231,9 @@ impl eframe::App for Viewer {
                     .get(info.plate as usize)
                     .map(|plate| plate.id),
                 direction: picking.mesh.vertex(cell),
+                basin: picking
+                    .drainage
+                    .describe(&picking.mesh, &picking.cells, cell),
                 selected,
             })
         });

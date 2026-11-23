@@ -312,12 +312,14 @@ mod tests {
                 potential_evaporation: 0.8,
                 ice: 0.0,
                 discharge: 0.0,
+                lake_depth: 0.0,
                 current_east: 1.0,
                 current_north: -2.0,
                 streamfunction: 3.0,
                 gyre_heating: 4.0,
                 plate: (index % 3) as u32,
                 flags: 0,
+                drainage: CellInfo::NO_RECEIVER,
             })
             .collect()
     }

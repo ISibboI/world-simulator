@@ -325,6 +325,9 @@ pub struct ErosionResult {
     pub discharge: Vec<f64>,
     /// Lakes and endorheic basins.
     pub hydrology: Hydrology,
+    /// Where the water of every cell goes, and the lakes, for the view (nothing in the
+    /// simulation reads it).
+    pub water: SurfaceWater,
     /// Total sediment delivered to the ocean, in m³.
     pub sediment_to_ocean: f64,
     /// Sediment piled above the delta top because the ocean within reach was full (thickness
@@ -378,6 +381,35 @@ pub struct Hydrology {
     pub dry_inland_depressions: usize,
     /// Water in lakes (m³; by the surface elevations, without the load of the water).
     pub lake_volume: f64,
+}
+
+/// Where the water of every cell goes, the ocean, closed depressions and lakes, as the erosion
+/// step saw them (before its changes of the surface), for the hydrology render mode (#102).
+#[derive(Clone, Debug, Default)]
+pub struct SurfaceWater {
+    /// The neighbour the water of a cell flows to: the receiver of the drainage, but none for
+    /// ocean cells and for the exit of an endorheic lake, whose water does not leave.
+    pub receiver: Vec<Option<u32>>,
+    /// The ocean: the water below sea level connected to the world ocean (see [`sea`]).
+    pub ocean: Vec<bool>,
+    /// Land in a closed depression (at least [`LAKE_MIN_DEPTH`] below its spill level), dry
+    /// or under a lake.
+    pub depression: Vec<bool>,
+    /// Depth of lake water over the cell's floor (m), zero where there is no lake.
+    pub lake_depth: Vec<f64>,
+}
+
+impl SurfaceWater {
+    /// The ocean alone, without rivers or lakes (while erosion is disabled).
+    pub fn ocean_only(ocean: Vec<bool>) -> Self {
+        let cells = ocean.len();
+        Self {
+            receiver: vec![None; cells],
+            ocean,
+            depression: vec![false; cells],
+            lake_depth: vec![0.0; cells],
+        }
+    }
 }
 
 /// Sediment moved by waves in one step, as rock-equivalent thickness over one cell, summed.
@@ -534,6 +566,26 @@ pub fn erode(
             }
         }
     }
+
+    // For the view only: the receivers as the water sees them, the closed depressions and the
+    // depth of their lakes.
+    let surface_water = SurfaceWater {
+        receiver: (0..cell_count)
+            .map(|cell| {
+                let closed = lakes.exit_of(cell).is_some_and(|lake| endorheic[lake]);
+                if is_ocean(cell) || closed {
+                    None
+                } else {
+                    receiver[cell]
+                }
+            })
+            .collect(),
+        ocean: ocean.clone(),
+        depression: lakes.lake.iter().map(|&lake| lake != NO_LAKE).collect(),
+        lake_depth: (0..cell_count)
+            .map(|cell| (water_level[cell] - elevation[cell]).max(0.0))
+            .collect(),
+    };
 
     // Implicit stream-power incision, from the ocean upstream so receivers are updated first.
     let mut new_elevation = elevation.to_vec();
@@ -886,6 +938,7 @@ pub fn erode(
         sediment_delta: seabed.delta,
         discharge,
         hydrology,
+        water: surface_water,
         sediment_to_ocean,
         sediment_overfill,
         terminal_fan,

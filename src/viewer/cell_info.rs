@@ -11,7 +11,7 @@ use crate::tectonics::BoundaryClass;
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 84 bytes per cell, 3.4 MB
+/// buffer (to the page on the web) and read back without parsing: 92 bytes per cell, 3.8 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -47,6 +47,9 @@ pub struct CellInfo {
     pub ice: f32,
     /// Water discharge in m³/yr (zero while erosion is disabled).
     pub discharge: f32,
+    /// Depth of lake water over the cell in m (zero where there is none; see
+    /// [`CellInfo::water_body`]).
+    pub lake_depth: f32,
     /// Depth-integrated volume transport of the wind-driven ocean gyres, eastward and northward
     /// in m²/s, at the resolution of the climate model's coarse mesh; NaN where the gyre model
     /// has no ocean (see `TemperatureFields::ocean_current`).
@@ -63,7 +66,28 @@ pub struct CellInfo {
     /// ([`CellInfo::BOUNDARY_SHIFT`]) and [`CellInfo::DEFORMING_BAND`]. The frame history keeps
     /// the low 8 bits.
     pub flags: u32,
+    /// Where the cell's water goes and what water it holds, as the last erosion step saw it
+    /// (#102): the receiver ([`CellInfo::RECEIVER_MASK`]), [`CellInfo::OCEAN`],
+    /// [`CellInfo::DEPRESSION`] and [`CellInfo::LAKE`]. The frame history keeps the low 8 bits.
+    pub drainage: u32,
 }
+
+/// What water a cell holds (see [`CellInfo::water_body`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WaterBody {
+    /// The ocean: water below sea level connected to the world ocean (#58).
+    Ocean,
+    /// A lake in a closed depression, with its depth in m.
+    Lake(f32),
+    /// A closed depression without (at least [`LAKE_DEPTH`] of) lake water: land.
+    DryDepression,
+    /// Other land.
+    Land,
+}
+
+/// Closed depressions with at least this much water (m) are lakes, shallower ones land
+/// (Sebastian's rule on #128).
+pub const LAKE_DEPTH: f64 = 1.0;
 
 impl CellInfo {
     /// [`CellInfo::flags`]: the crust is continental (see
@@ -76,6 +100,69 @@ impl CellInfo {
     /// [`CellInfo::flags`]: the cell is in a deforming band (see
     /// [`crate::tectonics::Simulation::boundary_map`]).
     pub const DEFORMING_BAND: u32 = 1 << 5;
+
+    /// [`CellInfo::drainage`]: bits 0 to 2 are the slot, in the cell's neighbours
+    /// ([`crate::sphere::SphereMesh::neighbors`]), of the cell its water flows to;
+    /// [`CellInfo::NO_RECEIVER`] if it flows nowhere (the ocean, the exit of an endorheic lake).
+    pub const RECEIVER_MASK: u32 = 0b111;
+    pub const NO_RECEIVER: u32 = 0b111;
+    /// [`CellInfo::drainage`]: the cell is ocean.
+    pub const OCEAN: u32 = 1 << 3;
+    /// [`CellInfo::drainage`]: the cell is land in a closed depression, dry or under a lake.
+    pub const DEPRESSION: u32 = 1 << 4;
+    /// [`CellInfo::drainage`]: the cell is under at least [`LAKE_DEPTH`] of lake water. A bit of
+    /// its own, so that live and past frames agree whatever the quantisation of the depth.
+    pub const LAKE: u32 = 1 << 5;
+
+    /// The drainage bits of a cell (see [`CellInfo::drainage`]).
+    pub fn drainage_bits(
+        receiver_slot: Option<usize>,
+        ocean: bool,
+        depression: bool,
+        lake_depth: f64,
+    ) -> u32 {
+        let mut bits = receiver_slot
+            .filter(|&slot| (slot as u32) < Self::NO_RECEIVER)
+            .map_or(Self::NO_RECEIVER, |slot| slot as u32);
+        if ocean {
+            bits |= Self::OCEAN;
+        } else if depression {
+            bits |= Self::DEPRESSION;
+            if lake_depth >= LAKE_DEPTH {
+                bits |= Self::LAKE;
+            }
+        }
+        bits
+    }
+
+    /// The slot (in the cell's neighbours) of the cell its water flows to, if any.
+    pub fn receiver_slot(&self) -> Option<usize> {
+        let slot = self.drainage & Self::RECEIVER_MASK;
+        (slot != Self::NO_RECEIVER).then_some(slot as usize)
+    }
+
+    pub fn is_ocean(&self) -> bool {
+        self.drainage & Self::OCEAN != 0
+    }
+
+    pub fn in_depression(&self) -> bool {
+        self.drainage & Self::DEPRESSION != 0
+    }
+
+    /// What water the cell holds: ocean, a lake (closed depressions with at least
+    /// [`LAKE_DEPTH`] of water), a dry depression or other land. Closed depressions below sea
+    /// level are land (#58), drawn as lakes only with water in them (#128).
+    pub fn water_body(&self) -> WaterBody {
+        if self.is_ocean() {
+            WaterBody::Ocean
+        } else if self.drainage & Self::LAKE != 0 {
+            WaterBody::Lake(self.lake_depth)
+        } else if self.in_depression() {
+            WaterBody::DryDepression
+        } else {
+            WaterBody::Land
+        }
+    }
 
     pub fn is_continental(&self) -> bool {
         self.flags & Self::CONTINENTAL != 0
@@ -149,7 +236,24 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
             .flatten()
             .map_or(f32::NAN, |values| field(values, cell))
     };
-    (0..simulation.mesh().len())
+    let water = planet.surface_water();
+    let mesh = simulation.mesh();
+    let water_bits = |index: usize| {
+        let flag = |values: &[bool]| values.get(index).copied().unwrap_or(false);
+        let depth = water.lake_depth.get(index).copied().unwrap_or(0.0);
+        let slot = water
+            .receiver
+            .get(index)
+            .copied()
+            .flatten()
+            .and_then(|receiver| {
+                mesh.neighbors(index as u32)
+                    .iter()
+                    .position(|&neighbor| neighbor == receiver)
+            });
+        CellInfo::drainage_bits(slot, flag(&water.ocean), flag(&water.depression), depth)
+    };
+    (0..mesh.len())
         .map(|index| {
             let cell = index as u32;
             let crust = simulation.surface_crust(cell);
@@ -173,6 +277,10 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 potential_evaporation: field(&cycle.potential_evaporation, index),
                 ice: field(&temperature.ice, index),
                 discharge: field(planet.discharge(), index),
+                lake_depth: water
+                    .lake_depth
+                    .get(index)
+                    .map_or(0.0, |&depth| depth as f32),
                 current_east: current(index, 0),
                 current_north: current(index, 1),
                 streamfunction: field(&temperature.gyre_streamfunction, index),
@@ -183,6 +291,7 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                     boundaries.classes[index],
                     boundaries.band[index],
                 ),
+                drainage: water_bits(index),
             }
         })
         .collect()
@@ -219,6 +328,10 @@ pub fn format_position(latitude: f64, longitude: f64) -> String {
 
 /// Placeholder for a value that does not apply to a cell or is not known.
 pub const NOT_APPLICABLE: &str = "—";
+
+/// The label of the row with the drainage basin, after the rows of [`ROW_LABELS`] (it needs
+/// the drainage of the whole state, not only the cell's attributes).
+pub const BASIN_LABEL: &str = "Drainage basin";
 
 /// One row of the widget.
 #[derive(Debug, Clone, PartialEq)]
@@ -286,19 +399,11 @@ pub fn format_rows(
     latitude: f64,
     longitude: f64,
 ) -> Vec<Row> {
-    let land = info.elevation >= 0.0;
+    let land = !info.is_ocean();
     let values: [Option<String>; 17] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
-        Some(
-            match (land, info.ice > 0.5) {
-                (true, false) => "land",
-                (true, true) => "land, ice sheet",
-                (false, false) => "ocean",
-                (false, true) => "ocean, sea ice",
-            }
-            .to_owned(),
-        ),
+        Some(format_surface(info)),
         Some(plate_id.unwrap_or(info.plate).to_string()),
         match (info.boundary(), info.in_deforming_band()) {
             (Some(class), false) => Some(class.label().to_owned()),
@@ -377,6 +482,25 @@ pub fn format_rows(
         .zip(values)
         .map(|(label, value)| row(label, value))
         .collect()
+}
+
+/// What the surface of a cell is: ocean, a lake with its depth, a dry closed depression or
+/// land, and permanent ice on it.
+fn format_surface(info: &CellInfo) -> String {
+    let ice = info.ice > 0.5;
+    match info.water_body() {
+        WaterBody::Ocean if ice => "ocean, sea ice".to_owned(),
+        WaterBody::Ocean => "ocean".to_owned(),
+        WaterBody::Lake(depth) => format!(
+            "lake, {} m deep{}",
+            significant(f64::from(depth)),
+            if ice { ", ice" } else { "" }
+        ),
+        WaterBody::DryDepression if ice => "dry depression, ice sheet".to_owned(),
+        WaterBody::DryDepression => "land, dry depression".to_owned(),
+        WaterBody::Land if ice => "land, ice sheet".to_owned(),
+        WaterBody::Land => "land".to_owned(),
+    }
 }
 
 /// The ocean current of a cell: its transport in Sv per 100 km of width and the direction it
@@ -476,6 +600,8 @@ pub struct ShownCell<'a> {
     pub plate_id: Option<u32>,
     /// Direction of the cell from the planet centre.
     pub direction: DVec3,
+    /// Its drainage basin (see [`super::hydrology::Drainage::describe`]), `None` for the ocean.
+    pub basin: Option<String>,
     /// Whether the cell is selected (clicked or tapped) rather than under the pointer.
     pub selected: bool,
 }
@@ -552,12 +678,18 @@ impl CellInfoPanel {
                 egui::ScrollArea::vertical()
                     .max_height(((screen.height() - above) * 0.45).max(100.0))
                     .show(ui, |ui| {
-                        let rows = match &position {
+                        let mut rows = match &position {
                             Some((shown, latitude, longitude)) => {
                                 format_rows(shown.info, shown.plate_id, *latitude, *longitude)
                             }
                             None => empty_rows(),
                         };
+                        rows.push(row(
+                            BASIN_LABEL,
+                            position
+                                .as_ref()
+                                .and_then(|(shown, ..)| shown.basin.clone()),
+                        ));
                         egui::Grid::new("cell info grid")
                             .num_columns(2)
                             .striped(true)
@@ -621,12 +753,14 @@ mod tests {
             potential_evaporation: 1.0,
             ice: 0.0,
             discharge: 3.15576e11,
+            lake_depth: 0.0,
             current_east: f32::NAN,
             current_north: f32::NAN,
             streamfunction: f32::NAN,
             gyre_heating: f32::NAN,
             plate: 7,
             flags: CellInfo::CONTINENTAL,
+            drainage: CellInfo::NO_RECEIVER,
         }
     }
 
@@ -728,8 +862,42 @@ mod tests {
             streamfunction: 12.0,
             gyre_heating: 25.4,
             flags: 0,
+            drainage: CellInfo::NO_RECEIVER | CellInfo::OCEAN,
             ..info()
         }
+    }
+
+    #[test]
+    fn lakes_and_dry_depressions_follow_the_one_metre_rule() {
+        let below = |depth: f64| CellInfo {
+            elevation: -120.0,
+            lake_depth: depth as f32,
+            drainage: CellInfo::drainage_bits(Some(2), false, true, depth),
+            ..info()
+        };
+        assert_eq!(below(35.0).water_body(), WaterBody::Lake(35.0));
+        assert_eq!(
+            row(&format_rows(&below(35.0), None, 0.0, 0.0), "Surface").unwrap(),
+            "lake, 35.0 m deep"
+        );
+        // Less than 1 m of water: land, even below sea level.
+        assert_eq!(below(0.4).water_body(), WaterBody::DryDepression);
+        let rows = format_rows(&below(0.4), None, 0.0, 0.0);
+        assert_eq!(row(&rows, "Surface").unwrap(), "land, dry depression");
+        assert!(row(&rows, "River discharge").is_some());
+        assert_eq!(below(0.4).receiver_slot(), Some(2));
+        // The ocean bit wins; no receiver is slot 7.
+        let ocean = CellInfo::drainage_bits(None, true, true, 50.0);
+        assert_eq!(ocean, CellInfo::NO_RECEIVER | CellInfo::OCEAN);
+        assert_eq!(
+            CellInfo {
+                drainage: ocean,
+                ..info()
+            }
+            .receiver_slot(),
+            None
+        );
+        assert_eq!(info().water_body(), WaterBody::Land);
     }
 
     #[test]
@@ -809,7 +977,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 84);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 92);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 

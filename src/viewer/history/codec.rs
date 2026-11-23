@@ -2,8 +2,8 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (39 bytes per cell
-//! instead of 84, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (42 bytes per cell
+//! instead of 92, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
@@ -24,7 +24,7 @@ enum Code {
     Logarithmic(f32),
     /// An integer of up to 16 bits (larger ones are clamped).
     Integer16,
-    /// An integer of up to 8 bits.
+    /// An integer of up to 8 bits (the low 8 bits are kept).
     Integer8,
 }
 
@@ -38,7 +38,7 @@ impl Code {
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 21] = [
+const CHANNELS: [Code; 23] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -64,6 +64,9 @@ const CHANNELS: [Code; 21] = [
     Code::Share,
     // Discharge: 0.6 % relative (the widget shows 3 digits), up to 10^38 m³/yr.
     Code::Logarithmic(1.0 / 170.0),
+    // Lake depth: 0.1 % relative (1 mm at 1 m); whether a depression holds a lake is a bit of
+    // the drainage.
+    Code::Logarithmic(1.0 / 1000.0),
     // Ocean current (east, north): 0.05 m²/s (0.005 Sv per 100 km; the interior of the gyres
     // carries 0.5–2 m²/s), ±1638 m²/s.
     Code::Signed(0.05),
@@ -72,9 +75,26 @@ const CHANNELS: [Code; 21] = [
     Code::Signed(0.05),
     // Heating by the gyres: 1 W/m², ±32 kW/m².
     Code::Signed(1.0),
+    // Plate, flags, drainage.
     Code::Integer16,
     Code::Integer8,
+    Code::Integer8,
 ];
+
+/// The channels of the integer attributes: plate, flags and drainage.
+const PLATE: usize = 20;
+const FLAGS: usize = 21;
+const DRAINAGE: usize = 22;
+
+/// The value of an integer channel of a cell.
+fn integer(channel: usize, cell: &CellInfo) -> u16 {
+    match channel {
+        PLATE => cell.plate.min(u32::from(u16::MAX)) as u16,
+        FLAGS => (cell.flags & 0xFF) as u16,
+        DRAINAGE => (cell.drainage & 0xFF) as u16,
+        _ => unreachable!("not an integer channel"),
+    }
+}
 
 /// Bytes per cell of the quantised attributes.
 pub const BYTES_PER_CELL: usize = {
@@ -105,10 +125,12 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.potential_evaporation,
         cell.ice,
         cell.discharge,
+        cell.lake_depth,
         cell.current_east,
         cell.current_north,
         cell.streamfunction,
         cell.gyre_heating,
+        0.0,
         0.0,
         0.0,
     ]
@@ -204,8 +226,7 @@ impl Planes {
             let mut plane = 0;
             for (channel, code) in CHANNELS.iter().enumerate() {
                 let value = match code {
-                    Code::Integer16 => cell.plate.min(u32::from(u16::MAX)) as u16,
-                    Code::Integer8 => (cell.flags & 0xFF) as u16,
+                    Code::Integer16 | Code::Integer8 => integer(channel, cell),
                     _ => quantise(*code, values[channel]),
                 };
                 for byte in 0..code.bytes() {
@@ -251,12 +272,14 @@ impl Planes {
                     potential_evaporation: value(12),
                     ice: value(13),
                     discharge: value(14),
-                    current_east: value(15),
-                    current_north: value(16),
-                    streamfunction: value(17),
-                    gyre_heating: value(18),
-                    plate: u32::from(values[19]),
-                    flags: u32::from(values[20]),
+                    lake_depth: value(15),
+                    current_east: value(16),
+                    current_north: value(17),
+                    streamfunction: value(18),
+                    gyre_heating: value(19),
+                    plate: u32::from(values[PLATE]),
+                    flags: u32::from(values[FLAGS]),
+                    drainage: u32::from(values[DRAINAGE]),
                 }
             })
             .collect()
@@ -280,7 +303,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 4;
+const VERSION: u8 = 5;
 /// Bytes per plate: its rotation and id.
 pub const PLATE_BYTES: usize = 16;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -417,6 +440,11 @@ mod tests {
             } else {
                 1.0e8 * x
             },
+            lake_depth: if index.is_multiple_of(3) {
+                0.0
+            } else {
+                (x * 0.11).sin().abs() * 3000.0
+            },
             current_east: if index.is_multiple_of(6) {
                 f32::NAN
             } else {
@@ -427,6 +455,8 @@ mod tests {
             gyre_heating: (x * 0.07).cos() * 150.0,
             plate: (index % 13) as u32,
             flags: (index % 2) as u32,
+            // Every receiver slot (7 is none) and every combination of the bits.
+            drainage: (index % 64) as u32,
         }
     }
 
@@ -490,8 +520,17 @@ mod tests {
             original.discharge,
             decoded.discharge
         );
+        let relative =
+            (original.lake_depth - decoded.lake_depth).abs() / original.lake_depth.max(1.0);
+        assert!(
+            relative < 6e-4,
+            "{} → {}",
+            original.lake_depth,
+            decoded.lake_depth
+        );
         assert_eq!(original.plate, decoded.plate);
         assert_eq!(original.flags, decoded.flags);
+        assert_eq!(original.drainage, decoded.drainage);
         // Land stays land and sea stays sea.
         assert_eq!(original.elevation >= 0.0, decoded.elevation >= 0.0);
     }
@@ -504,7 +543,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 39);
+        assert_eq!(BYTES_PER_CELL, 42);
     }
 
     #[test]
