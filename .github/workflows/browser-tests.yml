@@ -81,7 +81,7 @@ jobs:
       matrix:
         include:
           - { name: Linux, os: ubuntu-latest, browsers: chrome firefox webkit }
-          - { name: macOS, os: macos-latest, browsers: safari chrome firefox }
+          - { name: macOS, os: macos-15-intel, browsers: safari chrome firefox }
           - { name: Windows, os: windows-latest, browsers: chrome firefox }
 
     steps:
@@ -134,7 +134,7 @@ jobs:
           retention-days: 14
 
   android:
-    name: Android ${{ matrix.browser }}
+    name: Android ${{ matrix.browser }} (${{ matrix.gpu }})
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -142,7 +142,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        browser: [chrome, firefox]
+        include:
+          - { browser: chrome, gpu: swangle_indirect }
+          - { browser: chrome, gpu: guest }
+          - { browser: firefox, gpu: swangle_indirect }
 
     steps:
       - uses: actions/checkout@v7
@@ -175,12 +178,12 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           # A low-end phone: 2 GB of memory.
-          api-level: 34
+          api-level: 35
           target: google_apis
           arch: x86_64
           ram-size: 2048M
           disk-size: 4096M
-          emulator-options: -no-window -gpu swangle_indirect -no-snapshot -noaudio -no-boot-anim
+          emulator-options: -no-window -gpu ${{ matrix.gpu }} -no-snapshot -noaudio -no-boot-anim
           disable-animations: true
           script: |
             echo "| Browser | Parameters | Result | Seconds | Planet pixels | User agent |" >> "$GITHUB_STEP_SUMMARY"
@@ -190,14 +193,14 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: results-android-${{ matrix.browser }}
+          name: results-android-${{ matrix.browser }}-${{ matrix.gpu }}
           path: results
           retention-days: 14
 
   ios:
     name: iOS Safari
     needs: build
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     timeout-minutes: 45
 
     steps:
@@ -236,7 +239,7 @@ jobs:
   ios-baseline:
     name: iOS Safari, main before #115
     if: github.event_name == 'push'
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     timeout-minutes: 60
 
     steps:

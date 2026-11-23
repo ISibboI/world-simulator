@@ -193,7 +193,7 @@ def adb_shell(command, check=True):
 # first-run and notification prompts), tapped away while the test waits.
 DISMISS = (
     "continue", "not now", "skip", "no thanks", "no, thanks", "maybe later", "got it",
-    "accept & continue", "use without an account", "dismiss",
+    "accept & continue", "use without an account", "dismiss", "cancel",
 )
 
 
@@ -273,9 +273,12 @@ def open_ios(url):
                 candidates.append((version, device["name"], device["udid"]))
     if not candidates:
         raise RuntimeError("no iPhone simulator available")
-    # The newest iOS; of its iPhones the one sorting first by name.
+    # The newest iOS; of its iPhones the smallest (the SE: the least pixels to render in
+    # software, and the closest to a low-end phone), else the one sorting first by name.
     newest = max(candidate[0] for candidate in candidates)
-    version, device_name, udid = sorted(c for c in candidates if c[0] == newest)[0]
+    phones = sorted(c for c in candidates if c[0] == newest)
+    small = [c for c in phones if "SE" in c[1]]
+    version, device_name, udid = (small or phones)[0]
     print("simulator:", device_name, "iOS", ".".join(map(str, version)), udid)
     # Booted once; a later test reuses it.
     run(["xcrun", "simctl", "boot", udid], check=False)
