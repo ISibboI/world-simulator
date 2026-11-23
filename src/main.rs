@@ -233,13 +233,21 @@ fn main() -> anyhow::Result<()> {
 fn simulation_thread_launcher() -> viewer::StartSimulation {
     use viewer::SimulationEvent;
 
-    /// Sends requested layers to the simulation thread.
-    struct ThreadControl(std::sync::mpsc::Sender<viewer::Layers>);
+    /// Sends the requests of the view to the simulation thread.
+    struct ThreadControl(std::sync::mpsc::Sender<Request>);
 
     impl viewer::SimulationControl for ThreadControl {
+        // Sending fails only once the simulation has ended.
         fn request_layers(&mut self, layers: viewer::Layers) {
-            // Fails only once the simulation has ended.
-            let _ = self.0.send(layers);
+            let _ = self.0.send(Request::Layers(layers));
+        }
+
+        fn set_paused(&mut self, paused: bool) {
+            let _ = self.0.send(Request::Paused(paused));
+        }
+
+        fn step(&mut self) {
+            let _ = self.0.send(Request::Step);
         }
     }
 
@@ -291,20 +299,31 @@ fn simulation_thread_launcher() -> viewer::StartSimulation {
     })
 }
 
+/// A request of the 3D view to its simulation thread.
+#[cfg(not(target_arch = "wasm32"))]
+enum Request {
+    /// Send these extra fields from now on.
+    Layers(viewer::Layers),
+    Paused(bool),
+    /// Take one step while paused.
+    Step,
+}
+
 /// Runs one simulation of the 3D view, from building its planet on. It stops early once
 /// `cancelled` is set or the view no longer receives its updates. The updates carry the extra
-/// fields last requested through `requests` (at first those of the render mode of `cli`); once
-/// the run is complete, the final state is sent again whenever new fields are requested, until
-/// the view drops the sender.
+/// fields last requested through `requests` (at first those of the render mode of `cli`). While
+/// paused, the thread waits after sending a state for requests: new fields (the state is sent
+/// again with them), a step, or to resume. Once the run is complete, the final state is sent
+/// again whenever new fields are requested, until the view drops the sender.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_simulation_thread(
     cli: &Cli,
     cancelled: &AtomicBool,
     events: &std::sync::mpsc::Sender<viewer::SimulationEvent>,
     wake_up: &dyn Fn(),
-    requests: &std::sync::mpsc::Receiver<viewer::Layers>,
+    requests: &std::sync::mpsc::Receiver<Request>,
 ) -> anyhow::Result<()> {
-    use viewer::{Fields, SimulationEvent, SurfaceUpdate};
+    use viewer::{Fields, MeshUpdate, SimulationEvent, SurfaceUpdate};
 
     if events.send(SimulationEvent::Generating).is_ok() {
         wake_up();
@@ -313,31 +332,26 @@ fn run_simulation_thread(
         .with_context(|| format!("creating output directory {}", cli.output.display()))?;
     let planet = build_planet(cli)?;
     let mut first_update = true;
-    let mut layers = cli.render_mode.layers();
     let mut publish = |planet: &Planet, step_time: Option<Duration>, layers: viewer::Layers| {
         if cancelled.load(Ordering::Relaxed) {
             return ControlFlow::Break(());
         }
-        let mesh = planet.tectonics().mesh();
         let start = Instant::now();
-        let vertices = viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
-        let vertices_built = start.elapsed();
         let cells = viewer::cell_infos(planet);
         let cells_built = start.elapsed();
         let fields = Fields::extract(planet, layers);
         debug!(
-            ?vertices_built,
-            cells_built = ?cells_built - vertices_built,
+            ?cells_built,
             fields_built = ?start.elapsed() - cells_built,
             field_bytes = fields.bytes(),
             "Surface update built"
         );
         let update = SurfaceUpdate {
             time: planet.tectonics().time(),
-            vertices: Arc::new(vertices),
             cells: Arc::new(cells),
-            // The triangles only with the first update of a simulation.
-            faces: std::mem::take(&mut first_update).then(|| Arc::new(mesh.faces().to_vec())),
+            plates: Arc::new(viewer::plate_rotations(planet)),
+            // The mesh only with the first update of a simulation.
+            mesh: std::mem::take(&mut first_update).then(|| Arc::new(MeshUpdate::of(planet))),
             step_seconds: step_time.map(|time| time.as_secs_f64()),
             fields,
         };
@@ -348,23 +362,61 @@ fn run_simulation_thread(
         wake_up();
         ControlFlow::Continue(())
     };
+    let mut layers = cli.render_mode.layers();
+    let mut paused = false;
+    let mut steps = 0u32;
+    // Whether the next step follows a pause, so that its time says nothing about the pace.
+    let mut after_pause = false;
     let planet = simulate(
         planet,
         cli,
         |planet: &Planet, step_time: Option<Duration>| {
-            // The latest request; new fields come with this update.
-            while let Ok(requested) = requests.try_recv() {
-                layers = requested;
+            // The requests that came during the step; new fields come with this update.
+            while let Ok(request) = requests.try_recv() {
+                match request {
+                    Request::Layers(requested) => layers = requested,
+                    Request::Paused(value) => paused = value,
+                    Request::Step => steps += u32::from(paused),
+                }
             }
-            publish(planet, step_time, layers)
+            let step_time = step_time.filter(|_| !std::mem::take(&mut after_pause));
+            publish(planet, step_time, layers)?;
+            // The last state is not held: the run ends (and writes its last snapshot).
+            let last = is_last_step(planet.tectonics().time(), cli.duration, cli.dt);
+            while paused && steps == 0 && !last {
+                after_pause = true;
+                if cancelled.load(Ordering::Relaxed) {
+                    return ControlFlow::Break(());
+                }
+                // Fails once the view dropped its control (a restart or the window closed).
+                let Ok(request) = requests.recv() else {
+                    return ControlFlow::Break(());
+                };
+                match request {
+                    Request::Layers(requested) => {
+                        let new = requested.0 & !layers.0 != 0;
+                        layers = requested;
+                        if new {
+                            publish(planet, None, layers)?;
+                        }
+                    }
+                    Request::Paused(value) => paused = value,
+                    Request::Step => steps += 1,
+                }
+            }
+            steps = steps.saturating_sub(1);
+            ControlFlow::Continue(())
         },
     )?;
     // The run is complete (or stopped): the final state again for every request of new
     // fields, until the view drops the sender (a restart or the window closed).
-    while let Ok(requested) = requests.recv() {
+    while let Ok(request) = requests.recv() {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
+        let Request::Layers(requested) = request else {
+            continue;
+        };
         let new = requested.0 & !layers.0 != 0;
         layers = requested;
         if new && publish(&planet, None, layers).is_break() {
@@ -499,6 +551,12 @@ fn simulate(
     }
     run.log_finished();
     Ok(run.planet)
+}
+
+/// Whether a run of `duration` Myr in steps of `dt` is complete at `time`: it takes
+/// `round(duration / dt)` steps (see [`Run`]).
+fn is_last_step(time: f64, duration: f64, dt: f64) -> bool {
+    time + 0.5 * dt >= (duration / dt).round() * dt
 }
 
 /// A simulation run, step by step: [`simulate`] runs it in one loop; the web worker runs one

@@ -322,14 +322,16 @@ pub struct CellInfoPanel {
 }
 
 impl CellInfoPanel {
-    /// Shows the widget or its button and returns the area reserved for it: the area it
-    /// covers, extended up to the highest it reached while open (e.g. a wrapped line), so that
-    /// the parameter panel does not change size with it.
+    /// Shows the widget or its button, `above` points above the bottom edge of the window
+    /// (above the time bar), and returns the area reserved for it: the area it covers, extended
+    /// up to the highest it reached while open (e.g. a wrapped line), so that the parameter
+    /// panel does not change size with it.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
         shown: Option<ShownCell>,
         touch: bool,
+        above: f32,
     ) -> Option<egui::Rect> {
         let screen = ctx.content_rect();
         let open = *self.open.get_or_insert(screen.width() >= NARROW_SCREEN);
@@ -346,7 +348,7 @@ impl CellInfoPanel {
             };
             self.reserved_top = None;
             return egui::Area::new(egui::Id::unique("cell info button"))
-                .anchor(egui::Align2::LEFT_BOTTOM, [MARGIN, -MARGIN])
+                .anchor(egui::Align2::LEFT_BOTTOM, [MARGIN, -MARGIN - above])
                 .show(ctx, |ui| {
                     // One line: the area is as narrow as the screen allows.
                     if ui
@@ -369,7 +371,7 @@ impl CellInfoPanel {
         let mut open = true;
         let response = egui::Window::new("Cell")
             .id(egui::Id::unique("cell info"))
-            .anchor(egui::Align2::LEFT_BOTTOM, [MARGIN, -MARGIN])
+            .anchor(egui::Align2::LEFT_BOTTOM, [MARGIN, -MARGIN - above])
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -378,7 +380,7 @@ impl CellInfoPanel {
             .max_width(width)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
-                    .max_height((screen.height() * 0.45).max(100.0))
+                    .max_height(((screen.height() - above) * 0.45).max(100.0))
                     .show(ui, |ui| {
                         let rows = match &position {
                             Some((shown, latitude, longitude)) => {

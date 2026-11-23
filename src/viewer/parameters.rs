@@ -284,7 +284,8 @@ impl ParameterPanel {
 
     /// Shows the panel (or the button that shows it) and returns the simulation to start if
     /// the user asked for a restart. The panel stays above `avoid` (the area reserved for the
-    /// cell widget in the bottom left corner) where the two could overlap, on narrow screens.
+    /// cell widget in the bottom left corner) where the two could overlap, on narrow screens,
+    /// and always above `time_bar` (along the bottom edge).
     /// The button and the hint under it stay clear of `switcher` (the render-mode switcher in
     /// the top left corner): beside it if there is room, else below it. `hint` draws the
     /// step-time hint: under the status line of the panel, or under the button while the panel
@@ -294,6 +295,7 @@ impl ParameterPanel {
         ctx: &egui::Context,
         status: &SimulationStatus,
         avoid: Option<egui::Rect>,
+        time_bar: Option<egui::Rect>,
         switcher: egui::Rect,
         hint: Option<impl FnOnce(&mut egui::Ui)>,
     ) -> Option<Launch> {
@@ -338,7 +340,8 @@ impl ParameterPanel {
                 avoid.top().min(screen.bottom())
             }
             _ => screen.bottom(),
-        };
+        }
+        .min(time_bar.map_or(screen.bottom(), |bar| bar.top()));
         let mut open = true;
         let mut launch = None;
         egui::Window::new("Simulation parameters")
@@ -722,19 +725,19 @@ mod tests {
         };
         let mut launch = None;
         run(&ctx, egui::RawInput::default(), |ui| {
-            launch = panel.show(ui.ctx(), &status, None, egui::Rect::NOTHING, NO_HINT);
+            launch = panel.show(ui.ctx(), &status, None, None, egui::Rect::NOTHING, NO_HINT);
         });
         assert!(launch.is_none());
         assert!(panel.error.is_none());
         field(&mut panel, "plates").text = "0".to_owned();
         run(&ctx, egui::RawInput::default(), |ui| {
-            panel.show(ui.ctx(), &status, None, egui::Rect::NOTHING, NO_HINT);
+            panel.show(ui.ctx(), &status, None, None, egui::Rect::NOTHING, NO_HINT);
         });
         assert!(panel.error.as_deref().unwrap().contains("plate"));
         // Hidden, the panel keeps its values.
         panel.open = Some(false);
         run(&ctx, egui::RawInput::default(), |ui| {
-            panel.show(ui.ctx(), &status, None, egui::Rect::NOTHING, NO_HINT);
+            panel.show(ui.ctx(), &status, None, None, egui::Rect::NOTHING, NO_HINT);
         });
         assert_eq!(field(&mut panel, "plates").text, "0");
 
@@ -749,7 +752,7 @@ mod tests {
             ..Default::default()
         };
         run(&ctx, phone, |ui| {
-            panel.show(ui.ctx(), &status, None, egui::Rect::NOTHING, NO_HINT);
+            panel.show(ui.ctx(), &status, None, None, egui::Rect::NOTHING, NO_HINT);
         });
         assert_eq!(panel.open, Some(false));
     }

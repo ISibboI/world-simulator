@@ -1,7 +1,7 @@
 //! Extra per-cell fields that render modes can request from the simulation, beyond the
-//! [`CellInfo`](super::CellInfo) that every surface update carries.
+//! [`CellInfo`] that every surface update carries.
 //!
-//! Every update carries the attributes of [`CellInfo`](super::CellInfo) (56 bytes per cell),
+//! Every update carries the attributes of [`CellInfo`] (56 bytes per cell),
 //! which cover the scalar modes (elevation, temperature, precipitation, crust, sediment, …). Fields that only
 //! some modes need, e.g. vectors for arrows, are [`Layer`]s: the view tells the simulation which
 //! layers the active mode needs ([`Layers`]), and the simulation extracts and sends only those
@@ -11,12 +11,16 @@
 //! so that it can be sent to the page on the web as one transferred buffer.
 //!
 //! Adding a layer: a variant of [`Layer`], its entries in [`Layer::ALL`], [`Layer::key`],
-//! [`Layer::components`] and [`Layer::extract`]; the transport (threads and the web worker)
-//! handles every layer alike.
+//! [`Layer::components`] and [`Layer::extract`], and how [`Fields::from_frame`] rebuilds it for a
+//! past frame of the history (from the cells and plate rotations every frame keeps; a layer that
+//! cannot be rebuilt from them needs its data added to the frames, see `super::history`); the
+//! transport (threads and the web worker) handles every layer alike.
 
 use std::sync::Arc;
 
+use super::CellInfo;
 use crate::planet::Planet;
+use crate::sphere::SphereMesh;
 
 /// A field that render modes can request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,20 +60,29 @@ impl Layer {
         let simulation = planet.tectonics();
         let mesh = simulation.mesh();
         match self {
-            Layer::PlateVelocity => {
-                // rad/Myr × m → cm/yr.
-                let cm_per_year = crate::EARTH_RADIUS * 100.0 / 1e6;
-                (0..mesh.len() as u32)
-                    .flat_map(|cell| {
-                        let omega = simulation.angular_velocity(simulation.owner(cell).plate);
-                        let velocity = omega.cross(mesh.vertex(cell)) * cm_per_year;
-                        velocity.as_vec3().to_array()
-                    })
-                    .collect()
-            }
+            Layer::PlateVelocity => (0..mesh.len() as u32)
+                .flat_map(|cell| {
+                    let omega = simulation.angular_velocity(simulation.owner(cell).plate);
+                    let velocity = omega.cross(mesh.vertex(cell)) * CM_PER_YEAR;
+                    velocity.as_vec3().to_array()
+                })
+                .collect(),
         }
     }
 }
+
+/// The angular velocity of every plate in rad/Myr, by plate id: sent with every update, so that
+/// the frame history can rebuild the layers derived from plates for any past frame
+/// ([`Fields::from_frame`]).
+pub fn plate_rotations(planet: &Planet) -> Vec<[f32; 3]> {
+    let simulation = planet.tectonics();
+    (0..simulation.plate_count() as u32)
+        .map(|plate| simulation.angular_velocity(plate).as_vec3().to_array())
+        .collect()
+}
+
+/// rad/Myr × m → cm/yr.
+const CM_PER_YEAR: f64 = crate::EARTH_RADIUS * 100.0 / 1e6;
 
 /// A set of [`Layer`]s, as bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -109,6 +122,34 @@ impl Fields {
                 .map(|layer| (layer, Arc::new(layer.extract(planet))))
                 .collect(),
         }
+    }
+
+    /// Every layer for a frame of the history, rebuilt from its cells and plate rotations (see
+    /// [`plate_rotations`]) on `mesh`.
+    pub fn from_frame(mesh: &SphereMesh, cells: &[CellInfo], plates: &[[f32; 3]]) -> Self {
+        let values = Layer::ALL
+            .into_iter()
+            .map(|layer| {
+                let values = match layer {
+                    Layer::PlateVelocity => cells
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(cell, info)| {
+                            let omega = plates
+                                .get(info.plate as usize)
+                                .map_or(glam::DVec3::ZERO, |&omega| {
+                                    glam::Vec3::from(omega).as_dvec3()
+                                });
+                            (omega.cross(mesh.vertex(cell as u32)) * CM_PER_YEAR)
+                                .as_vec3()
+                                .to_array()
+                        })
+                        .collect(),
+                };
+                (layer, Arc::new(values))
+            })
+            .collect();
+        Self { values }
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // Used by the web version.
@@ -231,6 +272,13 @@ mod tests {
             fastest = fastest.max(velocity.length());
         }
         assert!(fastest > 0.1, "plates move: {fastest} cm/yr");
+        // Rebuilt for a frame of the history from the cells and plate rotations, the same.
+        let cells = crate::viewer::cell_infos(&planet);
+        let rebuilt = Fields::from_frame(mesh, &cells, &plate_rotations(&planet));
+        let rebuilt = rebuilt.get(Layer::PlateVelocity).unwrap();
+        for (a, b) in values.iter().zip(rebuilt) {
+            assert!((a - b).abs() <= 1e-4 * a.abs().max(1.0), "{a} vs {b}");
+        }
         // No layers requested, none extracted.
         assert_eq!(Fields::extract(&planet, Layers::NONE).bytes(), 0);
     }
