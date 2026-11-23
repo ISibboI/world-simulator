@@ -2,8 +2,8 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (25 bytes per cell
-//! instead of 56, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (31 bytes per cell
+//! instead of 68, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
@@ -38,7 +38,7 @@ impl Code {
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 14] = [
+const CHANNELS: [Code; 17] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -55,7 +55,10 @@ const CHANNELS: [Code; 14] = [
     Code::Signed(0.1),
     Code::Signed(0.1),
     Code::Signed(0.1),
-    // Precipitation: 1 mm/yr, up to 65 m/yr.
+    // Precipitation (annual, January, July) and potential evaporation: 1 mm/yr, up to 65 m/yr.
+    Code::Unsigned(0.001),
+    Code::Unsigned(0.001),
+    Code::Unsigned(0.001),
     Code::Unsigned(0.001),
     // Ice share.
     Code::Share,
@@ -77,7 +80,7 @@ pub const BYTES_PER_CELL: usize = {
 };
 
 /// The attributes of a cell as the channel values.
-fn attributes(cell: &CellInfo) -> [f32; 14] {
+fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
     [
         cell.elevation,
         cell.crust_thickness,
@@ -89,6 +92,9 @@ fn attributes(cell: &CellInfo) -> [f32; 14] {
         cell.temperature_january,
         cell.temperature_july,
         cell.precipitation,
+        cell.precipitation_january,
+        cell.precipitation_july,
+        cell.potential_evaporation,
         cell.ice,
         cell.discharge,
         0.0,
@@ -228,10 +234,13 @@ impl Planes {
                     temperature_january: value(7),
                     temperature_july: value(8),
                     precipitation: value(9),
-                    ice: value(10),
-                    discharge: value(11),
-                    plate: u32::from(values[12]),
-                    flags: u32::from(values[13]),
+                    precipitation_january: value(10),
+                    precipitation_july: value(11),
+                    potential_evaporation: value(12),
+                    ice: value(13),
+                    discharge: value(14),
+                    plate: u32::from(values[15]),
+                    flags: u32::from(values[16]),
                 }
             })
             .collect()
@@ -255,7 +264,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 /// Bytes per plate: its rotation and id.
 pub const PLATE_BYTES: usize = 16;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -379,6 +388,13 @@ mod tests {
             temperature_january: f32::NAN,
             temperature_july: -12.34,
             precipitation: x * 0.001,
+            precipitation_january: x * 0.0013,
+            precipitation_july: if index.is_multiple_of(4) {
+                f32::NAN
+            } else {
+                x * 0.0007
+            },
+            potential_evaporation: (x * 0.05).sin().abs() * 2.0,
             ice: if index.is_multiple_of(5) { 1.0 } else { 0.0 },
             discharge: if index.is_multiple_of(7) {
                 0.0
@@ -411,6 +427,21 @@ mod tests {
             ),
             (original.temperature_july, decoded.temperature_july, 0.05),
             (original.precipitation, decoded.precipitation, 0.0005),
+            (
+                original.precipitation_january,
+                decoded.precipitation_january,
+                0.0005,
+            ),
+            (
+                original.precipitation_july,
+                decoded.precipitation_july,
+                0.0005,
+            ),
+            (
+                original.potential_evaporation,
+                decoded.potential_evaporation,
+                0.0005,
+            ),
             (original.ice, decoded.ice, 0.5 / 254.0),
         ];
         for (index, (a, b, tolerance)) in pairs.into_iter().enumerate() {
@@ -444,7 +475,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 25);
+        assert_eq!(BYTES_PER_CELL, 31);
     }
 
     #[test]
@@ -596,7 +627,7 @@ mod tests {
         );
         eprintln!(
             "raw (quantised) {raw} B/frame; CellInfo {} B/frame",
-            cells * 56
+            cells * std::mem::size_of::<CellInfo>()
         );
         eprintln!(
             "keyframe: first {} B, mean {:.0} B, second half {:.0} B",
