@@ -24,8 +24,10 @@ Release build with `filehash = true`, Chromium 159 and Firefox (Playwright), on 
 | broken-wasm | passed | passed | same text (instantiation fails: wasm of "another build") |
 | broken-worker | passed | passed | view banner "Simulation failed: its worker did not start. Reload the page." |
 
-WebKit could not be launched locally (missing system libraries in the container); the browser-test
-workflow runs all scenarios on Linux in Chrome, Firefox and WebKit.
+WebKit could not be launched locally (missing system libraries in the container). On GitHub, the
+browser-test workflow ([run 45248454876](https://github.com/ISibboI/world-simulator/actions/runs/45248454876))
+passed: every scenario on Linux in Chrome, Firefox and WebKit, the normal load on Windows (Chrome,
+Firefox) and Android (Chrome, Firefox).
 
 Seen along the way:
 - Chrome runs a module that is imported while its `modulepreload` failed the integrity check
