@@ -202,18 +202,19 @@ fn arrows(data: &ModeData, warm_cold: bool) -> (Vec<(Kind, Sample)>, f64) {
     (samples, spacing)
 }
 
-/// Background colours. The transport: ColorBrewer's PuBu (sequential, colour-blind safe) on a
-/// logarithmic axis, so that both the slow interior and the boundary currents show.
-const PU_BU: [[u8; 3]; 9] = [
-    [255, 247, 251],
-    [236, 231, 242],
-    [208, 209, 230],
-    [166, 189, 219],
-    [116, 169, 207],
-    [54, 144, 192],
-    [5, 112, 176],
-    [4, 90, 141],
-    [2, 56, 88],
+/// Background colours. The transport: ColorBrewer's Purples (sequential, colour-blind safe) on
+/// a logarithmic axis, so that both the slow interior and the boundary currents show; a hue
+/// apart from the red, light blue and white arrows.
+const PURPLES: [[u8; 3]; 9] = [
+    [252, 251, 253],
+    [239, 237, 245],
+    [218, 218, 235],
+    [188, 189, 220],
+    [158, 154, 200],
+    [128, 125, 186],
+    [106, 81, 163],
+    [84, 39, 143],
+    [63, 0, 125],
 ];
 /// The ends of the transport scale in Sv per 100 km; values beyond are clamped.
 const TRANSPORT_RANGE: (f64, f64) = (0.02, 2.0);
@@ -249,7 +250,7 @@ const GYRE_RANGE: f64 = 15.0;
 /// Land in a flat, light grey-beige, ocean that the model leaves out (seas too small or
 /// enclosed for its coarse mesh) in a darker grey.
 const LAND: [u8; 3] = [200, 195, 180];
-const OUTSIDE: [u8; 3] = [120, 120, 120];
+const OUTSIDE: [u8; 3] = [140, 140, 140];
 
 /// Lines: widths in multiples of the arrow spacing of the view, and colours.
 const COAST_WIDTH: f64 = 0.03;
@@ -265,9 +266,9 @@ fn log(value: f64) -> f64 {
 
 fn transport_scale() -> ColorScale {
     let (low, high) = (log(TRANSPORT_RANGE.0), log(TRANSPORT_RANGE.1));
-    let last = (PU_BU.len() - 1) as f64;
+    let last = (PURPLES.len() - 1) as f64;
     ColorScale {
-        stops: PU_BU
+        stops: PURPLES
             .iter()
             .enumerate()
             .map(|(index, &color)| (low + (high - low) * index as f64 / last, color))
