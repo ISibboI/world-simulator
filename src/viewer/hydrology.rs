@@ -170,7 +170,7 @@ impl Drainage {
             }
             if self.to_ocean[end] {
                 summary.ocean_basins += 1;
-                if size >= MIN_BASIN {
+                if size >= min_basin(cells.len()) {
                     summary.large_ocean_basins += 1;
                 }
             } else {
@@ -197,29 +197,40 @@ impl Drainage {
         summary
     }
 
-    /// The value of the cell widget's row "Drainage basin" for a cell, or `None` for the ocean.
-    pub fn describe(&self, mesh: &SphereMesh, cells: &[CellInfo], cell: u32) -> Option<String> {
+    /// The values of the cell widget's rows "Drainage basin" (to the ocean or endorheic, its
+    /// share of the land, and for a lake whether it is closed) and "Basin outlet" (where its
+    /// water leaves it: the river mouth or the exit of its endorheic lake), or `None` for the
+    /// ocean.
+    pub fn describe(
+        &self,
+        mesh: &SphereMesh,
+        cells: &[CellInfo],
+        cell: u32,
+    ) -> Option<(String, String)> {
         let end = self.basin_of(cell)?;
         let share = 100.0 * f64::from(self.size_of(end)) / f64::from(self.land.max(1));
-        let (latitude, longitude) = latitude_longitude(mesh.vertex(end));
-        let place = format_position(latitude, longitude);
-        let mut text = if self.is_endorheic(end) {
-            format!("endorheic, ends at {place}")
-        } else {
-            format!("to the ocean at {place}")
-        };
-        text += &format!(", {} cells ({})", self.size_of(end), format_share(share));
+        let mut basin = format!(
+            "{}, {}",
+            if self.is_endorheic(end) {
+                "endorheic"
+            } else {
+                "to the ocean"
+            },
+            format_share(share)
+        );
         let lake = cells
             .get(cell as usize)
             .is_some_and(|info| matches!(info.water_body(), WaterBody::Lake(_)));
         if lake {
-            text += if self.is_closed(cell) {
+            basin += if self.is_closed(cell) {
                 "; closed lake"
             } else {
-                "; lake with outflow"
+                "; lake spills"
             };
         }
-        Some(text)
+        let (latitude, longitude) = latitude_longitude(mesh.vertex(end));
+        let outlet = format!("{}, cell {end}", format_position(latitude, longitude));
+        Some((basin, outlet))
     }
 }
 
@@ -234,16 +245,22 @@ fn format_share(percent: f64) -> String {
     }
 }
 
-/// Basins draining to the ocean with fewer land cells than this are "small coastal basins"
-/// (on the default grid ~10⁵ km²): one colour and no outlines, so that the coasts do not turn
-/// into confetti.
-pub const MIN_BASIN: u32 = 8;
+/// Basins draining to the ocean smaller than this share of the surface (~2.5 × 10⁵ km², 20 cells of
+/// the default grid) are "small coastal basins": one colour and no outlines, so that the
+/// coasts do not turn into confetti.
+pub const MIN_BASIN_SHARE: f64 = 5e-4;
+
+/// The smallest basin (cells) that is not a small coastal basin on a mesh of `cells` cells
+/// (see [`MIN_BASIN_SHARE`]), at least 2.
+pub fn min_basin(cells: usize) -> u32 {
+    ((MIN_BASIN_SHARE * cells as f64).round() as u32).max(2)
+}
 
 /// Statistics of the basins and lakes of a state (cells).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Summary {
     pub land: u32,
-    /// Basins draining to the ocean, and those of them with at least [`MIN_BASIN`] cells.
+    /// Basins draining to the ocean, and those of them with at least [`min_basin`] cells.
     pub ocean_basins: u32,
     pub large_ocean_basins: u32,
     /// Endorheic basins and their land.
@@ -371,15 +388,18 @@ mod tests {
         assert!(drainage.is_endorheic(b1));
         let summary = drainage.summary(&cells);
         assert_eq!((summary.lake, summary.closed_lake), (4, 2));
-        let text = drainage.describe(&mesh, &cells, a0).unwrap();
+        let (text, outlet) = drainage.describe(&mesh, &cells, a0).unwrap();
         assert!(text.starts_with("endorheic"), "{text}");
-        assert!(text.ends_with("lake with outflow"), "{text}");
+        assert!(text.ends_with("lake spills"), "{text}");
+        assert!(outlet.ends_with(&format!("cell {b1}")), "{outlet}");
         assert!(
             drainage
                 .describe(&mesh, &cells, b0)
                 .unwrap()
+                .0
                 .ends_with("closed lake")
         );
+        assert!(drainage.describe(&mesh, &cells, pass).is_some());
     }
 
     #[test]
@@ -497,13 +517,14 @@ mod tests {
             let hydrology = planet.statistics().hydrology;
             let land = hydrology.land_cells.max(1.0);
             eprintln!(
-                "t {:.0} Myr: land {} cells; basins to the ocean {} (>= {MIN_BASIN} cells: {}), \
+                "t {:.0} Myr: land {} cells; basins to the ocean {} (>= {} cells: {}), \
                  largest {}; endorheic {:.1}% in {} basins (simulation {:.1}%, pits {:.1}%); \
                  lakes >= 1 m {:.1}% (closed {:.1}%; simulation, fractional {:.1}%), \
                  dry depressions {:.1}%; lakes {} (endorheic {})",
                 planet.tectonics().time(),
                 summary.land,
                 summary.ocean_basins,
+                min_basin(cells.len()),
                 summary.large_ocean_basins,
                 largest.join(" "),
                 summary.percent(summary.endorheic),

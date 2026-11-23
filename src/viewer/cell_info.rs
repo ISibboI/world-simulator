@@ -329,9 +329,9 @@ pub fn format_position(latitude: f64, longitude: f64) -> String {
 /// Placeholder for a value that does not apply to a cell or is not known.
 pub const NOT_APPLICABLE: &str = "—";
 
-/// The label of the row with the drainage basin, after the rows of [`ROW_LABELS`] (it needs
-/// the drainage of the whole state, not only the cell's attributes).
-pub const BASIN_LABEL: &str = "Drainage basin";
+/// The labels of the rows with the drainage basin and its outlet, after the rows of
+/// [`ROW_LABELS`] (they need the drainage of the whole state, not only the cell's attributes).
+pub const BASIN_LABELS: [&str; 2] = ["Drainage basin", "Basin outlet"];
 
 /// One row of the widget.
 #[derive(Debug, Clone, PartialEq)]
@@ -600,8 +600,9 @@ pub struct ShownCell<'a> {
     pub plate_id: Option<u32>,
     /// Direction of the cell from the planet centre.
     pub direction: DVec3,
-    /// Its drainage basin (see [`super::hydrology::Drainage::describe`]), `None` for the ocean.
-    pub basin: Option<String>,
+    /// Its drainage basin and the basin's outlet (see
+    /// [`super::hydrology::Drainage::describe`]), `None` for the ocean.
+    pub basin: Option<(String, String)>,
     /// Whether the cell is selected (clicked or tapped) rather than under the pointer.
     pub selected: bool,
 }
@@ -684,12 +685,12 @@ impl CellInfoPanel {
                             }
                             None => empty_rows(),
                         };
-                        rows.push(row(
-                            BASIN_LABEL,
-                            position
-                                .as_ref()
-                                .and_then(|(shown, ..)| shown.basin.clone()),
-                        ));
+                        let basin = position
+                            .as_ref()
+                            .and_then(|(shown, ..)| shown.basin.clone());
+                        let (basin, outlet) = basin.unzip();
+                        rows.push(row(BASIN_LABELS[0], basin));
+                        rows.push(row(BASIN_LABELS[1], outlet));
                         egui::Grid::new("cell info grid")
                             .num_columns(2)
                             .striped(true)

@@ -11,7 +11,7 @@ use glam::DVec3;
 
 use super::super::CellInfo;
 use super::super::cell_info::WaterBody;
-use super::super::hydrology::{Drainage, MIN_BASIN, NO_BASIN, receiver};
+use super::super::hydrology::{Drainage, NO_BASIN, min_basin, receiver};
 use super::super::overlay::{LineStyle, OverlayBuilder, category_boundaries};
 use super::{
     ColorScale, Legend, ModeData, ModeOption, OptionKind, OptionValues, RenderMode, Swatch,
@@ -128,8 +128,11 @@ const DIVIDE_WIDTH: f64 = 0.02;
 /// Dots of closed lakes and dry depressions: radius as a share of the cell spacing.
 const DOT_RADIUS: f64 = 0.12;
 const MIN_DOT_RADIUS: f64 = 0.002;
-/// Lift above the surface (planet radii).
+/// Lift above the surface (planet radii). Rivers run in valleys, along the edges of the mesh,
+/// with higher cells on both sides: their lines need more lift than lines across cells, or
+/// the exaggerated relief of the neighbouring triangles hides them.
 const LIFT: f64 = 0.003;
+const RIVER_LIFT: f64 = 0.008;
 
 /// A stable index into a palette of `length` for a basin, from its end cell (so a basin keeps
 /// its colour as long as its mouth stays in the same cell).
@@ -171,7 +174,9 @@ fn basin_color(drainage: &Drainage, cell: u32, basins: Basins) -> Option<[u8; 3]
         (Basins::Endorheic | Basins::Elevation, false) => OTHER_LAND,
         (Basins::Endorheic | Basins::Elevation, true) => ENDORHEIC,
         (Basins::All, true) => ENDORHEIC_BASINS[palette_index(end, ENDORHEIC_BASINS.len())],
-        (Basins::All, false) if drainage.size_of(end) < MIN_BASIN => OTHER_LAND,
+        (Basins::All, false) if drainage.size_of(end) < min_basin(drainage.basin.len()) => {
+            OTHER_LAND
+        }
         (Basins::All, false) => OCEAN_BASINS[palette_index(end, OCEAN_BASINS.len())],
     })
 }
@@ -181,7 +186,10 @@ fn basin_color(drainage: &Drainage, cell: u32, basins: Basins) -> Option<[u8; 3]
 fn divide_category(drainage: &Drainage, cell: u32) -> u32 {
     match drainage.basin_of(cell) {
         None => NO_BASIN,
-        Some(end) if !drainage.is_endorheic(end) && drainage.size_of(end) < MIN_BASIN => {
+        Some(end)
+            if !drainage.is_endorheic(end)
+                && drainage.size_of(end) < min_basin(drainage.basin.len()) =>
+        {
             NO_BASIN - 1
         }
         Some(end) => end,
@@ -326,7 +334,7 @@ impl RenderMode for Hydrology {
                 border: 0.15 * width,
                 color: rgba(mix(RIVER_SMALL, RIVER_LARGE, size)),
                 border_color: RIVER_BORDER,
-                lift: LIFT,
+                lift: RIVER_LIFT,
             };
             let start = position(from);
             let end = if river_cell(&data.cells[to as usize]) {
@@ -349,10 +357,11 @@ impl RenderMode for Hydrology {
             let drainage = Drainage::of(data.mesh, data.cells);
             let summary = drainage.summary(data.cells);
             description += &format!(
-                "\n{} basins of at least {MIN_BASIN} cells drain to the ocean; the largest basin \
+                "\n{} basins of at least {} cells drain to the ocean; the largest basin \
                  covers {:.1}% of the land{}. Endorheic: {:.1}% of the land in {} basins. \
                  Lakes: {:.1}% of the land ({:.1}% closed); dry depressions {:.1}%.",
                 summary.large_ocean_basins,
+                min_basin(data.cells.len()),
                 summary.percent(summary.largest),
                 if summary.largest_endorheic {
                     " (endorheic)"
@@ -375,38 +384,27 @@ impl RenderMode for Hydrology {
                 swatches.push(Swatch::new(
                     OCEAN_BASINS[0],
                     SwatchShape::Palette(OCEAN_BASINS.to_vec()),
-                    "Basins draining to the ocean",
+                    "Basins to the ocean",
                 ));
                 swatches.push(Swatch::new(
                     ENDORHEIC_BASINS[0],
                     SwatchShape::Palette(ENDORHEIC_BASINS.to_vec()),
                     "Endorheic basins",
                 ));
-                swatches.push(Swatch::fill(
-                    OTHER_LAND,
-                    format!("Small coastal basins (< {MIN_BASIN} cells)"),
-                ));
+                swatches.push(Swatch::fill(OTHER_LAND, "Small coastal basins"));
             }
-            Basins::Endorheic | Basins::Elevation => {
-                if basins == Basins::Endorheic {
-                    swatches.push(Swatch::fill(OTHER_LAND, "Drains to the ocean"));
-                }
+            Basins::Endorheic => {
+                swatches.push(Swatch::fill(OTHER_LAND, "Drains to the ocean"));
                 swatches.push(Swatch::fill(ENDORHEIC, "Endorheic"));
             }
+            // Only lakes are recoloured; the land keeps the elevation colours.
+            Basins::Elevation => {}
         }
-        if basins == Basins::Elevation {
-            // Only lakes are recoloured there; endorheic land keeps the elevation colours.
-            swatches.pop();
-        }
-        swatches.push(Swatch::new(
-            LAKE_SHALLOW,
-            SwatchShape::Dots,
-            "Closed lake (no outflow)",
-        ));
+        swatches.push(Swatch::new(LAKE_SHALLOW, SwatchShape::Dots, "Closed lake"));
         swatches.push(Swatch::new(
             OTHER_LAND.map(|c| (f32::from(c) * DEPRESSION_SHADE) as u8),
             SwatchShape::Dots,
-            "Dry closed depression",
+            "Dry depression",
         ));
         if let Some(threshold) = river_threshold(options) {
             let small = if threshold >= LARGE_RIVER {
@@ -422,15 +420,11 @@ impl RenderMode for Hydrology {
             swatches.push(Swatch::new(
                 RIVER_LARGE,
                 SwatchShape::Line,
-                "River ≥ 300 000 m³/s",
+                "≥ 300 000 m³/s",
             ));
         }
         if options.is_on(OUTLINES) && basins != Basins::Elevation {
-            swatches.push(Swatch::new(
-                DIVIDE_COLOR,
-                SwatchShape::Line,
-                "Drainage divide",
-            ));
+            swatches.push(Swatch::new(DIVIDE_COLOR, SwatchShape::Line, "Divide"));
         }
         Legend {
             description: description.into(),
