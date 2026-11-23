@@ -4,8 +4,11 @@
 //
 // The page names the files of its build to load, `module` (the JavaScript module) and `wasm`, at
 // the start of the query string (see `worker_query` in src/query.rs). Their names carry content
-// hashes, and the query string makes this script's URL unique per build, so that the page and
-// the worker never combine files of different builds from the browser cache (issue #122).
+// hashes, and the query string makes this script's URL unique per build of the module, so that the
+// page and the worker never combine files of different builds from the browser cache (issue
+// #122). (A build that changes only this script keeps its URL: a page may get the cached script
+// of the previous build for a while, so keep this script compatible with the page's messages
+// and query string.)
 //
 // Messages from the page (requests of other fields, `{ layers }`) that arrive while the module
 // is still loading would find no handler: they are kept and handed to the handler that the
@@ -16,7 +19,11 @@ self.onmessage = (event) => early.push(event.data);
 
 // A file of the page's build: only from the site itself.
 const file = (name) => {
-    const url = new URL(new URLSearchParams(location.search).get(name) ?? "", location.href);
+    const given = new URLSearchParams(location.search).get(name);
+    if (!given) {
+        throw new Error(`no ${name} file given: the page and this script are of different builds`);
+    }
+    const url = new URL(given, location.href);
     if (url.origin !== location.origin) {
         throw new Error(`the ${name} file is not on this site: ${url}`);
     }
@@ -25,7 +32,8 @@ const file = (name) => {
 
 // Failures to get or compile the files, as opposed to failures (traps, e.g. a panic) of the
 // simulation itself.
-const loading = (error) => !(error instanceof WebAssembly.RuntimeError);
+const loading = (error) =>
+    !(typeof WebAssembly === "object" && error instanceof WebAssembly.RuntimeError);
 
 (async () => {
     const { default: init } = await import(file("module"));

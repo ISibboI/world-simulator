@@ -586,16 +586,16 @@ fn start_worker(
             }));
         });
     worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
-    // Errors while loading the worker script (a failure to load the module, or inside the
-    // simulation, arrives as an `{ error }` message, see `web/worker.js`). A script that does
-    // not load gives a plain `Event` without a message, not an `ErrorEvent`.
+    // Uncaught errors in the worker, and a worker script that does not load (a failure to load
+    // the module, or of the simulation, arrives as an `{ error }` message, see `web/worker.js`).
+    // A script that does not load gives a plain `Event` without a message, not an `ErrorEvent`.
     let on_error = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
         let detail = get(&event, "message")
             .as_string()
             .filter(|message| !message.is_empty());
         error!("Simulation worker error: {detail:?}");
         // Short, for the banner; the details are in the console.
-        let message = format!("its worker did not start. {RELOAD_HINT}");
+        let message = detail.unwrap_or_else(|| format!("its worker did not start. {RELOAD_HINT}"));
         mark("simulation-failed", &message);
         if events.send(SimulationEvent::Failed(message)).is_ok() {
             wake_up();

@@ -11,7 +11,10 @@
         // and other uncaught errors and promise rejections. The banner says what failed and
         // suggests a reload; the details go to the console. A failure before the simulator
         // started reloads the page once, fetching the page itself anew (a page from the cache
-        // could name files that a new deploy removed). After 30 s without a frame the banner
+        // could name files that a new deploy removed); no more automatic reloads until a page
+        // of the session drew a frame, so a lasting failure cannot loop. Without WebAssembly
+        // (turned off in some browsers, e.g. Lockdown Mode on iOS) the banner says so at once.
+        // After 30 s without a frame the banner
         // says that loading takes long. The failure is also recorded as `data-load-failed` of
         // the root element, for the browser tests (web/tests/). Failures of the simulation
         // worker are shown by the view (src/web.rs).
@@ -30,21 +33,33 @@
                     status.style.display = "block";
                 }
             };
-            // At most one automatic reload per minute, so that a lasting failure cannot loop.
+            // One automatic reload, then none until a page drew a frame.
             const retry = (urls) => {
                 try {
-                    if (Date.now() - Number(sessionStorage.getItem(RETRY_KEY) ?? 0) < 60000) {
+                    if (sessionStorage.getItem(RETRY_KEY)) {
                         return false;
                     }
-                    sessionStorage.setItem(RETRY_KEY, String(Date.now()));
+                    sessionStorage.setItem(RETRY_KEY, "1");
                 } catch {
                     return false;
                 }
+                // The files anew into the cache, but not waiting long for them.
                 const fresh = [location.href, ...urls].map((url) =>
                     fetch(url, { cache: "reload" }).catch(() => {}));
-                Promise.all(fresh).finally(() => location.reload());
+                const patience = new Promise((resolve) => setTimeout(resolve, 5000));
+                Promise.race([Promise.all(fresh), patience]).finally(() => location.reload());
                 return true;
             };
+            new MutationObserver((_, observer) => {
+                if (running()) {
+                    observer.disconnect();
+                    try {
+                        sessionStorage.removeItem(RETRY_KEY);
+                    } catch {
+                        // No storage: no automatic reloads anyway.
+                    }
+                }
+            }).observe(root, { attributes: true, attributeFilter: ["data-first-frame"] });
             const fail = (what, detail, urls = []) => {
                 if (failed || running()) {
                     return;
@@ -60,7 +75,8 @@
             };
             addEventListener("TrunkApplicationStarted", () => { started = true; });
             // Before the module started: getting or compiling it failed (a trap is a crash).
-            const failure = (error) => !started && !(error instanceof WebAssembly.RuntimeError)
+            const wasm = typeof WebAssembly === "object";
+            const failure = (error) => !started && !(wasm && error instanceof WebAssembly.RuntimeError)
                 ? "Could not load the simulator"
                 : "The simulator could not start";
             // Capturing: errors of <script> and <link> elements do not bubble.
@@ -78,6 +94,12 @@
             }, true);
             addEventListener("unhandledrejection", (event) =>
                 fail(failure(event.reason), event.reason));
+            if (!wasm) {
+                failed = true;
+                root.dataset.loadFailed = "This browser has WebAssembly turned off.";
+                addEventListener("DOMContentLoaded", () => show(
+                    "This browser has WebAssembly turned off.\nThe simulator needs it to run."));
+            }
             setTimeout(() => {
                 const status = document.getElementById("status");
                 if (!failed && !running() && status?.textContent === LOADING) {

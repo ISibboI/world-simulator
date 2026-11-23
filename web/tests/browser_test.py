@@ -18,7 +18,7 @@ runners have no GPU, so this is software rendering everywhere).
 Scenarios (`--scenario`, issue #122): besides the normal load (`load`), the server can break the
 site on purpose, and the test then passes when the page reports the failure in its loading banner
 (`data-load-failed` or `data-simulation-failed`, a visible banner that suggests a reload) and
-reloads itself at most once:
+reloads itself exactly once (a failure to load) or not at all (a failure of the worker):
 
   broken-js      the simulator's JavaScript module does not match its integrity hash (and fails)
   broken-wasm    the wasm file is of another build (its imports do not match)
@@ -123,10 +123,9 @@ class State:
         self.site = site
         self.scenario = scenario
         self.reload = False
-        # The page requests served: (seconds since the start, build); the page loads seen (their
-        # `performance.timeOrigin`).
+        # The page requests served: (seconds since the start, build, fetch mode); navigations
+        # have the mode `navigate`, the page's own fetches of itself (before it reloads) not.
         self.pages = []
-        self.loads = []
         self.started = time.monotonic()
 
     def add(self, report):
@@ -137,8 +136,6 @@ class State:
             self.logs.extend(report.pop("logs", []))
             self.last = report
             self.reports += 1
-            if report.get("timeOrigin") not in self.loads:
-                self.loads.append(report.get("timeOrigin"))
             reload, self.reload = self.reload, False
             return {"stop": self.stop, "reload": reload}
 
@@ -179,10 +176,18 @@ def make_handler(state):
             path = self.path.split("?")[0].split("#")[0]
             if path in ("/", "/index.html"):
                 with state.lock:
-                    state.pages.append((round(time.monotonic() - state.started, 1), self.site.name))
+                    state.pages.append((
+                        round(time.monotonic() - state.started, 1),
+                        self.site.name,
+                        self.headers.get("Sec-Fetch-Mode", "navigate"),
+                    ))
                 self.site_cache()
                 page = (self.site / "index.html").read_text(encoding="utf-8")
                 page = page.replace("<head>", '<head>\n<script src="/probe.js"></script>', 1)
+                if state.scenario == "broken-wasm":
+                    # Without the integrity check of the preload, so that instantiating the
+                    # wasm file fails (in browsers that check it, its preload would fail first).
+                    page = re.sub(r'(<link rel="preload" href="[^"]+\.wasm"[^>]*?) integrity="[^"]*"', r"\1", page)
                 self.send_bytes(page.encode(), "text/html; charset=utf-8")
             elif path == "/probe.js":
                 self.send_bytes((TESTS / "probe.js").read_bytes(), "text/javascript")
@@ -269,7 +274,10 @@ def open_playwright(name, url):
     kind = {"webkit": "webkit", "chromium-pw": "chromium", "firefox-pw": "firefox"}[name]
     launch = {"headless": not os.environ.get("DISPLAY")}
     if kind == "chromium":
-        launch["args"] = ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"]
+        launch["args"] = [
+            "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist",
+            *os.environ.get("BROWSER_ARGS", "").split(),
+        ]
     if kind == "firefox":
         launch["firefox_user_prefs"] = {"webgl.force-enabled": True}
     browser = getattr(playwright, kind).launch(**launch)
@@ -454,7 +462,8 @@ def check_reported_failure(report, scenario):
         if data.get("firstFrame") == "true":
             return True, "the view started although the site was broken"
         message = data.get("loadFailed")
-        if message and not (status.get("display") != "none" and "reload" in (status.get("text") or "").lower()):
+        # Not while the page reloads itself: the banner then says "Reloading the page…".
+        if message and not (status.get("display") != "none" and "please reload" in (status.get("text") or "").lower()):
             return False, None
     if not message:
         return False, None
@@ -588,12 +597,14 @@ def main():
                 break
         with state.lock:
             result["pages"] = list(state.pages)
-            loads = len(state.loads)
+            loads = sum(1 for page in state.pages if page[2] == "navigate")
         if failure is None and failing:
             # Still shown at the end, and at most one automatic reload.
             _, failure = check_reported_failure(report or {}, args.scenario)
-            if failure is None and loads > 2:
-                failure = f"the page reloaded itself {loads - 1} times"
+            # A failure to load reloads the page once; one of the worker does not.
+            expected = 1 if args.scenario == "broken-worker" else 2
+            if failure is None and loads != expected:
+                failure = f"the page loaded {loads} times (expected {expected}): {state.pages}"
         result.setdefault("seconds", round(time.monotonic() - opened, 1))
         # Give the view a moment to draw the newest state, then look at it.
         time.sleep(2)
