@@ -267,11 +267,11 @@ fn after(milliseconds: i32, callback: impl FnOnce() + 'static) {
 /// Keeps the frames in memory from now on, with those written to IndexedDB so far (unless they
 /// were checked) and those waiting for it to open.
 fn fall_back(shared: &Rc<RefCell<Shared>>, error: &str) {
-    warn!("IndexedDB is not available for the frame history, keeping it in memory: {error}");
     let mut state = shared.borrow_mut();
     if state.fallback.is_some() {
         return;
     }
+    warn!("IndexedDB is not available for the frame history, keeping it in memory: {error}");
     if let Some(database) = state.database.take() {
         database.close();
     }
@@ -371,6 +371,10 @@ fn install_handlers(shared: &Rc<RefCell<Shared>>) {
 
 fn fail_write(shared: &Rc<RefCell<Shared>>, index: usize, error: &str) {
     let mut state = shared.borrow_mut();
+    if state.fallback.is_some() {
+        // A write sent to IndexedDB before the fallback: the frame is in memory.
+        return;
+    }
     if state.failed.is_none_or(|failed| index < failed) {
         warn!(
             frame = index,
@@ -465,8 +469,17 @@ fn object_store(
 /// Writes a frame; a failure (e.g. the quota) marks it as failed. The first frame is read back
 /// to check the storage.
 fn write(shared: &Rc<RefCell<Shared>>, index: usize, frame: &[u8]) {
-    if let Some(copies) = &mut shared.borrow_mut().unverified {
-        copies.push((index, frame.to_vec()));
+    {
+        let mut state = shared.borrow_mut();
+        // The history fell back to memory meanwhile (e.g. while the frames queued until the
+        // database opened are written).
+        if let Some(memory) = &mut state.fallback {
+            memory.append(index, frame.to_vec());
+            return;
+        }
+        if let Some(copies) = &mut state.unverified {
+            copies.push((index, frame.to_vec()));
+        }
     }
     let result = object_store(shared, web_sys::IdbTransactionMode::Readwrite).and_then(
         |(transaction, store)| {
