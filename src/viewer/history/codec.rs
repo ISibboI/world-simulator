@@ -2,8 +2,8 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (31 bytes per cell
-//! instead of 68, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (39 bytes per cell
+//! instead of 84, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
@@ -38,7 +38,7 @@ impl Code {
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 17] = [
+const CHANNELS: [Code; 21] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -64,6 +64,14 @@ const CHANNELS: [Code; 17] = [
     Code::Share,
     // Discharge: 0.6 % relative (the widget shows 3 digits), up to 10^38 m³/yr.
     Code::Logarithmic(1.0 / 170.0),
+    // Ocean current (east, north): 0.05 m²/s (0.005 Sv per 100 km; the interior of the gyres
+    // carries 0.5–2 m²/s), ±1638 m²/s.
+    Code::Signed(0.05),
+    Code::Signed(0.05),
+    // Gyre streamfunction: 0.05 Sv, ±1638 Sv.
+    Code::Signed(0.05),
+    // Heating by the gyres: 1 W/m², ±32 kW/m².
+    Code::Signed(1.0),
     Code::Integer16,
     Code::Integer8,
 ];
@@ -97,6 +105,10 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.potential_evaporation,
         cell.ice,
         cell.discharge,
+        cell.current_east,
+        cell.current_north,
+        cell.streamfunction,
+        cell.gyre_heating,
         0.0,
         0.0,
     ]
@@ -239,8 +251,12 @@ impl Planes {
                     potential_evaporation: value(12),
                     ice: value(13),
                     discharge: value(14),
-                    plate: u32::from(values[15]),
-                    flags: u32::from(values[16]),
+                    current_east: value(15),
+                    current_north: value(16),
+                    streamfunction: value(17),
+                    gyre_heating: value(18),
+                    plate: u32::from(values[19]),
+                    flags: u32::from(values[20]),
                 }
             })
             .collect()
@@ -264,7 +280,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 /// Bytes per plate: its rotation and id.
 pub const PLATE_BYTES: usize = 16;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -401,6 +417,14 @@ mod tests {
             } else {
                 1.0e8 * x
             },
+            current_east: if index.is_multiple_of(6) {
+                f32::NAN
+            } else {
+                (x * 0.3).sin() * 80.0
+            },
+            current_north: (x * 0.2).cos() * 40.0,
+            streamfunction: (x * 0.01).sin() * 60.0,
+            gyre_heating: (x * 0.07).cos() * 150.0,
             plate: (index % 13) as u32,
             flags: (index % 2) as u32,
         }
@@ -443,6 +467,11 @@ mod tests {
                 0.0005,
             ),
             (original.ice, decoded.ice, 0.5 / 254.0),
+            // A full step: small negative values keep their sign (one step below zero).
+            (original.current_east, decoded.current_east, 0.05),
+            (original.current_north, decoded.current_north, 0.05),
+            (original.streamfunction, decoded.streamfunction, 0.05),
+            (original.gyre_heating, decoded.gyre_heating, 1.0),
         ];
         for (index, (a, b, tolerance)) in pairs.into_iter().enumerate() {
             if a.is_nan() {
@@ -475,7 +504,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 31);
+        assert_eq!(BYTES_PER_CELL, 39);
     }
 
     #[test]

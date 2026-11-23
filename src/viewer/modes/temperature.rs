@@ -125,6 +125,11 @@ fn scale(period: Period) -> ColorScale {
     }
 }
 
+/// The scale of the annual mean temperature, for other modes.
+pub(super) fn annual_scale() -> ColorScale {
+    scale(Period::Annual)
+}
+
 impl RenderMode for Temperature {
     fn label(&self) -> &'static str {
         "Temperature"

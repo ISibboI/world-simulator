@@ -20,6 +20,7 @@
 //! legend and the mode reads their values from [`ModeData::options`].
 
 mod moisture;
+mod ocean_currents;
 mod plate_motion;
 mod plates;
 pub mod switcher;
@@ -51,6 +52,8 @@ pub enum RenderModeId {
     Temperature,
     /// Precipitation (annual, January or July) or the aridity index of land.
     Moisture,
+    /// The wind-driven ocean gyres as arrows.
+    OceanCurrents,
 }
 
 impl RenderModeId {
@@ -62,6 +65,7 @@ impl RenderModeId {
             RenderModeId::Plates => &plates::Plates,
             RenderModeId::Temperature => &temperature::Temperature,
             RenderModeId::Moisture => &moisture::Moisture,
+            RenderModeId::OceanCurrents => &ocean_currents::OceanCurrents,
         }
     }
 
@@ -84,6 +88,7 @@ impl RenderModeId {
             RenderModeId::Plates => "plates",
             RenderModeId::Temperature => "temperature",
             RenderModeId::Moisture => "moisture",
+            RenderModeId::OceanCurrents => "ocean-currents",
         }
     }
 

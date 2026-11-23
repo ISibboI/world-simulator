@@ -364,6 +364,16 @@ pub struct TemperatureFields {
     pub meridional_transport: Vec<(f64, f64, f64)>,
     /// Largest volume transport of the wind-driven gyres in Sv (1e6 m³/s).
     pub gyre_transport: f64,
+    /// Depth-integrated volume transport of the wind-driven gyres (eastward, northward) in m²/s
+    /// at every fine ocean cell: the value of its coarse cell, NaN where that is not ocean in the
+    /// gyre model (mostly land) or the fine cell is land.
+    pub ocean_current: Vec<[f64; 2]>,
+    /// Streamfunction of the gyres in Sv at every fine ocean cell (interpolated, zero at the
+    /// coasts of the coarse mesh), NaN on land.
+    pub gyre_streamfunction: Vec<f64>,
+    /// Annual mean heat the gyres deliver to the mixed layer (W/m² of ocean; negative where they
+    /// take heat away) at every fine ocean cell, from its coarse cell as `ocean_current`.
+    pub gyre_heating: Vec<f64>,
 }
 
 impl TemperatureFields {
@@ -646,6 +656,7 @@ impl TemperatureModel {
         let mut seasonal_mean = vec![vec![0.0; coarse_count]; seasons];
         let mut annual_land = vec![0.0; coarse_count];
         let mut annual_sea_ice = vec![0.0; coarse_count];
+        let mut annual_gyre_heat = vec![0.0; coarse_count];
         let mut mean = vec![0.0; coarse_count];
         for _ in 0..years {
             for season in seasonal_land
@@ -659,6 +670,7 @@ impl TemperatureModel {
             ocean_transport_sum.fill(0.0);
             annual_land.fill(0.0);
             annual_sea_ice.fill(0.0);
+            annual_gyre_heat.fill(0.0);
             // Albedo of the land from the ice sheets, which depend on last year's temperatures:
             // the mean over the fine land cells of every coarse cell, each with its own elevation
             // and snowfall.
@@ -734,6 +746,9 @@ impl TemperatureModel {
                     for cell in 0..coarse_count {
                         let band = self.band[cell];
                         let ocean_area = (1.0 - land_fraction[cell]) * cell_area;
+                        if is_ocean[cell] {
+                            annual_gyre_heat[cell] += gyre_heat[cell] / ocean_area.max(1.0);
+                        }
                         self.ocean_heat_convergence[cell] = band_ocean_flux[band]
                             / (band_ocean[band] * band_area).max(1.0)
                             + if is_ocean[cell] {
@@ -895,6 +910,9 @@ impl TemperatureModel {
             for sea_ice in &mut annual_sea_ice {
                 *sea_ice /= steps_per_year;
             }
+            for heat in &mut annual_gyre_heat {
+                *heat /= steps_per_year;
+            }
         }
 
         // Monthly means of the sea-level temperatures on the coarse mesh.
@@ -968,7 +986,33 @@ impl TemperatureModel {
             })
             .collect();
 
+        // The gyres on the fine mesh: the transport and heating of the coarse cell (the model's
+        // resolution), the streamfunction interpolated.
+        let transport = self.gyre_model.transport(&self.coarse, &is_ocean, &gyres);
+        let of_coarse = |fine: usize| {
+            let coarse = self.fine_to_coarse[fine] as usize;
+            (elevation[fine] < 0.0 && is_ocean[coarse]).then_some(coarse)
+        };
+        let ocean_current = (0..elevation.len())
+            .map(|fine| of_coarse(fine).map_or([f64::NAN; 2], |coarse| transport[coarse]))
+            .collect();
+        let gyre_heating = (0..elevation.len())
+            .map(|fine| of_coarse(fine).map_or(f64::NAN, |coarse| annual_gyre_heat[coarse]))
+            .collect();
+        let gyre_streamfunction = (0..elevation.len())
+            .map(|fine| {
+                if elevation[fine] < 0.0 {
+                    self.interpolate(&gyres.streamfunction, fine) / 1e6
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect();
+
         self.fields = TemperatureFields {
+            ocean_current,
+            gyre_streamfunction,
+            gyre_heating,
             annual_mean,
             monthly,
             thermal_equator,

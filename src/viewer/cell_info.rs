@@ -11,7 +11,7 @@ use crate::tectonics::BoundaryClass;
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 68 bytes per cell, 2.8 MB
+/// buffer (to the page on the web) and read back without parsing: 84 bytes per cell, 3.4 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -47,6 +47,16 @@ pub struct CellInfo {
     pub ice: f32,
     /// Water discharge in m³/yr (zero while erosion is disabled).
     pub discharge: f32,
+    /// Depth-integrated volume transport of the wind-driven ocean gyres, eastward and northward
+    /// in m²/s, at the resolution of the climate model's coarse mesh; NaN where the gyre model
+    /// has no ocean (see `TemperatureFields::ocean_current`).
+    pub current_east: f32,
+    pub current_north: f32,
+    /// Streamfunction of the gyres in Sv (NaN on land).
+    pub streamfunction: f32,
+    /// Annual mean heat the gyres deliver to the ocean mixed layer in W/m² (negative where they
+    /// cool it), NaN where the gyre model has no ocean.
+    pub gyre_heating: f32,
     /// The plate covering the cell.
     pub plate: u32,
     /// Bit flags: [`CellInfo::CONTINENTAL`], the boundary class
@@ -124,6 +134,12 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
             .get(month)
             .map_or(f32::NAN, |values| field(values, cell))
     };
+    let current = |cell: usize, component: usize| {
+        temperature
+            .ocean_current
+            .get(cell)
+            .map_or(f32::NAN, |vector| vector[component] as f32)
+    };
     let cycle = planet.water_cycle();
     // The solved months are spread evenly from January; the slot of a month, if it is solved.
     let solved = cycle.monthly_precipitation.len();
@@ -157,6 +173,10 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 potential_evaporation: field(&cycle.potential_evaporation, index),
                 ice: field(&temperature.ice, index),
                 discharge: field(planet.discharge(), index),
+                current_east: current(index, 0),
+                current_north: current(index, 1),
+                streamfunction: field(&temperature.gyre_streamfunction, index),
+                gyre_heating: field(&temperature.gyre_heating, index),
                 plate: simulation.owner(cell).plate,
                 flags: CellInfo::flags(
                     crust.is_continental(),
@@ -212,7 +232,7 @@ pub struct Row {
 
 /// The labels of the rows, always all of them in this order, so that the widget does not
 /// change its layout from cell to cell.
-pub const ROW_LABELS: [&str; 16] = [
+pub const ROW_LABELS: [&str; 17] = [
     "Position",
     "Elevation",
     "Surface",
@@ -229,6 +249,7 @@ pub const ROW_LABELS: [&str; 16] = [
     "Aridity index",
     "Permanent ice",
     "River discharge",
+    "Ocean current",
 ];
 
 fn row(label: &'static str, value: Option<String>) -> Row {
@@ -266,7 +287,7 @@ pub fn format_rows(
     longitude: f64,
 ) -> Vec<Row> {
     let land = info.elevation >= 0.0;
-    let values: [Option<String>; 16] = [
+    let values: [Option<String>; 17] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
         Some(
@@ -349,12 +370,38 @@ pub fn format_rows(
                 significant(f64::from(info.discharge) / crate::SECONDS_PER_YEAR)
             )
         }),
+        (!land).then(|| format_current(info)).flatten(),
     ];
     ROW_LABELS
         .into_iter()
         .zip(values)
         .map(|(label, value)| row(label, value))
         .collect()
+}
+
+/// The ocean current of a cell: its transport in Sv per 100 km of width and the direction it
+/// flows to, and the heat the gyres deliver there, if the gyre model has an ocean there.
+fn format_current(info: &CellInfo) -> Option<String> {
+    let (east, north) = (f64::from(info.current_east), f64::from(info.current_north));
+    if !(east.is_finite() && north.is_finite()) {
+        return None;
+    }
+    // 1 Sv per 100 km = 10 m²/s.
+    let transport = (east * east + north * north).sqrt() / 10.0;
+    const DIRECTIONS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+    let angle = crate::math::atan2(east, north)
+        .to_degrees()
+        .rem_euclid(360.0);
+    let direction = DIRECTIONS[((angle / 45.0).round() as usize) % 8];
+    let mut text = if transport < 0.005 {
+        "still".to_owned()
+    } else {
+        format!("{transport:.2} Sv/100 km to {direction}")
+    };
+    if info.gyre_heating.is_finite() {
+        text += &format!(", {:+.0} W/m²", info.gyre_heating);
+    }
+    Some(text)
 }
 
 /// An aridity index with two decimals (three below 0.1, none from 10).
@@ -574,6 +621,10 @@ mod tests {
             potential_evaporation: 1.0,
             ice: 0.0,
             discharge: 3.15576e11,
+            current_east: f32::NAN,
+            current_north: f32::NAN,
+            streamfunction: f32::NAN,
+            gyre_heating: f32::NAN,
             plate: 7,
             flags: CellInfo::CONTINENTAL,
         }
@@ -655,6 +706,7 @@ mod tests {
         assert_eq!(row(&rows, "Permanent ice"), None);
         // 3.15576e11 m³/yr = 10000 m³/s.
         assert_eq!(row(&rows, "River discharge").unwrap(), "10000 m³/s");
+        assert_eq!(row(&rows, "Ocean current"), None);
     }
 
     fn ocean() -> CellInfo {
@@ -671,6 +723,10 @@ mod tests {
             precipitation_july: f32::NAN,
             potential_evaporation: 0.0,
             ice: 0.75,
+            current_east: -10.0,
+            current_north: 10.0,
+            streamfunction: 12.0,
+            gyre_heating: 25.4,
             flags: 0,
             ..info()
         }
@@ -679,6 +735,20 @@ mod tests {
     #[test]
     fn ocean_cell_rows() {
         let rows = format_rows(&ocean(), None, -5.0, -170.0);
+        assert_eq!(
+            row(&rows, "Ocean current").unwrap(),
+            "1.41 Sv/100 km to NW, +25 W/m²"
+        );
+        let still = CellInfo {
+            current_east: 0.0,
+            current_north: 0.0,
+            gyre_heating: f32::NAN,
+            ..ocean()
+        };
+        assert_eq!(
+            row(&format_rows(&still, None, 0.0, 0.0), "Ocean current").unwrap(),
+            "still"
+        );
         assert_eq!(row(&rows, "Elevation").unwrap(), "-4321 m");
         assert_eq!(row(&rows, "Surface").unwrap(), "ocean, sea ice");
         assert_eq!(row(&rows, "Crust").unwrap(), "oceanic, 7.0 km");
@@ -739,7 +809,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 68);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 84);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 
