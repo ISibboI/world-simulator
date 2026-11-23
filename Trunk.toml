@@ -1,8 +1,11 @@
-# Web version: `trunk serve` for local testing, `trunk build --release` for the site in dist/.
+# Web version: `trunk build --release` for the site in dist/ (`trunk serve` for local testing).
 [build]
 target = "web/index.html"
 dist = "dist"
 # Relative URLs, so the site works under any path (GitHub Pages serves it at /world-simulator/).
 public_url = "./"
-# Fixed file names, because web/worker.js imports the module by name.
-filehash = false
+# File names with content hashes, so that a page always gets the files of its own build: GitHub
+# Pages lets browsers cache every file for 10 minutes, and with fixed names a new page could meet
+# the cached files of the previous build (issue #122). web/worker.js keeps its name; the page
+# tells it which module and wasm file to load (see src/web.rs).
+filehash = true
