@@ -13,8 +13,12 @@
 //! page starts, the databases whose lock nobody holds: those of closed pages, not those of other
 //! open tabs.
 //!
-//! If IndexedDB cannot be opened (some private modes), the frames are kept in memory, up to
-//! [`MEMORY_CAPACITY`].
+//! If IndexedDB cannot be opened (some private modes), does not open within [`TIMEOUT_MS`], or
+//! the first frame does not read back as written (checked once per run, also within
+//! [`TIMEOUT_MS`]), the frames are kept in memory, up to [`MEMORY_CAPACITY`]: the frames written
+//! to IndexedDB until then are kept in memory as well, so none is lost. Storage never holds up
+//! the view. The outcome is set as `data-frame-history` (`indexeddb` or `memory`) on the root
+//! element of the page (see `web::mark`), for the browser tests in `web/tests/`.
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -24,6 +28,7 @@ use tracing::{error, info, warn};
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::JsFuture;
 
+use super::mark;
 use crate::viewer::{FrameStore, MemoryStore};
 
 /// Prefix of the names of the databases.
@@ -35,6 +40,9 @@ const FRAMES: &str = "frames";
 const CAPACITY: u64 = 1 << 30;
 /// Bytes the history may keep in memory if IndexedDB is not available.
 pub const MEMORY_CAPACITY: u64 = 256 << 20;
+/// Milliseconds to wait for IndexedDB to open, and for the first frame to read back, before the
+/// history falls back to memory.
+const TIMEOUT_MS: i32 = 10_000;
 
 /// The state shared with the callbacks of IndexedDB.
 struct Shared {
@@ -45,6 +53,9 @@ struct Shared {
     queued_read: Option<Range<usize>>,
     /// Frames in memory, if IndexedDB is not available.
     fallback: Option<MemoryStore>,
+    /// Copies of the frames written to IndexedDB until the first one read back as written
+    /// (`None` from then on, or in memory).
+    unverified: Option<Vec<(usize, Vec<u8>)>>,
     result: Option<Result<Vec<Vec<u8>>, String>>,
     /// The number of frames the running read asks for.
     expected: usize,
@@ -185,6 +196,7 @@ impl IdbStore {
             queued: Vec::new(),
             queued_read: None,
             fallback: None,
+            unverified: Some(Vec::new()),
             result: None,
             expected: 0,
             failed: None,
@@ -195,8 +207,22 @@ impl IdbStore {
         }));
         install_handlers(&shared);
         let release = hold_lock(&name);
-        if let Err(error) = open(&name, &shared) {
-            fall_back(&shared, &error);
+        match open(&name, &shared) {
+            Ok(()) => {
+                let weak = Rc::downgrade(&shared);
+                after(TIMEOUT_MS, move || {
+                    if let Some(shared) = weak.upgrade() {
+                        let waiting = {
+                            let state = shared.borrow();
+                            state.database.is_none() && state.fallback.is_none()
+                        };
+                        if waiting {
+                            fall_back(&shared, "IndexedDB did not open in time");
+                        }
+                    }
+                });
+            }
+            Err(error) => fall_back(&shared, &error),
         }
         Self {
             name,
@@ -206,12 +232,36 @@ impl IdbStore {
     }
 }
 
-/// Keeps the frames in memory from now on.
+/// Calls `callback` after `milliseconds` (on the page or in a worker).
+fn after(milliseconds: i32, callback: impl FnOnce() + 'static) {
+    let callback = Closure::once_into_js(callback);
+    if let Err(error) = call(
+        &js_sys::global(),
+        "setTimeout",
+        &[&callback, &milliseconds.into()],
+    ) {
+        warn!("Could not set a timer: {error}");
+    }
+}
+
+/// Keeps the frames in memory from now on, with those written to IndexedDB so far (unless they
+/// were checked) and those waiting for it to open.
 fn fall_back(shared: &Rc<RefCell<Shared>>, error: &str) {
     warn!("IndexedDB is not available for the frame history, keeping it in memory: {error}");
     let mut state = shared.borrow_mut();
+    if state.fallback.is_some() {
+        return;
+    }
+    if let Some(database) = state.database.take() {
+        database.close();
+    }
     let mut memory = MemoryStore::new(MEMORY_CAPACITY);
-    for (index, frame) in std::mem::take(&mut state.queued) {
+    let written = state.unverified.take().unwrap_or_default();
+    if !written.is_empty() {
+        // All of them are in memory now.
+        state.failed = None;
+    }
+    for (index, frame) in written.into_iter().chain(std::mem::take(&mut state.queued)) {
         memory.append(index, frame);
     }
     if let Some(range) = state.queued_read.take() {
@@ -220,6 +270,7 @@ fn fall_back(shared: &Rc<RefCell<Shared>>, error: &str) {
         (state.wake)();
     }
     state.fallback = Some(memory);
+    mark("frame-history", "memory");
 }
 
 /// The target of an IndexedDB event: its request or transaction.
@@ -347,6 +398,11 @@ fn open(name: &str, shared: &Rc<RefCell<Shared>>) -> Result<(), String> {
             fall_back(&shared, "the database did not open");
             return;
         };
+        if shared.borrow().fallback.is_some() {
+            // Opened only after the timeout: the frames are in memory.
+            database.close();
+            return;
+        }
         let (queued, read) = {
             let mut state = shared.borrow_mut();
             state.database = Some(database);
@@ -385,8 +441,12 @@ fn object_store(
     Ok((transaction, store))
 }
 
-/// Writes a frame; a failure (e.g. the quota) marks it as failed.
+/// Writes a frame; a failure (e.g. the quota) marks it as failed. The first frame is read back
+/// to check the storage.
 fn write(shared: &Rc<RefCell<Shared>>, index: usize, frame: &[u8]) {
+    if let Some(copies) = &mut shared.borrow_mut().unverified {
+        copies.push((index, frame.to_vec()));
+    }
     let result = object_store(shared, web_sys::IdbTransactionMode::Readwrite).and_then(
         |(transaction, store)| {
             let _ = js_sys::Reflect::set(
@@ -405,6 +465,70 @@ fn write(shared: &Rc<RefCell<Shared>>, index: usize, frame: &[u8]) {
     if let Err(error) = result {
         fail_write(shared, index, &error);
     }
+    if index == 0 {
+        verify(shared);
+    }
+}
+
+/// Reads frame 0 back (in a transaction after the one that wrote it) and keeps the frames in
+/// memory if it is not there as written.
+fn verify(shared: &Rc<RefCell<Shared>>) {
+    let request =
+        object_store(shared, web_sys::IdbTransactionMode::Readonly).and_then(|(_, store)| {
+            store
+                .get(&JsValue::from(0))
+                .map_err(|error| message(&error))
+        });
+    let request = match request {
+        Ok(request) => request,
+        Err(error) => {
+            fall_back(shared, &format!("reading back the first frame: {error}"));
+            return;
+        }
+    };
+    let weak = Rc::downgrade(shared);
+    let success = Closure::once_into_js(move |event: web_sys::Event| {
+        let Some(shared) = weak.upgrade() else {
+            return;
+        };
+        let stored = target::<web_sys::IdbRequest>(&event)
+            .and_then(|request| request.result().ok())
+            .and_then(|value| value.dyn_into::<js_sys::Uint8Array>().ok())
+            .map(|array| array.to_vec());
+        let state = shared.borrow();
+        let matches = match (&state.unverified, &stored) {
+            (Some(copies), Some(stored)) => copies
+                .first()
+                .is_some_and(|(index, frame)| *index == 0 && frame == stored),
+            _ => false,
+        };
+        let open = state.fallback.is_none();
+        drop(state);
+        if matches {
+            shared.borrow_mut().unverified = None;
+            info!("The frame history is stored in IndexedDB (the first frame read back)");
+            mark("frame-history", "indexeddb");
+        } else if open {
+            fall_back(&shared, "the first frame did not read back as written");
+        }
+    });
+    request.set_onsuccess(Some(success.unchecked_ref()));
+    let weak = Rc::downgrade(shared);
+    let failure = Closure::once_into_js(move |event: web_sys::Event| {
+        if let Some(shared) = weak.upgrade() {
+            let error = request_error(target(&event));
+            fall_back(&shared, &format!("reading back the first frame: {error}"));
+        }
+    });
+    request.set_onerror(Some(failure.unchecked_ref()));
+    let weak = Rc::downgrade(shared);
+    after(TIMEOUT_MS, move || {
+        if let Some(shared) = weak.upgrade()
+            && shared.borrow().unverified.is_some()
+        {
+            fall_back(&shared, "the first frame did not read back in time");
+        }
+    });
 }
 
 fn start_read(shared: &Rc<RefCell<Shared>>, range: Range<usize>) {

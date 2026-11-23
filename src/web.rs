@@ -29,6 +29,9 @@
 //! with `{ step: true }`; both take effect between steps. The page keeps the frame history of the
 //! run in IndexedDB ([`frames`]).
 //!
+//! The page records its state as `data-` attributes of its root element (see [`mark`]), for the
+//! browser tests in `web/tests/`.
+//!
 //! Without `subdivisions` in the URL, the page starts with the subdivisions remembered in the
 //! local storage from the last restart, or else with a guess for the device (see
 //! [`crate::device`]). The worker always gets them explicitly; the page URL only when the user
@@ -129,6 +132,19 @@ fn show_status(text: &str) {
         if let Some(element) = element.dyn_ref::<web_sys::HtmlElement>() {
             let _ = element.style().set_property("display", display);
         }
+    }
+}
+
+/// Records a state of the page as the attribute `data-<name>` of its root element: for the
+/// browser tests (`web/tests/`), which read `data-first-frame` (the view drew its first frame),
+/// `data-surface-updates` (the number of states from the simulation worker),
+/// `data-simulation-failed` (why the simulation failed) and `data-frame-history` (where the frame
+/// history is kept, see [`frames`]). Harmless otherwise.
+fn mark(name: &str, value: &str) {
+    if let Ok(Some(root)) = document().map(|document| document.document_element())
+        && let Err(error) = root.set_attribute(&format!("data-{name}"), value)
+    {
+        error!("Could not set data-{name}: {error:?}");
     }
 }
 
@@ -359,6 +375,7 @@ async fn run_page() -> anyhow::Result<()> {
                 }
                 Err(error) => {
                     error!("{error:#}");
+                    mark("simulation-failed", &format!("{error:#}"));
                     // Shown in the banner and the panel.
                     let _ = events.send(SimulationEvent::Failed(format!("{error:#}")));
                     Box::new(NoControl)
@@ -368,7 +385,10 @@ async fn run_page() -> anyhow::Result<()> {
         Box::new(|wake| Box::new(frames::IdbStore::open(wake)) as Box<dyn FrameStore>),
         Box::new(remember_render_mode),
         // The view shows the state in its banner from its first frame on.
-        Box::new(|| show_status("")),
+        Box::new(|| {
+            show_status("");
+            mark("first-frame", "true");
+        }),
     )
     .await?;
     Ok(())
@@ -439,6 +459,7 @@ fn start_worker(
         .map_err(|error| anyhow!("starting the simulation worker: {error:?}"))?;
 
     let wake_up: Arc<dyn Fn() + Send> = Arc::from(wake_up);
+    let mut updates = 0u64;
     let send = {
         let events = events.clone();
         let wake_up = wake_up.clone();
@@ -452,6 +473,7 @@ fn start_worker(
         Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             let data = event.data();
             if let Some(message) = get(&data, "error").as_string() {
+                mark("simulation-failed", &message);
                 send(SimulationEvent::Failed(message));
                 return;
             }
@@ -519,6 +541,8 @@ fn start_worker(
             if let Ok(document) = document() {
                 document.set_title(&format!("World Simulator — {time:.0} Myr"));
             }
+            updates += 1;
+            mark("surface-updates", &updates.to_string());
             send(SimulationEvent::Surface(SurfaceUpdate {
                 time,
                 cells: Arc::new(cells),
@@ -535,6 +559,7 @@ fn start_worker(
         Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |event: web_sys::ErrorEvent| {
             let message = event.message();
             error!("Simulation worker error: {message}");
+            mark("simulation-failed", &message);
             if events.send(SimulationEvent::Failed(message)).is_ok() {
                 wake_up();
             }
