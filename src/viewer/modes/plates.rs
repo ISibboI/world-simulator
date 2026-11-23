@@ -11,8 +11,8 @@ use super::super::arrows::{ArrowStyle, Sample, base_point};
 use super::super::overlay::{LineStyle, OverlayBuilder, anchored, category_boundaries};
 use super::super::plate_colors::PALETTE;
 use super::{
-    ArrowScale, DEFAULT_ARROW_SPACING, Legend, ModeData, RenderMode, Swatch, SwatchShape,
-    plate_motion, rgba,
+    ArrowScale, DEFAULT_ARROW_SPACING, Legend, ModeData, OptionValues, RenderMode, Swatch,
+    SwatchShape, plate_motion, rgba,
 };
 use crate::tectonics::BoundaryClass;
 
@@ -337,7 +337,7 @@ impl RenderMode for Plates {
         overlay.arrows(&plate_samples, &style);
     }
 
-    fn legend(&self, data: Option<&ModeData>) -> Legend {
+    fn legend(&self, _options: &OptionValues, data: Option<&ModeData>) -> Legend {
         let spacing = data.map_or(DEFAULT_ARROW_SPACING, |data| data.arrow_spacing);
         let mut swatches = vec![Swatch::new(
             PALETTE[0],
@@ -456,6 +456,7 @@ mod tests {
             fields: &fields,
             arrow_cells: &arrow_cells,
             arrow_spacing,
+            options: &OptionValues::default(),
         };
         let colors = Plates.colors(&data).unwrap();
         assert_eq!(colors.len(), cells.len());
@@ -478,7 +479,7 @@ mod tests {
         let has = |color: [f32; 4]| vertices.iter().any(|vertex| vertex.color == color);
         assert!(has([1.0, 1.0, 1.0, 1.0]));
         assert!(has(plate_motion::style(arrow_spacing).color));
-        let legend = Plates.legend(Some(&data));
+        let legend = Plates.legend(&OptionValues::default(), Some(&data));
         assert_eq!(legend.arrows.len(), 2);
         assert_eq!(legend.swatches.len(), Line::ALL.len() + 2);
     }

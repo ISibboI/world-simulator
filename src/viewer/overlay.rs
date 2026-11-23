@@ -226,6 +226,46 @@ pub fn category_boundaries(
     pieces
 }
 
+/// The line where a per-cell value crosses `level` (an isoline or contour, e.g. an isotherm),
+/// as straight pieces through the triangles of the mesh: in a triangle whose corners lie on
+/// both sides of the level, between the two points on its edges where the value, interpolated
+/// linearly between the cells, equals the level ("marching triangles"). Triangles with a NaN
+/// value at a corner are left out, so a value that is NaN where it does not apply (e.g. over
+/// the ocean) ends the line there. Points lie on the displayed triangles (`position` gives the
+/// displayed position of a cell); the pieces are in the order of the faces.
+pub fn isolines(
+    faces: &[[u32; 3]],
+    value: impl Fn(u32) -> f32,
+    level: f32,
+    position: impl Fn(u32) -> DVec3,
+) -> Vec<[DVec3; 2]> {
+    let mut pieces = Vec::new();
+    for &face in faces {
+        let values = face.map(&value);
+        if values.iter().any(|value| value.is_nan()) {
+            continue;
+        }
+        // A value at the level counts as above, so that every crossed triangle has exactly two
+        // crossed edges.
+        let above = values.map(|value| value >= level);
+        if above[0] == above[1] && above[1] == above[2] {
+            continue;
+        }
+        let mut points = [DVec3::ZERO; 2];
+        let mut count = 0;
+        for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+            if above[i] != above[j] && count < 2 {
+                let t = f64::from((level - values[i]) / (values[j] - values[i])).clamp(0.0, 1.0);
+                let (from, to) = (position(face[i]), position(face[j]));
+                points[count] = from + (to - from) * t;
+                count += 1;
+            }
+        }
+        pieces.push(points);
+    }
+    pieces
+}
+
 /// Indices of `points` about `spacing` apart, anchored in space: per cube of a fixed grid of
 /// that size, the point nearest its centre, then of those, greedily in grid order, the ones at
 /// least 0.7 `spacing` from each other. A point stays chosen while the points around it move
@@ -365,6 +405,51 @@ mod tests {
             let [a, b, c] = [0, 1, 2].map(|i| glam::Vec3::from(triangle[i].position));
             assert!((b - a).cross(c - a).dot(a + b + c) > 0.0);
         }
+    }
+
+    #[test]
+    fn isolines_lie_where_the_interpolated_value_is_the_level() {
+        let mesh = SphereMesh::icosphere(3);
+        let position = |cell: u32| mesh.vertex(cell);
+        // The value is z: its isoline at 0.3 is a circle of latitude, through the edges.
+        let pieces = isolines(
+            mesh.faces(),
+            |cell| mesh.vertex(cell).z as f32,
+            0.3,
+            position,
+        );
+        assert!(!pieces.is_empty());
+        let mut length = 0.0;
+        for [from, to] in &pieces {
+            // On the flat triangles the linear interpolation of z is exact.
+            assert!((from.z - 0.3).abs() < 1e-6, "{from}");
+            assert!((to.z - 0.3).abs() < 1e-6, "{to}");
+            length += from.distance(*to);
+        }
+        // About the circumference of the circle (the chords are a little inside the sphere).
+        let circumference = 2.0 * std::f64::consts::PI * (1.0 - 0.3f64 * 0.3).sqrt();
+        assert!(
+            (length / circumference - 1.0).abs() < 0.05,
+            "{length} {circumference}"
+        );
+        // NaN cells (here the eastern half) end the line.
+        let half = isolines(
+            mesh.faces(),
+            |cell| {
+                let vertex = mesh.vertex(cell);
+                if vertex.x > 0.0 {
+                    f32::NAN
+                } else {
+                    vertex.z as f32
+                }
+            },
+            0.3,
+            position,
+        );
+        assert!(half.len() < pieces.len() * 6 / 10 && half.len() > pieces.len() * 3 / 10);
+        assert!(half.iter().all(|[from, to]| from.x <= 1e-9 && to.x <= 1e-9));
+        // No crossing, no line.
+        assert!(isolines(mesh.faces(), |_| 1.0, 0.3, position).is_empty());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The topographic mode, the default: the colours the view builds the vertices with
 //! (`render::surface_color`: elevation, rivers, permanent ice), unchanged.
 
-use super::{ColorScale, Legend, ModeData, RenderMode, Swatch};
+use super::{ColorScale, Legend, ModeData, OptionValues, RenderMode, Swatch};
 use crate::render;
 
 pub struct Topographic;
@@ -11,7 +11,7 @@ impl RenderMode for Topographic {
         "Topographic"
     }
 
-    fn legend(&self, _data: Option<&ModeData>) -> Legend {
+    fn legend(&self, _options: &OptionValues, _data: Option<&ModeData>) -> Legend {
         Legend {
             description: "Elevation above and depth below sea level, with rivers and permanent \
                           ice. The relief is exaggerated."
