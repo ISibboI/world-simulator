@@ -15,6 +15,19 @@ src/web.rs, plus console output and uncaught errors). It passes when
 and a screenshot shows the planet: enough ocean-blue pixels in the middle of the screen (the
 runners have no GPU, so this is software rendering everywhere).
 
+Scenarios (`--scenario`, issue #122): besides the normal load (`load`), the server can break the
+site on purpose, and the test then passes when the page reports the failure in its loading banner
+(`data-load-failed` or `data-simulation-failed`, a visible banner that suggests a reload) and
+reloads itself exactly once (a failure to load) or not at all (a failure of the worker):
+
+  broken-js      the simulator's JavaScript module does not match its integrity hash (and fails)
+  broken-wasm    the wasm file is of another build (its imports do not match)
+  broken-worker  the worker script is missing (404)
+  redeploy       the site is served with `Cache-Control: max-age=600` like GitHub Pages; once the
+                 page passed, a new build (the same build with a changed JavaScript module, see
+                 `next_build`) replaces it, the page reloads, and it must pass again with the files
+                 of the new build (not combine the new page with cached files of the old one).
+
 Browsers (`--browser`):
   chrome, firefox, safari, edge   the installed browser through Selenium (WebDriver)
   webkit, chromium-pw, firefox-pw Playwright's browsers
@@ -27,11 +40,14 @@ Pillow, and selenium or playwright for those browsers.
 """
 
 import argparse
-import functools
+import base64
+import hashlib
 import http.server
 import io
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -40,30 +56,91 @@ from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
 
+SCENARIOS = ("load", "broken-js", "broken-wasm", "broken-worker", "redeploy")
+# Scenarios in which the page must report a failure.
+FAILING = ("broken-js", "broken-wasm", "broken-worker")
+
+
+# A stand-in for the wasm file of another build: a valid module whose import the JavaScript
+# module of this build does not provide, so that instantiating it fails. (A truncated file is
+# not used: Firefox runs out of memory on it without reporting an error the page could catch;
+# the banner's "still loading" hint covers that.)
+OTHER_WASM = bytes.fromhex(
+    "0061736d01000000"  # magic number and version
+    "0104016000" "00"  # type section: one function type () -> ()
+    "020f01" "03" + b"wbg".hex() + "07" + b"missing".hex() + "0000"  # import wbg.missing
+)
+
+
+def site_assets(site):
+    """The simulator's JavaScript module and wasm file in the build `site` (as the page links
+    them for preloading), and the integrity hash of the module."""
+    page = (site / "index.html").read_text(encoding="utf-8")
+    module = re.search(r'<link rel="modulepreload" href="\./([^"]+)"[^>]*integrity="([^"]+)"', page)
+    wasm = re.search(r'<link rel="preload" href="\./([^"]+\.wasm)"', page)
+    if not module or not wasm:
+        raise RuntimeError(f"no module or wasm preload link in {site}/index.html")
+    return module.group(1), wasm.group(1), module.group(2)
+
+
+def integrity(content):
+    return "sha384-" + base64.b64encode(hashlib.sha384(content).digest()).decode()
+
+
+def next_build(dist, out):
+    """A stand-in for the next deploy: a copy of the build `dist` whose JavaScript module has
+    changed (one more line), with the page pointing to it, as `trunk build` would make it: the
+    module under a new name if the names carry content hashes (Trunk's `filehash`), else under
+    the same name. Returns the integrity hash of the new module."""
+    shutil.rmtree(out, ignore_errors=True)
+    shutil.copytree(dist, out)
+    module, _, old_integrity = site_assets(dist)
+    content = (dist / module).read_bytes() + b"\n// The next build.\n"
+    new_module = module
+    hashed = re.fullmatch(r"(.*-)([0-9a-f]{8,16})(\.js)", module)
+    if hashed:
+        new_module = hashed.group(1) + hashlib.sha256(content).hexdigest()[:16] + hashed.group(3)
+        (out / module).unlink()
+    (out / new_module).write_bytes(content)
+    new_integrity = integrity(content)
+    page = (dist / "index.html").read_text(encoding="utf-8")
+    page = page.replace(f"./{module}", f"./{new_module}").replace(old_integrity, new_integrity)
+    (out / "index.html").write_text(page, encoding="utf-8")
+    return new_integrity
+
 
 class State:
-    """The reports of the probe, shared with the server threads."""
+    """The reports of the probe and the served site, shared with the server threads."""
 
-    def __init__(self, token):
+    def __init__(self, token, site, scenario):
         self.token = token
         self.lock = threading.Lock()
         self.last = None
         self.logs = []
         self.reports = 0
         self.stop = False
+        # The build served, and whether the page is to reload (once).
+        self.site = site
+        self.scenario = scenario
+        self.reload = False
+        # The page requests served: (seconds since the start, build, fetch mode); navigations
+        # have the mode `navigate`, the page's own fetches of itself (before it reloads) not.
+        self.pages = []
+        self.started = time.monotonic()
 
     def add(self, report):
         if report.get("hash") != f"#{self.token}":
             # A page of an earlier test, restored by the browser.
-            return True
+            return {"stop": True}
         with self.lock:
             self.logs.extend(report.pop("logs", []))
             self.last = report
             self.reports += 1
-            return self.stop
+            reload, self.reload = self.reload, False
+            return {"stop": self.stop, "reload": reload}
 
 
-def make_handler(dist, state):
+def make_handler(state):
     class Handler(http.server.SimpleHTTPRequestHandler):
         extensions_map = {
             **http.server.SimpleHTTPRequestHandler.extensions_map,
@@ -72,14 +149,21 @@ def make_handler(dist, state):
         }
 
         def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=str(dist), **kwargs)
+            with state.lock:
+                self.site = state.site
+            # Files of the site may be cached like on GitHub Pages; the rest never.
+            self.cache = "no-store"
+            super().__init__(*args, directory=str(self.site), **kwargs)
 
         def log_message(self, *args):
             pass
 
         def end_headers(self):
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", self.cache)
             super().end_headers()
+
+        def site_cache(self):
+            self.cache = "max-age=600" if state.scenario == "redeploy" else "no-store"
 
         def send_bytes(self, body, content_type):
             self.send_response(200)
@@ -91,13 +175,37 @@ def make_handler(dist, state):
         def do_GET(self):
             path = self.path.split("?")[0].split("#")[0]
             if path in ("/", "/index.html"):
-                page = (dist / "index.html").read_text(encoding="utf-8")
+                with state.lock:
+                    state.pages.append((
+                        round(time.monotonic() - state.started, 1),
+                        self.site.name,
+                        self.headers.get("Sec-Fetch-Mode", "navigate"),
+                    ))
+                self.site_cache()
+                page = (self.site / "index.html").read_text(encoding="utf-8")
                 page = page.replace("<head>", '<head>\n<script src="/probe.js"></script>', 1)
+                if state.scenario == "broken-wasm":
+                    # Without the integrity check of the preload, so that instantiating the
+                    # wasm file fails (in browsers that check it, its preload would fail first).
+                    page = re.sub(r'(<link rel="preload" href="[^"]+\.wasm"[^>]*?) integrity="[^"]*"', r"\1", page)
                 self.send_bytes(page.encode(), "text/html; charset=utf-8")
             elif path == "/probe.js":
                 self.send_bytes((TESTS / "probe.js").read_bytes(), "text/javascript")
             else:
-                super().do_GET()
+                self.site_cache()
+                module, wasm, _ = site_assets(self.site)
+                if state.scenario == "broken-js" and path == f"/{module}":
+                    # Some browsers run a module without its integrity check when it is imported
+                    # while its preload failed; the module of another build would then run with
+                    # this page's wasm. Here it fails then too.
+                    body = b'throw new Error("not the module of this page");\n' + (self.site / module).read_bytes()
+                    self.send_bytes(body, "text/javascript")
+                elif state.scenario == "broken-wasm" and path == f"/{wasm}":
+                    self.send_bytes(OTHER_WASM, "application/wasm")
+                elif state.scenario == "broken-worker" and path == "/worker.js":
+                    self.send_error(404)
+                else:
+                    super().do_GET()
 
         def do_POST(self):
             if self.path != "/report":
@@ -109,8 +217,8 @@ def make_handler(dist, state):
             except ValueError:
                 self.send_error(400)
                 return
-            stop = state.add(report)
-            self.send_bytes(json.dumps({"stop": stop}).encode(), "application/json")
+            answer = state.add(report)
+            self.send_bytes(json.dumps(answer).encode(), "application/json")
 
     return Handler
 
@@ -166,12 +274,18 @@ def open_playwright(name, url):
     kind = {"webkit": "webkit", "chromium-pw": "chromium", "firefox-pw": "firefox"}[name]
     launch = {"headless": not os.environ.get("DISPLAY")}
     if kind == "chromium":
-        launch["args"] = ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"]
+        launch["args"] = [
+            "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist",
+            *os.environ.get("BROWSER_ARGS", "").split(),
+        ]
     if kind == "firefox":
         launch["firefox_user_prefs"] = {"webgl.force-enabled": True}
     browser = getattr(playwright, kind).launch(**launch)
     print("browser:", kind, browser.version)
     page = browser.new_page(viewport={"width": 1280, "height": 800})
+    # The browser's own console messages too (e.g. integrity errors, which the probe cannot see).
+    page.on("console", lambda message: message.type == "error" and print(
+        f"console {message.type}: {message.text[:300]}", flush=True))
     if os.environ.get("INIT_SCRIPT"):
         # For trying failures by hand, e.g. a broken IndexedDB.
         page.add_init_script(path=os.environ["INIT_SCRIPT"])
@@ -317,6 +431,8 @@ def check_state(report, min_updates, loaded_only=False):
         return status.get("display") == "none" and "Myr" in report.get("title", ""), None
     if report.get("errors"):
         return True, "uncaught errors: " + "; ".join(report["errors"][:5])
+    if "loadFailed" in data:
+        return True, "loading failed: " + data["loadFailed"]
     if "simulationFailed" in data:
         return True, "simulation failed: " + data["simulationFailed"]
     status = report.get("status") or {}
@@ -332,6 +448,28 @@ def check_state(report, min_updates, loaded_only=False):
         and data.get("frameHistory") == "indexeddb"
     )
     return passed, None
+
+
+def check_reported_failure(report, scenario):
+    """For the scenarios that break the site: returns (done, failure), done when the page shows
+    that it failed and suggests a reload."""
+    data = report.get("data", {})
+    status = report.get("status") or {}
+    if scenario == "broken-worker":
+        # The view runs; its banner shows the failure of the simulation.
+        message = data.get("simulationFailed")
+    else:
+        if data.get("firstFrame") == "true":
+            return True, "the view started although the site was broken"
+        message = data.get("loadFailed")
+        # Not while the page reloads itself: the banner then says "Reloading the page…".
+        if message and not (status.get("display") != "none" and "please reload" in (status.get("text") or "").lower()):
+            return False, None
+    if not message:
+        return False, None
+    if "reload" not in message.lower():
+        return True, f"the failure is reported without suggesting a reload: {message!r}"
+    return True, None
 
 
 def describe(report):
@@ -372,15 +510,20 @@ def main():
     parser.add_argument("--loaded-only", action="store_true", help="only check that the page loads (for builds before #117)")
     parser.add_argument("--hold", type=float, default=30, help="seconds the page must stay healthy after it passed")
     parser.add_argument("--min-planet", type=float, default=0.05, help="least share of ocean-blue pixels")
+    parser.add_argument("--scenario", choices=SCENARIOS, default="load", help="see above")
     args = parser.parse_args()
+    failing = args.scenario in FAILING
 
     dist = args.dist.resolve()
     if not (dist / "index.html").exists():
         sys.exit(f"{dist}/index.html not found: build the site first (trunk build --release)")
     args.out.mkdir(parents=True, exist_ok=True)
     token = f"test-{os.getpid()}-{int(time.time())}"
-    state = State(token)
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(dist, state))
+    state = State(token, dist, args.scenario)
+    if args.scenario == "redeploy":
+        next_site = args.out / "next-build"
+        next_integrity = next_build(dist, next_site)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     query = f"?{args.query}" if args.query else ""
     url = f"http://localhost:{args.port}/{query}#{token}"
@@ -405,19 +548,43 @@ def main():
         result["open_seconds"] = round(opened - started, 1)
         last_print = last_tick = 0
         passed_at = None
+        # redeploy: the page load of the first build, once it passed.
+        first_origin = None
+        hold = min(args.hold, 10) if failing else args.hold
         while True:
             time.sleep(0.5)
             with state.lock:
                 report = json.loads(json.dumps(state.last)) if state.last else None
-            if report:
-                done, failure = check_state(report, args.min_updates, args.loaded_only)
+            if report and first_origin is not None and report.get("timeOrigin") == first_origin:
+                # Still the page of the first build.
+                report = None
+            if report and passed_at is None:
+                if failing:
+                    done, failure = check_reported_failure(report, args.scenario)
+                else:
+                    done, failure = check_state(report, args.min_updates, args.loaded_only)
+                if not failure and done and first_origin is not None and report.get("build") != next_integrity:
+                    failure = f"the reloaded page is not the new build: module {report.get('build')}"
                 if failure:
                     break
-                if done and passed_at is None:
+                if done and args.scenario == "redeploy" and first_origin is None:
+                    first_origin = report.get("timeOrigin")
+                    result["first_build_seconds"] = round(time.monotonic() - opened, 1)
+                    print(f"the first build passed after {result['first_build_seconds']} s; deploying the next and reloading", flush=True)
+                    with state.lock:
+                        state.site = next_site.resolve()
+                        state.reload = True
+                    opened = time.monotonic()
+                elif done:
                     passed_at = time.monotonic()
                     result["seconds"] = round(passed_at - opened, 1)
-                    print(f"passed after {result['seconds']} s; watching it for {args.hold:.0f} s more", flush=True)
-            if passed_at is not None and time.monotonic() - passed_at > args.hold:
+                    print(f"passed after {result['seconds']} s; watching it for {hold:.0f} s more", flush=True)
+            elif report and passed_at is not None and not failing:
+                # The page must stay healthy.
+                _, failure = check_state(report, args.min_updates, args.loaded_only)
+                if failure:
+                    break
+            if passed_at is not None and time.monotonic() - passed_at > hold:
                 break
             if tick and passed_at is None and time.monotonic() - last_tick > 5:
                 tick()
@@ -428,6 +595,16 @@ def main():
             if passed_at is None and time.monotonic() - opened > args.timeout:
                 failure = f"timed out after {args.timeout:.0f} s; last state: {describe(report)}"
                 break
+        with state.lock:
+            result["pages"] = list(state.pages)
+            loads = sum(1 for page in state.pages if page[2] == "navigate")
+        if failure is None and failing:
+            # Still shown at the end, and at most one automatic reload.
+            _, failure = check_reported_failure(report or {}, args.scenario)
+            # A failure to load reloads the page once; one of the worker does not.
+            expected = 1 if args.scenario == "broken-worker" else 2
+            if failure is None and loads != expected:
+                failure = f"the page loaded {loads} times (expected {expected}): {state.pages}"
         result.setdefault("seconds", round(time.monotonic() - opened, 1))
         # Give the view a moment to draw the newest state, then look at it.
         time.sleep(2)
@@ -436,7 +613,7 @@ def main():
             (args.out / "screenshot.png").write_bytes(png)
             share = planet_share(png)
             result["planet_share"] = round(share, 3)
-            if failure is None and share < args.min_planet:
+            if failure is None and share < args.min_planet and not failing:
                 failure = f"the screenshot shows no planet ({share:.1%} ocean-blue pixels in the middle)"
         except Exception as error:  # noqa: BLE001 - report any screenshot failure
             result["screenshot_error"] = repr(error)
@@ -461,14 +638,14 @@ def main():
     (args.out / "result.json").write_text(json.dumps(result, indent=2))
     (args.out / "page.log").write_text("\n".join(logs) + "\n", encoding="utf-8")
     verdict = "PASSED" if failure is None else f"FAILED: {failure}"
-    print(f"{args.browser} ({args.query or 'default parameters'}): {verdict}")
+    print(f"{args.browser} ({args.query or 'default parameters'}, {args.scenario}): {verdict}")
     print("last state:", describe(result["report"]))
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         user_agent = (result["report"] or {}).get("userAgent", "?")
         with open(summary, "a", encoding="utf-8") as file:
             file.write(
-                f"| {args.browser} | `{args.query or 'default'}` | "
+                f"| {args.browser} | `{args.query or 'default'}` {'' if args.scenario == 'load' else args.scenario} | "
                 f"{'✅ passed' if failure is None else '❌ ' + failure.replace('|', '/')} | "
                 f"{result.get('seconds', '?')} s | {result.get('planet_share', '?')} | {user_agent} |\n"
             )

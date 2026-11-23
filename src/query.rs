@@ -70,6 +70,47 @@ pub fn args_to_query(args: &[String]) -> String {
     }
 }
 
+/// Parameters of the simulation worker's URL that are not command-line options: the files of the
+/// page's build that `web/worker.js` loads (the simulator's JavaScript module and its wasm file).
+/// Their names carry content hashes, so that the page and its worker always run the same build
+/// (issue #122).
+pub const WORKER_FILE_KEYS: [&str; 2] = ["module", "wasm"];
+
+/// The query string of the simulation worker: the files `module` and `wasm` (see
+/// [`WORKER_FILE_KEYS`]), then the pairs of `query` (as [`args_to_query`] makes it).
+pub fn worker_query(module: &str, wasm: &str, query: &str) -> String {
+    let [module_key, wasm_key] = WORKER_FILE_KEYS;
+    let mut search = format!(
+        "?{module_key}={}&{wasm_key}={}",
+        encode(module),
+        encode(wasm)
+    );
+    let rest = query.trim_start_matches('?');
+    if !rest.is_empty() {
+        search.push('&');
+        search.push_str(rest);
+    }
+    search
+}
+
+/// The query string `search` without the worker's file parameters (see [`WORKER_FILE_KEYS`]),
+/// for [`query_to_args`].
+pub fn without_worker_files(search: &str) -> String {
+    let pairs: Vec<&str> = search
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|pair| {
+            let name = pair.split_once('=').map_or(*pair, |(name, _)| name);
+            !pair.is_empty() && !WORKER_FILE_KEYS.contains(&name)
+        })
+        .collect();
+    if pairs.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", pairs.join("&"))
+    }
+}
+
 /// Decodes a percent-encoded query component (`+` is a space).
 fn decode(component: &str) -> anyhow::Result<String> {
     let invalid = || anyhow!("invalid percent-encoding in the URL: {component}");
@@ -114,6 +155,24 @@ mod tests {
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|&arg| arg.to_owned()).collect()
+    }
+
+    #[test]
+    fn worker_files_go_before_the_options_and_are_removed_again() {
+        let query = args_to_query(&strings(&["world-simulator", "--seed=3", "--no-erosion"]));
+        let search = worker_query("./world-simulator-0a1b.js", "./x_bg.wasm", &query);
+        assert_eq!(
+            search,
+            "?module=.%2Fworld-simulator-0a1b.js&wasm=.%2Fx_bg.wasm&seed=3&no-erosion"
+        );
+        assert_eq!(without_worker_files(&search), query);
+        assert_eq!(
+            query_to_args(&without_worker_files(&search)).unwrap(),
+            strings(&["world-simulator", "--seed=3", "--no-erosion"])
+        );
+        let bare = worker_query("m.js", "w.wasm", "");
+        assert_eq!(bare, "?module=m.js&wasm=w.wasm");
+        assert_eq!(without_worker_files(&bare), "");
     }
 
     #[test]
