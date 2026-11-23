@@ -183,8 +183,8 @@ const ARIDITY_TICKS: [(f64, &str); 7] = [
     (10.0, "10"),
 ];
 
-/// Colour of the ocean in the aridity view (it has no aridity index), and of cells without
-/// data.
+/// Colours of the ocean (it has no aridity index) and of ice sheets in the aridity view, and of
+/// cells without data.
 /// The ocean is a darker blue-grey than the near-white middle of the aridity scale (AI = 1).
 const OCEAN: [u8; 3] = [140, 152, 170];
 /// Ice sheets in lilac: neither the near-white middle of the scale nor its teal wet arm.

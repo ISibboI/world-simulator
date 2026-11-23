@@ -66,6 +66,14 @@ Earth-like planet. The scales cover 1 %–99 % of both.
 - Monthly slots mapped to months properly; with no July solved the map shows "No data" (the option
   framework has no disabled options).
 
+## Code review (independent agent)
+
+No significant bugs (codec channel order, month slots, log scales, isoline, web transport and
+past frames checked). Fixed: land with PET below the 1 mm/yr resolution of the frames is "No
+data" live too (before, live and past frames disagreed on such cold land); two doc comments.
+Left: the *Season* option stays active in the aridity view (its hover text says it applies to
+precipitation only; the option framework has no disabled state).
+
 ## Checks
 
 - Unit tests: scales monotone in lightness (precipitation darker with more rain, aridity darker

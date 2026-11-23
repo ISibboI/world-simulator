@@ -77,11 +77,12 @@ impl CellInfo {
     }
 
     /// The aridity index of land (UNEP): annual precipitation over potential evaporation, NaN
-    /// over the ocean and where the potential evaporation is not known (zero). Capped far
-    /// beyond any scale, so that it stays finite.
+    /// over the ocean and where the potential evaporation is not known (below the 1 mm/yr
+    /// resolution of the frame history, so that live and past frames agree). Capped far beyond
+    /// any scale, so that it stays finite.
     pub fn aridity_index(&self) -> f32 {
         let (p, pet) = (self.precipitation, self.potential_evaporation);
-        if self.elevation >= 0.0 && pet > 0.0 && p >= 0.0 {
+        if self.elevation >= 0.0 && pet >= 0.0005 && p >= 0.0 {
             (p / pet).min(1e4)
         } else {
             f32::NAN
@@ -356,7 +357,7 @@ pub fn format_rows(
         .collect()
 }
 
-/// An aridity index with about two significant digits.
+/// An aridity index with two decimals (three below 0.1, none from 10).
 fn format_aridity(index: f32) -> String {
     if index < 0.1 {
         format!("{index:.3}")
