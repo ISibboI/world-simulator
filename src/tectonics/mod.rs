@@ -945,6 +945,11 @@ impl Simulation {
         self.owners[cell as usize]
     }
 
+    /// The number of plates; their ids are `0..plate_count()`.
+    pub fn plate_count(&self) -> usize {
+        self.plates.len()
+    }
+
     /// The rotation axis of a plate scaled by its rotation speed in rad/Myr.
     pub fn angular_velocity(&self, plate: u32) -> DVec3 {
         self.plates[plate as usize].angular_velocity

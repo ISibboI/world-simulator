@@ -55,22 +55,16 @@ pub const ICE_SHEET_COLOR: [u8; 3] = [240, 245, 250];
 pub const SEA_ICE_COLOR: [u8; 3] = [200, 220, 235];
 
 /// The colour of a cell on the planet surface for the 3D view: elevation colours, rivers, and
-/// permanent ice (sea ice and ice sheets).
-pub fn surface_color(planet: &Planet, cell: u32, river_threshold: f64) -> Rgb<u8> {
-    let simulation = planet.tectonics();
-    let elevation = simulation.surface_elevation(cell);
-    let frozen = planet
-        .temperature()
-        .ice
-        .get(cell as usize)
-        .is_some_and(|&ice| ice > 0.5);
-    if frozen {
+/// permanent ice (sea ice and ice sheets), from its elevation (m), permanent ice share and
+/// discharge (m³/yr).
+pub fn surface_color(elevation: f64, ice: f64, discharge: f64, river_threshold: f64) -> Rgb<u8> {
+    if ice > 0.5 {
         if elevation >= 0.0 {
             Rgb(ICE_SHEET_COLOR)
         } else {
             Rgb(SEA_ICE_COLOR)
         }
-    } else if elevation >= 0.0 && planet.discharge()[cell as usize] >= river_threshold {
+    } else if elevation >= 0.0 && discharge >= river_threshold {
         Rgb(RIVER_COLOR)
     } else {
         elevation_color(elevation)

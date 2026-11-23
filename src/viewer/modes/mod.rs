@@ -4,8 +4,8 @@
 //! colour the cells ([`RenderMode::colors`], from the [`CellInfo`]s every update carries and the
 //! requested layers), may draw arrows ([`RenderMode::arrows`], see [`super::arrows`]), and
 //! describes itself in a [`Legend`]. The topographic mode, the default, keeps the colours the
-//! simulation computes with the vertices (`render::surface_color`), so it looks exactly as
-//! before modes existed.
+//! view builds the vertices with (`render::surface_color`), so it looks exactly as before modes
+//! existed.
 //!
 //! The active mode is chosen in the mode switcher ([`switcher`]), on the command line
 //! (`--render-mode`) or in the URL of the web version (`?render-mode=…`); the web version also
@@ -476,9 +476,9 @@ mod tests {
         use clap::Parser;
         let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "2"]);
         let planet = crate::build_planet(&cli).unwrap();
-        let vertices = super::super::surface_vertices(&planet, 40.0, 1e11);
         let cells = super::super::cell_infos(&planet);
         let mesh = planet.tectonics().mesh();
+        let vertices = super::super::surface_vertices(mesh, &cells, 40.0, 1e11);
         let fields = Fields::default();
         let data = ModeData {
             mesh,

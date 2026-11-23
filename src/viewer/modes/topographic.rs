@@ -1,4 +1,4 @@
-//! The topographic mode, the default: the colours the simulation computes with the vertices
+//! The topographic mode, the default: the colours the view builds the vertices with
 //! (`render::surface_color`: elevation, rivers, permanent ice), unchanged.
 
 use super::{ColorScale, Legend, ModeData, RenderMode, Swatch};

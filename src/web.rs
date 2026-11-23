@@ -7,9 +7,9 @@
 //! (`?seed=3&subdivisions=5&no-erosion&set=basal_drag=8e14`, see [`crate::query`]); the worker
 //! gets the same query string. It sends `{ generating: true }` before it builds the planet, then a
 //! surface update after every step as
-//! `{ time, vertices, cells }` (the vertices, the attributes of the cells as
-//! [`viewer::CellInfo`]s, and with the first update also `faces`, the triangles), with the buffers
-//! transferred rather than copied, or `{ error }` if the simulation fails. A restart from the
+//! `{ time, cells, plates }` (the attributes of the cells as [`viewer::CellInfo`]s, the angular
+//! velocity of every plate, and with the first update also `directions` and `faces`, the mesh),
+//! with the buffers transferred rather than copied, or `{ error }` if the simulation fails. A restart from the
 //! parameter panel terminates the worker and starts a new one with the new query string, which
 //! also replaces the query of the page URL, so that the setting can be shared as a link. Each
 //! update after the first also carries `step_seconds`, the time of the step in the worker.
@@ -24,6 +24,10 @@
 //! The render mode is remembered like the subdivisions: the URL's `render-mode` wins over the
 //! one in the local storage (stored when the user picks a mode), which wins over the default.
 //! Picking a mode puts it into the page URL at once, without a restart.
+//!
+//! The time bar pauses the worker with `{ paused: true/false }` and asks for one step while paused
+//! with `{ step: true }`; both take effect between steps. The page keeps the frame history of the
+//! run in IndexedDB ([`frames`]).
 //!
 //! Without `subdivisions` in the URL, the page starts with the subdivisions remembered in the
 //! local storage from the last restart, or else with a guess for the device (see
@@ -46,9 +50,11 @@ use tracing_subscriber::util::SubscriberInitExt;
 use crate::device::{self, DeviceSignals, Source};
 use crate::query::{args_to_query, query_to_args};
 use crate::viewer::{
-    self, CellInfo, Fields, Launch, Layer, Layers, RenderModeId, SimulationControl,
-    SimulationEvent, SurfaceUpdate, UiOptions, Vertex, has_option, with_default,
+    self, CellInfo, Fields, FrameStore, Launch, Layer, Layers, MeshUpdate, RenderModeId,
+    SimulationControl, SimulationEvent, SurfaceUpdate, UiOptions, has_option, with_default,
 };
+
+mod frames;
 use crate::{Cli, Run, build_planet};
 
 /// Id of the canvas in `web/index.html`.
@@ -238,14 +244,28 @@ fn remember_render_mode(mode: RenderModeId) {
 /// Sends requests of the page to the running simulation worker.
 struct WorkerControl(web_sys::Worker);
 
-impl SimulationControl for WorkerControl {
-    fn request_layers(&mut self, layers: Layers) {
+impl WorkerControl {
+    fn send(&self, key: &str, value: &JsValue) {
         let message = js_sys::Object::new();
-        set(&message, "layers", &layers.0.into());
+        set(&message, key, value);
         // A terminated worker ignores messages.
         if let Err(error) = self.0.post_message(&message) {
             error!("Could not send the request to the simulation worker: {error:?}");
         }
+    }
+}
+
+impl SimulationControl for WorkerControl {
+    fn request_layers(&mut self, layers: Layers) {
+        self.send("layers", &layers.0.into());
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        self.send("paused", &paused.into());
+    }
+
+    fn step(&mut self) {
+        self.send("step", &true.into());
     }
 }
 
@@ -254,6 +274,10 @@ struct NoControl;
 
 impl SimulationControl for NoControl {
     fn request_layers(&mut self, _layers: Layers) {}
+
+    fn set_paused(&mut self, _paused: bool) {}
+
+    fn step(&mut self) {}
 }
 
 /// Starts the 3D view on the page and the simulation worker.
@@ -303,6 +327,8 @@ async fn run_page() -> anyhow::Result<()> {
         .map_err(|_| anyhow!("#{CANVAS_ID} is not a canvas"))?;
 
     let hidden = watch_hidden()?;
+    // Frame histories of closed pages.
+    wasm_bindgen_futures::spawn_local(frames::delete_stale());
     let mut running: Option<RunningWorker> = None;
     let mut first = true;
     viewer::run_web(
@@ -339,6 +365,7 @@ async fn run_page() -> anyhow::Result<()> {
                 }
             }
         }),
+        Box::new(|wake| Box::new(frames::IdbStore::open(wake)) as Box<dyn FrameStore>),
         Box::new(remember_render_mode),
         // The view shows the state in its banner from its first frame on.
         Box::new(|| show_status("")),
@@ -432,46 +459,44 @@ fn start_worker(
                 send(SimulationEvent::Generating);
                 return;
             }
-            let (Some(time), Ok(buffer), Ok(cell_buffer)) = (
+            let (Some(time), Ok(cell_buffer), Ok(plate_buffer)) = (
                 get(&data, "time").as_f64(),
-                get(&data, "vertices").dyn_into::<js_sys::ArrayBuffer>(),
                 get(&data, "cells").dyn_into::<js_sys::ArrayBuffer>(),
+                get(&data, "plates").dyn_into::<js_sys::ArrayBuffer>(),
             ) else {
                 error!("Unexpected message from the simulation worker");
                 return;
             };
-            let floats = js_sys::Float32Array::new(&buffer);
-            let floats_per_vertex = std::mem::size_of::<Vertex>() / std::mem::size_of::<f32>();
-            if !(floats.length() as usize).is_multiple_of(floats_per_vertex) {
-                error!(
-                    floats = floats.length(),
-                    "Surface update of the wrong size from the simulation worker"
-                );
-                return;
-            }
-            let vertex_count = floats.length() as usize / floats_per_vertex;
-            let mut vertices: Vec<Vertex> = vec![bytemuck::Zeroable::zeroed(); vertex_count];
-            floats.copy_to(bytemuck::cast_slice_mut(&mut vertices));
             let cell_words = js_sys::Uint32Array::new(&cell_buffer);
             let words_per_cell = std::mem::size_of::<CellInfo>() / std::mem::size_of::<u32>();
-            if cell_words.length() as usize != vertex_count * words_per_cell {
+            if !(cell_words.length() as usize).is_multiple_of(words_per_cell) {
                 error!(
                     words = cell_words.length(),
-                    vertex_count, "Cell attributes of the wrong size from the simulation worker"
+                    "Cell attributes of the wrong size from the simulation worker"
                 );
                 return;
             }
-            let mut cells: Vec<CellInfo> = vec![bytemuck::Zeroable::zeroed(); vertex_count];
+            let cell_count = cell_words.length() as usize / words_per_cell;
+            let mut cells: Vec<CellInfo> = vec![bytemuck::Zeroable::zeroed(); cell_count];
             cell_words.copy_to(bytemuck::cast_slice_mut(&mut cells));
-            let faces = get(&data, "faces")
-                .dyn_into::<js_sys::ArrayBuffer>()
-                .ok()
-                .map(|buffer| {
-                    let indices = js_sys::Uint32Array::new(&buffer);
+            let plate_floats = js_sys::Float32Array::new(&plate_buffer);
+            let mut plates = vec![[0f32; 3]; plate_floats.length() as usize / 3];
+            plate_floats.copy_to(bytemuck::cast_slice_mut(&mut plates));
+            let mesh = match (
+                get(&data, "directions").dyn_into::<js_sys::ArrayBuffer>(),
+                get(&data, "faces").dyn_into::<js_sys::ArrayBuffer>(),
+            ) {
+                (Ok(directions), Ok(faces)) => {
+                    let floats = js_sys::Float32Array::new(&directions);
+                    let mut directions = vec![[0f32; 3]; floats.length() as usize / 3];
+                    floats.copy_to(bytemuck::cast_slice_mut(&mut directions));
+                    let indices = js_sys::Uint32Array::new(&faces);
                     let mut faces = vec![[0u32; 3]; indices.length() as usize / 3];
                     indices.copy_to(bytemuck::cast_slice_mut(&mut faces));
-                    Arc::new(faces)
-                });
+                    Some(Arc::new(MeshUpdate { directions, faces }))
+                }
+                _ => None,
+            };
             // Not representative if the page is or was hidden since the last update. The mark
             // stays until an update arrives while the page is visible: that one still spans
             // the hidden time.
@@ -487,7 +512,7 @@ fn start_worker(
                     continue;
                 };
                 let values = js_sys::Float32Array::new(&buffer).to_vec();
-                if let Err(message) = fields.insert(layer, values, vertex_count) {
+                if let Err(message) = fields.insert(layer, values, cell_count) {
                     error!("Field from the simulation worker refused: {message}");
                 }
             }
@@ -496,9 +521,9 @@ fn start_worker(
             }
             send(SimulationEvent::Surface(SurfaceUpdate {
                 time,
-                vertices: Arc::new(vertices),
                 cells: Arc::new(cells),
-                faces,
+                plates: Arc::new(plates),
+                mesh,
                 step_seconds,
                 fields,
             }));
@@ -530,46 +555,57 @@ struct WorkerState {
     /// The layers the page asked for.
     layers: Layers,
     first_update: bool,
+    /// Paused by the page, the steps it asked for meanwhile, and whether the step loop is
+    /// stopped (to be scheduled again on resume or a step).
+    paused: bool,
+    steps: u32,
+    stopped: bool,
+    /// The next step follows a pause: its time says nothing about the pace.
+    after_pause: bool,
+    /// The run is complete.
+    complete: bool,
 }
 
 impl WorkerState {
     /// Sends the current state to the page, with the requested layers.
     fn publish(&mut self, step_time: Option<std::time::Duration>) {
         let planet = &self.run.planet;
-        let cli = &self.cli;
-        let vertices = viewer::surface_vertices(planet, cli.exaggeration, cli.river_threshold);
-        let floats: &[f32] = bytemuck::cast_slice(&vertices);
-        let array = js_sys::Float32Array::new_with_length(floats.len() as u32);
-        array.copy_from(floats);
-        let buffer = array.buffer();
         let message = js_sys::Object::new();
         set(&message, "time", &planet.tectonics().time().into());
+        let step_time = step_time.filter(|_| !std::mem::take(&mut self.after_pause));
         if let Some(step_time) = step_time {
             set(&message, "step_seconds", &step_time.as_secs_f64().into());
         }
-        set(&message, "vertices", &buffer);
-        let cells = viewer::cell_infos(planet);
-        let words: &[u32] = bytemuck::cast_slice(&cells);
-        let array = js_sys::Uint32Array::new_with_length(words.len() as u32);
-        array.copy_from(words);
-        let cell_buffer = array.buffer();
-        set(&message, "cells", &cell_buffer);
-        let transfer = js_sys::Array::of2(&buffer, &cell_buffer);
-        for (layer, values) in Fields::extract(planet, self.layers).iter() {
+        let transfer = js_sys::Array::new();
+        let put_floats = |key: &str, values: &[f32]| {
             let array = js_sys::Float32Array::new_with_length(values.len() as u32);
             array.copy_from(values);
             let buffer = array.buffer();
-            set(&message, layer.key(), &buffer);
+            set(&message, key, &buffer);
             transfer.push(&buffer);
+        };
+        let plates = viewer::plate_rotations(planet);
+        put_floats("plates", bytemuck::cast_slice(&plates));
+        for (layer, values) in Fields::extract(planet, self.layers).iter() {
+            put_floats(layer.key(), values);
         }
-        // The triangles only with the first update.
-        if std::mem::take(&mut self.first_update) {
-            let indices: &[u32] = bytemuck::cast_slice(planet.tectonics().mesh().faces());
-            let array = js_sys::Uint32Array::new_with_length(indices.len() as u32);
-            array.copy_from(indices);
-            let faces = array.buffer();
-            set(&message, "faces", &faces);
-            transfer.push(&faces);
+        // The mesh only with the first update.
+        let first = std::mem::take(&mut self.first_update);
+        let mesh = first.then(|| MeshUpdate::of(planet));
+        if let Some(mesh) = &mesh {
+            put_floats("directions", bytemuck::cast_slice(&mesh.directions));
+        }
+        let put_words = |key: &str, values: &[u32]| {
+            let array = js_sys::Uint32Array::new_with_length(values.len() as u32);
+            array.copy_from(values);
+            let buffer = array.buffer();
+            set(&message, key, &buffer);
+            transfer.push(&buffer);
+        };
+        let cells = viewer::cell_infos(planet);
+        put_words("cells", bytemuck::cast_slice(&cells));
+        if let Some(mesh) = &mesh {
+            put_words("faces", bytemuck::cast_slice(&mesh.faces));
         }
         if let Err(error) = self.scope.post_message_with_transfer(&message, &transfer) {
             error!("Could not send the surface to the page: {error:?}");
@@ -586,6 +622,30 @@ impl WorkerState {
             // The time of this extra update does not count into the next step's.
             self.run.previous_update += start.elapsed();
         }
+    }
+}
+
+/// Takes a pause or step request of the page, and schedules the step loop again if it stopped
+/// for a pause and may go on.
+fn control(state: &Rc<RefCell<WorkerState>>, paused: Option<bool>, step: bool) {
+    let restart = {
+        let mut worker = state.borrow_mut();
+        if let Some(paused) = paused {
+            worker.paused = paused;
+        }
+        if step && worker.paused {
+            worker.steps += 1;
+        }
+        let go = !worker.paused || worker.steps > 0;
+        if go && worker.stopped && !worker.complete {
+            worker.stopped = false;
+            true
+        } else {
+            false
+        }
+    };
+    if restart {
+        schedule_step(state.clone());
     }
 }
 
@@ -607,6 +667,15 @@ fn schedule_step(state: Rc<RefCell<WorkerState>>) {
         let more = {
             let mut guard = state.borrow_mut();
             let worker = &mut *guard;
+            if worker.paused {
+                if worker.steps == 0 {
+                    // Scheduled again on resume or a step (see `WorkerState::control`).
+                    worker.stopped = true;
+                    worker.after_pause = true;
+                    return;
+                }
+                worker.steps -= 1;
+            }
             match worker.run.advance(&worker.cli) {
                 Some(step_time) => {
                     worker.publish(Some(step_time));
@@ -620,6 +689,7 @@ fn schedule_step(state: Rc<RefCell<WorkerState>>) {
                 }
                 None => {
                     worker.run.log_finished();
+                    worker.complete = true;
                     false
                 }
             }
@@ -636,8 +706,9 @@ fn schedule_step(state: Rc<RefCell<WorkerState>>) {
 }
 
 /// Runs the simulation in the worker, sending the surface to the page after every step. The
-/// parameters come with its URL, a restart terminates it and starts a new worker; the only
-/// messages from the page are requests for other fields (`{ layers }`), handled between steps.
+/// parameters come with its URL, a restart terminates it and starts a new worker; the messages
+/// from the page are requests for other fields (`{ layers }`), to pause or resume
+/// (`{ paused }`) and for one step while paused (`{ step }`), handled between steps.
 fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()> {
     let search = scope.location().search();
     let Launch { cli, .. } = parse_query(&search)?;
@@ -656,14 +727,25 @@ fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()>
         run,
         layers,
         first_update: true,
+        paused: false,
+        steps: 0,
+        stopped: false,
+        after_pause: false,
+        complete: false,
     }));
     state.borrow_mut().publish(None);
     let requests = state.clone();
     let on_message =
         Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-            match get(&event.data(), "layers").as_f64() {
-                Some(bits) => requests.borrow_mut().request(Layers(bits as u32)),
-                None => error!("Unexpected message from the page"),
+            let data = event.data();
+            if let Some(bits) = get(&data, "layers").as_f64() {
+                requests.borrow_mut().request(Layers(bits as u32));
+            } else if let Some(paused) = get(&data, "paused").as_bool() {
+                control(&requests, Some(paused), false);
+            } else if get(&data, "step").is_truthy() {
+                control(&requests, None, true);
+            } else {
+                error!("Unexpected message from the page");
             }
         });
     scope.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
