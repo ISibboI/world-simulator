@@ -278,7 +278,7 @@ pub const ROW_LABELS: [&str; 18] = [
     "Permanent ice",
     "River discharge",
     "Ocean current",
-    "Wind",
+    "Wind (year)",
 ];
 
 fn row(label: &'static str, value: Option<String>) -> Row {
@@ -764,21 +764,21 @@ mod tests {
         assert_eq!(row(&rows, "River discharge").unwrap(), "10000 m³/s");
         assert_eq!(row(&rows, "Ocean current"), None);
         // A trade wind blowing to the west, from the east.
-        assert_eq!(row(&rows, "Wind").unwrap(), "5.0 m/s from E");
+        assert_eq!(row(&rows, "Wind (year)").unwrap(), "5.0 m/s from E");
         let westerly = CellInfo {
             wind_east: 6.0,
             wind_north: 6.0,
             ..info()
         };
         assert_eq!(
-            row(&format_rows(&westerly, None, 0.0, 0.0), "Wind").unwrap(),
+            row(&format_rows(&westerly, None, 0.0, 0.0), "Wind (year)").unwrap(),
             "8.5 m/s from SW"
         );
         let unknown = CellInfo {
             wind_east: f32::NAN,
             ..info()
         };
-        assert_eq!(row(&format_rows(&unknown, None, 0.0, 0.0), "Wind"), None);
+        assert_eq!(row(&format_rows(&unknown, None, 0.0, 0.0), "Wind (year)"), None);
     }
 
     fn ocean() -> CellInfo {

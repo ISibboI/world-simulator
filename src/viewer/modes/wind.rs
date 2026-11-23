@@ -5,7 +5,7 @@
 //! zonal-mean profile of the three-cell circulation (trade winds converging on the ITCZ,
 //! westerlies with a weak poleward drift, polar easterlies), centred on the ITCZ of each
 //! longitude, which in every solved month lies where the moist static energy of the surface air
-//! peaks (so it follows the seasons and bends poleward over summer continents). The thermally
+//! peaks (so it follows the seasons and varies with longitude between land and sea). The thermally
 //! driven (monsoon) winds of land–sea contrasts are added if enabled
 //! (`ClimateParams::thermal_wind_depth`, off by default). Every cell keeps the annual mean and
 //! the January and July winds (east and north, 0.25 m/s in the frame history), so past frames
@@ -149,9 +149,9 @@ fn speed_scale(period: Period) -> ColorScale {
             .map(|(index, &color)| (SPEED_RANGE * index as f64 / last, color))
             .collect(),
         title: match period {
-            Period::Annual => "Wind speed, annual mean (m/s)",
-            Period::January => "Wind speed in January (m/s)",
-            Period::July => "Wind speed in July (m/s)",
+            Period::Annual => "Speed of the annual mean wind (m/s)",
+            Period::January => "Speed of the January mean wind (m/s)",
+            Period::July => "Speed of the July mean wind (m/s)",
         }
         .into(),
         ticks: [0, 2, 4, 6, 8, 10]
