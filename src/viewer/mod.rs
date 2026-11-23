@@ -547,7 +547,10 @@ impl Viewer {
             displays: 0,
             arrow_cells: None,
             points_per_radius: 100.0,
-            legend: initial.cli.render_mode.mode().legend(None),
+            legend: {
+                let mode = initial.cli.render_mode.mode();
+                mode.legend(&modes::OptionValues::defaults(mode.options()), None)
+            },
             parameters,
             plate_colors: PlateColors::default(),
             cell_panel: CellInfoPanel::default(),
@@ -646,7 +649,10 @@ impl Viewer {
                 ..surface
             });
             self.overlay = None;
-            self.legend = self.mode.mode().legend(None);
+            self.legend = self
+                .mode
+                .mode()
+                .legend(self.switcher.options(self.mode), None);
             return;
         };
         let start = web_time::Instant::now();
@@ -671,6 +677,7 @@ impl Viewer {
             fields: &self.fields,
             arrow_cells,
             arrow_spacing,
+            options: self.switcher.options(self.mode),
         };
         let mode = self.mode.mode();
         self.displays += 1;
@@ -690,7 +697,7 @@ impl Viewer {
             id: self.displays,
             vertices: Arc::new(vertices),
         });
-        self.legend = mode.legend(Some(&data));
+        self.legend = mode.legend(data.options, Some(&data));
         tracing::debug!(
             mode = self.mode.name(),
             elapsed = ?start.elapsed(),
@@ -1205,8 +1212,13 @@ impl eframe::App for Viewer {
             bottom: cell_panel.map_or(f32::INFINITY, |rect| rect.top()),
         };
         let (changed, switcher) = self.switcher.show(ui.ctx(), &mut mode, &view);
-        if changed && mode != self.mode {
-            self.set_mode(mode);
+        if changed {
+            if mode != self.mode {
+                self.set_mode(mode);
+            } else {
+                // Another setting of the mode.
+                self.display_outdated = true;
+            }
             ui.ctx().request_repaint();
         }
 

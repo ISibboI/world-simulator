@@ -1,12 +1,13 @@
 //! The mode switcher in the top left corner of the 3D view: a drop-down list of the render
 //! modes and the legend of the active one (colour bar, swatches, arrow scale), which can be
-//! hidden. It is free there: the parameter panel is in the top right corner, the cell widget
+//! hidden, with the settings of the mode (see [`super::RenderMode::options`]) above the legend.
+//! It is free there: the parameter panel is in the top right corner, the cell widget
 //! in the bottom left, and the banner across the middle. Like those, the legend starts hidden
 //! on narrow screens (phones), where only the drop-down list remains.
 
 use eframe::egui;
 
-use super::{Legend, RenderModeId, Swatch, SwatchShape};
+use super::{Legend, OptionKind, OptionValues, RenderModeId, Swatch, SwatchShape};
 
 /// Screens narrower than this (in points) start with the legend hidden, as the other panels.
 const NARROW_SCREEN: f32 = 600.0;
@@ -35,16 +36,40 @@ pub struct SwitcherView<'a> {
 }
 
 /// The switcher's state.
-#[derive(Default)]
 pub struct ModeSwitcher {
     /// Whether the legend is shown; decided by the screen width on the first frame.
     legend_open: Option<bool>,
+    /// The values of every mode's options, in the order of [`RenderModeId::all`]; a mode keeps
+    /// them while another one is shown.
+    options: Vec<OptionValues>,
+}
+
+impl Default for ModeSwitcher {
+    fn default() -> Self {
+        Self {
+            legend_open: None,
+            options: RenderModeId::all()
+                .iter()
+                .map(|mode| OptionValues::defaults(mode.mode().options()))
+                .collect(),
+        }
+    }
 }
 
 impl ModeSwitcher {
+    /// The values of the options of `mode`.
+    pub fn options(&self, mode: RenderModeId) -> &OptionValues {
+        static NONE: OptionValues = OptionValues(Vec::new());
+        RenderModeId::all()
+            .iter()
+            .position(|&other| other == mode)
+            .and_then(|index| self.options.get(index))
+            .unwrap_or(&NONE)
+    }
+
     /// Shows the switcher; changes `mode` if the user chose another one. Returns whether that
-    /// happened and the area the switcher covers (the parameter panel's button keeps clear of
-    /// it on narrow screens).
+    /// happened or the user changed a setting of the mode, and the area the switcher covers
+    /// (the parameter panel's button keeps clear of it on narrow screens).
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -84,6 +109,8 @@ impl ModeSwitcher {
                 }
             });
         };
+        let mut options_changed = false;
+        let all_options = &mut self.options;
         let response = egui::Area::new(egui::Id::unique("render mode switcher"))
             .anchor(egui::Align2::LEFT_TOP, [MARGIN, MARGIN])
             .show(ctx, |ui| {
@@ -92,6 +119,14 @@ impl ModeSwitcher {
                         ui.set_max_width(width);
                         controls(ui, mode, legend_open);
                         ui.separator();
+                        // The mode as chosen in this frame.
+                        if let Some(values) = RenderModeId::all()
+                            .iter()
+                            .position(|&other| other == *mode)
+                            .and_then(|index| all_options.get_mut(index))
+                        {
+                            options_changed = option_controls(ui, *mode, values);
+                        }
                         // Long legends scroll (phones in landscape, small windows).
                         // Above the cell widget, but at least a share of the screen (they
                         // may overlap on short screens; either can be hidden).
@@ -110,8 +145,51 @@ impl ModeSwitcher {
                     controls(ui, mode, legend_open);
                 }
             });
-        (changed, response.response.rect)
+        (changed || options_changed, response.response.rect)
     }
+}
+
+/// The controls of the options of `mode`; returns whether a value changed.
+fn option_controls(ui: &mut egui::Ui, mode: RenderModeId, values: &mut OptionValues) -> bool {
+    let options = mode.mode().options();
+    if options.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    for (index, option) in options.iter().enumerate() {
+        match option.kind {
+            OptionKind::Choice(choices) => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(option.label).on_hover_text(option.hover);
+                    for (value, &choice) in choices.iter().enumerate() {
+                        let value = value as u8;
+                        if ui
+                            .selectable_label(values.get(index) == value, choice)
+                            .on_hover_text(option.hover)
+                            .clicked()
+                            && values.get(index) != value
+                        {
+                            values.set(index, value);
+                            changed = true;
+                        }
+                    }
+                });
+            }
+            OptionKind::Switch { .. } => {
+                let mut on = values.is_on(index);
+                if ui
+                    .checkbox(&mut on, option.label)
+                    .on_hover_text(option.hover)
+                    .changed()
+                {
+                    values.set(index, u8::from(on));
+                    changed = true;
+                }
+            }
+        }
+    }
+    ui.separator();
+    changed
 }
 
 /// Draws a legend `width` points wide.
@@ -270,7 +348,13 @@ fn swatch_symbol(ui: &mut egui::Ui, swatch: &Swatch, size: f32) {
     let line = |painter: &egui::Painter| {
         let y = rect.center().y;
         let ends = [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)];
-        painter.line_segment(ends, egui::Stroke::new(line_width + 2.0, dark));
+        // Dark lines (coastlines, isotherms) get a light border to show on the dark panel.
+        let border = if u32::from(r) + u32::from(g) + u32::from(b) < 150 {
+            egui::Color32::from_gray(220)
+        } else {
+            dark
+        };
+        painter.line_segment(ends, egui::Stroke::new(line_width + 2.0, border));
         painter.line_segment(ends, egui::Stroke::new(line_width, color));
     };
     match &swatch.shape {

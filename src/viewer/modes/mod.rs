@@ -15,11 +15,14 @@
 //! Adding a mode: a variant of [`RenderModeId`] (its clap name is the name in the command line
 //! and the URL), a type implementing [`RenderMode`] in its own file, and its lines in
 //! [`RenderModeId::mode`] and [`RenderModeId::name`]. A mode that needs data beyond
-//! [`CellInfo`] adds a [`super::fields::Layer`].
+//! [`CellInfo`] adds a [`super::fields::Layer`]. A mode with settings of its own (which month,
+//! which lines) lists them in [`RenderMode::options`]; the switcher shows them above the
+//! legend and the mode reads their values from [`ModeData::options`].
 
 mod plate_motion;
 mod plates;
 pub mod switcher;
+mod temperature;
 mod topographic;
 
 use clap::ValueEnum;
@@ -27,7 +30,7 @@ use glam::Vec3;
 
 use super::arrows::{ArrowStyle, Sample, base_point};
 use super::fields::{Fields, Layer, Layers};
-use super::overlay::OverlayBuilder;
+use super::overlay::{LineStyle, OverlayBuilder, category_boundaries};
 use super::plate_colors::PlateColors;
 use super::renderer::Vertex;
 use super::{CellInfo, PlateInfo};
@@ -43,6 +46,8 @@ pub enum RenderModeId {
     PlateMotion,
     /// Plates in their colours, their boundaries by type, and their motion.
     Plates,
+    /// Surface temperature: annual mean, January or July.
+    Temperature,
 }
 
 impl RenderModeId {
@@ -52,6 +57,7 @@ impl RenderModeId {
             RenderModeId::Topographic => &topographic::Topographic,
             RenderModeId::PlateMotion => &plate_motion::PlateMotion,
             RenderModeId::Plates => &plates::Plates,
+            RenderModeId::Temperature => &temperature::Temperature,
         }
     }
 
@@ -72,6 +78,7 @@ impl RenderModeId {
             RenderModeId::Topographic => "topographic",
             RenderModeId::PlateMotion => "plate-motion",
             RenderModeId::Plates => "plates",
+            RenderModeId::Temperature => "temperature",
         }
     }
 
@@ -98,6 +105,8 @@ pub struct ModeData<'a> {
     /// Evenly spread cells for arrows, and their spacing in planet radii.
     pub arrow_cells: &'a [u32],
     pub arrow_spacing: f64,
+    /// The values of the mode's [`RenderMode::options`].
+    pub options: &'a OptionValues,
 }
 
 impl ModeData<'_> {
@@ -165,9 +174,77 @@ pub trait RenderMode: Sync {
         Shading::Lit
     }
 
-    /// The legend, from the data of the displayed state if there is one (ranges, counts and
-    /// the arrow spacing can follow the data); rebuilt with every update.
-    fn legend(&self, data: Option<&ModeData>) -> Legend;
+    /// Settings of the mode, shown above its legend (see [`ModeOption`]).
+    fn options(&self) -> &'static [ModeOption] {
+        &[]
+    }
+
+    /// The legend for the values of the [`RenderMode::options`], from the data of the
+    /// displayed state if there is one (ranges, counts and the arrow spacing can follow the
+    /// data); rebuilt with every update.
+    fn legend(&self, options: &OptionValues, data: Option<&ModeData>) -> Legend;
+}
+
+/// A setting of a render mode (see [`RenderMode::options`]), e.g. which month a mode shows or
+/// whether it draws some lines. Its value is a small number: the index of the choice, or 0
+/// and 1 for a switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModeOption {
+    /// The text next to the control.
+    pub label: &'static str,
+    /// What the setting does, shown when the pointer rests on it.
+    pub hover: &'static str,
+    pub kind: OptionKind,
+}
+
+/// The kind of a [`ModeOption`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionKind {
+    /// One of these choices (shown as a row of buttons); the first is the default.
+    Choice(&'static [&'static str]),
+    /// On or off.
+    Switch { default: bool },
+}
+
+impl OptionKind {
+    fn default_value(self) -> u8 {
+        match self {
+            OptionKind::Choice(_) => 0,
+            OptionKind::Switch { default } => u8::from(default),
+        }
+    }
+}
+
+/// The values of a mode's options, in the order of [`RenderMode::options`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OptionValues(Vec<u8>);
+
+impl OptionValues {
+    /// The defaults of `options`.
+    pub fn defaults(options: &[ModeOption]) -> Self {
+        Self(
+            options
+                .iter()
+                .map(|option| option.kind.default_value())
+                .collect(),
+        )
+    }
+
+    /// The value of the option at `index` (0 if there is none).
+    pub fn get(&self, index: usize) -> u8 {
+        self.0.get(index).copied().unwrap_or(0)
+    }
+
+    /// Whether the switch at `index` is on.
+    pub fn is_on(&self, index: usize) -> bool {
+        self.get(index) != 0
+    }
+
+    pub fn set(&mut self, index: usize, value: u8) {
+        if let Some(slot) = self.0.get_mut(index) {
+            *slot = value;
+        }
+    }
 }
 
 /// How the planet's colours are lit, see [`RenderMode::shading`].
@@ -177,7 +254,6 @@ pub enum Shading {
     #[default]
     Lit,
     /// The colours as they are.
-    #[allow(dead_code)] // For the scalar modes to come; see the tests.
     Unlit,
 }
 
@@ -289,7 +365,6 @@ pub struct ColorScale {
 }
 
 impl ColorScale {
-    #[allow(dead_code)] // For the scalar modes to come (#94, #95, #98–#100); see the tests.
     /// The colour of a value, clamped to the range of the scale; `None` for NaN.
     pub fn color(&self, value: f64) -> Option<[u8; 3]> {
         let (first, last) = (self.stops.first()?, self.stops.last()?);
@@ -324,13 +399,42 @@ impl ColorScale {
         }
     }
 
-    #[allow(dead_code)] // For the scalar modes to come (#94, #95, #98–#100); see the tests.
     /// The colours of a per-cell value for [`RenderMode::colors`]: `missing` where the value is
     /// NaN.
     pub fn colors(&self, values: impl Iterator<Item = f32>, missing: [u8; 3]) -> Vec<[f32; 4]> {
         values
             .map(|value| rgba(self.color(f64::from(value)).unwrap_or(missing)))
             .collect()
+    }
+}
+
+/// Draws the coastlines (between cells above and below sea level) as lines of `width` (planet
+/// radii) in `color`, without border, lifted by `lift`: for modes that colour the
+/// planet unlit, where the relief no longer shows land and sea.
+pub fn coastlines(
+    data: &ModeData,
+    overlay: &mut OverlayBuilder,
+    width: f64,
+    color: [f32; 4],
+    lift: f64,
+) {
+    if data.cells.len() != data.mesh.len() {
+        return;
+    }
+    let pieces = category_boundaries(
+        data.mesh.faces(),
+        |cell| u32::from(data.cells[cell as usize].elevation >= 0.0),
+        |cell| data.position(cell).as_dvec3(),
+    );
+    let style = LineStyle {
+        width,
+        border: 0.0,
+        color,
+        border_color: color,
+        lift,
+    };
+    for piece in pieces {
+        overlay.line(piece.from, piece.to, &style);
     }
 }
 
@@ -411,7 +515,13 @@ mod tests {
             assert_eq!(mode.name(), clap_name);
             assert_eq!(RenderModeId::parse(mode.name()), Some(mode));
             assert!(!mode.mode().label().is_empty());
-            assert!(!mode.mode().legend(None).description.is_empty());
+            assert!(
+                !mode
+                    .mode()
+                    .legend(&OptionValues::defaults(mode.mode().options()), None)
+                    .description
+                    .is_empty()
+            );
         }
         assert_eq!(
             RenderModeId::parse("plate-motion"),
@@ -527,7 +637,7 @@ mod tests {
             Shading::Unlit
         }
 
-        fn legend(&self, _data: Option<&ModeData>) -> Legend {
+        fn legend(&self, _options: &OptionValues, _data: Option<&ModeData>) -> Legend {
             Legend {
                 description: "Sediment thickness.".into(),
                 ..Legend::default()
@@ -554,6 +664,7 @@ mod tests {
             fields: &fields,
             arrow_cells: &[],
             arrow_spacing: 0.1,
+            options: &OptionValues::default(),
         };
         let colors = SedimentTest.colors(&data).unwrap();
         let new_vertices = recolored(&vertices, &colors).unwrap();
