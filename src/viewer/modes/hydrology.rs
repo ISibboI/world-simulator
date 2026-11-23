@@ -107,7 +107,7 @@ const ENDORHEIC_BASINS: [[u8; 3]; 6] = [
 /// Endorheic land when only those basins are coloured.
 const ENDORHEIC: [u8; 3] = [222, 150, 80];
 /// Small coastal basins, and land draining to the ocean when only endorheic basins are shown.
-const OTHER_LAND: [u8; 3] = [222, 222, 212];
+const OTHER_LAND: [u8; 3] = [190, 198, 186];
 const OCEAN: [u8; 3] = [42, 72, 122];
 /// Dry closed depressions are drawn in their basin's colour times this, and stippled.
 const DEPRESSION_SHADE: f32 = 0.8;
@@ -311,7 +311,8 @@ impl RenderMode for Hydrology {
         }
 
         // Rivers, from each cell to the one its water flows to; into the sea or a lake only to
-        // the shore (half way). Small ones first, so that large rivers lie on top.
+        // the shore (half way), out of a lake from its shore. Small ones first, so that large
+        // rivers lie on top.
         let Some(threshold) = river_threshold(data.options) else {
             return;
         };
@@ -319,10 +320,15 @@ impl RenderMode for Hydrology {
             .cells
             .iter()
             .enumerate()
-            .filter(|(_, info)| river_cell(info) && f64::from(info.discharge) >= threshold)
+            .filter(|(_, info)| f64::from(info.discharge) >= threshold)
             .filter_map(|(cell, info)| {
                 let to = receiver(data.mesh, data.cells, cell as u32)?;
-                Some((f64::from(info.discharge), cell as u32, to))
+                // On a lake only its outflow, from the exit over the shore.
+                (river_cell(info) || river_cell(&data.cells[to as usize])).then_some((
+                    f64::from(info.discharge),
+                    cell as u32,
+                    to,
+                ))
             })
             .collect();
         rivers.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -336,11 +342,17 @@ impl RenderMode for Hydrology {
                 border_color: RIVER_BORDER,
                 lift: RIVER_LIFT,
             };
-            let start = position(from);
-            let end = if river_cell(&data.cells[to as usize]) {
-                position(to)
+            let (start, end) = (position(from), position(to));
+            let shore = (start + end) / 2.0;
+            let start = if river_cell(&data.cells[from as usize]) {
+                start
             } else {
-                (start + position(to)) / 2.0
+                shore
+            };
+            let end = if river_cell(&data.cells[to as usize]) {
+                end
+            } else {
+                shore
             };
             overlay.line(start, end, &style);
         }

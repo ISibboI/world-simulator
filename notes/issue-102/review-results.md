@@ -1,0 +1,27 @@
+# Review of agent/issue-102 (72d612b..ff801bb), 2026-11-24
+
+Verdict: **sound, mergeable after small fixes.** No correctness bug found in the derivation or the codec. The issues are in the notes (seed labels, an overstated conclusion) and in the UI polish.
+
+## Correctness
+- **Export is read-only.** `SurfaceWater` (src/erosion.rs:570-588) is built from `receiver`, `lakes`, `endorheic`, `water_level` and `ocean` after the discharge/terminal loops and before incision. It goes into a new vec and changes nothing the code below reads. `Planet::step` only stores it (src/planet.rs:369, 393-399), and `state_hash` does not include it. Evidence: in agent-scratch/hash, the hashes of br-* and main-* match pairwise (seeds 1 and 2, plus no-erosion). erosion.rs and planet.rs have not changed since that check.
+- **Basin and closed-lake derivation is correct.** `Lakes::new` makes every lake a receiver subtree whose exit's receiver is not in any lake. So "follow receivers while DEPRESSION is set, then check that the exit has no receiver" (src/viewer/hydrology.rs:121-128) gives exactly the sim's endorheic exits. The basin `resolve` ends at the mouth (receiver is ocean) or at a cut exit, and it matches `Hydrology::endorheic_cells` to the cell in every snapshot. A no-ocean planet and a cycle are both handled and tested.
+- **lake_depth.** `water_level` is -inf outside covered members, so the depth is 0 there (ocean included). The partly covered last cell has level ≥ its floor. The LAKE bit (≥ 1 m) is set from the f64 depth before quantisation, so live and history frames agree. This follows Sebastian's rule.
+- **Codec is OK.** There are 23 channels. PLATE=20, FLAGS=21 and DRAINAGE=22 match the order in `attributes()`. Logarithmic(1/1000) on ln_1p fits in 2 bytes and gives about 1 mm at 1 m. The drainage bits need 6 of the 8 available. VERSION is bumped to 5 and the round-trip test covers all 64 bit patterns.
+- **Determinism.** The diff adds no HashMap/HashSet. New transcendental calls (`log10`, `sin` in a test) are only in src/viewer/ and the codec tests (viewer exempt). The receiver slot comes from `neighbors().position()`, which is deterministic.
+
+## Minor code points
+1. src/viewer/modes/hydrology.rs:315-345: a spilling lake's exit is a Lake cell, so `river_cell` drops the segment exit→pass. The outflow river therefore starts about half a cell away from the lake. Inflows are drawn up to the shore (half way), but outflows are not. Suggest drawing from the shore midpoint too.
+2. `Drainage::of` runs 3× per recolour (colors, overlay, legend; modes/hydrology.rs:257, 270, 355) and once more per surface update in `Picking`, in every mode (src/viewer/mod.rs:839). It is cheap (O(n)), but one shared result would be cleaner.
+3. src/viewer/cell_info.rs:402: `format_rows` now uses `land = !is_ocean()` in **all** modes. That is right for #58, but it uses the pre-step mask against the post-step elevation. A cell can read "elevation +3 m, surface ocean" (results.md caveat 1 says so). It is acceptable, but #128 should know about it.
+
+## Notes / plausibility (results.md)
+4. **Seed labels in the table do not match stats/.** The rows labelled seed 0 are in stats/seed-1.txt, seed 1 in seed-2.txt, and seed 2 in seed-0.txt (the raw output in agent-scratch/stats has the same file names). The text says the 28%/42% outlier is "seed 1", but it is in seed-2.txt. Fix either the labels or the files.
+5. **The endorheic conclusion is too generous.** Single-cell pits (#129) explain more than the outlier: in every snapshot they are 40-70% of the endorheic share (e.g. 9.4 of 14.0, 9.6 of 13.6, 4.4 of 10.2). Without the pits, endorheic land is about 3-6%, against Earth's ~18-20%. "10-17%, Earth-like" only holds when pits are counted. It also only holds from 300 Myr on: at 100-200 Myr every seed has 2-8% (stats/). The text should say so, and should not call only the outlier "pits".
+6. The lakes (2.6-3.5% vs fractional 2.3-3.7%) and the largest basins (4-12%) follow from the numbers. The conclusions are reasonable for an Earth-like planet. Calling the coastal 1-2-cell basins a grid artefact is fair (#64).
+
+## UI (screenshots)
+7. The desktop screenshots are older than the final legend labels. They show "Basins draining to the ocean", "Closed lake (no outflow)", "Dry closed depression" and "Drainage divide", while the code says "Basins to the ocean", "Closed lake", "Dry depression" and "Divide". Retake them, or note it.
+8. The legend's live-statistics paragraph is tiny: about 8 px on desktop and about 10 px on the phone. That is below the readable base size the UI guidelines want, so it should use the normal body size. On the phone the open legend covers about 2/3 of the screen and hides the globe. That is acceptable because it is collapsible, but the stats text could move into the hover text or be shortened.
+9. On desktop the open legend panel overlaps the cell widget and hides its "Cell" header and first rows (desktop-basins.png, desktop-past-frame.png). This is probably not new, but the Hydrology legend is taller and makes it worse.
+10. "Small coastal basins" (OTHER_LAND, light grey) is interpolated with the ocean colour into a wide pale halo around every coast. It reads like ice or haze. A colour closer to the basin tones, or a slightly darker grey, would help.
+11. On the phone, the touch targets of the Basins/Rivers choices look fine (about 24 px of text plus padding). "Elevation" wraps to a second line, which is acceptable.

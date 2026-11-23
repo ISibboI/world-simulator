@@ -1,6 +1,8 @@
 # #102 results: hydrology render mode
 
-_2026-11-24. Plan: [`plan.md`](plan.md), plan review: [`review-plan.md`](review-plan.md)._
+_2026-11-24. Plan: [`plan.md`](plan.md), plan review: [`review-plan.md`](review-plan.md),
+results review: [`review-results.md`](review-results.md) (seed labels and the endorheic
+conclusion corrected, lake outflows drawn, the coastal-basin colour darkened after it)._
 
 ## What it shows
 
@@ -62,13 +64,13 @@ fractional lake cover.
 
 | seed, t | largest basins (% of land; e = endorheic) | endorheic % (sim.) | in single-cell pits | lakes ≥ 1 m % (sim. fractional) | closed lakes % | dry depr. % |
 |---|---|---|---|---|---|---|
-| 0, 300 | 5.0 4.6 4.2 4.0 3.5 | 15.0 (15.0) | 6.9 | 2.6 (2.3) | 0.7 | 1.0 |
-| 0, 600 | 9.0 6.2 4.2 4.2 4.1 | 13.6 (13.6) | 9.6 | 3.2 (3.0) | 0.5 | 1.3 |
-| 1, 300 | 8.1 6.3 5.6 3.2 2.1 | 12.0 (12.0) | 5.4 | 3.5 (3.4) | 0.8 | 1.4 |
-| 1, 500 | 9.7 8.0 7.3 4.6e 2.9 | 27.9 (27.9) | 12.0 | 2.9 (2.7) | 0.8 | 2.4 |
-| 1, 600 | 12.1 6.6 5.1 3.7 3.4e | 41.6 (41.6) | 18.5 | 3.4 (3.7) | 0.7 | 4.8 |
-| 2, 300 | 11.6 6.0 3.4 3.3 3.2 | 10.2 (10.2) | 4.4 | 2.9 (2.6) | 0.6 | 1.5 |
-| 2, 600 | 3.7 2.2 2.2 1.8 1.6 | 14.0 (14.0) | 9.4 | 3.0 (2.6) | 0.9 | 1.2 |
+| 0, 300 | 11.6 6.0 3.4 3.3 3.2 | 10.2 (10.2) | 4.4 | 2.9 (2.6) | 0.6 | 1.5 |
+| 0, 600 | 3.7 2.2 2.2 1.8 1.6 | 14.0 (14.0) | 9.4 | 3.0 (2.6) | 0.9 | 1.2 |
+| 1, 300 | 5.0 4.6 4.2 4.0 3.5 | 15.0 (15.0) | 6.9 | 2.6 (2.3) | 0.7 | 1.0 |
+| 1, 600 | 9.0 6.2 4.2 4.2 4.1 | 13.6 (13.6) | 9.6 | 3.2 (3.0) | 0.5 | 1.3 |
+| 2, 300 | 8.1 6.3 5.6 3.2 2.1 | 12.0 (12.0) | 5.4 | 3.5 (3.4) | 0.8 | 1.4 |
+| 2, 500 | 9.7 8.0 7.3 4.6e 2.9 | 27.9 (27.9) | 12.0 | 2.9 (2.7) | 0.8 | 2.4 |
+| 2, 600 | 12.1 6.6 5.1 3.7 3.4e | 41.6 (41.6) | 18.5 | 3.4 (3.7) | 0.7 | 4.8 |
 
 Full output per 100 Myr: [`stats/`](stats/) (its count of larger basins used an earlier threshold of 8 cells).
 
@@ -79,12 +81,14 @@ Full output per 100 Myr: [`stats/`](stats/) (its count of larger basins used an 
 - **Largest basins** 4–12% of the land, the five largest together 12–30%. Earth: Amazon ~4%
   of the land, Congo 2.7%, Nile 2.3%, Mississippi 2.2%. Plausible for an Earth-like planet with
   fewer, larger continents; the largest basins here are ~2× Earth's.
-- **Endorheic** 10–17% of the land in most snapshots (#114 measured 19.5% over 600–1000 Myr;
-  Earth ~18–20%). Seed 1 rises to 28% and 42% at 500–600 Myr, of which 12–19 points drain into
-  **single-cell pits** (#129): the pits, not real closed basins, make the outlier. The mode shows
-  them as many small orange basins with a dot each (dry depressions or closed lakes).
+- **Endorheic** 10–17% of the land from 300 Myr on (2–8% at 100–200 Myr; #114 measured 19.5%
+  over 600–1000 Myr; Earth ~18–20%), but **single-cell pits (#129) make 30–70% of it** in every
+  snapshot: without them endorheic land is 4–8% (seed 2 at 500–600 Myr: 16–23%). Seed 2 rises to
+  28% and 42% at 500–600 Myr, 12–19 points of it in pits. So the endorheic share that looks
+  Earth-like is largely the pit artefact; real closed basins are rarer than on Earth. The mode
+  shows the pits as many small orange basins with a dot each (dry depressions or closed lakes).
 - **Lakes** 2.6–3.5% of the land (#114: 3.6%, Earth ~2%); closed lakes 0.5–0.9%; dry closed
-  depressions 1–2.4% (4.8% in seed 1 at 600 Myr, again the pits).
+  depressions 1–2.4% (4.8% in seed 2 at 600 Myr, again the pits).
 - **Coasts**: 1300–2200 basins drain to the ocean, most of them one or two coastal cells (on the
   ~110 km grid every coastal cell that is not on a river is its own basin). They are drawn in
   one neutral colour; this is a grid artefact (#64), not a property of the planet.
@@ -99,6 +103,11 @@ Full output per 100 Myr: [`stats/`](stats/) (its count of larger basins used an 
   time (a basin has no identity beyond its outlet).
 - Lit shading (relief visible) makes the palette colours a little darker or lighter than the
   legend.
+- The cell widget decides ocean/land by the ocean bit (before the step) but shows the elevation
+  after it, so a cell can rarely read "+3 m, ocean"; #128 should keep this in mind.
+- The basins are labelled once per update for the widget and again by the mode (colours,
+  overlay, legend): O(cells) each, well below a millisecond; not shared.
+- The legend's statistics paragraph uses the small description font of all modes.
 - The 1 m rule here is only in this mode and the cell widget; #128 (all modes, the topographic
   colours and the 3D view) can reuse `CellInfo::water_body()`, which every frame has.
 
