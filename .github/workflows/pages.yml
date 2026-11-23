@@ -15,10 +15,11 @@ on:
 permissions:
   contents: read
 
-# One deployment at a time; a running deployment is not cancelled.
+# One run per branch or pull request: a newer push cancels the older run, including a deployment
+# in progress (the newer run deploys the newer build anyway).
 concurrency:
   group: pages-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   TRUNK_VERSION: v0.22.2
