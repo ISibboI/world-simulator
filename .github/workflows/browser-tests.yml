@@ -2,9 +2,10 @@ name: Browser tests
 
 # Basic tests of the web version in the supported browsers (issue #117, see web/tests/): the
 # simulator loads, the 3D view draws a frame, and the frame history is stored in IndexedDB and
-# read back. Desktop: Linux (Chrome, Firefox, WebKit), macOS (Safari, Chrome, Firefox), Windows
-# (Chrome, Firefox). Mobile: Chrome and Firefox in an Android emulator set up like a low-end
-# phone, Safari in the iOS Simulator. The runners have no GPU, so everything renders in software.
+# read back. Desktop: Linux (Chrome, Firefox, WebKit), Windows (Chrome, Firefox). Mobile: Chrome
+# and Firefox in an Android emulator set up like a low-end phone. The runners have no GPU, so
+# everything renders in software. No macOS/iOS jobs: Safari has no working WebGL on GitHub's macOS
+# runners (no GPU), so they could not pass; WebKit on Linux stands in for Safari's engine.
 #
 # Only on request: started by hand (Actions → Browser tests → Run workflow), or on a pull request
 # that carries the label `browser-tests` (when it is added, and on every push while it is there).
@@ -71,15 +72,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
 
-    # One job per system, the browsers one after the other (fewer runners, notably macOS ones,
-    # which are often scarce).
+    # One job per system, the browsers one after the other (fewer runners).
     strategy:
       fail-fast: false
       matrix:
         include:
           - { name: Linux, os: ubuntu-latest, browsers: chrome firefox webkit }
-          # Intel: the arm64 runners were often not available at all ("not acquired").
-          - { name: macOS, os: macos-15-intel, browsers: safari chrome firefox }
           - { name: Windows, os: windows-latest, browsers: chrome firefox }
 
     steps:
@@ -102,9 +100,6 @@ jobs:
             python -m pip install --quiet playwright
             python -m playwright install --with-deps webkit
           fi
-          if [[ " ${{ matrix.browsers }} " == *" safari "* ]]; then
-            sudo safaridriver --enable
-          fi
 
       - name: Test
         shell: bash
@@ -120,12 +115,7 @@ jobs:
             if [ "$RUNNER_OS" = Linux ]; then
               command=(xvfb-run --auto-servernum --server-args="-screen 0 1400x900x24" "${command[@]}")
             fi
-            if [ "$browser" = safari ]; then
-              # Known to fail on the runners (see the iOS job): reported, not failing the job.
-              "${command[@]}" || echo "::warning::Safari failed (expected on GitHub's macOS runners: no WebGL without a GPU)"
-            else
-              "${command[@]}" || status=1
-            fi
+            "${command[@]}" || status=1
           done
           exit $status
 
@@ -196,47 +186,3 @@ jobs:
           name: results-android-${{ matrix.browser }}
           path: results
           retention-days: 14
-
-  # Known to fail on GitHub's runners: their macOS VMs have no GPU, and WebKit there has no
-  # working software WebGL (the iOS Simulator runs out of WebGL memory, desktop Safari loses its
-  # context at once), also for the build before #115. It still runs, for the day it works and
-  # for its logs, but does not fail the workflow.
-  ios:
-    name: iOS Safari
-    needs: build
-    runs-on: macos-15-intel
-    timeout-minutes: 45
-    continue-on-error: true
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: dist
-          path: dist
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
-
-      - name: Install test dependencies
-        run: python -m pip install --quiet pillow
-
-      - name: Test
-        run: |
-          echo "| Browser | Parameters | Result | Seconds | Planet pixels | User agent |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| --- | --- | --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
-          # The quick test, then one with the parameters the page picks for the device.
-          status=0
-          python web/tests/browser_test.py --browser ios-safari --dist dist --query "$QUICK_QUERY" --timeout 600 --out results/ios-safari-quick || status=1
-          python web/tests/browser_test.py --browser ios-safari --dist dist --query "" --min-updates 1 --timeout 900 --out results/ios-safari-default || status=1
-          exit $status
-
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: results-ios-safari
-          path: results
-          retention-days: 14
-

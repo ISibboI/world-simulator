@@ -26,13 +26,12 @@ if the browser's storage is not available).
 `web/tests/browser_test.py` checks in one browser that the simulator loads (no error banner, the
 simulation worker runs), that the 3D view draws the planet, and that the frame history is
 stored in IndexedDB and read back. The workflow `.github/workflows/browser-tests.yml` runs it
-on Linux (Chrome, Firefox, WebKit), macOS (Safari, Chrome, Firefox), Windows (Chrome, Firefox),
-in an Android emulator set up like a low-end phone (Chrome, Firefox) and in the iOS Simulator
-(Safari). It runs only on request: by hand (Actions → Browser tests → Run workflow), or on a
-pull request with the label `browser-tests`. The runners have no GPU, so everything renders in
-software; Safari and the iOS Simulator cannot run the 3D view there at all (WebKit on GitHub's
-macOS VMs has no working WebGL), so their results are reported but do not fail the workflow.
-WebKit itself is covered by the Linux WebKit test. Locally, e.g.:
+on Linux (Chrome, Firefox, WebKit), Windows (Chrome, Firefox) and in an Android emulator set up
+like a low-end phone (Chrome, Firefox). It runs only on request: by hand (Actions → Browser
+tests → Run workflow), or on a pull request with the label `browser-tests`. The runners have no
+GPU, so everything renders in software. Safari (macOS, iOS) is not tested in CI: WebKit on
+GitHub's macOS runners has no working WebGL, so the 3D view cannot run there at all.
+Safari's engine, WebKit, is covered by the Linux WebKit test. Locally, e.g.:
 
 ```sh
 trunk build --release
