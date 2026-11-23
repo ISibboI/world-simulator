@@ -195,7 +195,15 @@ impl Planet {
     ) -> Self {
         let climate = Climate::new(tectonics.mesh(), planet_radius, climate);
         let mut temperature = TemperatureModel::new(tectonics.mesh(), temperature);
-        temperature.update(&climate_elevations(&tectonics), None);
+        let elevation = tectonics.surface_elevations();
+        let seeds = crate::sea::ocean_seeds(
+            tectonics.mesh(),
+            &elevation,
+            -crate::sea::SILL_TOLERANCE,
+            tectonics.min_sea_fraction(),
+        );
+        let view = climate_elevations(tectonics.mesh(), &elevation, &seeds);
+        temperature.update(&view, None);
         let cell_count = tectonics.mesh().len();
         let mut planet = Self {
             tectonics,
@@ -217,7 +225,7 @@ impl Planet {
             cover_cohort: None,
             inland_change: 0.0,
         };
-        planet.update_water_cycle(&climate_elevations(&planet.tectonics));
+        planet.update_water_cycle(&view);
         planet
     }
 
@@ -291,7 +299,14 @@ impl Planet {
         let start = Instant::now();
         let elevation = self.tectonics.surface_elevations();
         // Ice sheets depend on last step's snowfall.
-        let view = climate_elevations(&self.tectonics);
+        // The seas of this topography, for the climate and the erosion.
+        let seeds = crate::sea::ocean_seeds(
+            self.tectonics.mesh(),
+            &elevation,
+            -crate::sea::SILL_TOLERANCE,
+            self.tectonics.min_sea_fraction(),
+        );
+        let view = climate_elevations(self.tectonics.mesh(), &elevation, &seeds);
         self.temperature.update(&view, Some(&self.precipitation));
         self.update_water_cycle(&view);
         let climate_time = start.elapsed();
@@ -313,7 +328,7 @@ impl Planet {
                     plate: &plate,
                     class: &class,
                     ocean_volume: self.tectonics.ocean_volume(),
-                    min_sea_fraction: self.tectonics.min_sea_fraction(),
+                    ocean_seeds: &seeds,
                 },
                 params,
                 dt_years,
@@ -610,9 +625,13 @@ fn crust_class(crust: &Crust) -> CrustClass {
 /// The surface elevations as the climate and temperature models see them: closed depressions
 /// below sea level are land (raised to sea level; the lapse rate ignores elevations below it
 /// anyway), so that they get runoff and potential evaporation instead of ocean evaporation.
-fn climate_elevations(tectonics: &Simulation) -> Vec<f64> {
-    let mut elevation = tectonics.surface_elevations();
-    let ocean = crate::sea::ocean_mask(tectonics.mesh(), &elevation, tectonics.min_sea_fraction());
+fn climate_elevations(
+    mesh: &crate::sphere::SphereMesh,
+    elevation: &[f64],
+    seeds: &[usize],
+) -> Vec<f64> {
+    let ocean = crate::sea::ocean_from(mesh, elevation, seeds.iter().copied());
+    let mut elevation = elevation.to_vec();
     for (e, ocean) in elevation.iter_mut().zip(ocean) {
         if !ocean {
             *e = e.max(0.0);

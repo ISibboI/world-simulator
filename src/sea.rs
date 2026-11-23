@@ -40,15 +40,67 @@ pub const SILL_TOLERANCE: f64 = 1e-6;
 /// third of it.
 pub const MIN_SEA_FRACTION: f64 = 0.002;
 
-/// The seeds of the ocean: the deepest cell of the largest connected body (by cell count) of the
-/// cells with `level < reference`, and of every other body whose basin, filled to its pass
-/// towards the largest body, covers at least `min_sea_fraction` of the cells
-/// (a sea connected to the ocean by straits narrower than a cell); the lowest cell of all if
-/// there is none. The size at the pass does not depend on the sea level, so a body is a sea or
-/// not whichever reference the solve or a mask uses, as long as some of it is below it.
-fn seeds(mesh: &SphereMesh, level: &[f64], reference: f64, min_sea_fraction: f64) -> Vec<usize> {
+/// The ocean's priority flood (Barnes et al., 2014) from its seeds: the pass level of every
+/// cell, the lowest possible highest `level` on a path of neighbouring cells from a seed, and
+/// the cells in the order in which the flood reaches them, which is the order of their passes.
+struct Flood {
+    pass: Vec<f64>,
+    order: Vec<u32>,
+}
+
+/// The flood from the given seeds.
+fn flood(mesh: &SphereMesh, level: &[f64], seeds: &[usize]) -> Flood {
     let cell_count = mesh.len();
-    let min_cells = min_sea_fraction * cell_count as f64;
+    let mut pass = vec![f64::INFINITY; cell_count];
+    let mut order = Vec::with_capacity(cell_count);
+    let mut reached = vec![false; cell_count];
+    let mut heap = BinaryHeap::new();
+    for &seed in seeds {
+        if !reached[seed] {
+            pass[seed] = level[seed];
+            reached[seed] = true;
+            heap.push(Reverse((Ordered(level[seed]), seed as u32)));
+        }
+    }
+    // Cells leave the queue in the order of their passes, so the first path to reach a cell is
+    // the lowest one.
+    while let Some(Reverse((Ordered(at), cell))) = heap.pop() {
+        order.push(cell);
+        for &neighbor in mesh.neighbors(cell) {
+            let n = neighbor as usize;
+            if !reached[n] {
+                reached[n] = true;
+                pass[n] = level[n].max(at);
+                heap.push(Reverse((Ordered(pass[n]), neighbor)));
+            }
+        }
+    }
+    Flood { pass, order }
+}
+
+/// The flood of the ocean. Its seeds are the deepest cell of the largest connected body (by
+/// cell count) of the cells with `level < reference`, and of every other body whose basin,
+/// filled to its pass towards the largest body, covers at least `min_sea_fraction` of the
+/// cells (a sea connected to the ocean by straits narrower than a cell); the lowest cell of all
+/// if there is none. The size at the pass does not depend on the sea level, so a body is a sea
+/// or not whichever reference the solve or a mask uses, as long as some of it is below it.
+fn ocean_flood(mesh: &SphereMesh, level: &[f64], reference: f64, min_sea_fraction: f64) -> Flood {
+    let seeds = seeds(mesh, level, reference);
+    let first = flood(mesh, level, &seeds[..1]);
+    let extra = sea_seeds(mesh, level, &seeds[1..], &first.pass, min_sea_fraction);
+    if extra.is_empty() {
+        first
+    } else {
+        let mut all = vec![seeds[0]];
+        all.extend(extra);
+        flood(mesh, level, &all)
+    }
+}
+
+/// The deepest cell of the largest connected body of the cells with `level < reference` (or the
+/// lowest cell of all if there is none), followed by the deepest cells of the other bodies.
+fn seeds(mesh: &SphereMesh, level: &[f64], reference: f64) -> Vec<usize> {
+    let cell_count = mesh.len();
     let mut body = vec![false; cell_count];
     let mut queue = VecDeque::new();
     // (size, deepest cell) of every body.
@@ -75,30 +127,42 @@ fn seeds(mesh: &SphereMesh, level: &[f64], reference: f64, min_sea_fraction: f64
         }
         bodies.push((size, deepest));
     }
-    let largest = bodies.iter().map(|&(size, _)| size).max();
-    let Some(largest) = largest else {
+    let Some(first) = (0..bodies.len()).max_by_key(|&i| (bodies[i].0, Reverse(i))) else {
         return vec![
             (0..cell_count)
                 .min_by(|&a, &b| level[a].total_cmp(&level[b]))
                 .unwrap_or(0),
         ];
     };
-    let Some(first) = bodies.iter().position(|&(size, _)| size == largest) else {
-        unreachable!("the largest body is one of them")
-    };
     let mut seeds = vec![bodies[first].1];
-    if bodies.len() == 1 || min_cells > cell_count as f64 {
-        return seeds;
+    seeds.extend(
+        bodies
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != first)
+            .map(|(_, &(_, deepest))| deepest),
+    );
+    seeds
+}
+
+/// The deepest cells of the `others` bodies whose basin, filled to its `pass` (from the flood
+/// of the largest body), covers at least `min_sea_fraction` of the cells.
+fn sea_seeds(
+    mesh: &SphereMesh,
+    level: &[f64],
+    others: &[usize],
+    pass: &[f64],
+    min_sea_fraction: f64,
+) -> Vec<usize> {
+    let cell_count = mesh.len();
+    let min_cells = min_sea_fraction * cell_count as f64;
+    let mut seas = Vec::new();
+    if others.is_empty() || min_cells > cell_count as f64 {
+        return seas;
     }
-    // Every other body's basin, filled to its pass towards the largest body (its spill level
-    // into the world ocean, which deposits in sub-basins do not change).
-    let pass = pass_levels(mesh, level, &seeds);
     let mut in_basin = vec![false; cell_count];
     let mut basin = Vec::new();
-    for (index, &(_, deepest)) in bodies.iter().enumerate() {
-        if index == first {
-            continue;
-        }
+    for &deepest in others {
         let spill = pass[deepest];
         basin.clear();
         basin.push(deepest);
@@ -116,43 +180,40 @@ fn seeds(mesh: &SphereMesh, level: &[f64], reference: f64, min_sea_fraction: f64
             }
         }
         if basin.len() as f64 >= min_cells {
-            seeds.push(deepest);
+            seas.push(deepest);
         }
         for &cell in &basin {
             in_basin[cell] = false;
         }
     }
-    seeds
+    seas
 }
 
-/// The pass level of every cell: the lowest possible highest `level` on a path of neighbouring
-/// cells from `seeds` (Barnes et al., 2014: priority flood). [`sea_level`] floods the same way.
+/// The pass level of every cell from `seeds` (see [`Flood`]).
+#[cfg(test)]
 fn pass_levels(mesh: &SphereMesh, level: &[f64], seeds: &[usize]) -> Vec<f64> {
-    let cell_count = mesh.len();
-    let mut pass = vec![f64::INFINITY; cell_count];
-    let mut reached = vec![false; cell_count];
-    let mut heap = BinaryHeap::new();
-    if cell_count == 0 {
-        return pass;
-    }
-    // Cells leave the queue in the order of their pass levels, so the first path to reach a
-    // cell is the lowest one.
-    for &seed in seeds {
-        pass[seed] = level[seed];
-        reached[seed] = true;
-        heap.push(Reverse((Ordered(level[seed]), seed as u32)));
-    }
-    while let Some(Reverse((Ordered(at), cell))) = heap.pop() {
-        for &neighbor in mesh.neighbors(cell) {
-            let n = neighbor as usize;
-            if !reached[n] {
-                reached[n] = true;
-                pass[n] = level[n].max(at);
-                heap.push(Reverse((Ordered(pass[n]), neighbor)));
-            }
-        }
-    }
-    pass
+    flood(mesh, level, seeds).pass
+}
+
+/// The seeds of the ocean (see [`ocean_flood`]) for [`ocean_from`] and [`sea_level_from`]: the
+/// seas of one topography, to keep through small changes of it (one erosion step).
+pub fn ocean_seeds(
+    mesh: &SphereMesh,
+    level: &[f64],
+    reference: f64,
+    min_sea_fraction: f64,
+) -> Vec<usize> {
+    let seeds = seeds(mesh, level, reference);
+    let first = flood(mesh, level, &seeds[..1]);
+    let mut all = vec![seeds[0]];
+    all.extend(sea_seeds(
+        mesh,
+        level,
+        &seeds[1..],
+        &first.pass,
+        min_sea_fraction,
+    ));
+    all
 }
 
 /// The ocean among cells with the given surface elevations relative to sea level (m): the cells
@@ -160,8 +221,11 @@ fn pass_levels(mesh: &SphereMesh, level: &[f64], seeds: &[usize]) -> Vec<f64> {
 /// at least `min_sea_fraction` of the surface (see [`MIN_SEA_FRACTION`]), also over sills on
 /// which the sea level stands (see [`SILL_TOLERANCE`]).
 pub fn ocean_mask(mesh: &SphereMesh, elevation: &[f64], min_sea_fraction: f64) -> Vec<bool> {
-    let seeds = seeds(mesh, elevation, -SILL_TOLERANCE, min_sea_fraction);
-    ocean_from(mesh, elevation, seeds)
+    let Flood { pass, .. } = ocean_flood(mesh, elevation, -SILL_TOLERANCE, min_sea_fraction);
+    pass.iter()
+        .zip(elevation)
+        .map(|(&pass, &e)| pass < SILL_TOLERANCE && e < -SILL_TOLERANCE)
+        .collect()
 }
 
 /// The cells below sea level (`elevation < 0`, less [`SILL_TOLERANCE`]) connected to the
@@ -223,23 +287,83 @@ pub fn sea_level(
             deficit: 0.0,
         };
     }
-    // The priority flood of `pass_levels` hands out the cells in the order of their passes,
-    // which is the order in which `isostasy::sea_level_for_volume_with_passes` takes them: solve
-    // while flooding and stop at the level, without passes for the cells above it.
-    let seeds = seeds(mesh, dry, reference, min_sea_fraction);
+    // The flood hands out the cells in the order of their passes, which is the order in which
+    // the volume takes them.
+    let Flood { pass, order } = ocean_flood(mesh, dry, reference, min_sea_fraction);
     let target = volume / (cell_area * isostasy::WATER_LOADING);
+    if target <= 0.0 {
+        return SeaLevel {
+            level: pass[order[0] as usize],
+            deficit: 0.0,
+        };
+    }
+    let (mut count, mut prefix, mut pore_prefix) = (0usize, 0.0, 0.0);
+    // The cells with a lower pass than the current one: their count and sums.
+    let mut lower = (0, 0.0, 0.0);
+    let mut previous = f64::NEG_INFINITY;
+    for (k, &cell) in order.iter().enumerate() {
+        let cell = cell as usize;
+        let pass_here = pass[cell];
+        if previous < pass_here {
+            lower = (count, prefix, pore_prefix);
+            previous = pass_here;
+        }
+        count += 1;
+        prefix += dry[cell];
+        pore_prefix += pores[cell] / isostasy::WATER_LOADING;
+        // With these `count` cells in the ocean: count · S − Σ dᵢ + Σ pᵢ / W = target.
+        let level = (target + prefix - pore_prefix) / count as f64;
+        if level < pass_here {
+            // The volume runs out while this cell joins (its basin below the pass, or its
+            // pores): the cells with a lower pass hold their share, the rest is the deficit.
+            let (below, dry_sum, pore_sum) = lower;
+            let held = below as f64 * pass_here - dry_sum + pore_sum;
+            return SeaLevel {
+                level: pass_here,
+                deficit: ((target - held) * cell_area * isostasy::WATER_LOADING).max(0.0),
+            };
+        }
+        match order.get(k + 1) {
+            Some(&next) if level > pass[next as usize] => {}
+            _ => {
+                return SeaLevel {
+                    level,
+                    deficit: 0.0,
+                };
+            }
+        }
+    }
+    unreachable!("the flood returns at the last cell")
+}
+
+/// [`sea_level`] for given seeds of the ocean (see [`ocean_seeds`]); the flood stops at the
+/// level.
+pub fn sea_level_from(
+    mesh: &SphereMesh,
+    dry: &[f64],
+    pores: &[f64],
+    cell_area: f64,
+    volume: f64,
+    seeds: &[usize],
+) -> SeaLevel {
     let mut reached = vec![false; dry.len()];
     let mut heap = BinaryHeap::new();
-    for &seed in &seeds {
-        reached[seed] = true;
-        heap.push(Reverse((Ordered(dry[seed]), seed as u32)));
+    for &seed in seeds {
+        if !reached[seed] {
+            reached[seed] = true;
+            heap.push(Reverse((Ordered(dry[seed]), seed as u32)));
+        }
     }
-    if target <= 0.0 {
-        let Some(Reverse((Ordered(lowest), _))) = heap.peek() else {
-            unreachable!("there is a seed")
-        };
+    let target = volume / (cell_area * isostasy::WATER_LOADING);
+    let Some(&Reverse((Ordered(lowest), _))) = heap.peek() else {
         return SeaLevel {
-            level: *lowest,
+            level: 0.0,
+            deficit: 0.0,
+        };
+    };
+    if target <= 0.0 {
+        return SeaLevel {
+            level: lowest,
             deficit: 0.0,
         };
     }
@@ -262,11 +386,8 @@ pub fn sea_level(
         count += 1;
         prefix += dry[cell as usize];
         pore_prefix += pores[cell as usize] / isostasy::WATER_LOADING;
-        // With these `count` cells in the ocean: count · S − Σ dᵢ + Σ pᵢ / W = target.
         let level = (target + prefix - pore_prefix) / count as f64;
         if level < pass {
-            // The volume runs out while this cell joins (its basin below the pass, or its
-            // pores): the cells with a lower pass hold their share, the rest is the deficit.
             let (below, dry_sum, pore_sum) = lower;
             let held = below as f64 * pass - dry_sum + pore_sum;
             return SeaLevel {
@@ -287,9 +408,27 @@ pub fn sea_level(
     unreachable!("the flood returns at the last cell")
 }
 
+/// [`relative_sea_level`] for given seeds of the ocean (see [`ocean_seeds`]).
+pub fn relative_sea_level_from(
+    mesh: &SphereMesh,
+    elevations: &[f64],
+    sediment: &[f64],
+    cell_area: f64,
+    volume: f64,
+    seeds: &[usize],
+) -> f64 {
+    let dry: Vec<f64> = elevations.iter().map(|&e| isostasy::to_dry(e)).collect();
+    let pores: Vec<f64> = sediment
+        .iter()
+        .map(|&s| isostasy::sediment_pores(s))
+        .collect();
+    sea_level_from(mesh, &dry, &pores, cell_area, volume, seeds).level
+}
+
 /// The sea level (as an offset of dry elevations, m) at which the ocean holds `volume` (m³),
 /// relative to the sea level that the surface `elevations` (m) refer to, for cells of equal
 /// `cell_area` (m²) carrying the given rock-equivalent `sediment` (m), whose pores hold water.
+#[cfg(test)]
 pub fn relative_sea_level(
     mesh: &SphereMesh,
     elevations: &[f64],
@@ -441,7 +580,7 @@ mod tests {
             }
         }
         assert!(inner.contains(&-900.0));
-        assert!(seeds(&mesh, &inner, -1000.0, MIN_SEA_FRACTION).len() >= 3);
+        assert!(ocean_seeds(&mesh, &inner, -1000.0, MIN_SEA_FRACTION).len() >= 3);
         // Without the rule, it is a lake.
         let ocean = ocean_mask(&mesh, &elevation, 1.0);
         assert!(!ocean.iter().zip(&dry).any(|(&o, &d)| o && d == -1800.0));
@@ -461,7 +600,7 @@ mod tests {
         for reference in [-1700.0, -1300.0] {
             let below = |d: f64| d < reference;
             assert!(dry.iter().filter(|&&d| d > -2000.0 && below(d)).count() > 0);
-            let seeds = seeds(&mesh, &dry, reference, MIN_SEA_FRACTION);
+            let seeds = ocean_seeds(&mesh, &dry, reference, MIN_SEA_FRACTION);
             assert_eq!(seeds.len(), 2, "{reference}");
             let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - reference)).collect();
             let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
@@ -471,7 +610,7 @@ mod tests {
         }
         // A small basin is a lake at any sea level.
         let (mesh, dry) = world(-1800.0);
-        let seeds = seeds(&mesh, &dry, -1000.0, MIN_SEA_FRACTION);
+        let seeds = ocean_seeds(&mesh, &dry, -1000.0, MIN_SEA_FRACTION);
         assert_eq!(seeds.len(), 1);
     }
 
@@ -509,7 +648,11 @@ mod tests {
         let (mesh, dry) = world(-300.0);
         let area = 1e10;
         let pores = vec![0.0; dry.len()];
-        let passes = pass_levels(&mesh, &dry, &seeds(&mesh, &dry, 0.0, MIN_SEA_FRACTION));
+        let passes = pass_levels(
+            &mesh,
+            &dry,
+            &ocean_seeds(&mesh, &dry, 0.0, MIN_SEA_FRACTION),
+        );
         let pit = (0..dry.len()).find(|&c| dry[c] == -300.0).unwrap();
         let rim = passes[pit];
         assert!(rim > 500.0);
@@ -569,13 +712,18 @@ mod tests {
         let pores: Vec<f64> = (0..dry.len()).map(|c| ((c * 37) % 11) as f64).collect();
         for volume in [0.0, 1e14, 1e16, 3e16, 1e17, 1e19] {
             let solved = sea_level(&mesh, &dry, &pores, 1e10, volume, (0.0, MIN_SEA_FRACTION));
-            let seeds = seeds(&mesh, &dry, 0.0, MIN_SEA_FRACTION);
+            let seeds = ocean_seeds(&mesh, &dry, 0.0, MIN_SEA_FRACTION);
             let passes = pass_levels(&mesh, &dry, &seeds);
             let sorted =
                 isostasy::sea_level_for_volume_with_passes(&dry, &passes, &pores, 1e10, volume);
             assert!(
                 (solved.level - sorted.level).abs() < 1e-9,
                 "{solved:?} {sorted:?}"
+            );
+            let from = sea_level_from(&mesh, &dry, &pores, 1e10, volume, &seeds);
+            assert!(
+                (from.level - solved.level).abs() < 1e-9,
+                "{from:?} {solved:?}"
             );
             assert!(
                 (solved.deficit - sorted.deficit).abs() <= 1e-9 * volume.max(1.0),

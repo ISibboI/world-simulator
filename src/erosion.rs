@@ -310,9 +310,9 @@ pub struct Surface<'a> {
     /// Volume of the ocean (m³), to solve the sea level (see
     /// [`sea::sea_level`]) as sediment fills it.
     pub ocean_volume: f64,
-    /// Bodies of water below sea level of at least this fraction of the surface are seas (see
-    /// [`sea::MIN_SEA_FRACTION`]).
-    pub min_sea_fraction: f64,
+    /// The seeds of the ocean for this topography (see [`sea::ocean_seeds`]): the ocean is the
+    /// water below sea level connected to them.
+    pub ocean_seeds: &'a [usize],
 }
 
 /// Changes caused by one erosion step, and diagnostic fields.
@@ -412,13 +412,13 @@ pub fn erode(
         plate,
         class,
         ocean_volume,
-        min_sea_fraction,
+        ocean_seeds,
     } = *surface;
     let cell_count = mesh.len();
     let cell_area = 4.0 * std::f64::consts::PI * params.planet_radius.powi(2) / cell_count as f64;
     // The ocean: water below sea level connected to the world ocean. Closed depressions below
     // sea level are land, dry or holding lakes (#58).
-    let ocean = sea::ocean_mask(mesh, elevation, min_sea_fraction);
+    let ocean = sea::ocean_from(mesh, elevation, ocean_seeds.iter().copied());
     let is_ocean = |cell: usize| ocean[cell];
 
     let Drainage {
@@ -607,12 +607,13 @@ pub fn erode(
 
     // The sea level (relative to the current one) before the step, to measure its changes;
     // zero up to rounding.
-    let initial_sea_level = sea::relative_sea_level(
+    let initial_sea_level = sea::relative_sea_level_from(
         mesh,
         elevation,
         sediment,
         cell_area,
-        (ocean_volume, min_sea_fraction),
+        ocean_volume,
+        ocean_seeds,
     );
     let mut seabed = Seabed {
         sediment: sediment
@@ -762,8 +763,7 @@ pub fn erode(
     // The deposits displace water: the coastal processes below work against the sea level
     // they raised, so that delta plains are not built for a sea level that their own sediment
     // floods (all elevations are shifted; land lower than the rise becomes sea).
-    let fluvial =
-        seabed.sea_level(mesh, cell_area, (ocean_volume, min_sea_fraction)) - initial_sea_level;
+    let fluvial = seabed.sea_level(mesh, cell_area, ocean_volume, ocean_seeds) - initial_sea_level;
     seabed.shift_sea_level(fluvial);
     // The sea now also covers the land lower than its rise that it reaches.
     let risen: Vec<f64> = (0..cell_count)
@@ -862,12 +862,12 @@ pub fn erode(
         }
     }
 
-    let ocean = sea::ocean_mask(mesh, &seabed.elevation, min_sea_fraction);
+    let ocean = sea::ocean_from(mesh, &seabed.elevation, ocean_seeds.iter().copied());
     diffuse_sediment(mesh, &mut seabed, &ocean, params, dt_years);
 
     let wave = if params.waves {
         wave_erosion(
-            (mesh, min_sea_fraction),
+            (mesh, ocean_seeds),
             &mut seabed,
             &mut bedrock_delta,
             (bedrock_density, bedrock_isostatic_density),
@@ -880,7 +880,7 @@ pub fn erode(
     };
 
     // Relative to the shifted sea level.
-    let coastal = seabed.sea_level(mesh, cell_area, (ocean_volume, min_sea_fraction));
+    let coastal = seabed.sea_level(mesh, cell_area, ocean_volume, ocean_seeds);
     ErosionResult {
         bedrock_delta,
         sediment_delta: seabed.delta,
@@ -1170,7 +1170,7 @@ fn fill_lake(seabed: &mut Seabed, cells: &[u32], spill: f64, amount: f64) -> f64
 /// The moved sediment goes offshore through the sea, nearest cells first, to cells below their
 /// wave base with room (zone targets and caps). What finds no room within reach stays.
 fn wave_erosion(
-    (mesh, min_sea_fraction): (&SphereMesh, f64),
+    (mesh, ocean_seeds): (&SphereMesh, &[usize]),
     seabed: &mut Seabed,
     bedrock_delta: &mut [f64],
     (bedrock_density, bedrock_isostatic_density): (&[f64], &[f64]),
@@ -1183,7 +1183,7 @@ fn wave_erosion(
     let mut result = WaveErosion::default();
 
     // Waves act on the ocean only, not on lakes or dry depressions.
-    let ocean = sea::ocean_mask(mesh, &seabed.elevation, min_sea_fraction);
+    let ocean = sea::ocean_from(mesh, &seabed.elevation, ocean_seeds.iter().copied());
     let wave_base = wave_bases_in(mesh, &seabed.elevation, &ocean, params);
     let wave_base = |cell: usize| wave_base[cell];
 
@@ -1667,8 +1667,15 @@ impl Seabed {
 
     /// The sea level relative to the one the elevations refer to (m, an offset of dry
     /// elevations).
-    fn sea_level(&self, mesh: &SphereMesh, cell_area: f64, volume: (f64, f64)) -> f64 {
-        sea::relative_sea_level(mesh, &self.elevation, &self.sediment, cell_area, volume)
+    fn sea_level(&self, mesh: &SphereMesh, cell_area: f64, volume: f64, seeds: &[usize]) -> f64 {
+        sea::relative_sea_level_from(
+            mesh,
+            &self.elevation,
+            &self.sediment,
+            cell_area,
+            volume,
+            seeds,
+        )
     }
 
     /// Makes the elevations relative to a sea level `rise` m (dry offset) higher.
@@ -1967,7 +1974,12 @@ mod tests {
                 plate,
                 class,
                 ocean_volume: ocean_volume(mesh, elevation, sediment, params.planet_radius),
-                min_sea_fraction: sea::MIN_SEA_FRACTION,
+                ocean_seeds: &sea::ocean_seeds(
+                    mesh,
+                    elevation,
+                    -sea::SILL_TOLERANCE,
+                    sea::MIN_SEA_FRACTION,
+                ),
             },
             params,
             1e6,
@@ -2294,7 +2306,12 @@ mod tests {
                 plate: &vec![0; n],
                 class: &classes(elevation, -1000.0),
                 ocean_volume: ocean_volume(mesh, elevation, &sediment, params.planet_radius),
-                min_sea_fraction: sea::MIN_SEA_FRACTION,
+                ocean_seeds: &sea::ocean_seeds(
+                    mesh,
+                    elevation,
+                    -sea::SILL_TOLERANCE,
+                    sea::MIN_SEA_FRACTION,
+                ),
             },
             &params,
             1e6,
@@ -2374,7 +2391,12 @@ mod tests {
                 plate: &vec![0; n],
                 class: &classes(elevation, -1000.0),
                 ocean_volume: ocean_volume(mesh, elevation, sediment, params.planet_radius),
-                min_sea_fraction: sea::MIN_SEA_FRACTION,
+                ocean_seeds: &sea::ocean_seeds(
+                    mesh,
+                    elevation,
+                    -sea::SILL_TOLERANCE,
+                    sea::MIN_SEA_FRACTION,
+                ),
             },
             params,
             1e6,
