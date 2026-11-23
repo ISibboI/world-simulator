@@ -272,6 +272,15 @@ fn known(value: f32, format: impl Fn(f32) -> String) -> Option<String> {
     value.is_finite().then(|| format(value))
 }
 
+/// A thickness in metres, in km from 1 km on (short enough for the widget on phones).
+fn format_thickness(metres: f32) -> String {
+    if metres >= 999.5 {
+        format!("{:.1} km", metres / 1000.0)
+    } else {
+        format!("{metres:.0} m")
+    }
+}
+
 fn format_temperature(value: f32) -> Option<String> {
     known(value, |t| format!("{t:.1} °C"))
 }
@@ -324,7 +333,13 @@ pub fn format_rows(
                 format!("{age:.0} Myr (ocean floor)")
             }
         }),
-        Some(format!("{:.0} m (as rock)", info.sediment)),
+        known(info.sediment, |rock| {
+            format!(
+                "{} ({} as rock)",
+                format_thickness(super::modes::bulk_sediment(rock)),
+                format_thickness(rock)
+            )
+        }),
         (info.since_orogeny.is_finite() || info.orogenic > 0.0).then(|| {
             format!(
                 "{:.0}%, last {}",
@@ -687,7 +702,9 @@ mod tests {
         );
         assert_eq!(row(&rows, "Crust").unwrap(), "continental, 35.2 km");
         assert_eq!(row(&rows, "Lithosphere age").unwrap(), "old (≥ 1000 Myr)");
-        assert_eq!(row(&rows, "Sediment").unwrap(), "512 m (as rock)");
+        assert_eq!(row(&rows, "Sediment").unwrap(), "774 m (512 m as rock)");
+        assert_eq!(format_thickness(12_345.0), "12.3 km");
+        assert_eq!(format_thickness(999.0), "999 m");
         assert_eq!(row(&rows, "Orogeny").unwrap(), "25%, last 88 Myr ago");
         assert_eq!(row(&rows, "Temperature").unwrap(), "12.3 °C");
         assert_eq!(row(&rows, "Jan / Jul").unwrap(), "-3.2 °C / 25.0 °C");

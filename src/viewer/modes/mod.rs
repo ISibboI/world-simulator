@@ -23,7 +23,10 @@ mod moisture;
 mod ocean_currents;
 mod plate_motion;
 mod plates;
+mod sediment;
 pub mod switcher;
+
+pub use sediment::bulk as bulk_sediment;
 mod temperature;
 mod topographic;
 
@@ -54,6 +57,8 @@ pub enum RenderModeId {
     Moisture,
     /// The wind-driven ocean gyres as arrows.
     OceanCurrents,
+    /// Sediment thickness on land and sea floor (logarithmic), with optional isopachs.
+    Sediment,
 }
 
 impl RenderModeId {
@@ -66,6 +71,7 @@ impl RenderModeId {
             RenderModeId::Temperature => &temperature::Temperature,
             RenderModeId::Moisture => &moisture::Moisture,
             RenderModeId::OceanCurrents => &ocean_currents::OceanCurrents,
+            RenderModeId::Sediment => &sediment::Sediment,
         }
     }
 
@@ -89,6 +95,7 @@ impl RenderModeId {
             RenderModeId::Temperature => "temperature",
             RenderModeId::Moisture => "moisture",
             RenderModeId::OceanCurrents => "ocean-currents",
+            RenderModeId::Sediment => "sediment",
         }
     }
 
