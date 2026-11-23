@@ -1,9 +1,10 @@
 //! Render modes of the 3D view: what the planet's colours and overlays show.
 //!
 //! A mode is a [`RenderMode`]: it names the extra [`Layers`] it needs from the simulation, may
-//! colour the cells ([`RenderMode::colors`], from the [`CellInfo`]s every update carries and the
-//! requested layers), may draw arrows ([`RenderMode::arrows`], see [`super::arrows`]), and
-//! describes itself in a [`Legend`]. The topographic mode, the default, keeps the colours the
+//! colour the cells ([`RenderMode::colors`], from the [`CellInfo`]s and [`PlateInfo`]s every
+//! update carries and the requested layers), may draw over the planet ([`RenderMode::overlay`]:
+//! arrows, lines, markers, see [`super::overlay`]; vector modes just give
+//! [`RenderMode::arrows`]), and describes itself in a [`Legend`]. The topographic mode, the default, keeps the colours the
 //! view builds the vertices with (`render::surface_color`), so it looks exactly as before modes
 //! existed.
 //!
@@ -17,16 +18,19 @@
 //! [`CellInfo`] adds a [`super::fields::Layer`].
 
 mod plate_motion;
+mod plates;
 pub mod switcher;
 mod topographic;
 
 use clap::ValueEnum;
 use glam::Vec3;
 
-use super::CellInfo;
 use super::arrows::{ArrowStyle, Sample, base_point};
 use super::fields::{Fields, Layer, Layers};
+use super::overlay::OverlayBuilder;
+use super::plate_colors::PlateColors;
 use super::renderer::Vertex;
+use super::{CellInfo, PlateInfo};
 use crate::sphere::SphereMesh;
 
 /// The render modes, by their names on the command line and in the URL.
@@ -37,6 +41,8 @@ pub enum RenderModeId {
     Topographic,
     /// Plate velocities as arrows over the topographic colours.
     PlateMotion,
+    /// Plates in their colours, their boundaries by type, and their motion.
+    Plates,
 }
 
 impl RenderModeId {
@@ -45,6 +51,7 @@ impl RenderModeId {
         match self {
             RenderModeId::Topographic => &topographic::Topographic,
             RenderModeId::PlateMotion => &plate_motion::PlateMotion,
+            RenderModeId::Plates => &plates::Plates,
         }
     }
 
@@ -64,6 +71,7 @@ impl RenderModeId {
         match self {
             RenderModeId::Topographic => "topographic",
             RenderModeId::PlateMotion => "plate-motion",
+            RenderModeId::Plates => "plates",
         }
     }
 
@@ -80,8 +88,11 @@ pub struct ModeData<'a> {
     pub mesh: &'a SphereMesh,
     /// The displayed vertices of the cells (with the topographic colours).
     pub vertices: &'a [Vertex],
-    #[allow(dead_code)] // For the scalar modes to come (#94, #95, #98–#100); see the tests.
+    /// The attributes of the cells.
     pub cells: &'a [CellInfo],
+    /// The plates, by index ([`CellInfo::plate`]), and their colours.
+    pub plates: &'a [PlateInfo],
+    pub plate_colors: &'a PlateColors,
     /// The requested layers, as far as they arrived.
     pub fields: &'a Fields,
     /// Evenly spread cells for arrows, and their spacing in planet radii.
@@ -135,9 +146,17 @@ pub trait RenderMode: Sync {
         None
     }
 
-    /// Arrows to draw over the planet with their style, if any.
+    /// Arrows to draw over the planet with their style, if any (drawn by the default
+    /// [`RenderMode::overlay`]).
     fn arrows(&self, _data: &ModeData) -> Option<(Vec<Sample>, ArrowStyle)> {
         None
+    }
+
+    /// Draws over the planet: by default the [`RenderMode::arrows`].
+    fn overlay(&self, data: &ModeData, overlay: &mut OverlayBuilder) {
+        if let Some((samples, style)) = self.arrows(data) {
+            overlay.arrows(&samples, &style);
+        }
     }
 
     /// Whether the planet is shaded by the light (relief visible) or shows the colours as they
@@ -175,22 +194,60 @@ pub struct Legend {
     pub description: Text,
     /// A colour bar with its unit.
     pub scale: Option<ColorScale>,
-    /// Colours with a meaning of their own (rivers, ice, …).
+    /// Colours, lines and markers with a meaning of their own (rivers, ice, boundaries, …).
     pub swatches: Vec<Swatch>,
-    /// The meaning of the arrows' length.
-    pub arrows: Option<ArrowScale>,
+    /// The meaning of the arrows' length, per kind of arrow.
+    pub arrows: Vec<ArrowScale>,
 }
 
-/// A colour with its label.
+/// A colour (or a line or marker in that colour) with its label.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Swatch {
     pub color: [u8; 3],
     pub label: Text,
+    pub shape: SwatchShape,
+}
+
+impl Swatch {
+    /// A filled square of a colour.
+    pub fn fill(color: [u8; 3], label: impl Into<Text>) -> Self {
+        Self {
+            color,
+            label: label.into(),
+            shape: SwatchShape::Fill,
+        }
+    }
+
+    pub fn new(color: [u8; 3], shape: SwatchShape, label: impl Into<Text>) -> Self {
+        Self {
+            color,
+            label: label.into(),
+            shape,
+        }
+    }
+}
+
+/// How a [`Swatch`] is drawn; all but [`SwatchShape::Fill`] get a row of their own.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SwatchShape {
+    /// A filled square.
+    Fill,
+    /// A line with a dark border, as boundary lines on the planet.
+    Line,
+    /// A line with teeth on one side, as subduction zones.
+    Teeth,
+    /// Dark dots on a background of this colour, as a stippled area.
+    Dots,
+    /// A row of small squares of these colours (the colour of the swatch is not used), as for
+    /// categories whose colours have no meaning of their own.
+    Palette(Vec<[u8; 3]>),
 }
 
 /// Arrows of known magnitudes, drawn in the legend at their size on the planet's front.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArrowScale {
+    /// What the arrows show, if the legend has several kinds.
+    pub label: Option<Text>,
     /// Magnitudes in `unit` with the lengths and shaft widths of their arrows in planet radii.
     pub examples: Vec<(f64, f64, f64)>,
     pub unit: Text,
@@ -202,12 +259,20 @@ impl ArrowScale {
     /// The arrows of `magnitudes` in a style.
     pub fn new(style: &ArrowStyle, magnitudes: &[f64], unit: impl Into<Text>) -> Self {
         Self {
+            label: None,
             examples: magnitudes
                 .iter()
                 .map(|&magnitude| (magnitude, style.length(magnitude), style.width(magnitude)))
                 .collect(),
             unit: unit.into(),
             color: style.color,
+        }
+    }
+
+    pub fn with_label(self, label: impl Into<Text>) -> Self {
+        Self {
+            label: Some(label.into()),
+            ..self
         }
     }
 }
@@ -270,7 +335,6 @@ impl ColorScale {
 }
 
 /// An 8-bit sRGB colour as a vertex colour.
-#[allow(dead_code)] // For the scalar modes to come (#94, #95, #98–#100); see the tests.
 pub fn rgba([r, g, b]: [u8; 3]) -> [f32; 4] {
     [r, g, b, 255].map(|channel| f32::from(channel) / 255.0)
 }
@@ -480,10 +544,13 @@ mod tests {
         let mesh = planet.tectonics().mesh();
         let vertices = super::super::surface_vertices(mesh, &cells, 40.0, 1e11);
         let fields = Fields::default();
+        let plate_colors = PlateColors::default();
         let data = ModeData {
             mesh,
             vertices: &vertices,
             cells: &cells,
+            plates: &[],
+            plate_colors: &plate_colors,
             fields: &fields,
             arrow_cells: &[],
             arrow_spacing: 0.1,
@@ -503,10 +570,16 @@ mod tests {
         assert!(recolored(&vertices, &colors[1..]).is_none());
         assert_eq!(SedimentTest.shading(), Shading::Unlit);
         assert_eq!(RenderModeId::Topographic.mode().shading(), Shading::Lit);
-        // The topographic mode keeps the colours; no mode draws arrows without its data.
+        // The topographic mode keeps the colours and draws nothing over them; the plate motion
+        // mode draws no arrows without its data.
         assert!(RenderModeId::Topographic.mode().colors(&data).is_none());
-        for &mode in RenderModeId::all() {
-            assert!(mode.mode().arrows(&data).is_none());
-        }
+        let mut overlay = OverlayBuilder::default();
+        RenderModeId::Topographic
+            .mode()
+            .overlay(&data, &mut overlay);
+        RenderModeId::PlateMotion
+            .mode()
+            .overlay(&data, &mut overlay);
+        assert!(overlay.is_empty());
     }
 }

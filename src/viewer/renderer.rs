@@ -226,7 +226,7 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
 
 /// The pipeline of the overlay: [`OverlayVertex`] triangles, depth-tested against the planet
 /// (mountains in front hide them) without writing depth, so that they are drawn in their order
-/// (borders first, see `arrows::triangles`).
+/// (borders first, see `overlay::OverlayBuilder`).
 fn overlay_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,

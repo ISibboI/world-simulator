@@ -7,8 +7,8 @@
 //! (`?seed=3&subdivisions=5&no-erosion&set=basal_drag=8e14`, see [`crate::query`]); the worker
 //! gets the same query string. It sends `{ generating: true }` before it builds the planet, then a
 //! surface update after every step as
-//! `{ time, cells, plates }` (the attributes of the cells as [`viewer::CellInfo`]s, the angular
-//! velocity of every plate, and with the first update also `directions` and `faces`, the mesh),
+//! `{ time, cells, plates }` (the attributes of the cells as [`viewer::CellInfo`]s, the
+//! [`viewer::PlateInfo`] of every plate, and with the first update also `directions` and `faces`, the mesh),
 //! with the buffers transferred rather than copied, or `{ error }` if the simulation fails. A restart from the
 //! parameter panel terminates the worker and starts a new one with the new query string, which
 //! also replaces the query of the page URL, so that the setting can be shared as a link. Each
@@ -50,7 +50,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use crate::device::{self, DeviceSignals, Source};
 use crate::query::{args_to_query, query_to_args};
 use crate::viewer::{
-    self, CellInfo, Fields, FrameStore, Launch, Layer, Layers, MeshUpdate, RenderModeId,
+    self, CellInfo, Fields, FrameStore, Launch, Layer, Layers, MeshUpdate, PlateInfo, RenderModeId,
     SimulationControl, SimulationEvent, SurfaceUpdate, UiOptions, has_option, with_default,
 };
 
@@ -479,9 +479,15 @@ fn start_worker(
             let cell_count = cell_words.length() as usize / words_per_cell;
             let mut cells: Vec<CellInfo> = vec![bytemuck::Zeroable::zeroed(); cell_count];
             cell_words.copy_to(bytemuck::cast_slice_mut(&mut cells));
-            let plate_floats = js_sys::Float32Array::new(&plate_buffer);
-            let mut plates = vec![[0f32; 3]; plate_floats.length() as usize / 3];
-            plate_floats.copy_to(bytemuck::cast_slice_mut(&mut plates));
+            let plate_words = js_sys::Uint32Array::new(&plate_buffer);
+            let words_per_plate = std::mem::size_of::<PlateInfo>() / std::mem::size_of::<u32>();
+            if !(plate_words.length() as usize).is_multiple_of(words_per_plate) {
+                error!("Plates of the wrong size from the simulation worker");
+                return;
+            }
+            let mut plates: Vec<PlateInfo> =
+                vec![bytemuck::Zeroable::zeroed(); plate_words.length() as usize / words_per_plate];
+            plate_words.copy_to(bytemuck::cast_slice_mut(&mut plates));
             let mesh = match (
                 get(&data, "directions").dyn_into::<js_sys::ArrayBuffer>(),
                 get(&data, "faces").dyn_into::<js_sys::ArrayBuffer>(),
@@ -584,8 +590,6 @@ impl WorkerState {
             set(&message, key, &buffer);
             transfer.push(&buffer);
         };
-        let plates = viewer::plate_rotations(planet);
-        put_floats("plates", bytemuck::cast_slice(&plates));
         for (layer, values) in Fields::extract(planet, self.layers).iter() {
             put_floats(layer.key(), values);
         }
@@ -604,6 +608,8 @@ impl WorkerState {
         };
         let cells = viewer::cell_infos(planet);
         put_words("cells", bytemuck::cast_slice(&cells));
+        let plates = viewer::plate_infos(planet);
+        put_words("plates", bytemuck::cast_slice(&plates));
         if let Some(mesh) = &mesh {
             put_words("faces", bytemuck::cast_slice(&mesh.faces));
         }

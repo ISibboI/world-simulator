@@ -18,7 +18,7 @@ pub mod store;
 
 use std::ops::Range;
 
-use super::CellInfo;
+use super::{CellInfo, PlateInfo};
 pub use codec::BYTES_PER_CELL;
 use codec::{Kind, Planes, State};
 pub use store::FrameStore;
@@ -40,8 +40,8 @@ struct Entry {
 pub struct Frame {
     pub index: usize,
     pub cells: Vec<CellInfo>,
-    /// Angular velocity of every plate in rad/Myr, by plate id.
-    pub plates: Vec<[f32; 3]>,
+    /// Every plate, by index.
+    pub plates: Vec<PlateInfo>,
 }
 
 /// The frames of one run.
@@ -87,7 +87,7 @@ impl History {
     /// Records a state, if it is later than the last recorded one (the simulation sends a state
     /// again when the view asks for other fields) and the store has room. Returns whether it
     /// was recorded.
-    pub fn record(&mut self, time: f64, cells: &[CellInfo], plates: &[[f32; 3]]) -> bool {
+    pub fn record(&mut self, time: f64, cells: &[CellInfo], plates: &[PlateInfo]) -> bool {
         self.check_writes();
         if self.full || self.frames.last().is_some_and(|entry| time <= entry.time) {
             return false;
@@ -114,12 +114,12 @@ impl History {
         tracing::debug!(
             index,
             key = kind == Kind::Key,
-            raw = BYTES_PER_CELL * cells.len() + 12 * plates.len(),
+            raw = BYTES_PER_CELL * cells.len() + codec::PLATE_BYTES * plates.len(),
             encoded = frame.len(),
             "Frame recorded"
         );
         self.stored += frame.len() as u64;
-        self.raw += (BYTES_PER_CELL * cells.len() + 12 * plates.len()) as u64;
+        self.raw += (BYTES_PER_CELL * cells.len() + codec::PLATE_BYTES * plates.len()) as u64;
         self.store.append(index, frame);
         self.frames.push(Entry {
             time,
@@ -287,6 +287,13 @@ mod tests {
     use super::store::MemoryStore;
     use super::*;
 
+    fn plate(step: usize) -> PlateInfo {
+        PlateInfo {
+            rotation: [step as f32, 0.0, 0.0],
+            id: step as u32 + 7,
+        }
+    }
+
     fn cells(count: usize, step: usize) -> Vec<CellInfo> {
         (0..count)
             .map(|index| CellInfo {
@@ -320,7 +327,7 @@ mod tests {
     fn history(steps: usize, capacity: u64) -> History {
         let mut history = History::new(Box::new(MemoryStore::new(capacity)));
         for step in 0..steps {
-            history.record(step as f64, &cells(100, step), &[[step as f32, 0.0, 0.0]]);
+            history.record(step as f64, &cells(100, step), &[plate(step)]);
         }
         history
     }
@@ -355,7 +362,7 @@ mod tests {
             let frame = show(&mut history, index);
             assert_eq!(frame.index, index);
             assert_eq!(bytes(&frame.cells), quantised(&cells(100, index)));
-            assert_eq!(frame.plates, [[index as f32, 0.0, 0.0]]);
+            assert_eq!(frame.plates, [plate(index)]);
         }
         let keys = history.frames.iter().filter(|entry| entry.key).count();
         assert_eq!(keys, steps.div_ceil(KEY_INTERVAL));
