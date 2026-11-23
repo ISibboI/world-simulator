@@ -25,8 +25,33 @@
     addEventListener("unhandledrejection", (event) =>
         keep(errors, `unhandled rejection: ${event.reason?.stack ?? event.reason}`));
 
+    // Changes of the page state, and stalls of the page (no animation frame for over a second,
+    // e.g. a long frame of the view), into the log with their time.
+    let previous = "";
+    const watch = () => {
+        // Not every new state from the worker, only the first ones.
+        const { surfaceUpdates, ...rest } = document.documentElement.dataset;
+        const key = JSON.stringify(rest) + (Number(surfaceUpdates ?? 0) < 3 ? surfaceUpdates : "");
+        if (key !== previous) {
+            keep(logs, `state: ${JSON.stringify(document.documentElement.dataset)}`);
+            previous = key;
+        }
+    };
+    let lastFrame = performance.now();
+    const frame = (now) => {
+        if (now - lastFrame > 1000 && !document.hidden) {
+            keep(logs, `stall: no animation frame for ${((now - lastFrame) / 1000).toFixed(1)} s`);
+        }
+        lastFrame = now;
+        watch();
+        requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+    addEventListener("visibilitychange", () => keep(logs, `visibility: ${document.visibilityState}`));
+
     let sent = 0;
     const report = async () => {
+        watch();
         const status = document.getElementById("status");
         const body = {
             seconds: (Date.now() - started) / 1000,

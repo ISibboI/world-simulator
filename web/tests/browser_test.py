@@ -156,7 +156,7 @@ def open_selenium(name, url):
         raise ValueError(name)
     print("browser:", driver.capabilities.get("browserName"), driver.capabilities.get("browserVersion"))
     driver.get(url)
-    return driver.get_screenshot_as_png, driver.quit
+    return driver.get_screenshot_as_png, driver.quit, None
 
 
 def open_playwright(name, url):
@@ -178,7 +178,7 @@ def open_playwright(name, url):
         browser.close()
         playwright.stop()
 
-    return page.screenshot, close
+    return page.screenshot, close, None
 
 
 ANDROID_CHROME = "com.android.chrome"
@@ -187,6 +187,37 @@ ANDROID_FIREFOX = "org.mozilla.firefox"
 
 def adb_shell(command, check=True):
     return run(["adb", "shell", command], check=check)
+
+
+# Buttons of first-run screens and prompts that cover the page (Firefox's onboarding, Chrome's
+# first-run and notification prompts), tapped away while the test waits.
+DISMISS = (
+    "continue", "not now", "skip", "no thanks", "no, thanks", "maybe later", "got it",
+    "accept & continue", "use without an account", "dismiss",
+)
+
+
+def dismiss_android_prompts():
+    import re
+    import xml.etree.ElementTree as ElementTree
+
+    dump = subprocess.run(
+        ["adb", "exec-out", "uiautomator", "dump", "/dev/tty"], capture_output=True, text=True, timeout=60
+    ).stdout
+    dump = dump[dump.find("<?xml") :].rsplit(">", 1)[0] + ">"
+    try:
+        root = ElementTree.fromstring(dump)
+    except ElementTree.ParseError:
+        return
+    for node in root.iter("node"):
+        label = (node.get("text") or node.get("content-desc") or "").strip().lower()
+        if label in DISMISS and node.get("clickable") == "true":
+            numbers = [int(n) for n in re.findall(r"\d+", node.get("bounds", ""))]
+            if len(numbers) == 4:
+                x, y = (numbers[0] + numbers[2]) // 2, (numbers[1] + numbers[3]) // 2
+                print(f"tapping {label!r} at {x},{y}", flush=True)
+                run(["adb", "shell", "input", "tap", str(x), str(y)], check=False)
+                return
 
 
 def open_android(name, url, port, apk):
@@ -222,7 +253,7 @@ def open_android(name, url, port, apk):
     def close():
         adb_shell(f"am force-stop {package}", check=False)
 
-    return screenshot, close
+    return screenshot, close, dismiss_android_prompts
 
 
 def open_ios(url):
@@ -241,9 +272,15 @@ def open_ios(url):
     newest = max(candidate[0] for candidate in candidates)
     version, device_name, udid = sorted(c for c in candidates if c[0] == newest)[0]
     print("simulator:", device_name, "iOS", ".".join(map(str, version)), udid)
+    # Booted once; a later test reuses it.
     run(["xcrun", "simctl", "boot", udid], check=False)
-    run(["xcrun", "simctl", "bootstatus", udid, "-b"], timeout=600)
-    run(["xcrun", "simctl", "openurl", udid, url], timeout=120)
+    run(["xcrun", "simctl", "bootstatus", udid, "-b"], timeout=900)
+    for attempt in range(5):
+        if run(["xcrun", "simctl", "openurl", udid, url], check=False, timeout=180).returncode == 0:
+            break
+        time.sleep(10)
+    else:
+        raise RuntimeError("the simulator did not open the page")
     folder = Path(os.environ.get("TMPDIR", ".")).resolve()
 
     def screenshot():
@@ -252,9 +289,9 @@ def open_ios(url):
         return path.read_bytes()
 
     def close():
-        run(["xcrun", "simctl", "shutdown", udid], check=False)
+        run(["xcrun", "simctl", "terminate", udid, "com.apple.mobilesafari"], check=False)
 
-    return screenshot, close
+    return screenshot, close, None
 
 
 def check_state(report, min_updates):
@@ -314,6 +351,7 @@ def main():
     parser.add_argument("--port", type=int, default=8117)
     parser.add_argument("--out", type=Path, default=Path("browser-test"))
     parser.add_argument("--apk", type=Path, help="Firefox (Fenix) APK to install on Android")
+    parser.add_argument("--hold", type=float, default=30, help="seconds the page must stay healthy after it passed")
     parser.add_argument("--min-planet", type=float, default=0.05, help="least share of ocean-blue pixels")
     args = parser.parse_args()
 
@@ -330,39 +368,48 @@ def main():
     print("page:", url, flush=True)
 
     result = {"browser": args.browser, "query": args.query, "url": url}
-    screenshot = close = None
+    screenshot = close = tick = None
     failure = None
     started = time.monotonic()
     try:
         if args.browser in ("chrome", "firefox", "safari", "edge"):
-            screenshot, close = open_selenium(args.browser, url)
+            screenshot, close, tick = open_selenium(args.browser, url)
         elif args.browser in ("webkit", "chromium-pw", "firefox-pw"):
-            screenshot, close = open_playwright(args.browser, url)
+            screenshot, close, tick = open_playwright(args.browser, url)
         elif args.browser in ("android-chrome", "android-firefox"):
-            screenshot, close = open_android(args.browser, url, args.port, args.apk)
+            screenshot, close, tick = open_android(args.browser, url, args.port, args.apk)
         elif args.browser == "ios-safari":
-            screenshot, close = open_ios(url)
+            screenshot, close, tick = open_ios(url)
         else:
             sys.exit(f"unknown browser {args.browser}")
         opened = time.monotonic()
         result["open_seconds"] = round(opened - started, 1)
-        last_print = 0
+        last_print = last_tick = 0
+        passed_at = None
         while True:
             time.sleep(0.5)
             with state.lock:
                 report = json.loads(json.dumps(state.last)) if state.last else None
             if report:
-                report["errors"] = report.get("errors", [])
                 done, failure = check_state(report, args.min_updates)
-                if done:
+                if failure:
                     break
+                if done and passed_at is None:
+                    passed_at = time.monotonic()
+                    result["seconds"] = round(passed_at - opened, 1)
+                    print(f"passed after {result['seconds']} s; watching it for {args.hold:.0f} s more", flush=True)
+            if passed_at is not None and time.monotonic() - passed_at > args.hold:
+                break
+            if tick and passed_at is None and time.monotonic() - last_tick > 5:
+                tick()
+                last_tick = time.monotonic()
             if time.monotonic() - last_print > 10:
                 print("waiting:", describe(report), flush=True)
                 last_print = time.monotonic()
-            if time.monotonic() - opened > args.timeout:
+            if passed_at is None and time.monotonic() - opened > args.timeout:
                 failure = f"timed out after {args.timeout:.0f} s; last state: {describe(report)}"
                 break
-        result["seconds"] = round(time.monotonic() - opened, 1)
+        result.setdefault("seconds", round(time.monotonic() - opened, 1))
         # Give the view a moment to draw the newest state, then look at it.
         time.sleep(2)
         try:

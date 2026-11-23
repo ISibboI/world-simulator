@@ -403,6 +403,7 @@ fn open(name: &str, shared: &Rc<RefCell<Shared>>) -> Result<(), String> {
             database.close();
             return;
         }
+        info!("IndexedDB opened for the frame history");
         let (queued, read) = {
             let mut state = shared.borrow_mut();
             state.database = Some(database);
