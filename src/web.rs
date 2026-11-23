@@ -485,10 +485,8 @@ fn start_worker(
                 error!("Plates of the wrong size from the simulation worker");
                 return;
             }
-            let mut plates: Vec<PlateInfo> = vec![
-                bytemuck::Zeroable::zeroed();
-                plate_words.length() as usize / words_per_plate
-            ];
+            let mut plates: Vec<PlateInfo> =
+                vec![bytemuck::Zeroable::zeroed(); plate_words.length() as usize / words_per_plate];
             plate_words.copy_to(bytemuck::cast_slice_mut(&mut plates));
             let mesh = match (
                 get(&data, "directions").dyn_into::<js_sys::ArrayBuffer>(),

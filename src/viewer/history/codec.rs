@@ -515,7 +515,13 @@ mod tests {
         let state = State {
             time: 1.0,
             planes: Planes::new(&cells(10_000, 0.0)),
-            plates: vec![PlateInfo { rotation: [0.0; 3], id: 1 }; 12],
+            plates: vec![
+                PlateInfo {
+                    rotation: [0.0; 3],
+                    id: 1
+                };
+                12
+            ],
         };
         let key = encode(&state, None);
         let delta = encode(&state, Some(&state));

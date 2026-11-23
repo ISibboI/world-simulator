@@ -29,9 +29,11 @@ mod cell_info;
 mod fields;
 mod history;
 mod modes;
+mod overlay;
 mod pace;
 mod parameters;
 mod picking;
+mod plate_colors;
 mod renderer;
 mod timeline;
 
@@ -62,10 +64,12 @@ pub use modes::{
     STORAGE_KEY as RENDER_MODE_STORAGE_KEY, initial as initial_render_mode, to_store,
     with_render_mode,
 };
+use overlay::OverlayBuilder;
 use pace::{HintAction, Pace};
 use parameters::{ParameterPanel, SimulationStatus};
 #[cfg(target_arch = "wasm32")]
 pub use parameters::{has_option, with_default};
+use plate_colors::PlateColors;
 use renderer::Vertex;
 use renderer::{LineSegment, Overlay, PlanetCallback, Surface, Uniforms};
 
@@ -443,6 +447,8 @@ struct Viewer {
     /// The legend of the active mode for the displayed state.
     legend: modes::Legend,
     parameters: ParameterPanel,
+    /// The colour of every plate of the run, for the plate mode.
+    plate_colors: PlateColors,
     cell_panel: CellInfoPanel,
     pace: Pace,
     /// Whether the main pointer is coarse (touch): cells are tapped rather than pointed at.
@@ -480,6 +486,7 @@ struct Viewer {
 struct Latest {
     time: f64,
     cells: Arc<Vec<CellInfo>>,
+    plates: Arc<Vec<PlateInfo>>,
     fields: Fields,
 }
 
@@ -490,8 +497,9 @@ struct Picking {
     /// The mesh with the directions of the cells.
     mesh: SphereMesh,
     faces: Arc<Vec<[u32; 3]>>,
-    /// The attributes of the cells of the displayed state.
+    /// The attributes of the cells of the displayed state, and its plates.
     cells: Arc<Vec<CellInfo>>,
+    plates: Arc<Vec<PlateInfo>>,
     /// The largest displayed radius of a vertex.
     max_radius: f64,
 }
@@ -541,6 +549,7 @@ impl Viewer {
             points_per_radius: 100.0,
             legend: initial.cli.render_mode.mode().legend(None),
             parameters,
+            plate_colors: PlateColors::default(),
             cell_panel: CellInfoPanel::default(),
             pace,
             touch: ui_options.touch,
@@ -657,6 +666,8 @@ impl Viewer {
             mesh: &picking.mesh,
             vertices: &surface.vertices,
             cells: &picking.cells,
+            plates: &picking.plates,
+            plate_colors: &self.plate_colors,
             fields: &self.fields,
             arrow_cells,
             arrow_spacing,
@@ -667,9 +678,9 @@ impl Viewer {
             .colors(&data)
             .and_then(|colors| recolored(&surface.vertices, &colors))
             .map_or_else(|| surface.vertices.clone(), Arc::new);
-        let overlay = mode
-            .arrows(&data)
-            .map(|(samples, style)| arrows::triangles(&arrows::arrows(&samples, &style), &style));
+        let mut builder = OverlayBuilder::default();
+        mode.overlay(&data, &mut builder);
+        let overlay = (!builder.is_empty()).then(|| builder.finish());
         self.display = Some(Surface {
             vertices_id: self.displays,
             vertices,
@@ -713,22 +724,30 @@ impl Viewer {
             // The simulation does not hold its last state.
             self.paused = false;
         }
+        // Colours for new plates before any frame with them can be shown again.
+        if let Some(picking) = &self.picking {
+            self.plate_colors
+                .update(&picking.mesh, &update.cells, &update.plates);
+        }
         if let Some(history) = &mut self.history {
             history.record(update.time, &update.cells, &update.plates);
         }
         self.latest = Some(Latest {
             time: update.time,
             cells: update.cells.clone(),
+            plates: update.plates.clone(),
             fields: update.fields.clone(),
         });
         if self.viewing.is_none() {
-            self.show(update.cells, update.fields);
+            self.show(update.cells, update.plates, update.fields);
         }
     }
 
     /// Takes the mesh of a new simulation.
     fn set_mesh(&mut self, update: &MeshUpdate) {
         self.meshes += 1;
+        // A new simulation: its plates are others.
+        self.plate_colors.clear();
         let directions: Vec<DVec3> = update
             .directions
             .iter()
@@ -750,12 +769,13 @@ impl Viewer {
             mesh,
             faces: Arc::new(update.faces.clone()),
             cells: Arc::new(Vec::new()),
+            plates: Arc::new(Vec::new()),
             max_radius: 1.0,
         });
     }
 
     /// Shows a state of the current mesh: builds its surface and takes its cells for picking.
-    fn show(&mut self, cells: Arc<Vec<CellInfo>>, fields: Fields) {
+    fn show(&mut self, cells: Arc<Vec<CellInfo>>, plates: Arc<Vec<PlateInfo>>, fields: Fields) {
         let Some(picking) = &mut self.picking else {
             return;
         };
@@ -778,6 +798,7 @@ impl Viewer {
             .map(|vertex| f64::from(Vec3::from(vertex.position).length()))
             .fold(1.0, f64::max);
         picking.cells = cells;
+        picking.plates = plates;
         self.surfaces += 1;
         self.surface = Some(Surface {
             mesh_id: picking.mesh_id,
@@ -805,7 +826,7 @@ impl Viewer {
                 }
                 let fields = Fields::from_frame(&picking.mesh, &frame.cells, &frame.plates);
                 self.frame_error = None;
-                self.show(Arc::new(frame.cells), fields);
+                self.show(Arc::new(frame.cells), Arc::new(frame.plates), fields);
             }
             Ok(_) => {}
             // A read that failed after the view went live again is no longer of interest.
@@ -847,8 +868,12 @@ impl Viewer {
         if self.viewing.take().is_some()
             && let Some(latest) = &self.latest
         {
-            let (cells, fields) = (latest.cells.clone(), latest.fields.clone());
-            self.show(cells, fields);
+            let (cells, plates, fields) = (
+                latest.cells.clone(),
+                latest.plates.clone(),
+                latest.fields.clone(),
+            );
+            self.show(cells, plates, fields);
         }
     }
 
@@ -1157,9 +1182,14 @@ impl eframe::App for Viewer {
         let time_bar = self.time_bar(ui.ctx());
         let shown = shown.and_then(|(cell, selected)| {
             let picking = self.picking.as_ref()?;
+            let info = picking.cells.get(cell as usize)?;
             Some(ShownCell {
                 cell,
-                info: picking.cells.get(cell as usize)?,
+                info,
+                plate_id: picking
+                    .plates
+                    .get(info.plate as usize)
+                    .map(|plate| plate.id),
                 direction: picking.mesh.vertex(cell),
                 selected,
             })

@@ -215,7 +215,8 @@ impl Simulation {
                 continue;
             }
             for &neighbor in self.mesh.neighbors(cell) {
-                if self.owners[neighbor as usize].plate == plate && reach[neighbor as usize] < left - 1
+                if self.owners[neighbor as usize].plate == plate
+                    && reach[neighbor as usize] < left - 1
                 {
                     reach[neighbor as usize] = left - 1;
                     queue.push_back((neighbor, left - 1));
@@ -284,7 +285,10 @@ mod tests {
     }
 
     fn share(classes: &[BoundaryClass], wanted: &[BoundaryClass]) -> f64 {
-        classes.iter().filter(|class| wanted.contains(class)).count() as f64
+        classes
+            .iter()
+            .filter(|class| wanted.contains(class))
+            .count() as f64
             / classes.len().max(1) as f64
     }
 

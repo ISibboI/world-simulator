@@ -18,20 +18,11 @@ impl RenderMode for Topographic {
                 .into(),
             scale: Some(elevation_scale()),
             swatches: vec![
-                Swatch {
-                    color: render::RIVER_COLOR,
-                    label: "River".into(),
-                },
-                Swatch {
-                    color: render::ICE_SHEET_COLOR,
-                    label: "Ice sheet".into(),
-                },
-                Swatch {
-                    color: render::SEA_ICE_COLOR,
-                    label: "Sea ice".into(),
-                },
+                Swatch::fill(render::RIVER_COLOR, "River"),
+                Swatch::fill(render::ICE_SHEET_COLOR, "Ice sheet"),
+                Swatch::fill(render::SEA_ICE_COLOR, "Sea ice"),
             ],
-            arrows: None,
+            arrows: Vec::new(),
         }
     }
 }

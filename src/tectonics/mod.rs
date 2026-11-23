@@ -53,7 +53,7 @@ mod weak_zones;
 
 pub use boundaries::{GapStatistics, TrenchSediment};
 pub use crust::*;
-pub use display::{BoundaryClass, BoundaryMap};
+pub use display::BoundaryClass;
 pub use events::{EventCounts, PlateEventParams, WEAK_BELT_THRESHOLD};
 pub use generation::InitialConfiguration;
 pub use initial_sediment::{InitialSedimentParams, PlatformEmplacement};

@@ -6,7 +6,7 @@
 
 use eframe::egui;
 
-use super::{Legend, RenderModeId};
+use super::{Legend, RenderModeId, Swatch, SwatchShape};
 
 /// Screens narrower than this (in points) start with the legend hidden, as the other panels.
 const NARROW_SCREEN: f32 = 600.0;
@@ -86,7 +86,10 @@ impl ModeSwitcher {
                         ui.set_max_width(width);
                         controls(ui, mode, legend_open);
                         ui.separator();
-                        legend(ui, view.legend, view, width);
+                        // Long legends scroll (phones in landscape, small windows).
+                        egui::ScrollArea::vertical()
+                            .max_height((screen.height() - 6.0 * MARGIN - 60.0).max(120.0))
+                            .show(ui, |ui| legend(ui, view.legend, view, width));
                     });
                 } else {
                     // Hidden, only the controls remain, like the buttons of the other panels.
@@ -157,25 +160,33 @@ fn legend(ui: &mut egui::Ui, legend: &Legend, view: &SwitcherView, width: f32) {
             );
         }
     }
-    if !legend.swatches.is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            for swatch in &legend.swatches {
-                let [r, g, b] = swatch.color;
-                let (rect, _) = ui
-                    .allocate_exact_size(egui::vec2(bar_height, bar_height), egui::Sense::hover());
-                ui.painter()
-                    .rect_filled(rect, 2.0, egui::Color32::from_rgb(r, g, b));
-                ui.painter().rect_stroke(
-                    rect,
-                    2.0,
-                    ui.visuals().widgets.noninteractive.bg_stroke,
-                    egui::StrokeKind::Outside,
-                );
-                ui.label(swatch.label.as_ref());
-            }
-        });
+    // Filled squares share wrapped rows; lines and markers get a row each.
+    let mut rest = legend.swatches.as_slice();
+    while let Some(first) = rest.first() {
+        if first.shape == SwatchShape::Fill {
+            let count = rest
+                .iter()
+                .take_while(|swatch| swatch.shape == SwatchShape::Fill)
+                .count();
+            ui.horizontal_wrapped(|ui| {
+                for swatch in &rest[..count] {
+                    swatch_symbol(ui, swatch, bar_height);
+                    ui.label(swatch.label.as_ref());
+                }
+            });
+            rest = &rest[count..];
+        } else {
+            ui.horizontal(|ui| {
+                swatch_symbol(ui, first, bar_height);
+                ui.add(egui::Label::new(first.label.as_ref()).wrap());
+            });
+            rest = &rest[1..];
+        }
     }
-    if let Some(arrows) = &legend.arrows {
+    for arrows in &legend.arrows {
+        if let Some(label) = &arrows.label {
+            ui.label(label.as_ref());
+        }
         ui.horizontal_wrapped(|ui| {
             for &(magnitude, length, shaft) in &arrows.examples {
                 let scale = view.points_per_radius;
@@ -193,6 +204,85 @@ fn legend(ui: &mut egui::Ui, legend: &Legend, view: &SwitcherView, width: f32) {
     }
     if view.waiting {
         ui.weak("Waiting for the data of this mode…");
+    }
+}
+
+/// The symbol of a swatch, `size` points high.
+fn swatch_symbol(ui: &mut egui::Ui, swatch: &Swatch, size: f32) {
+    let [r, g, b] = swatch.color;
+    let color = egui::Color32::from_rgb(r, g, b);
+    let frame = ui.visuals().widgets.noninteractive.bg_stroke;
+    let dark = egui::Color32::from_gray(15);
+    let width = match swatch.shape {
+        SwatchShape::Fill => size,
+        SwatchShape::Palette(ref colors) => size * 0.6 * colors.len() as f32,
+        _ => 2.0 * size,
+    };
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, size), egui::Sense::hover());
+    let painter = ui.painter();
+    let line_width = (0.22 * size).max(2.0);
+    let line = |painter: &egui::Painter| {
+        let y = rect.center().y;
+        let ends = [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)];
+        painter.line_segment(ends, egui::Stroke::new(line_width + 2.0, dark));
+        painter.line_segment(ends, egui::Stroke::new(line_width, color));
+    };
+    match &swatch.shape {
+        SwatchShape::Fill => {
+            painter.rect_filled(rect, 2.0, color);
+            painter.rect_stroke(rect, 2.0, frame, egui::StrokeKind::Outside);
+        }
+        SwatchShape::Line => line(painter),
+        SwatchShape::Teeth => {
+            // Teeth above the line, pointing up (towards the upper plate).
+            let y = rect.center().y + 0.15 * size;
+            let tooth = 0.45 * size;
+            let mut x = rect.left() + 0.3 * size;
+            while x + tooth <= rect.right() {
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        egui::pos2(x, y),
+                        egui::pos2(x + tooth, y),
+                        egui::pos2(x + tooth / 2.0, y - tooth),
+                    ],
+                    color,
+                    egui::Stroke::new(1.0, dark),
+                ));
+                x += 1.6 * tooth;
+            }
+            let ends = [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)];
+            painter.line_segment(ends, egui::Stroke::new(line_width + 2.0, dark));
+            painter.line_segment(ends, egui::Stroke::new(line_width, color));
+        }
+        SwatchShape::Dots => {
+            painter.rect_filled(rect, 2.0, color);
+            let step = size / 3.0;
+            for row in 0..3 {
+                for column in 0..6 {
+                    let x = rect.left() + step * (column as f32 + 0.5);
+                    let y = rect.top() + step * (row as f32 + 0.5);
+                    if x < rect.right() {
+                        painter.circle_filled(egui::pos2(x, y), 0.12 * size, dark);
+                    }
+                }
+            }
+            painter.rect_stroke(rect, 2.0, frame, egui::StrokeKind::Outside);
+        }
+        SwatchShape::Palette(colors) => {
+            let step = rect.width() / colors.len().max(1) as f32;
+            for (index, &[r, g, b]) in colors.iter().enumerate() {
+                let left = rect.left() + step * index as f32;
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(left, rect.top()),
+                        egui::pos2(left + step, rect.bottom()),
+                    ),
+                    0.0,
+                    egui::Color32::from_rgb(r, g, b),
+                );
+            }
+            painter.rect_stroke(rect, 2.0, frame, egui::StrokeKind::Outside);
+        }
     }
 }
 
