@@ -2,7 +2,7 @@
 //! ([`super::timeline`]) can show any past one.
 //!
 //! A frame keeps what the view needs to rebuild everything it shows: the attributes of the
-//! cells, quantised ([`codec`], 31 bytes per cell), and the angular velocity of every plate, for
+//! cells, quantised ([`codec`], 39 bytes per cell), and the angular velocity of every plate, for
 //! the layers derived from plates. The vertices follow from the cells. Frames are stored as the
 //! difference to the frame before (mostly zeros), compressed with lz4, with a keyframe every
 //! [`KEY_INTERVAL`] frames, so that showing a frame decodes at most that many. A [`FrameStore`]
@@ -312,6 +312,10 @@ mod tests {
                 potential_evaporation: 0.8,
                 ice: 0.0,
                 discharge: 0.0,
+                current_east: 1.0,
+                current_north: -2.0,
+                streamfunction: 3.0,
+                gyre_heating: 4.0,
                 plate: (index % 3) as u32,
                 flags: 0,
             })

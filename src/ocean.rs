@@ -132,7 +132,12 @@ impl GyreModel {
         let (streamfunction, iterations) = multigrid.solve(&rhs, 1e-8, 400);
 
         tracing::debug!(iterations, "Gyres solved");
+        self.gyres(mesh, ocean, streamfunction)
+    }
 
+    /// The gyres of a streamfunction (m³/s per cell) in the ocean cells (`ocean[c]`).
+    pub fn gyres(&self, mesh: &SphereMesh, ocean: &[bool], streamfunction: Vec<f64>) -> Gyres {
+        let n = mesh.len();
         // Volume flux across every Voronoi edge from ψ at its two corners (the mean of the three
         // cells around each corner): for the transport r̂ × ∇ψ, the flux from a cell to its
         // neighbour is ψ(right corner) − ψ(left corner). The fluxes of a cell then add up to
@@ -164,6 +169,58 @@ impl GyreModel {
             fluxes,
             streamfunction,
         }
+    }
+
+    /// The depth-integrated volume transport of the gyres at every ocean cell (`ocean[c]`), as
+    /// (eastward, northward) in m²/s; NaN for the other cells. It is the vector `U` that fits the
+    /// fluxes across the cell's Voronoi edges best (least squares of `U·(r̂ × e) − q` over its
+    /// edges `e`, from corner to corner), with the edges to land as walls (`q = 0`).
+    pub fn transport(&self, mesh: &SphereMesh, ocean: &[bool], gyres: &Gyres) -> Vec<[f64; 2]> {
+        (0..mesh.len() as u32)
+            .map(|cell| {
+                if !ocean[cell as usize] {
+                    return [f64::NAN; 2];
+                }
+                let position = mesh.vertex(cell);
+                let east = east_of(position);
+                let north = position.cross(east);
+                let centroid =
+                    |j: u32, k: u32| (position + mesh.vertex(j) + mesh.vertex(k)).normalize();
+                let fluxes = &gyres.fluxes[cell as usize];
+                // Normal equations of the 2×2 least-squares problem.
+                let (mut a, mut b) = ([[0.0; 2]; 2], [0.0; 2]);
+                for (&j, &(left, right)) in mesh
+                    .neighbors(cell)
+                    .iter()
+                    .zip(&self.corners[cell as usize])
+                {
+                    // The flux across the edge from its left corner to its right one is
+                    // ψ(right) − ψ(left) = ∇ψ·e = U·(r̂ × e) for the edge vector e, since
+                    // ∇ψ = U × r̂: so `m = r̂ × e` (outward, as long as the edge) per edge.
+                    let edge = (centroid(j, right) - centroid(j, left)) * self.radius;
+                    let m = position.cross(edge);
+                    let normal = [m.dot(east), m.dot(north)];
+                    let q = fluxes
+                        .iter()
+                        .find(|&&(other, _)| other == j)
+                        .map_or(0.0, |&(_, q)| q);
+                    for row in 0..2 {
+                        for column in 0..2 {
+                            a[row][column] += normal[row] * normal[column];
+                        }
+                        b[row] += q * normal[row];
+                    }
+                }
+                let determinant = a[0][0] * a[1][1] - a[0][1] * a[1][0];
+                if determinant.abs() < 1e-30 {
+                    return [0.0; 2];
+                }
+                [
+                    (a[1][1] * b[0] - a[0][1] * b[1]) / determinant,
+                    (a[0][0] * b[1] - a[1][0] * b[0]) / determinant,
+                ]
+            })
+            .collect()
     }
 }
 
@@ -218,6 +275,46 @@ fn wind_stress_curl(latitude: f64, stress: &dyn Fn(f64) -> f64, radius: f64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_of_a_zonal_flow() {
+        // ψ = −U₀ R sin φ is an eastward transport U₀ cos φ (U = −∂ψ/∂y).
+        let mesh = SphereMesh::icosphere(4);
+        let radius = 6.371e6;
+        let u0 = 20.0;
+        let ocean = vec![true; mesh.len()];
+        let model = GyreModel::new(&mesh, radius);
+        let psi = (0..mesh.len() as u32)
+            .map(|c| -u0 * radius * mesh.vertex(c).z)
+            .collect();
+        let gyres = model.gyres(&mesh, &ocean, psi);
+        let transport = model.transport(&mesh, &ocean, &gyres);
+        for (cell, [east, north]) in transport.iter().enumerate() {
+            let z = mesh.vertex(cell as u32).z;
+            if z.abs() > 0.9 {
+                continue;
+            }
+            let expected = u0 * (1.0 - z * z).sqrt();
+            assert!((east - expected).abs() < 0.05 * u0, "{east} vs {expected}");
+            assert!(north.abs() < 0.05 * u0, "{north}");
+        }
+        // Land has none; the flow along a coast stays along it.
+        let ocean: Vec<bool> = (0..mesh.len() as u32)
+            .map(|c| mesh.vertex(c).z < 0.3)
+            .collect();
+        let psi = (0..mesh.len() as u32)
+            .map(|c| -u0 * radius * mesh.vertex(c).z.min(0.3))
+            .collect();
+        let gyres = model.gyres(&mesh, &ocean, psi);
+        let transport = model.transport(&mesh, &ocean, &gyres);
+        for (cell, [east, north]) in transport.iter().enumerate() {
+            if ocean[cell] {
+                assert!(east.is_finite() && north.is_finite());
+            } else {
+                assert!(east.is_nan() && north.is_nan());
+            }
+        }
+    }
 
     #[test]
     fn subtropical_gyres_turn_clockwise_with_western_boundary_currents() {
