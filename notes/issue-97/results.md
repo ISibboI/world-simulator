@@ -45,7 +45,7 @@ from the ITCZ:
 moist-static-energy maximum in each of 24 longitude sectors. So it shifts with the seasons and
 with longitude.
 - Seed 0 at 20 Myr (subdivisions 5): the monthly mean ITCZ is at −13°, −9°, +14° and +10°.
-- Over some sectors it reaches 25–30° N in July.
+- In July, the thermal equator of the temperature model, its first guess, reaches 25–30° N in some sectors.
 
 **Not modelled:**
 - winds steered or blocked by mountains;
