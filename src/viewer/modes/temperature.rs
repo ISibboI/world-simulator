@@ -14,38 +14,12 @@ use glam::DVec3;
 
 use super::super::overlay::{LineStyle, OverlayBuilder, isolines};
 use super::{
-    ColorScale, Legend, ModeData, ModeOption, OptionKind, OptionValues, RenderMode, Shading,
-    Swatch, SwatchShape, coastlines, rgba,
+    ColorScale, Legend, ModeData, ModeOption, OptionKind, OptionValues, Period, RenderMode,
+    Shading, Swatch, SwatchShape, coastlines, rgba,
 };
 use crate::viewer::CellInfo;
 
 pub struct Temperature;
-
-/// Which temperature is shown: the value of the option [`PERIOD`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Period {
-    Annual,
-    January,
-    July,
-}
-
-impl Period {
-    fn of(options: &OptionValues) -> Self {
-        match options.get(PERIOD) {
-            1 => Period::January,
-            2 => Period::July,
-            _ => Period::Annual,
-        }
-    }
-
-    fn value(self, cell: &CellInfo) -> f32 {
-        match self {
-            Period::Annual => cell.temperature,
-            Period::January => cell.temperature_january,
-            Period::July => cell.temperature_july,
-        }
-    }
-}
 
 /// Indices of the options.
 const PERIOD: usize = 0;
@@ -57,7 +31,7 @@ const OPTIONS: [ModeOption; 3] = [
         label: "Mean of",
         hover: "The annual mean, or the mean of January (northern winter) or July (northern \
                 summer)",
-        kind: OptionKind::Choice(&["Year", "January", "July"]),
+        kind: OptionKind::Choice(Period::CHOICES),
     },
     ModeOption {
         label: "0 °C isotherm",
@@ -109,7 +83,7 @@ const BORDER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const LIFT: f64 = 0.003;
 
 /// The colour scale for the shown period.
-fn scale(period: Period) -> ColorScale {
+pub(super) fn scale(period: Period) -> ColorScale {
     ColorScale {
         stops: STOPS.to_vec(),
         title: match period {
@@ -140,8 +114,11 @@ impl RenderMode for Temperature {
     }
 
     fn colors(&self, data: &ModeData) -> Option<Vec<[f32; 4]>> {
-        let period = Period::of(data.options);
-        Some(scale(period).colors(data.cells.iter().map(|cell| period.value(cell)), MISSING))
+        let period = Period::of(data.options, PERIOD);
+        Some(scale(period).colors(
+            data.cells.iter().map(|cell| period.temperature(cell)),
+            MISSING,
+        ))
     }
 
     fn shading(&self) -> Shading {
@@ -175,10 +152,10 @@ impl RenderMode for Temperature {
             }
         };
         if data.options.is_on(FREEZING_LINE) {
-            let period = Period::of(data.options);
+            let period = Period::of(data.options, PERIOD);
             let pieces = isolines(
                 data.mesh.faces(),
-                |cell| period.value(&data.cells[cell as usize]),
+                |cell| period.temperature(&data.cells[cell as usize]),
                 0.0,
                 position,
             );
@@ -203,9 +180,13 @@ impl RenderMode for Temperature {
     }
 
     fn legend(&self, options: &OptionValues, data: Option<&ModeData>) -> Legend {
-        let period = Period::of(options);
+        let period = Period::of(options, PERIOD);
         let mut swatches = vec![Swatch::new(COAST_COLOR, SwatchShape::Line, "Coastline")];
-        if data.is_some_and(|data| data.cells.iter().any(|cell| period.value(cell).is_nan())) {
+        if data.is_some_and(|data| {
+            data.cells
+                .iter()
+                .any(|cell| period.temperature(cell).is_nan())
+        }) {
             swatches.insert(0, Swatch::fill(MISSING, "No data"));
         }
         if options.is_on(FREEZING_LINE) {
@@ -269,10 +250,10 @@ mod tests {
     #[test]
     fn options_choose_the_period() {
         let mut options = OptionValues::defaults(&OPTIONS);
-        assert_eq!(Period::of(&options), Period::Annual);
+        assert_eq!(Period::of(&options, PERIOD), Period::Annual);
         assert!(!options.is_on(FREEZING_LINE) && !options.is_on(ICE_LINE));
         options.set(PERIOD, 2);
-        assert_eq!(Period::of(&options), Period::July);
+        assert_eq!(Period::of(&options, PERIOD), Period::July);
         let legend = Temperature.legend(&options, None);
         assert!(legend.scale.unwrap().title.starts_with("July"));
         assert_eq!(legend.swatches.len(), 1);
@@ -313,9 +294,11 @@ mod tests {
             };
             let colors = Temperature.colors(&data).unwrap();
             assert_eq!(colors.len(), cells.len());
-            let shown = Period::of(&options);
+            let shown = Period::of(&options, PERIOD);
             for (cell, color) in cells.iter().zip(&colors) {
-                let expected = scale(shown).color(f64::from(shown.value(cell))).unwrap();
+                let expected = scale(shown)
+                    .color(f64::from(shown.temperature(cell)))
+                    .unwrap();
                 assert_eq!(*color, rgba(expected));
             }
             let mut overlay = OverlayBuilder::default();

@@ -164,6 +164,21 @@ pub fn arrow_triangles(arrow: &Arrow, style: &ArrowStyle, margin: f64) -> [[DVec
     ]
 }
 
+/// Unit vectors to the east and to the north at a direction from the planet centre (+z is the
+/// north pole; at the poles, east is +y).
+pub fn east_north(position: DVec3) -> (DVec3, DVec3) {
+    let up = position.normalize_or(DVec3::Z);
+    let east = DVec3::Z.cross(up).try_normalize().unwrap_or(DVec3::Y);
+    (east, up.cross(east))
+}
+
+/// The vector with the eastward and northward components `[east, north]` at a direction from
+/// the planet centre, for fields given in local components (ocean currents, winds).
+pub fn tangent_vector(position: DVec3, [east, north]: [f32; 2]) -> DVec3 {
+    let (e, n) = east_north(position);
+    e * f64::from(east) + n * f64::from(north)
+}
+
 /// The cells of `mesh` nearest to the vertices of an icosphere with `subdivisions`: evenly
 /// spread points for arrows, with their mean spacing in planet radii. Duplicates (on a mesh
 /// coarser than the grid) are left out.
@@ -321,6 +336,19 @@ mod tests {
         assert!(border_a[0].x < 0.0);
         assert!(width(&border_a) > 0.01);
         assert!(border_head[1].x > 0.08);
+    }
+
+    #[test]
+    fn tangent_vectors_point_east_and_north() {
+        let position = DVec3::new(2.0, 0.0, 0.0);
+        // East at longitude 0 is +y, north +z.
+        assert!((tangent_vector(position, [1.0, 0.0]) - DVec3::Y).length() < 1e-9);
+        assert!((tangent_vector(position, [0.0, 2.0]) - 2.0 * DVec3::Z).length() < 1e-9);
+        // At longitude 90°, east is −x.
+        let v = tangent_vector(DVec3::Y, [3.0, 0.0]);
+        assert!((v + 3.0 * DVec3::X).length() < 1e-9, "{v}");
+        // Defined at the poles.
+        assert!(tangent_vector(DVec3::Z, [1.0, 1.0]).is_finite());
     }
 
     #[test]
