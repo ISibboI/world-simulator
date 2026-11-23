@@ -1,6 +1,6 @@
 # #95 Moisture render mode: results
 
-Plan: [plan.md](plan.md) (with the review's changes below). Stacked on #130 (temperature mode,
+Plan: [plan.md](plan.md) (with the review's changes below). Builds on #130 (temperature mode,
 mode options, isolines, coastlines).
 
 ## What changed
@@ -101,5 +101,5 @@ precipitation only; the option framework has no disabled state).
 
 - Size: +16 % stored per frame, +21 % per update on the wire, for seasonal precipitation and PET.
   Dropping January/July would save ~7 kB/frame of the 13 kB.
-- Not done: P − E (would need evaporation in the frames, +2 B/cell); a month slider (needs all
-  solved months: by default only 4 are solved).
+- Not done: P − E (would need evaporation in the frames, +2 B/cell); no month slider (as decided
+  on #130 for temperature; the water cycle solves only 4 months by default anyway).
