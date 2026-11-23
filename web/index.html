@@ -4,21 +4,6 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>World Simulator</title>
-    <script>
-        // An error before the view's first frame (the module fails to load or to start, or
-        // panics) would otherwise leave "Loading the simulator…" on the screen for good: show it
-        // in the loading banner instead. Once the view runs, the banner is hidden and the view
-        // shows the simulation's failures itself.
-        function showLoadError(error) {
-            const status = document.getElementById("status");
-            if (status && status.style.display !== "none") {
-                const text = String(error?.message ?? error ?? "unknown error");
-                status.textContent = "The simulator could not start: " + text;
-            }
-        }
-        addEventListener("error", (event) => showLoadError(event.error ?? event.message));
-        addEventListener("unhandledrejection", (event) => showLoadError(event.reason));
-    </script>
     <!-- The simulator (src/web.rs); the same module also runs the simulation in worker.js. -->
     <link data-trunk rel="rust" href="../Cargo.toml" data-bin="world-simulator" data-wasm-opt="3">
     <link data-trunk rel="copy-file" href="worker.js">

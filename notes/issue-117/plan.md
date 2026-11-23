@@ -41,14 +41,11 @@ iOS Simulator (newest iPhone runtime on `macos-latest`), Safari.
 
 ## Phone hang ("Loading the simulator…" forever since #115)
 
-The loading banner disappears only at the end of the view's first frame. Anything that stops
-the page before that (the module failing to load or start, a panic) left it on the screen with
-no message. Changes:
-
-1. `web/index.html`: uncaught errors and rejections before the first frame are shown in the
-   banner ("The simulator could not start: …") instead of hanging silently.
-2. Frame history (`src/web/frames.rs`): IndexedDB must open within 10 s and frame 0 must read
-   back as written within 10 s, else the history is kept in memory (with the frames written
-   so far). Storage never blocks loading (it never did block the first frame; this makes it
-   robust when it hangs or misbehaves, as WebKit's IndexedDB has done in some versions).
-3. Reproduce on the Android emulator, the iOS Simulator and WebKit; fix the cause if found.
+Most likely #122 (found by the orchestrator, a separate issue, not worked on here): after a
+Pages deploy the browser mixes a cached `world-simulator.js` of the previous build with the new
+`index.html`; the SRI check blocks it and the banner stays. The tests serve a local build with
+`Cache-Control: no-store`, so they are not affected by it. Here: look for platform-specific
+causes on the Android emulator, the iOS Simulator and WebKit, and make the frame-history
+storage robust: IndexedDB must open within 10 s and frame 0 must read back as written within
+10 s, else the history is kept in memory (with the frames written so far). Storage never blocks
+loading.

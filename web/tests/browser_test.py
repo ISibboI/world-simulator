@@ -201,23 +201,28 @@ def dismiss_android_prompts():
     import re
     import xml.etree.ElementTree as ElementTree
 
+    run(["adb", "shell", "uiautomator", "dump", "/sdcard/window.xml"], check=False, timeout=60)
     dump = subprocess.run(
-        ["adb", "exec-out", "uiautomator", "dump", "/dev/tty"], capture_output=True, text=True, timeout=60
+        ["adb", "exec-out", "cat", "/sdcard/window.xml"], capture_output=True, text=True, timeout=60
     ).stdout
-    dump = dump[dump.find("<?xml") :].rsplit(">", 1)[0] + ">"
     try:
-        root = ElementTree.fromstring(dump)
-    except ElementTree.ParseError:
+        root = ElementTree.fromstring(dump[dump.find("<?xml") :])
+    except ElementTree.ParseError as error:
+        print("no window dump:", error, dump[:200], flush=True)
         return
+    labels = []
     for node in root.iter("node"):
-        label = (node.get("text") or node.get("content-desc") or "").strip().lower()
-        if label in DISMISS and node.get("clickable") == "true":
+        label = (node.get("text") or node.get("content-desc") or "").strip()
+        if label:
+            labels.append(label)
+        if label.lower() in DISMISS:
             numbers = [int(n) for n in re.findall(r"\d+", node.get("bounds", ""))]
             if len(numbers) == 4:
                 x, y = (numbers[0] + numbers[2]) // 2, (numbers[1] + numbers[3]) // 2
                 print(f"tapping {label!r} at {x},{y}", flush=True)
                 run(["adb", "shell", "input", "tap", str(x), str(y)], check=False)
                 return
+    print("on the screen:", labels[:30], flush=True)
 
 
 def open_android(name, url, port, apk):
@@ -294,9 +299,16 @@ def open_ios(url):
     return screenshot, close, None
 
 
-def check_state(report, min_updates):
+def check_state(report, min_updates, loaded_only=False):
     """Returns (done, failure): done when the page passed or failed for good."""
     data = report.get("data", {})
+    if loaded_only:
+        # Builds without the page state (before #117): the banner is gone and the title shows
+        # the simulated time.
+        if report.get("errors"):
+            return True, "uncaught errors: " + "; ".join(report["errors"][:5])
+        status = report.get("status") or {}
+        return status.get("display") == "none" and "Myr" in report.get("title", ""), None
     if report.get("errors"):
         return True, "uncaught errors: " + "; ".join(report["errors"][:5])
     if "simulationFailed" in data:
@@ -351,6 +363,7 @@ def main():
     parser.add_argument("--port", type=int, default=8117)
     parser.add_argument("--out", type=Path, default=Path("browser-test"))
     parser.add_argument("--apk", type=Path, help="Firefox (Fenix) APK to install on Android")
+    parser.add_argument("--loaded-only", action="store_true", help="only check that the page loads (for builds before #117)")
     parser.add_argument("--hold", type=float, default=30, help="seconds the page must stay healthy after it passed")
     parser.add_argument("--min-planet", type=float, default=0.05, help="least share of ocean-blue pixels")
     args = parser.parse_args()
@@ -391,7 +404,7 @@ def main():
             with state.lock:
                 report = json.loads(json.dumps(state.last)) if state.last else None
             if report:
-                done, failure = check_state(report, args.min_updates)
+                done, failure = check_state(report, args.min_updates, args.loaded_only)
                 if failure:
                     break
                 if done and passed_at is None:
