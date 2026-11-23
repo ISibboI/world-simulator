@@ -12,7 +12,7 @@
 //!
 //! Adding a layer: a variant of [`Layer`], its entries in [`Layer::ALL`], [`Layer::key`],
 //! [`Layer::components`] and [`Layer::extract`], and how [`Fields::from_frame`] rebuilds it for a
-//! past frame of the history (from the cells and plate rotations every frame keeps; a layer that
+//! past frame of the history (from the cells and plates every frame keeps; a layer that
 //! cannot be rebuilt from them needs its data added to the frames, see `super::history`); the
 //! transport (threads and the web worker) handles every layer alike.
 
@@ -71,13 +71,34 @@ impl Layer {
     }
 }
 
-/// The angular velocity of every plate in rad/Myr, by plate id: sent with every update, so that
-/// the frame history can rebuild the layers derived from plates for any past frame
-/// ([`Fields::from_frame`]).
-pub fn plate_rotations(planet: &Planet) -> Vec<[f32; 3]> {
+/// What the view knows about a plate: sent for every plate (by index, as in
+/// [`CellInfo::plate`]) with every update and kept in every frame of the history, so that the
+/// layers and modes derived from plates work for any past frame ([`Fields::from_frame`]).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PlateInfo {
+    /// Angular velocity in rad/Myr.
+    pub rotation: [f32; 3],
+    /// The plate's id, which stays while its index changes (see
+    /// [`crate::tectonics::Simulation::plate_id`]): plate colours follow it.
+    pub id: u32,
+}
+
+impl PlateInfo {
+    /// The angular velocity in rad/Myr.
+    pub fn omega(&self) -> glam::DVec3 {
+        glam::Vec3::from(self.rotation).as_dvec3()
+    }
+}
+
+/// The [`PlateInfo`] of every plate, by index.
+pub fn plate_infos(planet: &Planet) -> Vec<PlateInfo> {
     let simulation = planet.tectonics();
     (0..simulation.plate_count() as u32)
-        .map(|plate| simulation.angular_velocity(plate).as_vec3().to_array())
+        .map(|plate| PlateInfo {
+            rotation: simulation.angular_velocity(plate).as_vec3().to_array(),
+            id: simulation.plate_id(plate),
+        })
         .collect()
 }
 
@@ -124,9 +145,9 @@ impl Fields {
         }
     }
 
-    /// Every layer for a frame of the history, rebuilt from its cells and plate rotations (see
-    /// [`plate_rotations`]) on `mesh`.
-    pub fn from_frame(mesh: &SphereMesh, cells: &[CellInfo], plates: &[[f32; 3]]) -> Self {
+    /// Every layer for a frame of the history, rebuilt from its cells and plates (see
+    /// [`plate_infos`]) on `mesh`.
+    pub fn from_frame(mesh: &SphereMesh, cells: &[CellInfo], plates: &[PlateInfo]) -> Self {
         let values = Layer::ALL
             .into_iter()
             .map(|layer| {
@@ -137,9 +158,7 @@ impl Fields {
                         .flat_map(|(cell, info)| {
                             let omega = plates
                                 .get(info.plate as usize)
-                                .map_or(glam::DVec3::ZERO, |&omega| {
-                                    glam::Vec3::from(omega).as_dvec3()
-                                });
+                                .map_or(glam::DVec3::ZERO, PlateInfo::omega);
                             (omega.cross(mesh.vertex(cell as u32)) * CM_PER_YEAR)
                                 .as_vec3()
                                 .to_array()
@@ -272,9 +291,9 @@ mod tests {
             fastest = fastest.max(velocity.length());
         }
         assert!(fastest > 0.1, "plates move: {fastest} cm/yr");
-        // Rebuilt for a frame of the history from the cells and plate rotations, the same.
+        // Rebuilt for a frame of the history from the cells and plates, the same.
         let cells = crate::viewer::cell_infos(&planet);
-        let rebuilt = Fields::from_frame(mesh, &cells, &plate_rotations(&planet));
+        let rebuilt = Fields::from_frame(mesh, &cells, &plate_infos(&planet));
         let rebuilt = rebuilt.get(Layer::PlateVelocity).unwrap();
         for (a, b) in values.iter().zip(rebuilt) {
             assert!((a - b).abs() <= 1e-4 * a.abs().max(1.0), "{a} vs {b}");

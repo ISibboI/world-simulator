@@ -8,11 +8,11 @@ use super::{ArrowScale, DEFAULT_ARROW_SPACING, Legend, ModeData, RenderMode};
 pub struct PlateMotion;
 
 /// Plate speed (cm/yr) drawn with the full arrow length; faster plates are drawn as long.
-const REFERENCE_SPEED: f64 = 10.0;
+pub(super) const REFERENCE_SPEED: f64 = 10.0;
 
 /// Arrow length grows with the square root of the speed, so that slow plates still show their
 /// direction next to fast ones.
-fn style(arrow_spacing: f64) -> ArrowStyle {
+pub(super) fn style(arrow_spacing: f64) -> ArrowStyle {
     ArrowStyle {
         exponent: 0.5,
         ..ArrowStyle::for_spacing(arrow_spacing, REFERENCE_SPEED)
@@ -42,11 +42,11 @@ impl RenderMode for PlateMotion {
                 .into(),
             scale: None,
             swatches: Vec::new(),
-            arrows: Some(ArrowScale::new(
+            arrows: vec![ArrowScale::new(
                 &style,
                 &[1.0, 3.0, REFERENCE_SPEED],
                 "cm/yr",
-            )),
+            )],
         }
     }
 }

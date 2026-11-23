@@ -3,10 +3,10 @@
 //!
 //! A mode gives a field of vectors (a [`Sample`] per point, e.g. the cells of a coarse grid,
 //! see [`sample_cells`]); [`arrows`] scales them with an [`ArrowStyle`] (length and width grow
-//! with the magnitude up to a reference value) and [`triangles`] turns them into geometry: a
-//! shaft and a head in the plane tangent to the sphere at the arrow's base, lifted above the
-//! displayed surface. The renderer draws them depth-tested against the planet (mountains in
-//! front hide them), each with a dark border for contrast on any colour.
+//! with the magnitude up to a reference value) and [`arrow_triangles`] turns them into geometry:
+//! a shaft and a head in the plane tangent to the sphere at the arrow's base, lifted above the
+//! displayed surface. [`super::overlay::OverlayBuilder::arrows`] adds them to the overlay, each
+//! with a dark border for contrast on any colour.
 
 use glam::{DVec3, Vec3};
 
@@ -162,24 +162,6 @@ pub fn arrow_triangles(arrow: &Arrow, style: &ArrowStyle, margin: f64) -> [[DVec
         [start_right, neck_left, start_left],
         [head_right, tip, head_left],
     ]
-}
-
-/// The overlay vertices of arrows (a list of triangles): all borders first, then all arrows, so
-/// that the renderer, which does not write depth for overlays, draws every arrow over the
-/// borders.
-pub fn triangles(arrows: &[Arrow], style: &ArrowStyle) -> Vec<OverlayVertex> {
-    let mut vertices = Vec::with_capacity(arrows.len() * 18);
-    for (margin, color) in [(style.border, style.border_color), (0.0, style.color)] {
-        for arrow in arrows {
-            for triangle in arrow_triangles(arrow, style, margin) {
-                vertices.extend(triangle.iter().map(|point| OverlayVertex {
-                    position: point.as_vec3().to_array(),
-                    color,
-                }));
-            }
-        }
-    }
-    vertices
 }
 
 /// The cells of `mesh` nearest to the vertices of an icosphere with `subdivisions`: evenly
@@ -339,21 +321,6 @@ mod tests {
         assert!(border_a[0].x < 0.0);
         assert!(width(&border_a) > 0.01);
         assert!(border_head[1].x > 0.08);
-    }
-
-    #[test]
-    fn borders_come_first() {
-        let style = style();
-        let arrow = Arrow {
-            base: DVec3::Y,
-            direction: DVec3::Z,
-            length: 0.05,
-            width: 0.01,
-        };
-        let vertices = triangles(&[arrow, arrow], &style);
-        assert_eq!(vertices.len(), 2 * 2 * 9);
-        assert!(vertices[..18].iter().all(|v| v.color == style.border_color));
-        assert!(vertices[18..].iter().all(|v| v.color == style.color));
     }
 
     #[test]

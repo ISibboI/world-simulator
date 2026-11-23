@@ -288,7 +288,9 @@ impl Simulation {
             tracked: None,
             matched_rotation: self.plates[plate as usize].matched_rotation,
             initiated_at: None,
+            id: self.next_plate_id,
         };
+        self.next_plate_id += 1;
         // The tracked crust of the remaining part is no longer accurate.
         self.plates[plate as usize].tracked = None;
         let new_index = self.plates.len() as u32;

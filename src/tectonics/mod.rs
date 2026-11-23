@@ -38,6 +38,7 @@
 mod boundaries;
 mod crust;
 mod deformation;
+mod display;
 mod dynamics;
 mod events;
 mod generation;
@@ -52,6 +53,7 @@ mod weak_zones;
 
 pub use boundaries::{GapStatistics, TrenchSediment};
 pub use crust::*;
+pub use display::BoundaryClass;
 pub use events::{EventCounts, PlateEventParams, WEAK_BELT_THRESHOLD};
 pub use generation::InitialConfiguration;
 pub use initial_sediment::{InitialSedimentParams, PlatformEmplacement};
@@ -473,6 +475,10 @@ pub struct Plate {
     /// When a subduction initiation inside a plate split this plate from its partner (both
     /// parts carry it), for tracking initiations that are undone by merging the parts again.
     initiated_at: Option<f64>,
+    /// A serial number that stays with the plate while its index changes (removing a plate
+    /// gives the last one its index): plates born later get larger ids, see
+    /// [`Simulation::plate_id`]. For display only.
+    id: u32,
 }
 
 /// Initial ocean ages with Earth's roughly triangular age–area distribution: the oceanic cells
@@ -690,6 +696,8 @@ pub struct Simulation {
     surface_sharing: SurfaceSharing,
     /// Simulated time in Myr.
     time: f64,
+    /// The id of the next plate born (see [`Plate::id`]).
+    next_plate_id: u32,
 }
 
 impl Simulation {
@@ -731,7 +739,8 @@ impl Simulation {
         let ocean_age = triangular_ages(&boundary_distance, &is_continental);
 
         let mut plates: Vec<Plate> = (0..plate_count)
-            .map(|_| Plate {
+            .map(|index| Plate {
+                id: index as u32,
                 rotation: DQuat::IDENTITY,
                 angular_velocity: DVec3::ZERO,
                 crust: vec![None; cell_count],
@@ -856,6 +865,7 @@ impl Simulation {
             sea_level_budget: SeaLevelBudget::default(),
             surface_sharing: SurfaceSharing::default(),
             time: 0.0,
+            next_plate_id: plate_count as u32,
         };
         // The sediment cover is part of the initial planet (a stock, not a source); it is
         // added after the plate setup and with its own random numbers, so that it changes
@@ -948,6 +958,12 @@ impl Simulation {
     /// The number of plates; their ids are `0..plate_count()`.
     pub fn plate_count(&self) -> usize {
         self.plates.len()
+    }
+
+    /// The id of a plate that stays the same while the plate exists, whereas its index
+    /// (`plate`) changes when another plate is removed; ids are never reused.
+    pub fn plate_id(&self, plate: u32) -> u32 {
+        self.plates[plate as usize].id
     }
 
     /// The rotation axis of a plate scaled by its rotation speed in rad/Myr.

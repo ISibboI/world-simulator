@@ -8,7 +8,7 @@
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
 
-use super::super::CellInfo;
+use super::super::{CellInfo, PlateInfo};
 
 /// The quantisation of one attribute.
 #[derive(Debug, Clone, Copy)]
@@ -251,11 +251,13 @@ pub enum Kind {
 pub struct State {
     pub time: f64,
     pub planes: Planes,
-    pub plates: Vec<[f32; 3]>,
+    pub plates: Vec<PlateInfo>,
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
+/// Bytes per plate: its rotation and id.
+pub const PLATE_BYTES: usize = 16;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
 const HEADER: usize = 2 + 8 + 4 + 4;
 
@@ -268,12 +270,13 @@ pub fn encode(state: &State, previous: Option<&State>) -> Vec<u8> {
     } else {
         Kind::Key
     };
-    let mut body = Vec::with_capacity(state.plates.len() * 12 + state.planes.bytes.len());
-    // Plate rotations are few and change every step: as they are.
-    for rotation in &state.plates {
-        for component in rotation {
+    let mut body = Vec::with_capacity(state.plates.len() * PLATE_BYTES + state.planes.bytes.len());
+    // Plates are few and their rotations change every step: as they are.
+    for plate in &state.plates {
+        for component in plate.rotation {
             body.extend_from_slice(&component.to_le_bytes());
         }
+        body.extend_from_slice(&plate.id.to_le_bytes());
     }
     match previous {
         Some(previous) => body.extend(
@@ -319,7 +322,7 @@ pub fn decode(frame: &[u8], previous: Option<&State>) -> Result<State, String> {
     let time = f64::from_le_bytes(header[2..10].try_into().expect("8 bytes"));
     let cells = number(10..14);
     let plates = number(14..18);
-    let plate_bytes = plates * 12;
+    let plate_bytes = plates * PLATE_BYTES;
     let size = plate_bytes + cells * BYTES_PER_CELL;
     let body = lz4_flex::decompress(&frame[HEADER..], size)
         .map_err(|error| format!("corrupt frame: {error}"))?;
@@ -327,13 +330,16 @@ pub fn decode(frame: &[u8], previous: Option<&State>) -> Result<State, String> {
         return Err("frame of the wrong size".to_owned());
     }
     let plates = body[..plate_bytes]
-        .as_chunks::<12>()
+        .as_chunks::<PLATE_BYTES>()
         .0
         .iter()
         .map(|chunk| {
-            let component =
-                |at: usize| f32::from_le_bytes(chunk[at..at + 4].try_into().expect("4 bytes"));
-            [component(0), component(4), component(8)]
+            let word = |at: usize| chunk[at..at + 4].try_into().expect("4 bytes");
+            let component = |at: usize| f32::from_le_bytes(word(at));
+            PlateInfo {
+                rotation: [component(0), component(4), component(8)],
+                id: u32::from_le_bytes(word(12)),
+            }
         })
         .collect();
     let mut bytes = body[plate_bytes..].to_vec();
@@ -464,7 +470,13 @@ mod tests {
             .map(|step| State {
                 time: f64::from(step),
                 planes: Planes::new(&cells(300, step as f32)),
-                plates: vec![[0.01 * step as f32, 0.0, -0.02]; 4],
+                plates: vec![
+                    PlateInfo {
+                        rotation: [0.01 * step as f32, 0.0, -0.02],
+                        id: step as u32 * 3,
+                    };
+                    4
+                ],
             })
             .collect();
         let mut previous: Option<State> = None;
@@ -503,7 +515,13 @@ mod tests {
         let state = State {
             time: 1.0,
             planes: Planes::new(&cells(10_000, 0.0)),
-            plates: vec![[0.0; 3]; 12],
+            plates: vec![
+                PlateInfo {
+                    rotation: [0.0; 3],
+                    id: 1
+                };
+                12
+            ],
         };
         let key = encode(&state, None);
         let delta = encode(&state, Some(&state));
@@ -534,11 +552,11 @@ mod tests {
         let state = |planet: &crate::planet::Planet| State {
             time: planet.tectonics().time(),
             planes: Planes::new(&crate::viewer::cell_infos(planet)),
-            plates: crate::viewer::fields::plate_rotations(planet),
+            plates: crate::viewer::fields::plate_infos(planet),
         };
         let mut previous = state(&planet);
         let cells = previous.planes.cells;
-        let raw = cells * BYTES_PER_CELL + previous.plates.len() * 12;
+        let raw = cells * BYTES_PER_CELL + previous.plates.len() * PLATE_BYTES;
         let mut keys = vec![encode(&previous, None).len()];
         let mut deltas = Vec::new();
         let mut channels = vec![0usize; CHANNELS.len()];

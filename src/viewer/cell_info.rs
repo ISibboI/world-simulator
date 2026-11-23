@@ -6,6 +6,7 @@ use eframe::egui;
 use glam::DVec3;
 
 use crate::planet::Planet;
+use crate::tectonics::BoundaryClass;
 
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
@@ -41,7 +42,9 @@ pub struct CellInfo {
     pub discharge: f32,
     /// The plate covering the cell.
     pub plate: u32,
-    /// Bit flags, see [`CellInfo::CONTINENTAL`].
+    /// Bit flags: [`CellInfo::CONTINENTAL`], the boundary class
+    /// ([`CellInfo::BOUNDARY_SHIFT`]) and [`CellInfo::DEFORMING_BAND`]. The frame history keeps
+    /// the low 8 bits.
     pub flags: u32,
 }
 
@@ -49,9 +52,37 @@ impl CellInfo {
     /// [`CellInfo::flags`]: the crust is continental (see
     /// [`crate::tectonics::Crust::is_continental`]), otherwise oceanic.
     pub const CONTINENTAL: u32 = 1;
+    /// [`CellInfo::flags`]: bits 1 to 4 are the code of the cell's
+    /// [`BoundaryClass`] (0 inside a plate).
+    pub const BOUNDARY_SHIFT: u32 = 1;
+    pub const BOUNDARY_MASK: u32 = 0b1111 << Self::BOUNDARY_SHIFT;
+    /// [`CellInfo::flags`]: the cell is in a deforming band (see
+    /// [`crate::tectonics::Simulation::boundary_map`]).
+    pub const DEFORMING_BAND: u32 = 1 << 5;
 
     pub fn is_continental(&self) -> bool {
         self.flags & Self::CONTINENTAL != 0
+    }
+
+    /// What the plate boundary at the cell does, if the cell is at one.
+    pub fn boundary(&self) -> Option<BoundaryClass> {
+        BoundaryClass::from_code(((self.flags & Self::BOUNDARY_MASK) >> Self::BOUNDARY_SHIFT) as u8)
+    }
+
+    pub fn in_deforming_band(&self) -> bool {
+        self.flags & Self::DEFORMING_BAND != 0
+    }
+
+    /// The flags of a cell.
+    pub fn flags(continental: bool, boundary: Option<BoundaryClass>, band: bool) -> u32 {
+        let mut flags = if continental { Self::CONTINENTAL } else { 0 };
+        if let Some(class) = boundary {
+            flags |= u32::from(class.code()) << Self::BOUNDARY_SHIFT;
+        }
+        if band {
+            flags |= Self::DEFORMING_BAND;
+        }
+        flags
     }
 }
 
@@ -65,6 +96,7 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
     let simulation = planet.tectonics();
     let time = simulation.time();
     let temperature = planet.temperature();
+    let boundaries = simulation.boundary_map();
     let field = |values: &[f64], cell: usize| values.get(cell).map_or(f32::NAN, |&v| v as f32);
     let month = |month: usize, cell: usize| {
         temperature
@@ -94,11 +126,11 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 ice: field(&temperature.ice, index),
                 discharge: field(planet.discharge(), index),
                 plate: simulation.owner(cell).plate,
-                flags: if crust.is_continental() {
-                    CellInfo::CONTINENTAL
-                } else {
-                    0
-                },
+                flags: CellInfo::flags(
+                    crust.is_continental(),
+                    boundaries.classes[index],
+                    boundaries.band[index],
+                ),
             }
         })
         .collect()
@@ -148,11 +180,12 @@ pub struct Row {
 
 /// The labels of the rows, always all of them in this order, so that the widget does not
 /// change its layout from cell to cell.
-pub const ROW_LABELS: [&str; 13] = [
+pub const ROW_LABELS: [&str; 14] = [
     "Position",
     "Elevation",
     "Surface",
     "Plate",
+    "Boundary",
     "Crust",
     "Lithosphere age",
     "Sediment",
@@ -188,12 +221,18 @@ fn format_temperature(value: f32) -> Option<String> {
     known(value, |t| format!("{t:.1} °C"))
 }
 
-/// The rows of the widget for a cell at `latitude`/`longitude` (degrees): always the rows of
+/// The rows of the widget for a cell at `latitude`/`longitude` (degrees) whose plate has the id
+/// `plate_id` (see [`super::PlateInfo::id`]; the plate's index if unknown): always the rows of
 /// [`ROW_LABELS`], with the values that do not apply to the cell (no orogeny, no ice, no river,
 /// unknown values) as [`NOT_APPLICABLE`].
-pub fn format_rows(info: &CellInfo, latitude: f64, longitude: f64) -> Vec<Row> {
+pub fn format_rows(
+    info: &CellInfo,
+    plate_id: Option<u32>,
+    latitude: f64,
+    longitude: f64,
+) -> Vec<Row> {
     let land = info.elevation >= 0.0;
-    let values: [Option<String>; 13] = [
+    let values: [Option<String>; 14] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
         Some(
@@ -205,7 +244,13 @@ pub fn format_rows(info: &CellInfo, latitude: f64, longitude: f64) -> Vec<Row> {
             }
             .to_owned(),
         ),
-        Some(info.plate.to_string()),
+        Some(plate_id.unwrap_or(info.plate).to_string()),
+        match (info.boundary(), info.in_deforming_band()) {
+            (Some(class), false) => Some(class.label().to_owned()),
+            (Some(class), true) => Some(format!("{}; deforming band", class.label())),
+            (None, true) => Some("deforming band".to_owned()),
+            (None, false) => None,
+        },
         Some(format!(
             "{}, {:.1} km",
             if info.is_continental() {
@@ -304,6 +349,8 @@ const MARGIN: f32 = 8.0;
 pub struct ShownCell<'a> {
     pub cell: u32,
     pub info: &'a CellInfo,
+    /// The id of its plate, if known.
+    pub plate_id: Option<u32>,
     /// Direction of the cell from the planet centre.
     pub direction: DVec3,
     /// Whether the cell is selected (clicked or tapped) rather than under the pointer.
@@ -384,7 +431,7 @@ impl CellInfoPanel {
                     .show(ui, |ui| {
                         let rows = match &position {
                             Some((shown, latitude, longitude)) => {
-                                format_rows(shown.info, *latitude, *longitude)
+                                format_rows(shown.info, shown.plate_id, *latitude, *longitude)
                             }
                             None => empty_rows(),
                         };
@@ -490,11 +537,24 @@ mod tests {
 
     #[test]
     fn land_cell_rows() {
-        let rows = format_rows(&info(), 10.0, 20.0);
+        let rows = format_rows(&info(), None, 10.0, 20.0);
         assert_eq!(row(&rows, "Position").unwrap(), "10.0° N, 20.0° E");
         assert_eq!(row(&rows, "Elevation").unwrap(), "1234 m");
         assert_eq!(row(&rows, "Surface").unwrap(), "land");
         assert_eq!(row(&rows, "Plate").unwrap(), "7");
+        assert_eq!(row(&rows, "Boundary"), None);
+        let rows = format_rows(&info(), Some(31), 10.0, 20.0);
+        assert_eq!(row(&rows, "Plate").unwrap(), "31");
+        let trench = CellInfo {
+            flags: CellInfo::flags(true, Some(BoundaryClass::Overriding), true),
+            ..info()
+        };
+        assert!(trench.is_continental() && trench.in_deforming_band());
+        assert_eq!(trench.boundary(), Some(BoundaryClass::Overriding));
+        assert_eq!(
+            row(&format_rows(&trench, None, 0.0, 0.0), "Boundary").unwrap(),
+            "trench, overriding plate; deforming band"
+        );
         assert_eq!(row(&rows, "Crust").unwrap(), "continental, 35.2 km");
         assert_eq!(row(&rows, "Lithosphere age").unwrap(), "old (≥ 1000 Myr)");
         assert_eq!(row(&rows, "Sediment").unwrap(), "512 m (as rock)");
@@ -525,7 +585,7 @@ mod tests {
 
     #[test]
     fn ocean_cell_rows() {
-        let rows = format_rows(&ocean(), -5.0, -170.0);
+        let rows = format_rows(&ocean(), None, -5.0, -170.0);
         assert_eq!(row(&rows, "Elevation").unwrap(), "-4321 m");
         assert_eq!(row(&rows, "Surface").unwrap(), "ocean, sea ice");
         assert_eq!(row(&rows, "Crust").unwrap(), "oceanic, 7.0 km");
@@ -556,7 +616,7 @@ mod tests {
             ..info()
         };
         for cell in [info(), ocean(), ice_sheet, bare_land] {
-            assert_eq!(labels(format_rows(&cell, 1.0, 2.0)), ROW_LABELS);
+            assert_eq!(labels(format_rows(&cell, Some(3), 1.0, 2.0)), ROW_LABELS);
         }
         assert_eq!(labels(empty_rows()), ROW_LABELS);
         assert!(empty_rows().iter().all(|row| !row.applies));
@@ -591,7 +651,7 @@ mod tests {
     #[test]
     fn old_oceanic_crust_has_no_ocean_floor_age() {
         let info = CellInfo { flags: 0, ..info() };
-        let rows = format_rows(&info, 0.0, 0.0);
+        let rows = format_rows(&info, None, 0.0, 0.0);
         assert_eq!(row(&rows, "Lithosphere age").unwrap(), "old (≥ 1000 Myr)");
     }
 
@@ -602,8 +662,13 @@ mod tests {
         let planet = crate::build_planet(&cli).unwrap();
         let simulation = planet.tectonics();
         let infos = cell_infos(&planet);
+        let boundaries = simulation.boundary_map();
         assert_eq!(infos.len(), simulation.mesh().len());
         for (cell, info) in infos.iter().enumerate() {
+            assert_eq!(info.boundary(), boundaries.classes[cell]);
+            assert_eq!(info.in_deforming_band(), boundaries.band[cell]);
+            // The frame history keeps 8 bits of the flags.
+            assert_eq!(info.flags & !0xFF, 0);
             let cell = cell as u32;
             assert_eq!(info.plate, simulation.owner(cell).plate);
             assert_eq!(
@@ -619,6 +684,7 @@ mod tests {
             assert!(info.precipitation.is_finite() && info.precipitation >= 0.0);
             assert!(info.crust_thickness > 0.0);
         }
+        assert!(infos.iter().any(|info| info.boundary().is_some()));
     }
 
     #[test]
