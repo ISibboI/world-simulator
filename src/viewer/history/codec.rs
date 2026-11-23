@@ -426,7 +426,8 @@ mod tests {
             streamfunction: (x * 0.01).sin() * 60.0,
             gyre_heating: (x * 0.07).cos() * 150.0,
             plate: (index % 13) as u32,
-            flags: (index % 2) as u32,
+            // All flag bits the history keeps, the oceanic bit (6) among them.
+            flags: (index % 2) as u32 | ((index % 3) as u32) << 5,
         }
     }
 
