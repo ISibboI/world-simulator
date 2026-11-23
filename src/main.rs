@@ -349,7 +349,7 @@ fn run_simulation_thread(
         let update = SurfaceUpdate {
             time: planet.tectonics().time(),
             cells: Arc::new(cells),
-            plates: Arc::new(viewer::plate_rotations(planet)),
+            plates: Arc::new(viewer::plate_infos(planet)),
             // The mesh only with the first update of a simulation.
             mesh: std::mem::take(&mut first_update).then(|| Arc::new(MeshUpdate::of(planet))),
             step_seconds: step_time.map(|time| time.as_secs_f64()),

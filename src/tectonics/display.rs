@@ -6,10 +6,9 @@
 //!
 //! Nothing here feeds back into the simulation.
 
-use glam::DVec3;
-
 use super::Simulation;
 use super::dynamics::BoundaryKind;
+use crate::hash::HashMap;
 use crate::math;
 
 /// What happens at a boundary cell, seen from the plate the cell belongs to. A cell at the
@@ -19,25 +18,26 @@ use crate::math;
 pub enum BoundaryClass {
     /// The plate subducts here under the other plate (an active trench).
     Subducting = 1,
-    /// Continental crust of both plates meets: a collision belt.
-    Collision = 2,
     /// The other plate subducts here under this one: the upper plate of a trench.
-    Overriding = 3,
+    Overriding = 2,
+    /// Continental crust of both plates meets and converges: a collision belt.
+    Collision = 3,
     /// A diffuse convergent zone, either side: the plates converge but no thrust has broken
     /// through yet, so the convergence is taken up by distributed shortening (#42, #73).
     Diffuse = 4,
     /// The plates move apart at young oceanic crust: a mid-ocean ridge.
     Ridge = 5,
-    /// The plates move apart at continental crust: a continental rift.
+    /// The plates move apart (faster than [`super::TectonicParams::min_stretching_rate`]) at
+    /// crust of continental origin that can still stretch: a continental rift.
     Rift = 6,
     /// The plates slide past each other: the relative motion is within
     /// [`super::TectonicParams::min_trench_obliquity`] of the boundary's strike.
     Transform = 7,
-    /// The plates converge, but none of the above (e.g. a decaying trench seen from its
-    /// upper side, or a contact whose polarity is not decided yet).
+    /// The plates converge, but none of the above (e.g. oceanic crust under continental
+    /// crust where no segment decided the polarity yet).
     OtherConvergent = 8,
-    /// The plates move apart at old oceanic or mixed crust (a boundary that just formed by a
-    /// split, or an old divergent margin).
+    /// The plates move apart at old oceanic crust or at continental crust too thin or too slow
+    /// to stretch (a boundary that just formed by a split, an old margin).
     OtherDivergent = 9,
     /// The plates move against each other slower than
     /// [`super::TectonicParams::min_trench_convergence`].
@@ -48,8 +48,8 @@ impl BoundaryClass {
     /// Every class, in order of their codes.
     pub const ALL: [BoundaryClass; 10] = [
         BoundaryClass::Subducting,
-        BoundaryClass::Collision,
         BoundaryClass::Overriding,
+        BoundaryClass::Collision,
         BoundaryClass::Diffuse,
         BoundaryClass::Ridge,
         BoundaryClass::Rift,
@@ -91,9 +91,10 @@ pub struct BoundaryMap {
     /// Per cell: its boundary class, `None` inside a plate.
     pub classes: Vec<Option<BoundaryClass>>,
     /// Per cell: whether it is in a deforming band: crust of continental origin of the upper
-    /// plate within [`super::TectonicParams::collision_band_width`] of a converging collision
-    /// (where the collision is taken up, see `deformation`), or continental crust within
-    /// [`super::TectonicParams::rift_width`] of a rift on its plate (where the rift stretches).
+    /// plate (by the segment's polarity) within [`super::TectonicParams::collision_band_width`]
+    /// of a converging collision (the band that takes up the collision, see `deformation`), or
+    /// within [`super::TectonicParams::rift_width`] of a rift on its plate (the zone the rift
+    /// stretches). Both are counted in rings of cells over the plate.
     pub band: Vec<bool>,
 }
 
@@ -105,129 +106,138 @@ impl Simulation {
         // rad/Myr per cm/yr.
         let per_cm_yr = 1.0 / (params.planet_radius * 100.0 / 1e6);
         let min_convergence = params.min_trench_convergence * per_cm_yr;
-        let suture = params.events.suture_convergence * per_cm_yr;
+        let min_stretching = params.min_stretching_rate * per_cm_yr;
         let strike_ratio = math::tan(params.min_trench_obliquity.to_radians());
         let rotations = self.rotations();
         let cell_count = self.mesh.len();
         let mut classes: Vec<Option<BoundaryClass>> = vec![None; cell_count];
-        // Seeds of the bands: (cell, rings).
         let spacing = params.planet_radius * self.mesh.mean_edge_angle();
         let collision_rings = super::deformation::band_rings(params.collision_band_width, spacing);
-        let rift_rings = super::deformation::band_rings(params.rift_width, spacing);
+        // As the rift stretching (`Simulation::resolve_ownership`).
+        let rift_rings = (params.rift_width / spacing).ceil().max(1.0) as usize;
+        // Seeds of the bands: (cell, rings).
         let mut seeds: Vec<(u32, usize)> = Vec::new();
 
-        for boundary in self.boundary_cells() {
+        let boundaries = self.boundary_cells();
+        // Trenches and diffuse zones by (lower cell, upper plate), so that the upper side
+        // takes the classification of the lower one.
+        let mut lower: HashMap<(u32, u32), BoundaryClass> = HashMap::default();
+        for boundary in &boundaries {
+            let class = match boundary.kind {
+                BoundaryKind::Trench { .. } => BoundaryClass::Subducting,
+                BoundaryKind::Diffuse => BoundaryClass::Diffuse,
+                _ => continue,
+            };
+            lower.insert((boundary.cell, boundary.other), class);
+        }
+        for boundary in &boundaries {
             let cell = boundary.cell;
             let position = self.mesh.vertex(cell);
             let crust = self.surface_crust(cell);
-            let other_crust = self
-                .mesh
-                .neighbors(cell)
-                .iter()
-                .find(|&&neighbor| self.owners[neighbor as usize].plate == boundary.other)
-                .map(|&neighbor| self.surface_crust(neighbor));
             let relative = (self.plates[boundary.plate as usize].angular_velocity
                 - self.plates[boundary.other as usize].angular_velocity)
                 .cross(position);
             let convergence = boundary.convergence;
             let strike_slip = relative.dot(position.cross(boundary.normal)).abs();
-            let segment =
-                self.polarities
-                    .segment_at(boundary.plate, boundary.other, position, &rotations);
-            let upper = segment.is_some_and(|segment| segment.overriding == boundary.plate);
-            let class = match boundary.kind {
-                BoundaryKind::Trench { .. } => BoundaryClass::Subducting,
-                BoundaryKind::Collision => {
-                    if upper && convergence > suture && collision_rings > 0 {
+            // The upper side of a trench or diffuse zone: a neighbour of the other plate is its
+            // lower side, under this plate.
+            let upper_of = self
+                .mesh
+                .neighbors(cell)
+                .iter()
+                .filter_map(|&neighbor| lower.get(&(neighbor, boundary.plate)))
+                .min()
+                .map(|class| match class {
+                    BoundaryClass::Subducting => BoundaryClass::Overriding,
+                    other => *other,
+                });
+            let kinematic = if relative.length() < min_convergence {
+                BoundaryClass::Inactive
+            } else if convergence.abs() < strike_ratio * strike_slip {
+                BoundaryClass::Transform
+            } else if convergence > 0.0 {
+                BoundaryClass::OtherConvergent
+            } else {
+                BoundaryClass::OtherDivergent
+            };
+            let class = match (boundary.kind, upper_of, kinematic) {
+                (BoundaryKind::Trench { .. }, ..) => BoundaryClass::Subducting,
+                (BoundaryKind::Diffuse, ..) => BoundaryClass::Diffuse,
+                (_, Some(class), _) => class,
+                // `Collision` only says that continental crust meets on both sides; how it
+                // moves decides what the boundary does.
+                (BoundaryKind::Collision, _, BoundaryClass::OtherConvergent) => {
+                    let upper = self
+                        .polarities
+                        .segment_at(boundary.plate, boundary.other, position, &rotations)
+                        .is_some_and(|segment| segment.overriding == boundary.plate);
+                    if upper && collision_rings > 0 {
                         seeds.push((cell, collision_rings));
                     }
                     BoundaryClass::Collision
                 }
-                BoundaryKind::Diffuse => BoundaryClass::Diffuse,
-                BoundaryKind::Ridge | BoundaryKind::Other => {
-                    let lower_subducts = other_crust.is_some_and(|crust| !crust.resists_subduction());
-                    // The mirror of the trench and diffuse conditions of `boundary_cells`.
-                    let overriding = segment.is_some_and(|segment| {
-                        upper
-                            && lower_subducts
-                            && segment.localised
-                            && ((segment.subducting && convergence > min_convergence)
-                                || (segment.slab_length > 0.0 && convergence > -min_convergence))
-                    });
-                    let diffuse = segment.is_some_and(|segment| {
-                        upper && lower_subducts && !segment.localised && segment.subducting
-                    });
-                    let speed = relative.length();
-                    if overriding {
-                        BoundaryClass::Overriding
-                    } else if diffuse {
-                        BoundaryClass::Diffuse
-                    } else if speed < min_convergence {
-                        BoundaryClass::Inactive
-                    } else if convergence.abs() < strike_ratio * strike_slip {
-                        BoundaryClass::Transform
-                    } else if boundary.kind == BoundaryKind::Ridge {
-                        BoundaryClass::Ridge
-                    } else if convergence < 0.0 && crust.is_continental() {
-                        if rift_rings > 0 {
-                            seeds.push((cell, rift_rings));
-                        }
-                        BoundaryClass::Rift
-                    } else if convergence < 0.0 {
-                        BoundaryClass::OtherDivergent
-                    } else {
-                        BoundaryClass::OtherConvergent
-                    }
+                (BoundaryKind::Ridge, _, BoundaryClass::OtherDivergent) => BoundaryClass::Ridge,
+                (_, _, BoundaryClass::OtherDivergent)
+                    if crust.is_continental_origin_column()
+                        && crust.thickness > params.breakup_thickness
+                        && -convergence > min_stretching =>
+                {
+                    seeds.push((cell, rift_rings));
+                    BoundaryClass::Rift
                 }
+                (.., kinematic) => kinematic,
             };
             let slot = &mut classes[cell as usize];
             *slot = Some(slot.map_or(class, |previous| previous.min(class)));
         }
 
-        // The bands: rings around their seeds over the crust of continental origin of the
-        // seed's plate.
+        // The bands: the cells of the seed's plate within its rings (also across its oceanic
+        // cells, as the collision band), where the crust is of continental origin.
         let mut band = vec![false; cell_count];
-        let mut stamp = vec![u32::MAX; cell_count];
-        let (mut frontier, mut next) = (Vec::new(), Vec::new());
-        for (index, &(seed, rings)) in seeds.iter().enumerate() {
-            let plate = self.owners[seed as usize].plate;
-            frontier.clear();
-            frontier.push(seed);
-            stamp[seed as usize] = index as u32;
-            for _ in 0..=rings {
-                next.clear();
-                for &cell in &frontier {
-                    if self.owners[cell as usize].plate != plate
-                        || !self.surface_crust(cell).is_continental_origin_column()
-                    {
-                        continue;
-                    }
-                    band[cell as usize] = true;
-                    for &neighbor in self.mesh.neighbors(cell) {
-                        if stamp[neighbor as usize] != index as u32 {
-                            stamp[neighbor as usize] = index as u32;
-                            next.push(neighbor);
-                        }
-                    }
+        let mut reach = vec![0usize; cell_count];
+        let mut queue: std::collections::VecDeque<(u32, usize)> = std::collections::VecDeque::new();
+        for &(seed, rings) in &seeds {
+            if rings + 1 > reach[seed as usize] {
+                reach[seed as usize] = rings + 1;
+                queue.push_back((seed, rings + 1));
+            }
+        }
+        while let Some((cell, left)) = queue.pop_front() {
+            if left < reach[cell as usize] {
+                continue;
+            }
+            let plate = self.owners[cell as usize].plate;
+            let crust = self.surface_crust(cell);
+            if crust.is_continental_origin_column() {
+                band[cell as usize] = true;
+            }
+            if left <= 1 {
+                continue;
+            }
+            for &neighbor in self.mesh.neighbors(cell) {
+                if self.owners[neighbor as usize].plate == plate && reach[neighbor as usize] < left - 1
+                {
+                    reach[neighbor as usize] = left - 1;
+                    queue.push_back((neighbor, left - 1));
                 }
-                std::mem::swap(&mut frontier, &mut next);
             }
         }
         BoundaryMap { classes, band }
     }
 }
 
-/// The unit normal (tangent to the sphere at `position`) pointing from `position` towards
-/// `towards`; zero if they coincide. For tests.
-#[cfg(test)]
-fn tangent_towards(position: DVec3, towards: DVec3) -> DVec3 {
-    let direction = towards - position;
-    (direction - position * direction.dot(position)).normalize_or_zero()
-}
-
 #[cfg(test)]
 mod tests {
+    use glam::DVec3;
+
     use super::*;
+
+    /// The unit normal (tangent to the sphere at `position`) pointing from `position` towards
+    /// `towards`; zero if they coincide.
+    fn tangent_towards(position: DVec3, towards: DVec3) -> DVec3 {
+        let direction = towards - position;
+        (direction - position * direction.dot(position)).normalize_or_zero()
+    }
     use crate::sphere::SphereMesh;
     use crate::tectonics::TectonicParams;
 
@@ -281,20 +291,14 @@ mod tests {
     #[test]
     fn strike_slip_is_a_transform_and_rest_is_inactive() {
         // A rotation about the pole: the plates slide past each other along the equator.
-        // Collisions (continental crust on both sides) are collisions whatever the motion.
-        let without_collisions = |classes: Vec<BoundaryClass>| -> Vec<BoundaryClass> {
-            classes
-                .into_iter()
-                .filter(|&class| class != BoundaryClass::Collision)
-                .collect()
-        };
-        let classes = without_collisions(classes(&split(DVec3::Z * 0.01)));
+        // Also where continental crust meets on both sides.
+        let classes = classes(&split(DVec3::Z * 0.01));
         assert!(!classes.is_empty());
         assert!(
             share(&classes, &[BoundaryClass::Transform]) > 0.9,
             "{classes:?}"
         );
-        let classes = without_collisions(self::classes(&split(DVec3::ZERO)));
+        let classes = self::classes(&split(DVec3::ZERO));
         assert!(share(&classes, &[BoundaryClass::Inactive]) > 0.99);
     }
 
@@ -318,7 +322,7 @@ mod tests {
             // The new plate (1) is north of the equator.
             let across = tangent_towards(position, if plate == 1 { -DVec3::Z } else { DVec3::Z });
             let convergence = relative.dot(across);
-            if convergence.abs() < 0.5 * relative.length() || class == BoundaryClass::Collision {
+            if convergence.abs() < 0.5 * relative.length() {
                 continue;
             }
             if convergence > 0.0 {
@@ -332,5 +336,8 @@ mod tests {
         let convergent = [Subducting, Overriding, Collision, Diffuse, OtherConvergent];
         assert!(share(&opening, &divergent) > 0.9, "{opening:?}");
         assert!(share(&closing, &convergent) > 0.9, "{closing:?}");
+        // The split cuts continents: where they open, they rift, with a band around the rift.
+        assert!(opening.contains(&Rift), "{opening:?}");
+        assert!(map.band.iter().any(|&band| band));
     }
 }

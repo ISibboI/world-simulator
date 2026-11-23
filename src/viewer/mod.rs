@@ -50,7 +50,7 @@ pub use cell_info::{CellInfo, cell_infos};
 use cell_info::{CellInfoPanel, ShownCell};
 #[cfg(target_arch = "wasm32")]
 pub use fields::Layer;
-pub use fields::{Fields, Layers, plate_rotations};
+pub use fields::{Fields, Layers, PlateInfo, plate_infos};
 #[cfg(target_arch = "wasm32")]
 pub use history::store::MemoryStore;
 pub use history::{FrameStore, History};
@@ -97,8 +97,8 @@ pub struct SurfaceUpdate {
     pub time: f64,
     /// The attributes of every cell, in the order of the mesh vertices.
     pub cells: Arc<Vec<CellInfo>>,
-    /// The angular velocity of every plate in rad/Myr, by plate id ([`plate_rotations`]).
-    pub plates: Arc<Vec<[f32; 3]>>,
+    /// Every plate, by index ([`plate_infos`]).
+    pub plates: Arc<Vec<PlateInfo>>,
     /// The mesh: sent with the first update of a simulation, `None` after.
     pub mesh: Option<Arc<MeshUpdate>>,
     /// Seconds since the previous update, i.e. the time of the step: `None` for the initial
