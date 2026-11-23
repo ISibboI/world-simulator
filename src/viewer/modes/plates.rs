@@ -54,14 +54,21 @@ impl Line {
     /// subducting side wins, then an overriding one, then the more important class.
     fn of(classes: [Option<BoundaryClass>; 2]) -> (Self, Option<usize>) {
         use BoundaryClass::*;
+        // A subducting side facing an overriding one, then an overriding side (the subducting
+        // side across may subduct under a third plate), then a subducting side alone.
         for (side, class) in classes.iter().enumerate() {
-            if *class == Some(Subducting) {
+            if *class == Some(Subducting) && classes[1 - side] == Some(Overriding) {
                 return (Line::Subduction, Some(1 - side));
             }
         }
         for (side, class) in classes.iter().enumerate() {
             if *class == Some(Overriding) {
                 return (Line::Subduction, Some(side));
+            }
+        }
+        for (side, class) in classes.iter().enumerate() {
+            if *class == Some(Subducting) {
+                return (Line::Subduction, Some(1 - side));
             }
         }
         let class = classes.into_iter().flatten().min();
@@ -385,6 +392,17 @@ mod tests {
         );
         assert_eq!(
             Line::of([Some(Collision), Some(Subducting)]),
+            (Line::Subduction, Some(0))
+        );
+        // Both sides subducting (one under a third plate): teeth on one of them.
+        assert_eq!(
+            Line::of([Some(Subducting), Some(Subducting)]),
+            (Line::Subduction, Some(1))
+        );
+        // An overriding side wins over a subducting side that subducts under a third plate.
+        assert_eq!(Line::of([Some(Subducting), Some(Overriding)]).1, Some(1));
+        assert_eq!(
+            Line::of([Some(Overriding), Some(Overriding)]),
             (Line::Subduction, Some(0))
         );
         // A subducting side hidden by a triple junction: the overriding side still marks it.

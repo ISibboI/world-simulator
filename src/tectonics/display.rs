@@ -145,6 +145,7 @@ impl Simulation {
                 .mesh
                 .neighbors(cell)
                 .iter()
+                .filter(|&&neighbor| self.owners[neighbor as usize].plate == boundary.other)
                 .filter_map(|&neighbor| lower.get(&(neighbor, boundary.plate)))
                 .min()
                 .map(|class| match class {

@@ -81,6 +81,9 @@ A default 500-frame run at 6 subdivisions grows from ~161 MB to ~163 MB of histo
 
 ## Checks
 
+- Independent code review of the diff: nothing serious; its findings are fixed (the upper side
+  of a trench now only from cells of the plate across; teeth placement when a side subducts
+  under a third plate) or listed below (bands of terrane accretion, arrow height).
 - Unit tests: class codes and order; transforms, opening and closing on a split test planet
   (including continental crust on both sides: rifts, a band); flag bits through `cell_infos`;
   `PlateInfo` through the codec and history; line combination of the two sides; colours
@@ -103,7 +106,11 @@ band, paired arrows), [web](web-plates.png), [phone-width legend](phone-legend.p
   ridges or "other divergent" (as accepted on #43).
 - "Other convergent/divergent" are contacts the solve does not class (e.g. a fresh split, old
   oceanic crust opening, ocean–continent convergence without a decided polarity).
-- The collision band is drawn on the upper plate only, as the simulation applies it.
+- The collision band is drawn on the upper plate (by the segment's polarity) of converging
+  collisions only. The simulation also spreads terrane accretion over a band, and takes the
+  winner from the ownership resolution where no segment exists; those bands are not drawn.
+- Relative-motion arrows sit at the height of the higher of the two cells beside the
+  boundary; with the 40× relief, a high neighbour can hide part of an arrow.
 - Plate colours are muted and need the boundary lines where two neighbours share a colour
   later in a run.
 - No zoom in the view: at phone size the arrows and teeth are small.
