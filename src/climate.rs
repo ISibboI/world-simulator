@@ -222,6 +222,8 @@ pub struct WaterCycle {
     pub clipped: f64,
     /// Precipitation (m/yr) of every solved month.
     pub monthly_precipitation: Vec<Vec<f64>>,
+    /// Evaporation and evapotranspiration (m/yr) of every solved month, as [`Self::evaporation`].
+    pub monthly_evaporation: Vec<Vec<f64>>,
     /// Area-weighted global means of precipitation and evaporation in m/yr.
     pub global_precipitation: f64,
     pub global_evaporation: f64,
@@ -474,6 +476,16 @@ impl Climate {
                 m.precipitation
                     .iter()
                     .map(|p| p * to_metres_per_year)
+                    .collect()
+            })
+            .collect();
+        cycle.monthly_evaporation = self
+            .solved
+            .iter()
+            .map(|m| {
+                m.evaporation
+                    .iter()
+                    .map(|e| e * to_metres_per_year)
                     .collect()
             })
             .collect();

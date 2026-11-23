@@ -11,7 +11,7 @@ use crate::tectonics::BoundaryClass;
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 84 bytes per cell, 3.4 MB
+/// buffer (to the page on the web) and read back without parsing: 96 bytes per cell, 3.9 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -43,6 +43,13 @@ pub struct CellInfo {
     /// Annual potential evaporation of land in m/yr (zero over the ocean, see
     /// [`crate::climate::WaterCycle::potential_evaporation`]).
     pub potential_evaporation: f32,
+    /// Actual evaporation in m/yr, of the year and of January and July (NaN if the water cycle
+    /// does not solve that month): the evaporation of the ocean and the evapotranspiration of
+    /// land (see [`crate::climate::WaterCycle::evaporation`]), without the extra evaporation of
+    /// lakes, which the river model takes from the runoff.
+    pub evaporation: f32,
+    pub evaporation_january: f32,
+    pub evaporation_july: f32,
     /// Permanent ice cover (sea ice, ice sheets), 0 to 1.
     pub ice: f32,
     /// Water discharge in m³/yr (zero while erosion is disabled).
@@ -143,12 +150,16 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
     let cycle = planet.water_cycle();
     // The solved months are spread evenly from January; the slot of a month, if it is solved.
     let solved = cycle.monthly_precipitation.len();
-    let precipitation_of = |month: usize, cell: usize| {
+    let of_month = |monthly: &[Vec<f64>], month: usize, cell: usize| {
         (solved > 0 && (month * solved).is_multiple_of(12))
-            .then(|| cycle.monthly_precipitation.get(month * solved / 12))
+            .then(|| monthly.get(month * solved / 12))
             .flatten()
             .map_or(f32::NAN, |values| field(values, cell))
     };
+    let precipitation_of =
+        |month: usize, cell: usize| of_month(&cycle.monthly_precipitation, month, cell);
+    let evaporation_of =
+        |month: usize, cell: usize| of_month(&cycle.monthly_evaporation, month, cell);
     (0..simulation.mesh().len())
         .map(|index| {
             let cell = index as u32;
@@ -171,6 +182,9 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 precipitation_january: precipitation_of(0, index),
                 precipitation_july: precipitation_of(6, index),
                 potential_evaporation: field(&cycle.potential_evaporation, index),
+                evaporation: field(&cycle.evaporation, index),
+                evaporation_january: evaporation_of(0, index),
+                evaporation_july: evaporation_of(6, index),
                 ice: field(&temperature.ice, index),
                 discharge: field(planet.discharge(), index),
                 current_east: current(index, 0),
@@ -232,7 +246,7 @@ pub struct Row {
 
 /// The labels of the rows, always all of them in this order, so that the widget does not
 /// change its layout from cell to cell.
-pub const ROW_LABELS: [&str; 17] = [
+pub const ROW_LABELS: [&str; 18] = [
     "Position",
     "Elevation",
     "Surface",
@@ -247,6 +261,7 @@ pub const ROW_LABELS: [&str; 17] = [
     "Precipitation",
     "Precip. Jan / Jul",
     "Aridity index",
+    "P − E",
     "Permanent ice",
     "River discharge",
     "Ocean current",
@@ -287,7 +302,7 @@ pub fn format_rows(
     longitude: f64,
 ) -> Vec<Row> {
     let land = info.elevation >= 0.0;
-    let values: [Option<String>; 17] = [
+    let values: [Option<String>; 18] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
         Some(
@@ -363,6 +378,7 @@ pub fn format_rows(
                     format!("{} ({})", format_aridity(index), aridity_class(index))
                 })
             }),
+        format_balance(info),
         (info.ice > 0.0).then(|| format!("{:.0}%", 100.0 * info.ice)),
         (land && info.discharge > 0.0).then(|| {
             format!(
@@ -402,6 +418,23 @@ fn format_current(info: &CellInfo) -> Option<String> {
         text += &format!(", {:+.0} W/m²", info.gyre_heating);
     }
     Some(text)
+}
+
+/// Annual precipitation minus evaporation, with the evaporation: "+312 mm/yr (evap. 500)".
+fn format_balance(info: &CellInfo) -> Option<String> {
+    let (p, e) = (info.precipitation, info.evaporation);
+    (p.is_finite() && e.is_finite()).then(|| {
+        let balance = ((p - e) * 1000.0).round();
+        // No "-0" or "+0".
+        let sign = if balance > 0.0 {
+            "+"
+        } else if balance < 0.0 {
+            "−"
+        } else {
+            ""
+        };
+        format!("{sign}{:.0} mm/yr (evap. {:.0})", balance.abs(), e * 1000.0)
+    })
 }
 
 /// An aridity index with two decimals (three below 0.1, none from 10).
@@ -619,6 +652,9 @@ mod tests {
             precipitation_january: 0.0404,
             precipitation_july: 0.1205,
             potential_evaporation: 1.0,
+            evaporation: 0.5,
+            evaporation_january: 0.0102,
+            evaporation_july: 0.9,
             ice: 0.0,
             discharge: 3.15576e11,
             current_east: f32::NAN,
@@ -694,6 +730,7 @@ mod tests {
         assert_eq!(row(&rows, "Precipitation").unwrap(), "812 mm/yr");
         assert_eq!(row(&rows, "Precip. Jan / Jul").unwrap(), "40 / 120 mm/yr");
         assert_eq!(row(&rows, "Aridity index").unwrap(), "0.81 (humid)");
+        assert_eq!(row(&rows, "P − E").unwrap(), "+312 mm/yr (evap. 500)");
         let dry = CellInfo {
             precipitation: 0.1,
             potential_evaporation: 2.0,
@@ -722,6 +759,9 @@ mod tests {
             precipitation_january: f32::NAN,
             precipitation_july: f32::NAN,
             potential_evaporation: 0.0,
+            evaporation: 1.6,
+            evaporation_january: 2.1,
+            evaporation_july: f32::NAN,
             ice: 0.75,
             current_east: -10.0,
             current_north: 10.0,
@@ -760,6 +800,13 @@ mod tests {
         assert_eq!(row(&rows, "Temperature"), None);
         assert_eq!(row(&rows, "Jan / Jul"), None);
         assert_eq!(row(&rows, "Precip. Jan / Jul"), None);
+        // The subtropical ocean loses water.
+        assert_eq!(row(&rows, "P − E").unwrap(), "−788 mm/yr (evap. 1600)");
+        let unknown = CellInfo {
+            evaporation: f32::NAN,
+            ..ocean()
+        };
+        assert_eq!(row(&format_rows(&unknown, None, 0.0, 0.0), "P − E"), None);
         assert_eq!(row(&rows, "Aridity index"), None);
         assert_eq!(row(&rows, "Permanent ice").unwrap(), "75%");
         // No rivers in the ocean.
@@ -809,7 +856,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 84);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 96);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 
