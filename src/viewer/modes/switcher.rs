@@ -14,6 +14,9 @@ const NARROW_SCREEN: f32 = 600.0;
 const MAX_WIDTH: f32 = 260.0;
 /// Distance from the corner of the window, in points.
 const MARGIN: f32 = 8.0;
+/// The legend scrolls when it would reach the cell widget, but is at least this share of the
+/// screen height high.
+const MIN_LEGEND_HEIGHT: f32 = 0.4;
 /// Height of the colour bar and size of the swatches, in multiples of the body text size.
 const BAR_HEIGHT: f32 = 0.9;
 
@@ -26,6 +29,9 @@ pub struct SwitcherView<'a> {
     pub points_per_radius: f32,
     /// Whether the data of the active mode has not arrived yet.
     pub waiting: bool,
+    /// The top of what lies below the switcher in the same corner (the cell widget): the
+    /// legend scrolls rather than reach it.
+    pub bottom: f32,
 }
 
 /// The switcher's state.
@@ -87,8 +93,16 @@ impl ModeSwitcher {
                         controls(ui, mode, legend_open);
                         ui.separator();
                         // Long legends scroll (phones in landscape, small windows).
+                        // Above the cell widget, but at least a share of the screen (they
+                        // may overlap on short screens; either can be hidden).
+                        let room =
+                            view.bottom.min(screen.bottom()) - 2.0 * MARGIN - ui.cursor().top();
+                        let least = MIN_LEGEND_HEIGHT * screen.height();
                         egui::ScrollArea::vertical()
-                            .max_height((screen.height() - 6.0 * MARGIN - 60.0).max(120.0))
+                            .max_height(room.max(least))
+                            // Also on the first frame after the legend opened (the area has
+                            // the size of the controls alone then).
+                            .min_scrolled_height(least)
                             .show(ui, |ui| legend(ui, view.legend, view, width));
                     });
                 } else {
@@ -160,28 +174,60 @@ fn legend(ui: &mut egui::Ui, legend: &Legend, view: &SwitcherView, width: f32) {
             );
         }
     }
-    // Filled squares share wrapped rows; lines and markers get a row each.
+    // Filled squares share wrapped rows, palettes get a row each, lines and markers two
+    // columns.
     let mut rest = legend.swatches.as_slice();
+    let mut grids = 0;
     while let Some(first) = rest.first() {
-        if first.shape == SwatchShape::Fill {
-            let count = rest
+        let count = match first.shape {
+            SwatchShape::Palette(_) => 1,
+            SwatchShape::Fill => rest
                 .iter()
                 .take_while(|swatch| swatch.shape == SwatchShape::Fill)
-                .count();
-            ui.horizontal_wrapped(|ui| {
-                for swatch in &rest[..count] {
-                    swatch_symbol(ui, swatch, bar_height);
-                    ui.label(swatch.label.as_ref());
-                }
-            });
-            rest = &rest[count..];
-        } else {
-            ui.horizontal(|ui| {
-                swatch_symbol(ui, first, bar_height);
-                ui.add(egui::Label::new(first.label.as_ref()).wrap());
-            });
-            rest = &rest[1..];
+                .count(),
+            _ => rest
+                .iter()
+                .take_while(|swatch| {
+                    !matches!(swatch.shape, SwatchShape::Fill | SwatchShape::Palette(_))
+                })
+                .count(),
+        };
+        let group = &rest[..count];
+        match first.shape {
+            SwatchShape::Palette(_) => {
+                ui.horizontal(|ui| {
+                    swatch_symbol(ui, first, bar_height);
+                    ui.add(egui::Label::new(first.label.as_ref()).wrap());
+                });
+            }
+            SwatchShape::Fill => {
+                ui.horizontal_wrapped(|ui| {
+                    for swatch in group {
+                        swatch_symbol(ui, swatch, bar_height);
+                        ui.label(swatch.label.as_ref());
+                    }
+                });
+            }
+            _ => {
+                grids += 1;
+                egui::Grid::new(("legend swatches", grids))
+                    .num_columns(2)
+                    .spacing([0.5 * bar_height, 0.25 * bar_height])
+                    .show(ui, |ui| {
+                        for (index, swatch) in group.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.3 * bar_height;
+                                swatch_symbol(ui, swatch, bar_height);
+                                ui.label(swatch.label.as_ref());
+                            });
+                            if index % 2 == 1 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+            }
         }
+        rest = &rest[count..];
     }
     for arrows in &legend.arrows {
         if let Some(label) = &arrows.label {
@@ -216,7 +262,7 @@ fn swatch_symbol(ui: &mut egui::Ui, swatch: &Swatch, size: f32) {
     let width = match swatch.shape {
         SwatchShape::Fill => size,
         SwatchShape::Palette(ref colors) => size * 0.6 * colors.len() as f32,
-        _ => 2.0 * size,
+        _ => 1.6 * size,
     };
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, size), egui::Sense::hover());
     let painter = ui.painter();

@@ -103,15 +103,15 @@ impl Line {
 
     fn label(self) -> &'static str {
         match self {
-            Line::Subduction => "Subduction zone, teeth on the upper plate",
-            Line::Collision => "Continental collision",
-            Line::Diffuse => "Diffuse convergent zone (no trench yet)",
-            Line::Ridge => "Mid-ocean ridge",
-            Line::Rift => "Continental rift",
-            Line::Transform => "Transform (within 20° of the strike)",
-            Line::Convergent => "Other convergent",
-            Line::Divergent => "Other divergent",
-            Line::Inactive => "Inactive (slower than 0.1 cm/yr)",
+            Line::Subduction => "Subduction",
+            Line::Collision => "Collision",
+            Line::Diffuse => "Diffuse conv.",
+            Line::Ridge => "Ridge",
+            Line::Rift => "Rift",
+            Line::Transform => "Transform",
+            Line::Convergent => "Other conv.",
+            Line::Divergent => "Other div.",
+            Line::Inactive => "Inactive",
         }
     }
 }
@@ -335,7 +335,7 @@ impl RenderMode for Plates {
         let mut swatches = vec![Swatch::new(
             PALETTE[0],
             SwatchShape::Palette(PALETTE[..8].to_vec()),
-            "Plates; oceanic crust darker",
+            "Plates",
         )];
         swatches.extend(Line::ALL.into_iter().map(|line| {
             let shape = if line == Line::Subduction {
@@ -345,15 +345,12 @@ impl RenderMode for Plates {
             };
             Swatch::new(line.color(), shape, line.label())
         }));
-        swatches.push(Swatch::new(
-            PALETTE[8],
-            SwatchShape::Dots,
-            "Deforming band: collision, rift",
-        ));
+        swatches.push(Swatch::new(PALETTE[8], SwatchShape::Dots, "Deforming"));
         Legend {
-            description: "Each plate in its own colour, kept for its life (a new plate gets a \
-                          colour its neighbours do not have), its boundaries by what they do, \
-                          and its motion. Arrow length grows with the square root of the speed."
+            description: "Each plate in its own colour for its life (oceanic crust darker), its \
+                          boundaries by what they do, and its motion. Teeth point into the \
+                          upper plate of a subduction zone; dots mark crust deforming behind a \
+                          collision or beside a rift."
                 .into(),
             scale: None,
             swatches,
@@ -369,7 +366,7 @@ impl RenderMode for Plates {
                     &[1.0, 5.0, RELATIVE_REFERENCE],
                     "cm/yr",
                 )
-                .with_label("Motion relative to the plate across"),
+                .with_label("Relative motion across boundaries"),
             ],
         }
     }

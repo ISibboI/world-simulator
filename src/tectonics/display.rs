@@ -344,4 +344,36 @@ mod tests {
         assert!(opening.contains(&Rift), "{opening:?}");
         assert!(map.band.iter().any(|&band| band));
     }
+
+    /// Time of [`Simulation::boundary_map`] against a step (`cargo test --release
+    /// boundary_map_cost -- --ignored --nocapture`, 6 subdivisions), for `results.md`.
+    #[test]
+    #[ignore]
+    fn boundary_map_cost() {
+        use clap::Parser;
+        let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "6"]);
+        let mut planet = crate::build_planet(&cli).unwrap();
+        let (mut step, mut map, mut cells) = (0.0, 0.0, 0.0);
+        let steps = 20;
+        for _ in 0..steps {
+            let start = std::time::Instant::now();
+            planet.step(cli.dt);
+            step += start.elapsed().as_secs_f64();
+            let start = std::time::Instant::now();
+            let boundaries = planet.tectonics().boundary_map();
+            map += start.elapsed().as_secs_f64();
+            assert_eq!(boundaries.classes.len(), planet.tectonics().mesh().len());
+            let start = std::time::Instant::now();
+            let infos = crate::viewer::cell_infos(&planet);
+            cells += start.elapsed().as_secs_f64();
+            assert!(!infos.is_empty());
+        }
+        let ms = |seconds: f64| 1000.0 * seconds / f64::from(steps);
+        eprintln!(
+            "step {:.1} ms, boundary_map {:.2} ms, cell_infos (with it) {:.2} ms",
+            ms(step),
+            ms(map),
+            ms(cells)
+        );
+    }
 }

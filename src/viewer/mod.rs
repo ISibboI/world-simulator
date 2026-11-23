@@ -1202,6 +1202,7 @@ impl eframe::App for Viewer {
             legend: &self.legend,
             points_per_radius: self.points_per_radius,
             waiting: self.waiting_for_fields(),
+            bottom: cell_panel.map_or(f32::INFINITY, |rect| rect.top()),
         };
         let (changed, switcher) = self.switcher.show(ui.ctx(), &mut mode, &view);
         if changed && mode != self.mode {
