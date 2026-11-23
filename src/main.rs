@@ -382,7 +382,7 @@ fn run_simulation_thread(
             let step_time = step_time.filter(|_| !std::mem::take(&mut after_pause));
             publish(planet, step_time, layers)?;
             // The last state is not held: the run ends (and writes its last snapshot).
-            let last = planet.tectonics().time() + 0.5 * cli.dt >= cli.duration;
+            let last = is_last_step(planet.tectonics().time(), cli.duration, cli.dt);
             while paused && steps == 0 && !last {
                 after_pause = true;
                 if cancelled.load(Ordering::Relaxed) {
@@ -551,6 +551,12 @@ fn simulate(
     }
     run.log_finished();
     Ok(run.planet)
+}
+
+/// Whether a run of `duration` Myr in steps of `dt` is complete at `time`: it takes
+/// `round(duration / dt)` steps (see [`Run`]).
+fn is_last_step(time: f64, duration: f64, dt: f64) -> bool {
+    time + 0.5 * dt >= (duration / dt).round() * dt
 }
 
 /// A simulation run, step by step: [`simulate`] runs it in one loop; the web worker runs one

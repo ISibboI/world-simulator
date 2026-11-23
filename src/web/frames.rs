@@ -46,8 +46,16 @@ struct Shared {
     /// Frames in memory, if IndexedDB is not available.
     fallback: Option<MemoryStore>,
     result: Option<Result<Vec<Vec<u8>>, String>>,
+    /// The number of frames the running read asks for.
+    expected: usize,
     failed: Option<usize>,
     wake: Box<dyn Fn()>,
+    /// The handlers of writes and reads, one of each per run for all requests (so that
+    /// handlers which never fire do not pile up). They find the request in their event and
+    /// hold the state only weakly, so a dropped store is freed.
+    on_write_abort: JsValue,
+    on_read_success: JsValue,
+    on_read_error: JsValue,
 }
 
 /// The frames of one run in IndexedDB.
@@ -178,9 +186,14 @@ impl IdbStore {
             queued_read: None,
             fallback: None,
             result: None,
+            expected: 0,
             failed: None,
             wake,
+            on_write_abort: JsValue::UNDEFINED,
+            on_read_success: JsValue::UNDEFINED,
+            on_read_error: JsValue::UNDEFINED,
         }));
+        install_handlers(&shared);
         let release = hold_lock(&name);
         if let Err(error) = open(&name, &shared) {
             fall_back(&shared, &error);
@@ -209,60 +222,150 @@ fn fall_back(shared: &Rc<RefCell<Shared>>, error: &str) {
     state.fallback = Some(memory);
 }
 
+/// The target of an IndexedDB event: its request or transaction.
+fn target<T: JsCast>(event: &web_sys::Event) -> Option<T> {
+    event.target()?.dyn_into::<T>().ok()
+}
+
+/// The error of a failed request, as text.
+fn request_error(request: Option<web_sys::IdbRequest>) -> String {
+    request
+        .and_then(|request| request.error().ok().flatten())
+        .map_or_else(|| "unknown error".to_owned(), |error| message(&error))
+}
+
+/// Property of a write transaction with the number of its frame.
+const FRAME_PROPERTY: &str = "worldSimulatorFrame";
+
+fn install_handlers(shared: &Rc<RefCell<Shared>>) {
+    let weak = Rc::downgrade(shared);
+    let on_write_abort = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let Some(shared) = weak.upgrade() else {
+            return;
+        };
+        let transaction = target::<web_sys::IdbTransaction>(&event);
+        let index = transaction
+            .as_ref()
+            .and_then(|transaction| {
+                js_sys::Reflect::get(transaction, &FRAME_PROPERTY.into())
+                    .ok()?
+                    .as_f64()
+            })
+            .map_or(0, |index| index as usize);
+        let error = transaction
+            .and_then(|transaction| transaction.error())
+            .map_or_else(|| "aborted".to_owned(), |error| message(&error));
+        fail_write(&shared, index, &error);
+    })
+    .into_js_value();
+    let weak = Rc::downgrade(shared);
+    let on_read_success =
+        Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let Some(shared) = weak.upgrade() else {
+                return;
+            };
+            let frames: Vec<Vec<u8>> = target::<web_sys::IdbRequest>(&event)
+                .and_then(|request| request.result().ok())
+                .map(|result| {
+                    js_sys::Array::from(&result)
+                        .iter()
+                        .map(|frame| js_sys::Uint8Array::new(&frame).to_vec())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let expected = shared.borrow().expected;
+            finish_read(
+                &shared,
+                if frames.len() == expected {
+                    Ok(frames)
+                } else {
+                    Err("the browser deleted the stored frames".to_owned())
+                },
+            );
+        })
+        .into_js_value();
+    let weak = Rc::downgrade(shared);
+    let on_read_error = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        if let Some(shared) = weak.upgrade() {
+            let error = request_error(target(&event));
+            finish_read(&shared, Err(format!("reading the stored frames: {error}")));
+        }
+    })
+    .into_js_value();
+    let mut state = shared.borrow_mut();
+    state.on_write_abort = on_write_abort;
+    state.on_read_success = on_read_success;
+    state.on_read_error = on_read_error;
+}
+
+fn fail_write(shared: &Rc<RefCell<Shared>>, index: usize, error: &str) {
+    let mut state = shared.borrow_mut();
+    if state.failed.is_none_or(|failed| index < failed) {
+        warn!(
+            frame = index,
+            "Could not store a frame of the history: {error}"
+        );
+        state.failed = Some(index);
+    }
+}
+
+fn finish_read(shared: &Rc<RefCell<Shared>>, result: Result<Vec<Vec<u8>>, String>) {
+    let mut state = shared.borrow_mut();
+    state.result = Some(result);
+    (state.wake)();
+}
+
 fn open(name: &str, shared: &Rc<RefCell<Shared>>) -> Result<(), String> {
     let request = factory()?
         .open_with_u32(name, 1)
         .map_err(|error| message(&error))?;
-    let upgrade = {
-        let request = request.clone();
-        Closure::once_into_js(move || {
-            if let Ok(result) = request.result()
-                && let Ok(database) = result.dyn_into::<web_sys::IdbDatabase>()
-                && let Err(error) = database.create_object_store(FRAMES)
-            {
-                error!("Could not create the frame store: {}", message(&error));
-            }
-        })
-    };
+    // These fire once per run; they hold the state only weakly.
+    let upgrade = Closure::once_into_js(move |event: web_sys::Event| {
+        if let Some(request) = target::<web_sys::IdbOpenDbRequest>(&event)
+            && let Ok(result) = request.result()
+            && let Ok(database) = result.dyn_into::<web_sys::IdbDatabase>()
+            && let Err(error) = database.create_object_store(FRAMES)
+        {
+            error!("Could not create the frame store: {}", message(&error));
+        }
+    });
     request.set_onupgradeneeded(Some(upgrade.unchecked_ref()));
-    let success = {
-        let request = request.clone();
-        let shared = shared.clone();
-        Closure::once_into_js(move || {
-            let database = request
-                .result()
-                .ok()
-                .and_then(|result| result.dyn_into::<web_sys::IdbDatabase>().ok());
-            let Some(database) = database else {
-                fall_back(&shared, "the database did not open");
-                return;
-            };
-            let (queued, read) = {
-                let mut state = shared.borrow_mut();
-                state.database = Some(database);
-                (std::mem::take(&mut state.queued), state.queued_read.take())
-            };
-            for (index, frame) in queued {
-                write(&shared, index, &frame);
+    let weak = Rc::downgrade(shared);
+    let success = Closure::once_into_js(move |event: web_sys::Event| {
+        let database = target::<web_sys::IdbOpenDbRequest>(&event)
+            .and_then(|request| request.result().ok())
+            .and_then(|result| result.dyn_into::<web_sys::IdbDatabase>().ok());
+        let Some(shared) = weak.upgrade() else {
+            // The run ended while the database opened: close it, so that its deletion
+            // (requested when the run ended) can go ahead.
+            if let Some(database) = database {
+                database.close();
             }
-            if let Some(range) = read {
-                start_read(&shared, range);
-            }
-        })
-    };
+            return;
+        };
+        let Some(database) = database else {
+            fall_back(&shared, "the database did not open");
+            return;
+        };
+        let (queued, read) = {
+            let mut state = shared.borrow_mut();
+            state.database = Some(database);
+            (std::mem::take(&mut state.queued), state.queued_read.take())
+        };
+        for (index, frame) in queued {
+            write(&shared, index, &frame);
+        }
+        if let Some(range) = read {
+            start_read(&shared, range);
+        }
+    });
     request.set_onsuccess(Some(success.unchecked_ref()));
-    let failure = {
-        let request = request.clone();
-        let shared = shared.clone();
-        Closure::once_into_js(move || {
-            let error = request
-                .error()
-                .ok()
-                .flatten()
-                .map_or_else(|| "unknown error".to_owned(), |error| message(&error));
-            fall_back(&shared, &error);
-        })
-    };
+    let weak = Rc::downgrade(shared);
+    let failure = Closure::once_into_js(move |event: web_sys::Event| {
+        if let Some(shared) = weak.upgrade() {
+            fall_back(&shared, &request_error(target(&event)));
+        }
+    });
     request.set_onerror(Some(failure.unchecked_ref()));
     Ok(())
 }
@@ -284,32 +387,14 @@ fn object_store(
 
 /// Writes a frame; a failure (e.g. the quota) marks it as failed.
 fn write(shared: &Rc<RefCell<Shared>>, index: usize, frame: &[u8]) {
-    let fail = {
-        let shared = shared.clone();
-        move |error: String| {
-            let mut state = shared.borrow_mut();
-            if state.failed.is_none_or(|failed| index < failed) {
-                warn!(
-                    frame = index,
-                    "Could not store a frame of the history: {error}"
-                );
-                state.failed = Some(index);
-            }
-        }
-    };
     let result = object_store(shared, web_sys::IdbTransactionMode::Readwrite).and_then(
         |(transaction, store)| {
-            let aborted = {
-                let transaction = transaction.clone();
-                let fail = fail.clone();
-                Closure::once_into_js(move || {
-                    let error = transaction
-                        .error()
-                        .map_or_else(|| "aborted".to_owned(), |error| message(&error));
-                    fail(error);
-                })
-            };
-            transaction.set_onabort(Some(aborted.unchecked_ref()));
+            let _ = js_sys::Reflect::set(
+                &transaction,
+                &FRAME_PROPERTY.into(),
+                &JsValue::from(index as u32),
+            );
+            transaction.set_onabort(Some(shared.borrow().on_write_abort.unchecked_ref()));
             let value = js_sys::Uint8Array::from(frame);
             store
                 .put_with_key(&value, &JsValue::from(index as u32))
@@ -318,20 +403,12 @@ fn write(shared: &Rc<RefCell<Shared>>, index: usize, frame: &[u8]) {
         },
     );
     if let Err(error) = result {
-        fail(error);
+        fail_write(shared, index, &error);
     }
 }
 
 fn start_read(shared: &Rc<RefCell<Shared>>, range: Range<usize>) {
-    let finish = {
-        let shared = shared.clone();
-        move |result: Result<Vec<Vec<u8>>, String>| {
-            let mut state = shared.borrow_mut();
-            state.result = Some(result);
-            (state.wake)();
-        }
-    };
-    let expected = range.len();
+    shared.borrow_mut().expected = range.len();
     let request =
         object_store(shared, web_sys::IdbTransactionMode::Readonly).and_then(|(_, store)| {
             let keys = web_sys::IdbKeyRange::bound(
@@ -343,43 +420,14 @@ fn start_read(shared: &Rc<RefCell<Shared>>, range: Range<usize>) {
                 .get_all_with_key(&keys)
                 .map_err(|error| message(&error))
         });
-    let request = match request {
-        Ok(request) => request,
-        Err(error) => return finish(Err(error)),
-    };
-    let success = {
-        let request = request.clone();
-        let finish = finish.clone();
-        Closure::once_into_js(move || {
-            let frames: Vec<Vec<u8>> = request
-                .result()
-                .map(|result| {
-                    js_sys::Array::from(&result)
-                        .iter()
-                        .map(|frame| js_sys::Uint8Array::new(&frame).to_vec())
-                        .collect()
-                })
-                .unwrap_or_default();
-            finish(if frames.len() == expected {
-                Ok(frames)
-            } else {
-                Err("the browser deleted the stored frames".to_owned())
-            });
-        })
-    };
-    request.set_onsuccess(Some(success.unchecked_ref()));
-    let failure = {
-        let request = request.clone();
-        Closure::once_into_js(move || {
-            let error = request
-                .error()
-                .ok()
-                .flatten()
-                .map_or_else(|| "unknown error".to_owned(), |error| message(&error));
-            finish(Err(format!("reading the stored frames: {error}")));
-        })
-    };
-    request.set_onerror(Some(failure.unchecked_ref()));
+    match request {
+        Ok(request) => {
+            let state = shared.borrow();
+            request.set_onsuccess(Some(state.on_read_success.unchecked_ref()));
+            request.set_onerror(Some(state.on_read_error.unchecked_ref()));
+        }
+        Err(error) => finish_read(shared, Err(error)),
+    }
 }
 
 impl FrameStore for IdbStore {

@@ -667,7 +667,9 @@ fn schedule_step(state: Rc<RefCell<WorkerState>>) {
         let more = {
             let mut guard = state.borrow_mut();
             let worker = &mut *guard;
-            if worker.paused {
+            // A run paused after its last step still ends (`advance` returns `None`).
+            let last = worker.run.step >= worker.run.steps;
+            if worker.paused && !last {
                 if worker.steps == 0 {
                     // Scheduled again on resume or a step (see `WorkerState::control`).
                     worker.stopped = true;

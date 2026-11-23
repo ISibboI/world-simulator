@@ -187,7 +187,7 @@ impl Planes {
             for (channel, code) in CHANNELS.iter().enumerate() {
                 let value = match code {
                     Code::Integer16 => cell.plate.min(u32::from(u16::MAX)) as u16,
-                    Code::Integer8 => cell.flags.min(255) as u16,
+                    Code::Integer8 => (cell.flags & 0xFF) as u16,
                     _ => quantise(*code, values[channel]),
                 };
                 for byte in 0..code.bytes() {
@@ -542,11 +542,19 @@ mod tests {
         let mut keys = vec![encode(&previous, None).len()];
         let mut deltas = Vec::new();
         let mut channels = vec![0usize; CHANNELS.len()];
+        let (mut encode_seconds, mut decode_seconds) = (0.0, 0.0);
         for step in 1..=steps {
             planet.step(cli.dt);
             let current = state(&planet);
             keys.push(encode(&current, None).len());
-            deltas.push(encode(&current, Some(&previous)).len());
+            let start = std::time::Instant::now();
+            let delta = encode(&current, Some(&previous));
+            encode_seconds += start.elapsed().as_secs_f64();
+            let start = std::time::Instant::now();
+            let decoded = decode(&delta, Some(&previous)).unwrap();
+            let _ = decoded.planes.cell_infos();
+            decode_seconds += start.elapsed().as_secs_f64();
+            deltas.push(delta.len());
             if step > steps / 2 {
                 let mut plane = 0;
                 for (channel, code) in CHANNELS.iter().enumerate() {
@@ -583,6 +591,11 @@ mod tests {
             deltas[0],
             mean(&deltas),
             late(&deltas)
+        );
+        eprintln!(
+            "delta frame: encode {:.2} ms, decode (with the cells) {:.2} ms",
+            encode_seconds * 1e3 / f64::from(steps),
+            decode_seconds * 1e3 / f64::from(steps)
         );
         let per_frame = (late(&keys) + (super::super::KEY_INTERVAL as f64 - 1.0) * late(&deltas))
             / super::super::KEY_INTERVAL as f64;

@@ -4,8 +4,9 @@
 //!
 //! Viewing a past frame does not pause the simulation: the slider keeps growing while the view
 //! stays on the chosen frame. Stepping forward on the newest frame while the simulation is paused
-//! computes one more step. Keys (when no text field has focus): space pauses or resumes, ← and →
-//! step, End goes live.
+//! computes one more step. Keys (when no text field has focus and no drop-down list is open):
+//! space pauses or resumes, ← and → step, End goes live. While paused, the desktop simulation
+//! writes the snapshot of its paused step only on resume.
 //!
 //! On wide screens the bar is one row; on narrow ones (phones) the slider gets a row of its own
 //! below the buttons. On touch screens the buttons and the slider are touch-sized (see
@@ -32,7 +33,7 @@ pub struct TimelineView<'a> {
     /// The time of the newest state.
     pub live_time: f64,
     pub paused: bool,
-    /// The run is complete: nothing to pause or step.
+    /// The run is complete (or failed): nothing to pause or step.
     pub finished: bool,
     /// A step was requested and has not arrived.
     pub step_pending: bool,
@@ -57,7 +58,8 @@ pub enum TimeAction {
 /// Reads the keys of the time bar, unless a text field has them. They are consumed, so that
 /// space does not also press a focused button.
 pub fn keys(ctx: &egui::Context) -> Option<TimeAction> {
-    if ctx.egui_wants_keyboard_input() {
+    // Not while a text field or a drop-down list (the mode switcher) takes the keys.
+    if ctx.text_edit_focused() || ctx.any_popup_open() {
         return None;
     }
     ctx.input_mut(|input| {
@@ -134,22 +136,88 @@ pub fn show(ctx: &egui::Context, view: &TimelineView) -> (Option<TimeAction>, eg
     (action, response.response.rect)
 }
 
-fn buttons(ui: &mut egui::Ui, view: &TimelineView, action: &mut Option<TimeAction>) {
-    let (label, tip) = if view.paused {
-        ("▶", "Resume the simulation (space)")
+/// The symbols of the buttons, drawn rather than taken from a font (egui's fonts lack them).
+#[derive(Debug, Clone, Copy)]
+enum Icon {
+    Play,
+    Pause,
+    Back,
+    Forward,
+}
+
+/// A square button with an icon.
+fn icon_button(ui: &mut egui::Ui, icon: Icon, enabled: bool) -> egui::Response {
+    let side = ui.spacing().interact_size.y;
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new("").min_size(egui::vec2(side, side)),
+    );
+    let color = ui.style().interact(&response).fg_stroke.color;
+    let color = if enabled {
+        color
     } else {
-        ("⏸", "Pause the simulation (space)")
+        ui.visuals().weak_text_color()
     };
-    if ui
-        .add_enabled(!view.finished, egui::Button::new(label))
+    let rect = egui::Rect::from_center_size(response.rect.center(), egui::Vec2::splat(side * 0.4));
+    let painter = ui.painter();
+    let triangle = |left: f32, right: f32, pointing_right: bool| {
+        let (tip, base) = if pointing_right {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(base, rect.top()),
+                egui::pos2(tip, rect.center().y),
+                egui::pos2(base, rect.bottom()),
+            ],
+            color,
+            egui::Stroke::NONE,
+        )
+    };
+    let bar = |left: f32, width: f32| {
+        egui::Shape::rect_filled(
+            egui::Rect::from_x_y_ranges(left..=left + width, rect.y_range()),
+            0.0,
+            color,
+        )
+    };
+    let width = rect.width();
+    match icon {
+        Icon::Play => {
+            painter.add(triangle(rect.left() + 0.1 * width, rect.right(), true));
+        }
+        Icon::Pause => {
+            painter.add(bar(rect.left() + 0.1 * width, 0.3 * width));
+            painter.add(bar(rect.left() + 0.6 * width, 0.3 * width));
+        }
+        Icon::Back => {
+            painter.add(bar(rect.left(), 0.2 * width));
+            painter.add(triangle(rect.left() + 0.25 * width, rect.right(), false));
+        }
+        Icon::Forward => {
+            painter.add(triangle(rect.left(), rect.right() - 0.25 * width, true));
+            painter.add(bar(rect.right() - 0.2 * width, 0.2 * width));
+        }
+    }
+    response
+}
+
+fn buttons(ui: &mut egui::Ui, view: &TimelineView, action: &mut Option<TimeAction>) {
+    let (icon, tip) = if view.paused {
+        (Icon::Play, "Resume the simulation (space)")
+    } else {
+        (Icon::Pause, "Pause the simulation (space)")
+    };
+    if icon_button(ui, icon, !view.finished)
         .on_hover_text(tip)
         .on_disabled_hover_text("The simulation is complete")
         .clicked()
     {
         *action = Some(TimeAction::TogglePause);
     }
-    if ui
-        .add_enabled(view.position > 0, egui::Button::new("⏴"))
+    if icon_button(ui, Icon::Back, view.position > 0)
         .on_hover_text("One frame back (←)")
         .clicked()
     {
@@ -160,8 +228,7 @@ fn buttons(ui: &mut egui::Ui, view: &TimelineView, action: &mut Option<TimeActio
     } else {
         "One frame forward (→)"
     };
-    if ui
-        .add_enabled(can_step_forward(view), egui::Button::new("⏵"))
+    if icon_button(ui, Icon::Forward, can_step_forward(view))
         .on_hover_text(forward_tip)
         .on_disabled_hover_text(if view.step_pending {
             "Computing the step…"

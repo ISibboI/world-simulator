@@ -703,9 +703,12 @@ impl Viewer {
             tracing::error!("Surface update without a mesh");
             return;
         }
+        // A state sent again (with other fields) is not the step asked for.
+        if self.time.is_none_or(|time| update.time > time) {
+            self.step_pending = false;
+        }
         self.time = Some(update.time);
         self.pace.record(update.step_seconds);
-        self.step_pending = false;
         if self.finished() {
             // The simulation does not hold its last state.
             self.paused = false;
@@ -805,6 +808,8 @@ impl Viewer {
                 self.show(Arc::new(frame.cells), fields);
             }
             Ok(_) => {}
+            // A read that failed after the view went live again is no longer of interest.
+            Err(_) if self.viewing.is_none() => {}
             Err(error) => self.frame_error = Some(format!("Cannot show this frame: {error}")),
         }
     }
@@ -847,10 +852,13 @@ impl Viewer {
         }
     }
 
-    /// Whether the running simulation is complete.
+    /// Whether the running simulation is complete (it takes `round(duration / dt)` steps,
+    /// like `crate::Run`), or failed.
     fn finished(&self) -> bool {
-        self.time
-            .is_some_and(|time| time + 0.5 * self.dt >= self.duration)
+        self.failure.is_some()
+            || self
+                .time
+                .is_some_and(|time| crate::is_last_step(time, self.duration, self.dt))
     }
 
     /// Carries out an action of the time bar.
