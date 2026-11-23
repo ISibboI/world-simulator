@@ -22,8 +22,8 @@ the history stores both as `Code::Share` (1 byte each, steps of 1/254; 39 → 41
 cell). No flag bits. The combined strength is computed in the viewer by the simulation's own
 function (`weak_zones::combine_strength(thermal, thinning, orogenic)`, which
 `lithosphere_strength` now calls too: same operations, bit-identical results), with the frame's
-`orogenic` (1/254 steps → strength error < 0.002). Plume heating is recognised where the thermal
-term is clearly below the one of the frame's `age` (`thermal_strength(age)` − thermal > 0.02).
+`orogenic` (strength error ~0.005 with all terms rounded). Plume heating is recognised where the thermal
+term is clearly below the one of the frame's `age` (`thermal_strength(age)` − thermal > 0.025).
 Alternative considered: storing the combined strength directly (1 byte) — but then the terms
 (sub-modes, cause) could not be separated where the floor 0.05 clamps; two terms are the
 smallest set from which everything follows.
@@ -52,3 +52,14 @@ Shared egui code; options wrap (horizontal_wrapped) on phones; no new widgets.
 Strength distribution for seeds 0–3 (cell dumps of the main-commit runs from #99, 500 Myr):
 by crust class, by weakest term, near boundaries by kind; do weak zones sit at ridges, rifts,
 orogens/sutures, young ocean? Weaknesses → comment on an existing issue or a new labelled one.
+
+## Independent review (summary) and changes
+- Terms export sound and minimal; refactor keeps the same f64 operations (results unchanged).
+- Plume heuristic works with a thin margin near the ridge axis (age rounding to 0.25 Myr moves
+  the term by ≤ 0.015) → margin set to 0.025 and a unit test over 0–25 Myr ages with both
+  roundings. The suggested flag bit (exact) is not used: the flag bits are taken by open
+  PRs #140/#142.
+- Combined-strength error is ~0.005 with all three terms rounded (not 0.002).
+- Blending categories towards grey loses hue first for colour-blind viewers → categories in full
+  colour only below strength 0.75, greys above; Okabe–Ito blue, orange, bluish green, reddish
+  purple (no orange/vermillion or blue/sky-blue pair).

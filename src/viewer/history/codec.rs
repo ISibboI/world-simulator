@@ -52,7 +52,7 @@ const CHANNELS: [Code; 23] = [
     // Time since the last orogeny: 0.25 Myr.
     Code::Unsigned(0.25),
     // Thermal and thinning terms of the lithosphere strength (shares; the combined strength
-    // is good to 0.002, against a range of 0.05 to 1).
+    // is good to ~0.005, against a range of 0.05 to 1).
     Code::Share,
     Code::Share,
     // Temperatures (annual, January, July): 0.1 °C.

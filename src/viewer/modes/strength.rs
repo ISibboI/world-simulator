@@ -19,7 +19,7 @@ use super::super::overlay::{LineStyle, OverlayBuilder, isolines};
 use super::plates::{boundaries, boundary_swatches, deforming_bands, deforming_swatch};
 use super::{
     ColorScale, Legend, ModeData, ModeOption, OptionKind, OptionValues, RenderMode, Shading,
-    Swatch, SwatchShape, coastlines, rgba,
+    Swatch, SwatchShape, Text, coastlines, rgba,
 };
 use crate::tectonics::{MIN_BAND_STRENGTH, MIN_STRENGTH};
 use crate::viewer::CellInfo;
@@ -126,12 +126,24 @@ const MISSING: [u8; 3] = [128, 128, 128];
 
 /// Lines: widths in multiples of the arrow spacing, and colours.
 const COAST_WIDTH: f64 = 0.03;
-const COAST_COLOR: [u8; 3] = [235, 235, 235];
+/// Coastlines: pale grey on the colour scale (white is for inactive boundaries), dark on the
+/// greys of the weakest-term view.
+const COAST_COLOR: [u8; 3] = [185, 185, 185];
+const COAST_COLOR_ON_GREY: [u8; 3] = [25, 25, 25];
+
+fn coast_color(shown: Shown) -> [u8; 3] {
+    if shown == Shown::Weakest {
+        COAST_COLOR_ON_GREY
+    } else {
+        COAST_COLOR
+    }
+}
 /// Boundary lines narrower than in the Plates mode, so that the colours beside them show.
 const BOUNDARY_SCALE: f64 = 0.6;
 const OUTLINE_WIDTH: f64 = 0.03;
-const OUTLINE_COLOR: [u8; 3] = [255, 255, 255];
-const OUTLINE_BORDER: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+/// Black with a white border: white lines are inactive boundaries.
+const OUTLINE_COLOR: [u8; 3] = [0, 0, 0];
+const OUTLINE_BORDER: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// Lift of the lines above the surface (planet radii).
 const LIFT: f64 = 0.003;
 
@@ -141,7 +153,7 @@ fn scale(shown: Shown) -> ColorScale {
         title: match shown {
             Shown::Strength | Shown::Weakest => "Lithosphere strength (relative to old)",
             Shown::Thermal => "Thermal term (√ of thermal age / 100 Myr)",
-            Shown::Thinning => "Thinning term (crust / 35 km)",
+            Shown::Thinning => "Thinning term (crystalline crust without metasediment / 35 km)",
             Shown::Orogenic => "Orogenic term",
         }
         .into(),
@@ -199,7 +211,7 @@ impl RenderMode for LithosphereStrength {
             data,
             overlay,
             COAST_WIDTH * spacing,
-            rgba(COAST_COLOR),
+            rgba(coast_color(Shown::of(data.options))),
             LIFT,
         );
         overlay.next_layer();
@@ -237,27 +249,38 @@ impl RenderMode for LithosphereStrength {
             swatches.push(Swatch::fill(MISSING, "No data"));
         }
         if shown == Shown::Weakest {
+            // One row each (a one-colour palette), so that no colour sits next to the label of
+            // another.
+            let row = |color: [u8; 3], label: Text| {
+                Swatch::new(color, SwatchShape::Palette(vec![color]), label)
+            };
             swatches.extend(Weakness::ALL.into_iter().map(|weakness| {
-                Swatch::fill(
+                row(
                     weakness_color(weakness),
                     match weakness {
-                        Weakness::Young => "Young lithosphere",
+                        Weakness::Young => "Young lithosphere (sea floor, arcs, rifts)",
                         Weakness::Plume => "Plume-heated",
-                        Weakness::Thinned => "Thinned crust",
+                        Weakness::Thinned => "Thinned continental crust",
                         Weakness::Orogenic => "Orogenic belt, suture",
-                    },
+                    }
+                    .into(),
                 )
             }));
-            swatches.push(Swatch::fill(
+            swatches.push(row(
                 SOMEWHAT_WEAK_COLOR,
                 format!(
-                    "{WEAKEST_SHOWN_BELOW}–{}",
+                    "Strength {WEAKEST_SHOWN_BELOW}–{}",
                     crate::viewer::cell_info::FULL_STRENGTH
-                ),
+                )
+                .into(),
             ));
-            swatches.push(Swatch::fill(STRONG_COLOR, "Full strength"));
+            swatches.push(row(STRONG_COLOR, "Full strength".into()));
         }
-        swatches.push(Swatch::new(COAST_COLOR, SwatchShape::Line, "Coastline"));
+        swatches.push(Swatch::new(
+            coast_color(shown),
+            SwatchShape::Line,
+            "Coastline",
+        ));
         if options.is_on(OUTLINE) {
             swatches.push(Swatch::new(
                 OUTLINE_COLOR,

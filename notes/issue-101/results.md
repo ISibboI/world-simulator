@@ -14,6 +14,16 @@
     weights (`MIN_BAND_STRENGTH`, off); coastlines always.
   - Cell widget: row **Strength**, e.g. `0.42, weakest: orogenic` or `1.00 (full)`.
 - Works on past frames (#115): everything comes from the frame.
+- Coastlines pale grey on the colour scale and dark on the greys of the Weakest view; the
+  weak-zone outline is black with a white border (white lines are inactive boundaries).
+
+Checked: the state hash of seed 0 at 0 and 100 Myr equals main's (results unchanged); desktop
+(5 subdivisions, live and a past frame) and the web build at phone width (412 px, 4
+subdivisions: options wrap onto two rows, legend and cell button usable).
+
+![Strength with outline](desktop-strength.png)
+![Weakest term, past frame 292 Myr](desktop-weakest-past-frame.png)
+![Web, phone width](web-phone.png)
 
 ## Data
 `lithosphere_strength` is not a pure function of what the frame had: the plume reset
@@ -31,17 +41,17 @@ them with the frame's `orogenic` through the simulation's own `combine_strength`
   0.25 Myr and the term to 1/254) never shows as plume-heated.
 
 ## Strength on the planet (seeds 0–3, 500 Myr runs of main, cell dumps)
-Script: `~/tasks/issue-101/scripts/strength_stats.py` (local). Strength p10/p50/p90 and the share
+Script: [`strength_stats.py`](strength_stats.py) on the cell and boundary dumps. Strength p10/p50/p90 and the share
 below 0.5:
 
 | | t = 100 Myr | t = 500 Myr |
 |---|---|---|
 | all cells | 0.29–0.32 / 0.78–0.87 / 1.00; < 0.5: 21–25% | 0.23–0.33 / 0.65–0.76 / 0.98–1.00; < 0.5: 22–36% |
-| oceanic | median 0.66–0.93 | median 0.55–0.67 |
+| oceanic | median 0.64–0.93 | median 0.55–0.67 |
 | continental origin | median 0.85–0.87, < 0.5: 10–12% | median 0.78–0.84, < 0.5: 9–27% |
 | ridge/rift boundary cells | median 0.15–0.16, 100% < 0.5 | median 0.14–0.15, 100% < 0.5 |
 | collision boundary cells | median 0.30–0.71 | median 0.26–0.31, < 0.5: 57–76% |
-| subduction / transform cells | median 0.60–0.75 | median 0.47–0.74 |
+| subduction / transform boundary cells | median 0.57–0.75 | median 0.47–0.74 |
 | orogenic weakening ≥ 0.25 | 1–2% of cells, median 0.25–0.35 | 4.5–10% of cells, median 0.34–0.60 |
 | plume-reset cells | 1.3–2.4%, median 0.68–0.85 | 2.0–6.5%, median 0.78–0.89 |
 
@@ -54,15 +64,25 @@ in collision belts and sutures, along stretched continental margins, and in youn
 Old ocean and undeformed cratons are at full strength.
 
 **Weaknesses of the model it shows** (reported on GitHub, not fixed here):
-1. Young oceanic lithosphere dominates the weak zones: the proxy has no compositional term, so
-   50 Myr old ocean (0.71) is as weak as a half-healed orogenic belt, and 71–78% of the weak
-   lithosphere is young sea floor. Earth's young oceanic lithosphere is not a typical site of
-   rifting; continental rifts follow mobile belts.
-2. 8–20% of the continental cells on collision boundaries at 500 Myr are at full strength
-   and never marked as orogenic (thick, 40–48 km): the front of the colliding side is not
-   weakened.
-3. Plume heating weakens little (reset cells median 0.8; < 2% of the weak lithosphere): only
-   the head centre is reset to 25 Myr, and the thermal term saturates fast.
+1. Young lithosphere dominates the weak zones (71–78% of the lithosphere weaker than 0.75; mostly
+   young sea floor, plus arcs and freshly rifted continental crust): the proxy has no
+   compositional or rheological term, so 50 Myr old ocean (0.71) is as weak as a half-healed
+   orogenic belt and competes with mobile belts as a place to break. On Earth, rifts follow
+   continental mobile belts; young oceanic plates rarely break internally away from ridges.
+2. 8–18% of the continental cells on collision boundaries at 500 Myr are at full strength
+   (≥ 0.95) and were never marked as orogenic, though thickened (median 42–49 km): one side of
+   the collision front is not weakened (last block of the script).
+3. Plume heating weakens little (reset cells median 0.8; < 2% of the weak lithosphere): a
+   parameter choice — the head centre is reset to a thermal age of 25 Myr (term 0.5), tapering
+   to none at the edge, and the reset cells have cooled since.
 
 The coarse grid (~110 km cells; ~220 km on the web) makes ridges and sutures one or two cells
 wide; the weak zones are drawn that wide, which is a grid artefact.
+
+## Independent review of the results (summary)
+No correctness bugs found (refactor keeps the operations; Plates mode draws as before; codec
+order consistent). Fixed after it: the Weakest legend gives each category its own row and says
+"Strength 0.75–0.98"; codec comment (~0.005); two ranges in the table; the collision-front
+statistic is now computed by the script; weakness 1 reworded (the "young" category includes
+arcs and rifted crust); weakness 3 attributed to the plume parameters; the thinning title names
+the basement (crust without metasediment).
