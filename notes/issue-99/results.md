@@ -33,7 +33,11 @@ past frames are per run, so no compatibility issue). Left for a decision.
 
 Screenshots: desktop [type](crust-type.png), [thickness + 10 km isolines](crust-thickness.png),
 [both](crust-both.png); web at phone width (390 px) [type](web-phone-type.png),
-[both](web-phone-both.png). The legend and the cell widget fit at 390 px.
+[both](web-phone-both.png). The legend and the cell widget fit at 390 px. The screenshots are
+short runs (subdivisions 5 or 4, 150–300 Myr), so thick orogens and oceanic arcs barely
+appear; `crust-type.png` was taken before the description's "mafic arcs" became "oceanic
+arcs". The browser was not emulating a touch screen, so the option buttons have their
+mouse size there (touch sizing is the switcher's, unchanged here).
 
 ## Plausibility (Earth-like planet), 4 seeds, default settings, 500 Myr
 
@@ -58,17 +62,20 @@ Shares are of the planet's surface; thickness percentiles p5 / p50 / p95 in km.
   On the thin side, still plausible for an Earth-like planet.
 - **Orogens > 50 km**: 0.4–2.3 % of the surface (1–7 % of the continental crust), maximum
   ~70 km, like Tibet and the Andes; plausible.
-- **Continental share**: continental 33–38 % plus thinned continental 3–6 % → felsic crust on
-  37–41 % of the surface (Earth ~40 % including shelves).
+- **Continental share**: continental 34–36 % plus thinned continental 3–6 % → felsic crust on
+  37–40 % of the surface (Earth ~40 % including shelves).
 - Coarse grid: margins are one or two cells (110–220 km) wide, so the thinned-continental belt
   and the ocean–continent step are blocky; thickness isolines bunch up at the margins, where the
   thickness changes by ~25 km between neighbouring cells. Accepted grid artefacts.
 
-Follow-up for the weaknesses: see the linked geology issue.
+Follow-up for the weaknesses: #141 (geology, low priority).
 
 ## Review
 
-Independent review of plan and draft (subagent): found that the first "Both" shading made the
+Results evaluation (subagent): the table reproduces from the cell dumps; corrected the
+continental share (34–36 %, felsic 37–40 %) and noted the screenshot caveats above.
+
+Plan review: an independent review of plan and draft (subagent) found that the first "Both" shading made the
 thick felsic types indistinguishable dark browns (fixed: darkening limited to 35 %), legend
 swatches in "Both" showed base colours only (fixed: per-type ramps), the codec test claimed to
 cover all flag bits but did not (fixed: bits 0–7), and "mafic arc" was misleading for 40 %
