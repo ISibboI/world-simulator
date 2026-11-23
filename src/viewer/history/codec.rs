@@ -64,13 +64,14 @@ const CHANNELS: [Code; 21] = [
     Code::Share,
     // Discharge: 0.6 % relative (the widget shows 3 digits), up to 10^38 m³/yr.
     Code::Logarithmic(1.0 / 170.0),
-    // Ocean current (east, north): 0.01 m²/s (0.001 Sv per 100 km), ±327 m²/s.
-    Code::Signed(0.01),
-    Code::Signed(0.01),
-    // Gyre streamfunction: 0.01 Sv, ±327 Sv.
-    Code::Signed(0.01),
-    // Heating by the gyres: 0.1 W/m², ±3277 W/m².
-    Code::Signed(0.1),
+    // Ocean current (east, north): 0.05 m²/s (0.005 Sv per 100 km; the interior of the gyres
+    // carries 0.5–2 m²/s), ±1638 m²/s.
+    Code::Signed(0.05),
+    Code::Signed(0.05),
+    // Gyre streamfunction: 0.05 Sv, ±1638 Sv.
+    Code::Signed(0.05),
+    // Heating by the gyres: 1 W/m², ±32 kW/m².
+    Code::Signed(1.0),
     Code::Integer16,
     Code::Integer8,
 ];
@@ -466,10 +467,11 @@ mod tests {
                 0.0005,
             ),
             (original.ice, decoded.ice, 0.5 / 254.0),
-            (original.current_east, decoded.current_east, 0.005),
-            (original.current_north, decoded.current_north, 0.005),
-            (original.streamfunction, decoded.streamfunction, 0.005),
-            (original.gyre_heating, decoded.gyre_heating, 0.05),
+            // A full step: small negative values keep their sign (one step below zero).
+            (original.current_east, decoded.current_east, 0.05),
+            (original.current_north, decoded.current_north, 0.05),
+            (original.streamfunction, decoded.streamfunction, 0.05),
+            (original.gyre_heating, decoded.gyre_heating, 1.0),
         ];
         for (index, (a, b, tolerance)) in pairs.into_iter().enumerate() {
             if a.is_nan() {
