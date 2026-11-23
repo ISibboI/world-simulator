@@ -2,8 +2,8 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (39 bytes per cell
-//! instead of 84, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (40 bytes per cell
+//! instead of 88, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
@@ -38,7 +38,7 @@ impl Code {
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 21] = [
+const CHANNELS: [Code; 22] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -72,9 +72,15 @@ const CHANNELS: [Code; 21] = [
     Code::Signed(0.05),
     // Heating by the gyres: 1 W/m², ±32 kW/m².
     Code::Signed(1.0),
+    // Plate, flags and climate class.
     Code::Integer16,
     Code::Integer8,
+    Code::Integer8,
 ];
+
+/// The channels of the flags and of the climate class.
+const FLAGS: usize = 20;
+const CLIMATE_CLASS: usize = 21;
 
 /// Bytes per cell of the quantised attributes.
 pub const BYTES_PER_CELL: usize = {
@@ -109,6 +115,7 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.current_north,
         cell.streamfunction,
         cell.gyre_heating,
+        0.0,
         0.0,
         0.0,
     ]
@@ -203,9 +210,10 @@ impl Planes {
             let values = attributes(cell);
             let mut plane = 0;
             for (channel, code) in CHANNELS.iter().enumerate() {
-                let value = match code {
-                    Code::Integer16 => cell.plate.min(u32::from(u16::MAX)) as u16,
-                    Code::Integer8 => (cell.flags & 0xFF) as u16,
+                let value = match (channel, code) {
+                    (_, Code::Integer16) => cell.plate.min(u32::from(u16::MAX)) as u16,
+                    (FLAGS, _) => (cell.flags & 0xFF) as u16,
+                    (CLIMATE_CLASS, _) => cell.climate_class.min(0xFF) as u16,
                     _ => quantise(*code, values[channel]),
                 };
                 for byte in 0..code.bytes() {
@@ -255,8 +263,9 @@ impl Planes {
                     current_north: value(16),
                     streamfunction: value(17),
                     gyre_heating: value(18),
+                    climate_class: u32::from(values[CLIMATE_CLASS]),
                     plate: u32::from(values[19]),
-                    flags: u32::from(values[20]),
+                    flags: u32::from(values[FLAGS]),
                 }
             })
             .collect()
@@ -280,7 +289,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 4;
+const VERSION: u8 = 5;
 /// Bytes per plate: its rotation and id.
 pub const PLATE_BYTES: usize = 16;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -425,6 +434,7 @@ mod tests {
             current_north: (x * 0.2).cos() * 40.0,
             streamfunction: (x * 0.01).sin() * 60.0,
             gyre_heating: (x * 0.07).cos() * 150.0,
+            climate_class: (index % 31) as u32,
             plate: (index % 13) as u32,
             flags: (index % 2) as u32,
         }
@@ -492,6 +502,7 @@ mod tests {
         );
         assert_eq!(original.plate, decoded.plate);
         assert_eq!(original.flags, decoded.flags);
+        assert_eq!(original.climate_class, decoded.climate_class);
         // Land stays land and sea stays sea.
         assert_eq!(original.elevation >= 0.0, decoded.elevation >= 0.0);
     }
@@ -504,7 +515,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 39);
+        assert_eq!(BYTES_PER_CELL, 40);
     }
 
     #[test]

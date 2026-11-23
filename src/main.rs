@@ -8,6 +8,7 @@ mod device;
 mod erosion;
 mod hash;
 mod isostasy;
+mod koppen;
 mod math;
 mod ocean;
 mod planet;
@@ -1189,6 +1190,30 @@ fn snapshot(
         planet_statistics.heat_transport[2],
         planet_statistics.heat_transport[3],
         planet_statistics.gyre_transport,
+    );
+
+    let (groups, classes) = koppen::land_shares(&koppen::classes(planet));
+    // The five most common classes, the more common first (ties by id).
+    let mut common: Vec<(usize, f64)> = classes.iter().copied().enumerate().collect();
+    common.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    info!(
+        "    climate classes of land: A {:.1}%, B {:.1}%, C {:.1}%, D {:.1}%, E {:.1}% | most \
+         common {}",
+        100.0 * groups[0],
+        100.0 * groups[1],
+        100.0 * groups[2],
+        100.0 * groups[3],
+        100.0 * groups[4],
+        common
+            .iter()
+            .take(5)
+            .map(|&(index, share)| format!(
+                "{} {:.1}%",
+                koppen::KoppenClass::ALL[index].code(),
+                100.0 * share
+            ))
+            .collect::<Vec<_>>()
+            .join(", "),
     );
 
     info!("    state hash {:016x}", planet.state_hash());

@@ -19,6 +19,7 @@
 //! which lines) lists them in [`RenderMode::options`]; the switcher shows them above the
 //! legend and the mode reads their values from [`ModeData::options`].
 
+mod climate;
 mod moisture;
 mod ocean_currents;
 mod plate_motion;
@@ -54,6 +55,8 @@ pub enum RenderModeId {
     Moisture,
     /// The wind-driven ocean gyres as arrows.
     OceanCurrents,
+    /// Köppen–Geiger climate classes of land.
+    Climate,
 }
 
 impl RenderModeId {
@@ -66,6 +69,7 @@ impl RenderModeId {
             RenderModeId::Temperature => &temperature::Temperature,
             RenderModeId::Moisture => &moisture::Moisture,
             RenderModeId::OceanCurrents => &ocean_currents::OceanCurrents,
+            RenderModeId::Climate => &climate::Climate,
         }
     }
 
@@ -89,6 +93,7 @@ impl RenderModeId {
             RenderModeId::Temperature => "temperature",
             RenderModeId::Moisture => "moisture",
             RenderModeId::OceanCurrents => "ocean-currents",
+            RenderModeId::Climate => "climate",
         }
     }
 
@@ -318,6 +323,8 @@ impl Swatch {
 pub enum SwatchShape {
     /// A filled square.
     Fill,
+    /// A filled square on a row of its own, for categories with long labels.
+    Entry,
     /// A line with a dark border, as boundary lines on the planet.
     Line,
     /// A line with teeth on one side, as subduction zones.

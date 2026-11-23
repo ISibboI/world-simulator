@@ -11,7 +11,7 @@ use crate::tectonics::BoundaryClass;
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 84 bytes per cell, 3.4 MB
+/// buffer (to the page on the web) and read back without parsing: 88 bytes per cell, 3.6 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -57,6 +57,9 @@ pub struct CellInfo {
     /// Annual mean heat the gyres deliver to the ocean mixed layer in W/m² (negative where they
     /// cool it), NaN where the gyre model has no ocean.
     pub gyre_heating: f32,
+    /// The Köppen–Geiger climate class of land ([`crate::koppen::KoppenClass::id`]), 0 for the
+    /// ocean and land without data (see [`crate::koppen::classes`]).
+    pub climate_class: u32,
     /// The plate covering the cell.
     pub plate: u32,
     /// Bit flags: [`CellInfo::CONTINENTAL`], the boundary class
@@ -149,6 +152,7 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
             .flatten()
             .map_or(f32::NAN, |values| field(values, cell))
     };
+    let climate_classes = crate::koppen::classes(planet);
     (0..simulation.mesh().len())
         .map(|index| {
             let cell = index as u32;
@@ -177,6 +181,7 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 current_north: current(index, 1),
                 streamfunction: field(&temperature.gyre_streamfunction, index),
                 gyre_heating: field(&temperature.gyre_heating, index),
+                climate_class: climate_classes[index].map_or(0, |class| u32::from(class.id())),
                 plate: simulation.owner(cell).plate,
                 flags: CellInfo::flags(
                     crust.is_continental(),
@@ -232,7 +237,7 @@ pub struct Row {
 
 /// The labels of the rows, always all of them in this order, so that the widget does not
 /// change its layout from cell to cell.
-pub const ROW_LABELS: [&str; 17] = [
+pub const ROW_LABELS: [&str; 18] = [
     "Position",
     "Elevation",
     "Surface",
@@ -247,6 +252,7 @@ pub const ROW_LABELS: [&str; 17] = [
     "Precipitation",
     "Precip. Jan / Jul",
     "Aridity index",
+    "Climate",
     "Permanent ice",
     "River discharge",
     "Ocean current",
@@ -287,7 +293,7 @@ pub fn format_rows(
     longitude: f64,
 ) -> Vec<Row> {
     let land = info.elevation >= 0.0;
-    let values: [Option<String>; 17] = [
+    let values: [Option<String>; 18] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
         Some(
@@ -363,6 +369,7 @@ pub fn format_rows(
                     format!("{} ({})", format_aridity(index), aridity_class(index))
                 })
             }),
+        climate_class(info).map(|class| format!("{} — {}", class.code(), class.name())),
         (info.ice > 0.0).then(|| format!("{:.0}%", 100.0 * info.ice)),
         (land && info.discharge > 0.0).then(|| {
             format!(
@@ -424,6 +431,13 @@ pub fn aridity_class(index: f32) -> &'static str {
         index if index < 0.65 => "dry sub-humid",
         _ => "humid",
     }
+}
+
+/// The Köppen–Geiger class of a cell, if it is classified (land with data).
+pub fn climate_class(info: &CellInfo) -> Option<crate::koppen::KoppenClass> {
+    u8::try_from(info.climate_class)
+        .ok()
+        .and_then(crate::koppen::KoppenClass::from_id)
 }
 
 /// The rows of the widget while no cell is shown: all of them, without values.
@@ -625,6 +639,7 @@ mod tests {
             current_north: f32::NAN,
             streamfunction: f32::NAN,
             gyre_heating: f32::NAN,
+            climate_class: crate::koppen::KoppenClass::Cfb.id().into(),
             plate: 7,
             flags: CellInfo::CONTINENTAL,
         }
@@ -704,6 +719,7 @@ mod tests {
             "0.050 (arid)"
         );
         assert_eq!(row(&rows, "Permanent ice"), None);
+        assert_eq!(row(&rows, "Climate").unwrap(), "Cfb — temperate oceanic");
         // 3.15576e11 m³/yr = 10000 m³/s.
         assert_eq!(row(&rows, "River discharge").unwrap(), "10000 m³/s");
         assert_eq!(row(&rows, "Ocean current"), None);
@@ -727,6 +743,7 @@ mod tests {
             current_north: 10.0,
             streamfunction: 12.0,
             gyre_heating: 25.4,
+            climate_class: 0,
             flags: 0,
             ..info()
         }
@@ -758,6 +775,7 @@ mod tests {
         );
         assert_eq!(row(&rows, "Orogeny"), None);
         assert_eq!(row(&rows, "Temperature"), None);
+        assert_eq!(row(&rows, "Climate"), None);
         assert_eq!(row(&rows, "Jan / Jul"), None);
         assert_eq!(row(&rows, "Precip. Jan / Jul"), None);
         assert_eq!(row(&rows, "Aridity index"), None);
@@ -809,7 +827,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 84);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 88);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 
