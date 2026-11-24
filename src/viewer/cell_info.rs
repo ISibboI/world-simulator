@@ -78,8 +78,8 @@ pub struct CellInfo {
     /// The plate covering the cell.
     pub plate: u32,
     /// Bit flags: [`CellInfo::CONTINENTAL`], the boundary class
-    /// ([`CellInfo::BOUNDARY_SHIFT`]) and [`CellInfo::DEFORMING_BAND`]. The frame history keeps
-    /// the low 8 bits.
+    /// ([`CellInfo::BOUNDARY_SHIFT`]), [`CellInfo::DEFORMING_BAND`] and [`CellInfo::OCEANIC`].
+    /// The frame history keeps the low 8 bits.
     pub flags: u32,
     /// Where the cell's water goes and what water it holds, as the last erosion step saw it
     /// (#102): the receiver ([`CellInfo::RECEIVER_MASK`]), [`CellInfo::OCEAN`],
@@ -106,7 +106,8 @@ pub const LAKE_DEPTH: f64 = 1.0;
 
 impl CellInfo {
     /// [`CellInfo::flags`]: the crust is continental (see
-    /// [`crate::tectonics::Crust::is_continental`]), otherwise oceanic.
+    /// [`crate::tectonics::Crust::is_continental`]); otherwise oceanic
+    /// ([`CellInfo::OCEANIC`]) or transitional.
     pub const CONTINENTAL: u32 = 1;
     /// [`CellInfo::flags`]: bits 1 to 4 are the code of the cell's
     /// [`BoundaryClass`] (0 inside a plate).
@@ -115,6 +116,10 @@ impl CellInfo {
     /// [`CellInfo::flags`]: the cell is in a deforming band (see
     /// [`crate::tectonics::Simulation::boundary_map`]).
     pub const DEFORMING_BAND: u32 = 1 << 5;
+    /// [`CellInfo::flags`]: the crust is normal oceanic crust (see
+    /// [`crate::tectonics::Crust::is_oceanic`]); crust that is neither this nor
+    /// [`CellInfo::CONTINENTAL`] is transitional (thick arcs, thinned continental margins).
+    pub const OCEANIC: u32 = 1 << 6;
 
     /// [`CellInfo::drainage`]: bits 0 to 2 are the slot, in the cell's neighbours
     /// ([`crate::sphere::SphereMesh::neighbors`]), of the cell its water flows to;
@@ -199,6 +204,10 @@ impl CellInfo {
         } else {
             f32::NAN
         }
+    }
+
+    pub fn is_oceanic(&self) -> bool {
+        self.flags & Self::OCEANIC != 0
     }
 
     pub fn in_deforming_band(&self) -> bool {
@@ -332,7 +341,11 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                     crust.is_continental(),
                     boundaries.classes[index],
                     boundaries.band[index],
-                ),
+                ) | if crust.is_oceanic() {
+                    CellInfo::OCEANIC
+                } else {
+                    0
+                },
                 drainage: water_bits(index),
             }
         })
@@ -459,18 +472,20 @@ pub fn format_rows(
             "{}, {:.1} km",
             if info.is_continental() {
                 "continental"
-            } else {
+            } else if info.is_oceanic() {
                 "oceanic"
+            } else {
+                "transitional"
             },
             info.crust_thickness / 1000.0
         )),
         known(info.age, |age| {
             if age >= OLD_LITHOSPHERE {
                 format!("old (≥ {OLD_LITHOSPHERE:.0} Myr)")
-            } else if info.is_continental() {
-                format!("{age:.0} Myr")
-            } else {
+            } else if info.is_oceanic() {
                 format!("{age:.0} Myr (ocean floor)")
+            } else {
+                format!("{age:.0} Myr")
             }
         }),
         Some(format!("{:.0} m (as rock)", info.sediment)),
@@ -977,7 +992,7 @@ mod tests {
             current_north: 10.0,
             streamfunction: 12.0,
             gyre_heating: 25.4,
-            flags: 0,
+            flags: CellInfo::OCEANIC,
             drainage: CellInfo::NO_RECEIVER | CellInfo::OCEAN,
             ..info()
         }
@@ -1040,6 +1055,17 @@ mod tests {
             row(&rows, "Lithosphere age").unwrap(),
             "42 Myr (ocean floor)"
         );
+        let transitional = CellInfo {
+            flags: 0,
+            crust_thickness: 14_000.0,
+            ..ocean()
+        };
+        let transitional = format_rows(&transitional, None, 0.0, 0.0);
+        assert_eq!(
+            row(&transitional, "Crust").unwrap(),
+            "transitional, 14.0 km"
+        );
+        assert_eq!(row(&transitional, "Lithosphere age").unwrap(), "42 Myr");
         assert_eq!(row(&rows, "Orogeny"), None);
         assert_eq!(row(&rows, "Temperature"), None);
         assert_eq!(row(&rows, "Jan / Jul"), None);
@@ -1106,7 +1132,10 @@ mod tests {
 
     #[test]
     fn old_oceanic_crust_has_no_ocean_floor_age() {
-        let info = CellInfo { flags: 0, ..info() };
+        let info = CellInfo {
+            flags: CellInfo::OCEANIC,
+            ..info()
+        };
         let rows = format_rows(&info, None, 0.0, 0.0);
         assert_eq!(row(&rows, "Lithosphere age").unwrap(), "old (≥ 1000 Myr)");
     }
@@ -1134,6 +1163,10 @@ mod tests {
             assert_eq!(
                 info.is_continental(),
                 simulation.surface_crust(cell).is_continental()
+            );
+            assert_eq!(
+                info.is_oceanic(),
+                simulation.surface_crust(cell).is_oceanic()
             );
             assert!(info.temperature.is_finite());
             assert!(info.temperature_january.is_finite() && info.temperature_july.is_finite());
