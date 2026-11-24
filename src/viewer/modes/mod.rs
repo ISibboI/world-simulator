@@ -25,10 +25,13 @@ mod moisture;
 mod ocean_currents;
 mod plate_motion;
 mod plates;
+mod sediment;
 pub mod switcher;
 mod temperature;
 mod topographic;
 mod wind;
+
+pub use sediment::bulk as bulk_sediment;
 
 use clap::ValueEnum;
 use glam::Vec3;
@@ -63,6 +66,8 @@ pub enum RenderModeId {
     CrustAge,
     /// Crust type (oceanic, transitional, continental) and thickness.
     Crust,
+    /// Sediment thickness on land and sea floor (logarithmic), with optional isopachs.
+    Sediment,
 }
 
 impl RenderModeId {
@@ -78,6 +83,7 @@ impl RenderModeId {
             RenderModeId::Wind => &wind::Wind,
             RenderModeId::CrustAge => &crust_age::CrustAge,
             RenderModeId::Crust => &crust::Crust,
+            RenderModeId::Sediment => &sediment::Sediment,
         }
     }
 
@@ -104,6 +110,7 @@ impl RenderModeId {
             RenderModeId::Wind => "wind",
             RenderModeId::CrustAge => "crust-age",
             RenderModeId::Crust => "crust",
+            RenderModeId::Sediment => "sediment",
         }
     }
 
