@@ -136,8 +136,9 @@ pub struct TemperatureParams {
     /// The epoch of the run's start (`--epoch`, see [`crate::presets::Epoch`]), from which
     /// [`crate::sun::age_of_run`] gives the age of the sun; today (0) by default.
     pub epoch: f64,
-    /// Scales the brightening of the sun during the run: 1 follows the sun model
-    /// ([`crate::sun::brightening`], ~1% per 100 Myr), 0 keeps the solar constant of the start.
+    /// Scales the ageing of the sun during the run (the simulated time it sees): 1 follows the
+    /// sun model ([`crate::sun::brightening`], ~1% per 100 Myr), 0 keeps the solar constant of
+    /// the start. The view always shows the unscaled sun model.
     pub solar_brightening: f64,
     /// Outgoing longwave radiation at 0 °C in W/m².
     pub radiation_a: f64,

@@ -514,7 +514,7 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
     info!(
         biosphere = ?cli.biosphere,
         epoch_ga = cli.epoch,
-        solar_constant = parameters.temperature.orbit.solar_constant,
+        solar_constant_at_start = parameters.temperature.orbit.solar_constant,
         greenhouse_forcing = parameters.temperature.greenhouse_forcing,
         "Planet presets (after the overrides; `--set temperature.solar_constant` does not \
          change the greenhouse forcing)"
