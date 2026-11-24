@@ -222,6 +222,13 @@ pub struct WaterCycle {
     pub clipped: f64,
     /// Precipitation (m/yr) of every solved month.
     pub monthly_precipitation: Vec<Vec<f64>>,
+    /// The low-level wind (eastward, northward; m/s) that carries the moisture, as the mean of
+    /// the solved months: the zonal profile of the three-cell circulation around each
+    /// longitude's ITCZ (see [`low_level_wind`]), plus the thermally driven winds if they are
+    /// enabled (`ClimateParams::thermal_wind_depth`).
+    pub wind: Vec<[f64; 2]>,
+    /// The low-level wind of every solved month.
+    pub monthly_wind: Vec<Vec<[f64; 2]>>,
     /// Area-weighted global means of precipitation and evaporation in m/yr.
     pub global_precipitation: f64,
     pub global_evaporation: f64,
@@ -268,6 +275,8 @@ pub struct Climate {
 #[derive(Clone, Debug, Default)]
 struct SolvedMonth {
     precipitation: Vec<f64>,
+    /// Low-level wind (eastward, northward) in m/s.
+    wind: Vec<[f64; 2]>,
     evaporation: Vec<f64>,
     /// Potential evaporation of land.
     potential: Vec<f64>,
@@ -390,6 +399,12 @@ impl Climate {
                 );
                 self.solved[slot].potential = input.potential.clone();
                 self.solved[slot].itcz = input.itcz;
+                self.solved[slot].wind = self
+                    .position
+                    .iter()
+                    .zip(&input.wind)
+                    .map(|(&position, &wind)| east_north(position, wind))
+                    .collect();
                 self.set_evapotranspiration(elevation, slot, &mut input);
                 let (precipitation, used, clipped) = self.solve_month(&input, slot, max_newton);
                 iterations[slot] = used;
@@ -475,6 +490,16 @@ impl Climate {
                     .iter()
                     .map(|p| p * to_metres_per_year)
                     .collect()
+            })
+            .collect();
+        cycle.monthly_wind = self.solved.iter().map(|m| m.wind.clone()).collect();
+        cycle.wind = (0..cell_count)
+            .map(|cell| {
+                let sum = self.solved.iter().fold([0.0; 2], |[e, n], m| {
+                    let [east, north] = m.wind[cell];
+                    [e + east, n + north]
+                });
+                sum.map(|component| component / month_count as f64)
             })
             .collect();
         cycle.global_precipitation = area_mean(&cycle.precipitation);
@@ -1064,6 +1089,18 @@ fn circulation_latitude(latitude: f64, thermal_equator: f64) -> f64 {
     }
 }
 
+/// The eastward and northward components of a vector tangent to the unit sphere at `position`.
+fn east_north(position: DVec3, vector: DVec3) -> [f64; 2] {
+    let east = DVec3::Z.cross(position);
+    let east = if east.length_squared() < 1e-12 {
+        DVec3::X
+    } else {
+        east.normalize()
+    };
+    let north = position.cross(east);
+    [vector.dot(east), vector.dot(north)]
+}
+
 /// The low-level wind vector (m/s) at `position` on the unit sphere, with the ITCZ at
 /// `thermal_equator` (degrees).
 pub fn low_level_wind(position: DVec3, thermal_equator: f64) -> DVec3 {
@@ -1154,6 +1191,22 @@ mod tests {
     }
 
     #[test]
+    fn wind_components_are_east_and_north() {
+        for (latitude, longitude) in [(15.0f64, 40.0f64), (-45.0, -120.0), (75.0, 170.0)] {
+            let (lat, lon) = (latitude.to_radians(), longitude.to_radians());
+            let position = DVec3::new(
+                math::cos(lat) * math::cos(lon),
+                math::cos(lat) * math::sin(lon),
+                math::sin(lat),
+            );
+            let [east, north] = east_north(position, low_level_wind(position, 0.0));
+            let (eastward, poleward) = zonal_mean_wind(latitude.abs());
+            assert!((east - eastward).abs() < 1e-9, "{east} {eastward}");
+            assert!((north - poleward * latitude.signum()).abs() < 1e-9);
+        }
+    }
+
+    #[test]
     fn budyko_curve_limits() {
         // Humid: runoff a little above P − PET; arid: almost everything evaporates.
         let humid = budyko_runoff(2.0, 0.5, 2.6);
@@ -1218,6 +1271,20 @@ mod tests {
         assert!(mean_at(0.0, 5.0) > 2.0 * mean_at(20.0, 30.0));
         assert!(mean_at(40.0, 55.0) > mean_at(20.0, 30.0));
         assert!(mean_at(75.0, 90.0) < mean_at(40.0, 55.0));
+
+        // The winds of the solved months and their mean: trades and westerlies.
+        let cycle = climate.water_cycle();
+        assert_eq!(cycle.monthly_wind.len(), ClimateParams::default().months);
+        assert_eq!(cycle.wind.len(), mesh.len());
+        for c in 0..mesh.len() {
+            let latitude = climate.latitude[c].to_degrees().abs();
+            let [east, _] = cycle.wind[c];
+            if (10.0..20.0).contains(&latitude) {
+                assert!(east < -3.0, "{latitude} {east}");
+            } else if (40.0..55.0).contains(&latitude) {
+                assert!(east > 4.0, "{latitude} {east}");
+            }
+        }
     }
 
     #[test]
