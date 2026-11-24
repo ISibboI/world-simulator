@@ -1,7 +1,7 @@
 //! Extra per-cell fields that render modes can request from the simulation, beyond the
 //! [`CellInfo`] that every surface update carries.
 //!
-//! Every update carries the attributes of [`CellInfo`] (136 bytes per cell),
+//! Every update carries the attributes of [`CellInfo`] (140 bytes per cell),
 //! which cover the scalar modes (elevation, temperature, precipitation, crust, sediment, …). Fields that only
 //! some modes need, e.g. vectors for arrows, are [`Layer`]s: the view tells the simulation which
 //! layers the active mode needs ([`Layers`]), and the simulation extracts and sends only those

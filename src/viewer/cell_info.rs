@@ -11,7 +11,7 @@ use crate::tectonics::{self, BoundaryClass};
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 136 bytes per cell, 5.6 MB
+/// buffer (to the page on the web) and read back without parsing: 140 bytes per cell, 5.7 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -82,6 +82,9 @@ pub struct CellInfo {
     pub wind_january_north: f32,
     pub wind_july_east: f32,
     pub wind_july_north: f32,
+    /// The Köppen–Geiger climate class of land ([`crate::koppen::KoppenClass::id`]), 0 for the
+    /// ocean and land without data (see [`crate::koppen::classes`]).
+    pub climate_class: u32,
     /// The plate covering the cell.
     pub plate: u32,
     /// Bit flags: [`CellInfo::CONTINENTAL`], the boundary class
@@ -470,6 +473,7 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
             .and_then(|slot| monthly.get(slot))
             .map_or(f32::NAN, |values| field(values, cell))
     };
+    let climate_classes = crate::koppen::classes(planet);
     let precipitation_of =
         |month: usize, cell: usize| of_month(&cycle.monthly_precipitation, month, cell);
     let evaporation_of =
@@ -547,6 +551,7 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 wind_january_north: wind_of(0, index, 1),
                 wind_july_east: wind_of(6, index, 0),
                 wind_july_north: wind_of(6, index, 1),
+                climate_class: climate_classes[index].map_or(0, |class| u32::from(class.id())),
                 plate: simulation.owner(cell).plate,
                 flags: CellInfo::flags(
                     crust.is_continental(),
@@ -619,7 +624,7 @@ pub struct Row {
 
 /// The labels of the rows, always all of them in this order, so that the widget does not
 /// change its layout from cell to cell.
-pub const ROW_LABELS: [&str; 20] = [
+pub const ROW_LABELS: [&str; 21] = [
     "Position",
     "Elevation",
     "Surface",
@@ -635,6 +640,7 @@ pub const ROW_LABELS: [&str; 20] = [
     "Precipitation",
     "Precip. Jan / Jul",
     "Aridity index",
+    "Climate",
     "P − E",
     "Permanent ice",
     "River discharge",
@@ -686,7 +692,7 @@ pub fn format_rows(
     longitude: f64,
 ) -> Vec<Row> {
     let land = !info.is_ocean();
-    let values: [Option<String>; 20] = [
+    let values: [Option<String>; 21] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
         Some(format_surface(info)),
@@ -757,6 +763,7 @@ pub fn format_rows(
                     format!("{} ({})", format_aridity(index), aridity_class(index))
                 })
             }),
+        climate_class(info).map(|class| format!("{} — {}", class.code(), class.name())),
         format_balance(info),
         (info.ice > 0.0).then(|| format!("{:.0}%", 100.0 * info.ice)),
         (land && info.discharge > 0.0).then(|| {
@@ -886,6 +893,13 @@ pub fn aridity_class(index: f32) -> &'static str {
         index if index < 0.65 => "dry sub-humid",
         _ => "humid",
     }
+}
+
+/// The Köppen–Geiger class of a cell, if it is classified (land with data).
+pub fn climate_class(info: &CellInfo) -> Option<crate::koppen::KoppenClass> {
+    u8::try_from(info.climate_class)
+        .ok()
+        .and_then(crate::koppen::KoppenClass::from_id)
 }
 
 /// The rows of the widget while no cell is shown: all of them, without values.
@@ -1108,6 +1122,7 @@ mod tests {
             wind_january_north: 1.0,
             wind_july_east: -4.0,
             wind_july_north: -2.0,
+            climate_class: crate::koppen::KoppenClass::Cfb.id().into(),
             plate: 7,
             flags: CellInfo::CONTINENTAL | CellInfo::FELSIC,
             drainage: CellInfo::NO_RECEIVER,
@@ -1191,6 +1206,7 @@ mod tests {
             "0.050 (arid)"
         );
         assert_eq!(row(&rows, "Permanent ice"), None);
+        assert_eq!(row(&rows, "Climate").unwrap(), "Cfb — temperate oceanic");
         // 3.15576e11 m³/yr = 10000 m³/s.
         assert_eq!(row(&rows, "River discharge").unwrap(), "10000 m³/s");
         assert_eq!(row(&rows, "Ocean current"), None);
@@ -1238,6 +1254,7 @@ mod tests {
             current_north: 10.0,
             streamfunction: 12.0,
             gyre_heating: 25.4,
+            climate_class: 0,
             flags: CellInfo::OCEANIC,
             drainage: CellInfo::NO_RECEIVER | CellInfo::OCEAN,
             ..info()
@@ -1314,6 +1331,7 @@ mod tests {
         assert_eq!(row(&transitional, "Lithosphere age").unwrap(), "42 Myr");
         assert_eq!(row(&rows, "Orogeny"), None);
         assert_eq!(row(&rows, "Temperature"), None);
+        assert_eq!(row(&rows, "Climate"), None);
         assert_eq!(row(&rows, "Jan / Jul"), None);
         assert_eq!(row(&rows, "Precip. Jan / Jul"), None);
         // The subtropical ocean loses water.
@@ -1408,7 +1426,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 136);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 140);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 
