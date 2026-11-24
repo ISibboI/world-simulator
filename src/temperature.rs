@@ -130,7 +130,15 @@ impl OrbitParams {
 /// Parameters of the energy balance model. Temperatures in °C.
 #[derive(Clone, Debug)]
 pub struct TemperatureParams {
+    /// The orbit; its solar constant is the one at the start of the run (time 0), which the sun's
+    /// brightening raises during the run.
     pub orbit: OrbitParams,
+    /// The epoch of the run's start (`--epoch`, see [`crate::presets::Epoch`]), from which
+    /// [`crate::sun::age_of_run`] gives the age of the sun; today (0) by default.
+    pub epoch: f64,
+    /// Scales the brightening of the sun during the run: 1 follows the sun model
+    /// ([`crate::sun::brightening`], ~1% per 100 Myr), 0 keeps the solar constant of the start.
+    pub solar_brightening: f64,
     /// Outgoing longwave radiation at 0 °C in W/m².
     pub radiation_a: f64,
     /// Increase of outgoing longwave radiation per kelvin in W/m²/K.
@@ -247,6 +255,8 @@ impl Default for TemperatureParams {
     fn default() -> Self {
         Self {
             orbit: OrbitParams::default(),
+            epoch: 0.0,
+            solar_brightening: 1.0,
             radiation_a: 203.3,
             radiation_b: 2.09,
             greenhouse_forcing: 0.0,
@@ -289,6 +299,15 @@ impl Default for TemperatureParams {
 }
 
 impl TemperatureParams {
+    /// The solar constant (W/m²) `time` Myr into the run: the one of the start, raised by the
+    /// sun's brightening since then (scaled by [`Self::solar_brightening`]). Exactly the start's
+    /// at time 0.
+    pub fn solar_constant(&self, time: f64) -> f64 {
+        let start = crate::sun::age_of_run(self.epoch, 0.0);
+        let now = crate::sun::age_of_run(self.epoch, self.solar_brightening * time);
+        self.orbit.solar_constant * crate::sun::brightening(start, now)
+    }
+
     /// Sets a parameter by its field name, for calibration from the command line.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
         let field = match name {
@@ -324,6 +343,7 @@ impl TemperatureParams {
             "free_air_base" => &mut self.free_air_base,
             "free_air_latitude" => &mut self.free_air_latitude,
             "solar_constant" => &mut self.orbit.solar_constant,
+            "solar_brightening" => &mut self.solar_brightening,
             _ => anyhow::bail!("unknown temperature parameter {name}"),
         };
         *field = value;
@@ -364,6 +384,8 @@ pub struct TemperatureFields {
     pub meridional_transport: Vec<(f64, f64, f64)>,
     /// Largest volume transport of the wind-driven gyres in Sv (1e6 m³/s).
     pub gyre_transport: f64,
+    /// The solar constant (W/m²) of the last update, raised by the sun's brightening.
+    pub solar_constant: f64,
     /// Depth-integrated volume transport of the wind-driven gyres (eastward, northward) in m²/s
     /// at every fine ocean cell: the value of its coarse cell, NaN where that is not ocean in the
     /// gyre model (mostly land) or the fine cell is land.
@@ -506,10 +528,15 @@ impl TemperatureModel {
     }
 
     /// Simulates the seasonal cycle for the given surface elevation (in metres, sea level is 0)
-    /// of the fine mesh, and updates the temperature fields. `precipitation` (m/yr) limits where
-    /// ice sheets can grow; without it, 1 m/yr is assumed everywhere.
-    pub fn update(&mut self, elevation: &[f64], precipitation: Option<&[f64]>) {
+    /// of the fine mesh, `time` Myr into the run (for the sun's brightening), and updates the
+    /// temperature fields. `precipitation` (m/yr) limits where ice sheets can grow; without it,
+    /// 1 m/yr is assumed everywhere.
+    pub fn update(&mut self, elevation: &[f64], precipitation: Option<&[f64]>, time: f64) {
         let params = &self.params;
+        let orbit = OrbitParams {
+            solar_constant: params.solar_constant(time),
+            ..params.orbit.clone()
+        };
         let coarse_count = self.coarse.len();
 
         // Land fraction of every coarse cell.
@@ -555,12 +582,10 @@ impl TemperatureModel {
         let seasons = params.seasons_per_year;
         let insolation: Vec<Vec<f64>> = (0..seasons)
             .map(|season| {
-                let position = params
-                    .orbit
-                    .position((season as f64 + 0.5) / seasons as f64);
+                let position = orbit.position((season as f64 + 0.5) / seasons as f64);
                 self.coarse_latitude
                     .iter()
-                    .map(|&latitude| params.orbit.daily_insolation(latitude, position))
+                    .map(|&latitude| orbit.daily_insolation(latitude, position))
                     .collect()
             })
             .collect();
@@ -1017,6 +1042,7 @@ impl TemperatureModel {
             monthly,
             thermal_equator,
             ice,
+            solar_constant: orbit.solar_constant,
             gyre_transport: gyres
                 .streamfunction
                 .iter()
@@ -1232,7 +1258,7 @@ mod tests {
             })
             .collect();
         let mut model = TemperatureModel::new(&mesh, TemperatureParams::default());
-        model.update(&elevation, None);
+        model.update(&elevation, None, 0.0);
         let fields = model.fields();
 
         let mean_where = |filter: &dyn Fn(f64, f64) -> bool, field: &dyn Fn(usize) -> f64| {
@@ -1321,7 +1347,7 @@ mod tests {
             // Cold enough that the plateau starts under ice.
             model.previous_annual_land.fill(0.0);
         }
-        model.update(&elevation, None);
+        model.update(&elevation, None, 0.0);
         let fields = model.fields();
         let mean = |filter: &dyn Fn(f64, f64) -> bool, field: &dyn Fn(usize) -> f64| {
             let cells: Vec<usize> = (0..mesh.len())
@@ -1412,7 +1438,7 @@ mod tests {
                 ..TemperatureParams::default()
             };
             let mut model = TemperatureModel::new(&mesh, params);
-            model.update(&elevation, None);
+            model.update(&elevation, None, 0.0);
             let fields = model.fields();
             let cells: Vec<usize> = (0..mesh.len())
                 .filter(|&c| mesh.vertex(c as u32).z.abs() > math::sin(70f64.to_radians()))
@@ -1429,7 +1455,7 @@ mod tests {
         let mesh = SphereMesh::icosphere(4);
         let elevation = vec![-4000.0; mesh.len()];
         let mut model = TemperatureModel::new(&mesh, TemperatureParams::default());
-        model.update(&elevation, None);
+        model.update(&elevation, None, 0.0);
         let fields = model.fields();
         let mean_where = |filter: &dyn Fn(f64) -> bool, field: &dyn Fn(usize) -> f64| {
             let cells: Vec<usize> = (0..mesh.len())
@@ -1497,7 +1523,7 @@ mod probe {
                 model.params.orbit.solar_constant = 1361.0 * percent as f64 / 100.0;
                 model.spun_up = false;
                 model.params.spin_up_years = 40;
-                model.update(&elevation, Some(&precipitation));
+                model.update(&elevation, Some(&precipitation), 0.0);
                 let f = model.fields();
                 let global = f.annual_mean.iter().sum::<f64>() / f.annual_mean.len() as f64;
                 let ice = f.ice.iter().filter(|&&i| i > 0.5).count() as f64 / f.ice.len() as f64;

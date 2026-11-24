@@ -121,6 +121,8 @@ pub struct PlanetStatistics {
     pub heat_transport: [f64; 4],
     /// Largest transport of the wind-driven ocean gyres in Sv.
     pub gyre_transport: f64,
+    /// Solar constant of the climate in W/m² (the sun brightens during the run).
+    pub solar_constant: f64,
     /// Fraction of the surface covered by permanent ice (sea ice, ice sheets).
     pub frozen_fraction: f64,
     /// Where the sediment sits and how much of the sea level it makes up.
@@ -207,7 +209,7 @@ impl Planet {
             tectonics.min_sea_fraction(),
         );
         let view = climate_elevations(tectonics.mesh(), &elevation, &seeds);
-        temperature.update(&view, None);
+        temperature.update(&view, None, tectonics.time());
         let cell_count = tectonics.mesh().len();
         let water = SurfaceWater::ocean_only(crate::sea::ocean_from(
             tectonics.mesh(),
@@ -323,7 +325,8 @@ impl Planet {
             self.tectonics.min_sea_fraction(),
         );
         let view = climate_elevations(self.tectonics.mesh(), &elevation, &seeds);
-        self.temperature.update(&view, Some(&self.precipitation));
+        self.temperature
+            .update(&view, Some(&self.precipitation), self.tectonics.time());
         self.update_water_cycle(&view);
         let climate_time = start.elapsed();
 
@@ -498,6 +501,7 @@ impl Planet {
             polar_temperature: mean(&mut all().filter(|&c| latitude(c).abs() > 70.0), &annual),
             land_seasonal_range: mean(&mut land.iter().copied(), &|c| fields.seasonal_range(c)),
             gyre_transport: fields.gyre_transport,
+            solar_constant: fields.solar_constant,
             heat_transport: {
                 let transport = &fields.meridional_transport;
                 let to_petawatts = |t: f64| t * self.planet_radius.powi(2) / 1e15;

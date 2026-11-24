@@ -134,7 +134,12 @@ impl Epoch {
     /// its present age `t₀`. 0.77 S₀ at 3.5 Ga, 0.92 S₀ at 1 Ga.
     /// The sun model of the view ([`crate::sun::Sun`]) uses the same formula.
     pub fn solar_constant(&self) -> f64 {
-        sun::solar_constant(SOLAR_AGE - self.before_present)
+        sun::solar_constant(self.sun_age())
+    }
+
+    /// The age of the sun in Gyr at the start of a run of this epoch.
+    pub fn sun_age(&self) -> f64 {
+        sun::age_of_run(self.before_present, 0.0)
     }
 
     /// Greenhouse forcing (W/m²) of the epoch relative to today's atmosphere.
@@ -164,12 +169,14 @@ impl Epoch {
         }
     }
 
-    /// Sets the solar constant and the greenhouse forcing of the epoch. The present keeps the
-    /// defaults exactly (S₀ and no forcing).
+    /// Sets the solar constant of the run's start, the epoch (from which the sun brightens
+    /// during the run) and the greenhouse forcing of the epoch. The forcing stays fixed during
+    /// the run. The present keeps the defaults exactly (S₀, today's age and no forcing).
     pub fn apply(&self, temperature: &mut TemperatureParams) {
         if *self == Self::PRESENT {
             return;
         }
+        temperature.epoch = self.before_present;
         temperature.orbit.solar_constant = self.solar_constant();
         temperature.greenhouse_forcing = self.greenhouse_forcing();
     }
@@ -277,6 +284,44 @@ mod tests {
     }
 
     #[test]
+    fn the_climate_follows_the_brightening_sun() {
+        for (epoch, time) in [(0.0, 500.0), (3.5, 1000.0), (2.0, 37.5)] {
+            let parameters =
+                Parameters::new(RADIUS, Biosphere::Modern, Epoch::new(epoch, None).unwrap());
+            let temperature = &parameters.temperature;
+            // The start keeps the epoch's solar constant bit for bit.
+            assert_eq!(
+                temperature.solar_constant(0.0).to_bits(),
+                temperature.orbit.solar_constant.to_bits()
+            );
+            // Later the sun model's, as the view shows it.
+            let sun = crate::sun::Sun::of_run(epoch, time);
+            let climate = temperature.solar_constant(time);
+            assert!(
+                (climate - sun.luminosity * PRESENT_SOLAR_CONSTANT).abs() < 1e-9,
+                "{epoch} Ga + {time} Myr: {climate} vs {}",
+                sun.luminosity * PRESENT_SOLAR_CONSTANT
+            );
+            // About 1% brighter per 100 Myr (0.7% at 3.5 Ga, 0.9% today).
+            let per_100_myr = temperature.solar_constant(100.0) / temperature.solar_constant(0.0);
+            assert!((1.006..1.012).contains(&per_100_myr), "{per_100_myr}");
+        }
+        // An override of the solar constant is scaled by the brightening; `solar_brightening`
+        // 0 keeps it.
+        let mut parameters = Parameters::new(RADIUS, Biosphere::Modern, Epoch::PRESENT);
+        parameters
+            .set("temperature.solar_constant", 1300.0)
+            .unwrap();
+        let scaled = parameters.temperature.solar_constant(500.0);
+        let expected = 1300.0 * crate::sun::Sun::of_run(0.0, 500.0).luminosity;
+        assert!((scaled - expected).abs() < 1e-9, "{scaled} vs {expected}");
+        parameters
+            .set("temperature.solar_brightening", 0.0)
+            .unwrap();
+        assert_eq!(parameters.temperature.solar_constant(500.0), 1300.0);
+    }
+
+    #[test]
     fn greenhouse_forcing_offsets_the_faint_sun_or_follows_co2() {
         let archean = Epoch::new(3.5, None).unwrap();
         let forcing = archean.greenhouse_forcing();
@@ -370,7 +415,7 @@ mod tests {
         let mut parameters = Parameters::new(RADIUS, biosphere, epoch);
         parameters.temperature.spin_up_years = 60;
         let mut model = TemperatureModel::new(&mesh, parameters.temperature);
-        model.update(&elevation, None);
+        model.update(&elevation, None, 0.0);
         let fields = model.fields();
         let count = mesh.len() as f64;
         let global = fields.annual_mean.iter().sum::<f64>() / count;
