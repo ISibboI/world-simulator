@@ -2,8 +2,8 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (54 bytes per cell
-//! instead of 136, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (55 bytes per cell
+//! instead of 140, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
@@ -44,7 +44,7 @@ impl Code {
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 34] = [
+const CHANNELS: [Code; 35] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -102,18 +102,20 @@ const CHANNELS: [Code; 34] = [
     Code::Signed8(0.25),
     Code::Signed8(0.25),
     Code::Signed8(0.25),
-    // Plate (clamped to 16 bits), the low 16 bits of the flags and the drainage. The flags take
-    // 9 bits, so most of their high byte is zero and costs next to nothing after the delta and
-    // lz4.
+    // Plate (clamped to 16 bits), the low 16 bits of the flags, the drainage and the climate
+    // class. The flags take 9 bits, so most of their high byte is zero and costs next to nothing
+    // after the delta and lz4.
     Code::Integer16,
     Code::Integer16,
     Code::Integer8,
+    Code::Integer8,
 ];
 
-/// The channels of the integer attributes: plate, flags and drainage.
+/// The channels of the integer attributes: plate, flags, drainage and climate class.
 const PLATE: usize = 31;
 const FLAGS: usize = 32;
 const DRAINAGE: usize = 33;
+const CLIMATE_CLASS: usize = 34;
 
 /// The value of an integer channel of a cell.
 fn integer(channel: usize, cell: &CellInfo) -> u16 {
@@ -121,6 +123,7 @@ fn integer(channel: usize, cell: &CellInfo) -> u16 {
         PLATE => cell.plate.min(u32::from(u16::MAX)) as u16,
         FLAGS => (cell.flags & 0xFFFF) as u16,
         DRAINAGE => (cell.drainage & 0xFF) as u16,
+        CLIMATE_CLASS => cell.climate_class.min(0xFF) as u16,
         _ => unreachable!("not an integer channel"),
     }
 }
@@ -170,6 +173,7 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.wind_january_north,
         cell.wind_july_east,
         cell.wind_july_north,
+        0.0,
         0.0,
         0.0,
         0.0,
@@ -359,6 +363,7 @@ impl Planes {
                     wind_january_north: value(28),
                     wind_july_east: value(29),
                     wind_july_north: value(30),
+                    climate_class: u32::from(values[CLIMATE_CLASS]),
                     plate: u32::from(values[PLATE]),
                     flags: u32::from(values[FLAGS]),
                     drainage: u32::from(values[DRAINAGE]),
@@ -385,7 +390,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 9;
+const VERSION: u8 = 10;
 /// Bytes per plate: its rotation and id.
 pub const PLATE_BYTES: usize = 16;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -554,6 +559,7 @@ mod tests {
             wind_january_north: (x * 0.17).sin() * 3.0,
             wind_july_east: (x * 0.19).cos() * 7.0,
             wind_july_north: -0.1,
+            climate_class: (index % 31) as u32,
             plate: (index % 13) as u32,
             // All flag bits the history keeps (the oceanic bit 6, the felsic bit 7 and the
             // metasediment bit 8 among them).
@@ -681,6 +687,7 @@ mod tests {
         );
         assert_eq!(original.plate, decoded.plate);
         assert_eq!(original.flags, decoded.flags);
+        assert_eq!(original.climate_class, decoded.climate_class);
         assert_eq!(original.drainage, decoded.drainage);
         // Land stays land and sea stays sea.
         assert_eq!(original.elevation >= 0.0, decoded.elevation >= 0.0);
@@ -694,7 +701,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 54);
+        assert_eq!(BYTES_PER_CELL, 55);
     }
 
     #[test]

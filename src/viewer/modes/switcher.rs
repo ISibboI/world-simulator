@@ -289,13 +289,13 @@ fn legend(ui: &mut egui::Ui, legend: &Legend, view: &SwitcherView, width: f32) {
             );
         }
     }
-    // Filled squares share wrapped rows, palettes get a row each, lines and markers two
-    // columns.
+    // Filled squares share wrapped rows, palettes and entries get a row each, lines and markers
+    // two columns.
     let mut rest = legend.swatches.as_slice();
     let mut grids = 0;
     while let Some(first) = rest.first() {
         let count = match first.shape {
-            SwatchShape::Palette(_) => 1,
+            SwatchShape::Palette(_) | SwatchShape::Entry => 1,
             SwatchShape::Fill => rest
                 .iter()
                 .take_while(|swatch| swatch.shape == SwatchShape::Fill)
@@ -303,13 +303,16 @@ fn legend(ui: &mut egui::Ui, legend: &Legend, view: &SwitcherView, width: f32) {
             _ => rest
                 .iter()
                 .take_while(|swatch| {
-                    !matches!(swatch.shape, SwatchShape::Fill | SwatchShape::Palette(_))
+                    !matches!(
+                        swatch.shape,
+                        SwatchShape::Fill | SwatchShape::Palette(_) | SwatchShape::Entry
+                    )
                 })
                 .count(),
         };
         let group = &rest[..count];
         match first.shape {
-            SwatchShape::Palette(_) => {
+            SwatchShape::Palette(_) | SwatchShape::Entry => {
                 ui.horizontal(|ui| {
                     swatch_symbol(ui, first, bar_height);
                     ui.add(egui::Label::new(first.label.as_ref()).wrap());
@@ -390,7 +393,7 @@ fn swatch_symbol(ui: &mut egui::Ui, swatch: &Swatch, size: f32) {
     let frame = ui.visuals().widgets.noninteractive.bg_stroke;
     let dark = egui::Color32::from_gray(15);
     let width = match swatch.shape {
-        SwatchShape::Fill => size,
+        SwatchShape::Fill | SwatchShape::Entry => size,
         SwatchShape::Palette(ref colors) => size * 0.6 * colors.len() as f32,
         _ => 1.6 * size,
     };
@@ -410,7 +413,7 @@ fn swatch_symbol(ui: &mut egui::Ui, swatch: &Swatch, size: f32) {
         painter.line_segment(ends, egui::Stroke::new(line_width, color));
     };
     match &swatch.shape {
-        SwatchShape::Fill => {
+        SwatchShape::Fill | SwatchShape::Entry => {
             painter.rect_filled(rect, 2.0, color);
             painter.rect_stroke(rect, 2.0, frame, egui::StrokeKind::Outside);
         }

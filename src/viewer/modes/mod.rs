@@ -19,6 +19,7 @@
 //! which lines) lists them in [`RenderMode::options`]; the switcher shows them above the
 //! legend and the mode reads their values from [`ModeData::options`].
 
+mod climate;
 mod crust;
 mod crust_age;
 mod hydrology;
@@ -74,6 +75,8 @@ pub enum RenderModeId {
     LithosphereStrength,
     /// Rivers, drainage basins, endorheic areas and lakes.
     Hydrology,
+    /// Köppen–Geiger climate classes of land.
+    Climate,
 }
 
 impl RenderModeId {
@@ -92,6 +95,7 @@ impl RenderModeId {
             RenderModeId::Sediment => &sediment::Sediment,
             RenderModeId::LithosphereStrength => &strength::LithosphereStrength,
             RenderModeId::Hydrology => &hydrology::Hydrology,
+            RenderModeId::Climate => &climate::Climate,
         }
     }
 
@@ -121,6 +125,7 @@ impl RenderModeId {
             RenderModeId::Sediment => "sediment",
             RenderModeId::LithosphereStrength => "lithosphere-strength",
             RenderModeId::Hydrology => "hydrology",
+            RenderModeId::Climate => "climate",
         }
     }
 
@@ -449,6 +454,8 @@ impl Swatch {
 pub enum SwatchShape {
     /// A filled square.
     Fill,
+    /// A filled square on a row of its own, for categories with long labels.
+    Entry,
     /// A line with a dark border, as boundary lines on the planet.
     Line,
     /// A line with teeth on one side, as subduction zones.

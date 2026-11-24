@@ -421,6 +421,7 @@ mod tests {
             wind_january_north: 0.0,
             wind_july_east: 0.0,
             wind_july_north: 0.0,
+            climate_class: 0,
             plate,
             flags: match kind {
                 Kind::Oceanic => CellInfo::OCEANIC,
