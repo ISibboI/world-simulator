@@ -41,7 +41,7 @@ pub(super) const PLATEAU_THICKNESS: f64 = 70e3;
 /// localise in the belt its own collision has just marked (37× at 0.3 with fresh belts at
 /// 0.25), and the belt gets narrower than with no band at all (test
 /// `a_collision_band_spreads_the_belt_and_conserves_mass`).
-const MIN_BAND_STRENGTH: f64 = 0.5;
+pub const MIN_BAND_STRENGTH: f64 = 0.5;
 
 /// Gravitational acceleration (m/s²).
 const GRAVITY: f64 = 9.81;

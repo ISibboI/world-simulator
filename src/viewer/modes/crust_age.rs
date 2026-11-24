@@ -396,6 +396,8 @@ mod tests {
             sediment: 0.0,
             orogenic: 0.0,
             since_orogeny: f32::NAN,
+            strength_thermal: 1.0,
+            strength_thinning: 1.0,
             temperature: 0.0,
             temperature_january: 0.0,
             temperature_july: 0.0,

@@ -6,12 +6,12 @@ use eframe::egui;
 use glam::DVec3;
 
 use crate::planet::Planet;
-use crate::tectonics::BoundaryClass;
+use crate::tectonics::{self, BoundaryClass};
 
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 120 bytes per cell, 4.9 MB
+/// buffer (to the page on the web) and read back without parsing: 128 bytes per cell, 5.2 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -28,6 +28,13 @@ pub struct CellInfo {
     pub orogenic: f32,
     /// Time since the last orogeny in Myr, or NaN if there was none.
     pub since_orogeny: f32,
+    /// The terms of the lithosphere strength that the view cannot rebuild from the other
+    /// attributes (see [`crate::tectonics::Simulation::lithosphere_strength_terms`]), 0 to 1: the thermal term (from
+    /// the thermal age, which a plume may have reset) and the thinning of stretched continental
+    /// lithosphere. [`CellInfo::lithosphere_strength`] combines them with
+    /// [`CellInfo::orogenic`].
+    pub strength_thermal: f32,
+    pub strength_thinning: f32,
     /// Annual mean surface temperature in °C (NaN if unknown).
     pub temperature: f32,
     /// Mean surface temperature of the first month of the year (early January, the month
@@ -129,6 +136,55 @@ impl CellInfo {
         }
     }
 
+    /// Strength of the lithosphere relative to old, undeformed lithosphere, 0.05 to 1 (see
+    /// [`crate::tectonics::combine_strength`]); NaN if a term is unknown.
+    pub fn lithosphere_strength(&self) -> f32 {
+        let terms = [self.strength_thermal, self.strength_thinning, self.orogenic];
+        if terms.iter().any(|term| term.is_nan()) {
+            return f32::NAN;
+        }
+        tectonics::combine_strength(
+            f64::from(self.strength_thermal),
+            f64::from(self.strength_thinning),
+            f64::from(self.orogenic),
+        ) as f32
+    }
+
+    /// The orogenic term of the lithosphere strength (see
+    /// [`crate::tectonics::orogenic_strength`]).
+    pub fn strength_orogenic(&self) -> f32 {
+        tectonics::orogenic_strength(f64::from(self.orogenic)) as f32
+    }
+
+    /// What weakens the lithosphere most: its weakest term, or `None` where it has (nearly)
+    /// its full strength or a term is unknown.
+    pub fn weakness(&self) -> Option<Weakness> {
+        let strength = self.lithosphere_strength();
+        if strength.is_nan() || strength >= FULL_STRENGTH {
+            return None;
+        }
+        let (thermal, thinning, orogenic) = (
+            self.strength_thermal,
+            self.strength_thinning,
+            self.strength_orogenic(),
+        );
+        Some(if thermal <= thinning && thermal <= orogenic {
+            // A plume reset the thermal age where the thermal term is clearly below the one of
+            // the lithosphere's age (both quantised in past frames: 0.25 Myr steps of the age
+            // change the term by up to 0.015 next to a ridge axis, the term itself by 0.002).
+            let by_age = tectonics::thermal_strength(f64::from(self.age)) as f32;
+            if by_age - thermal > PLUME_RESET_MARGIN {
+                Weakness::Plume
+            } else {
+                Weakness::Young
+            }
+        } else if thinning <= orogenic {
+            Weakness::Thinned
+        } else {
+            Weakness::Orogenic
+        })
+    }
+
     pub fn is_oceanic(&self) -> bool {
         self.flags & Self::OCEANIC != 0
     }
@@ -160,6 +216,44 @@ impl CellInfo {
             flags |= Self::DEFORMING_BAND;
         }
         flags
+    }
+}
+
+/// Lithosphere at least this strong counts as having its full strength (no [`Weakness`]).
+pub const FULL_STRENGTH: f32 = 0.98;
+
+/// See [`CellInfo::weakness`].
+const PLUME_RESET_MARGIN: f32 = 0.025;
+
+/// The weakest term of the lithosphere strength at a cell (see [`CellInfo::weakness`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Weakness {
+    /// Young (hot, thin) lithosphere: young sea floor, arcs, freshly rifted continental crust.
+    Young,
+    /// Lithosphere a plume heated (its thermal age reset), carried along with the plate.
+    Plume,
+    /// Stretched (thinned) continental lithosphere.
+    Thinned,
+    /// Orogenic belts, sutures and accreted terranes that have not healed yet.
+    Orogenic,
+}
+
+impl Weakness {
+    pub const ALL: [Weakness; 4] = [
+        Weakness::Young,
+        Weakness::Plume,
+        Weakness::Thinned,
+        Weakness::Orogenic,
+    ];
+
+    /// Short name, for the cell widget.
+    pub fn label(self) -> &'static str {
+        match self {
+            Weakness::Young => "young",
+            Weakness::Plume => "plume-heated",
+            Weakness::Thinned => "thinned crust",
+            Weakness::Orogenic => "orogenic",
+        }
     }
 }
 
@@ -309,6 +403,7 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
         .map(|index| {
             let cell = index as u32;
             let crust = simulation.surface_crust(cell);
+            let strength = simulation.lithosphere_strength_terms(cell);
             CellInfo {
                 elevation: simulation.surface_elevation(cell) as f32,
                 crust_thickness: crust.thickness as f32,
@@ -320,6 +415,8 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 } else {
                     f32::NAN
                 },
+                strength_thermal: strength.thermal as f32,
+                strength_thinning: strength.thinning as f32,
                 temperature: field(&temperature.annual_mean, index),
                 temperature_january: month(0, index),
                 temperature_july: month(6, index),
@@ -409,7 +506,7 @@ pub struct Row {
 
 /// The labels of the rows, always all of them in this order, so that the widget does not
 /// change its layout from cell to cell.
-pub const ROW_LABELS: [&str; 19] = [
+pub const ROW_LABELS: [&str; 20] = [
     "Position",
     "Elevation",
     "Surface",
@@ -419,6 +516,7 @@ pub const ROW_LABELS: [&str; 19] = [
     "Lithosphere age",
     "Sediment",
     "Orogeny",
+    "Strength",
     "Temperature",
     "Jan / Jul",
     "Precipitation",
@@ -475,7 +573,7 @@ pub fn format_rows(
     longitude: f64,
 ) -> Vec<Row> {
     let land = info.elevation >= 0.0;
-    let values: [Option<String>; 19] = [
+    let values: [Option<String>; 20] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
         Some(
@@ -523,6 +621,7 @@ pub fn format_rows(
                     .unwrap_or_else(|| NOT_APPLICABLE.to_owned())
             )
         }),
+        format_strength(info),
         format_temperature(info.temperature),
         (info.temperature_january.is_finite() || info.temperature_july.is_finite()).then(|| {
             let month = |t| format_temperature(t).unwrap_or_else(|| NOT_APPLICABLE.to_owned());
@@ -590,6 +689,16 @@ fn format_current(info: &CellInfo) -> Option<String> {
         text += &format!(", {:+.0} W/m²", info.gyre_heating);
     }
     Some(text)
+}
+
+/// The lithosphere strength of a cell and its weakest term: "0.42, weakest: orogenic".
+fn format_strength(info: &CellInfo) -> Option<String> {
+    known(info.lithosphere_strength(), |strength| {
+        match info.weakness() {
+            Some(weakness) => format!("{strength:.2}, weakest: {}", weakness.label()),
+            None => format!("{strength:.2} (full)"),
+        }
+    })
 }
 
 /// Annual precipitation minus evaporation, with the evaporation: "+312 mm/yr (evap. 500)".
@@ -841,6 +950,8 @@ mod tests {
             sediment: 512.3,
             orogenic: 0.25,
             since_orogeny: 87.6,
+            strength_thermal: 1.0,
+            strength_thinning: 0.8,
             temperature: 12.34,
             temperature_january: -3.21,
             temperature_july: 25.0,
@@ -976,6 +1087,8 @@ mod tests {
             age: 42.4,
             orogenic: 0.0,
             since_orogeny: f32::NAN,
+            strength_thermal: 0.6,
+            strength_thinning: 1.0,
             temperature: f32::NAN,
             temperature_january: f32::NAN,
             temperature_july: f32::NAN,
@@ -1126,7 +1239,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 120);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 128);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 

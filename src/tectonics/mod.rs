@@ -53,6 +53,7 @@ mod weak_zones;
 
 pub use boundaries::{GapStatistics, TrenchSediment};
 pub use crust::*;
+pub use deformation::MIN_BAND_STRENGTH;
 pub use display::BoundaryClass;
 pub use events::{EventCounts, PlateEventParams, WEAK_BELT_THRESHOLD};
 pub use generation::InitialConfiguration;
@@ -61,6 +62,7 @@ pub use ledger::MassLedger;
 pub use mantle::{MantleParams, Plume};
 pub use matching::{MatchingParams, MatchingStatistics};
 pub use statistics::*;
+pub use weak_zones::{MIN_STRENGTH, combine_strength, orogenic_strength, thermal_strength};
 
 use boundaries::{METASEDIMENT_DENSITY, ResolvedBoundaries, pair_key};
 use generation::*;
