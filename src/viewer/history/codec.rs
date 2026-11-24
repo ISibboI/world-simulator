@@ -390,9 +390,9 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 10;
-/// Bytes per plate: its rotation and id.
-pub const PLATE_BYTES: usize = 16;
+const VERSION: u8 = 11;
+/// Bytes per plate: its rotation (angular velocity), id and orientation.
+pub const PLATE_BYTES: usize = 32;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
 const HEADER: usize = 2 + 8 + 4 + 4;
 
@@ -412,6 +412,9 @@ pub fn encode(state: &State, previous: Option<&State>) -> Vec<u8> {
             body.extend_from_slice(&component.to_le_bytes());
         }
         body.extend_from_slice(&plate.id.to_le_bytes());
+        for component in plate.orientation {
+            body.extend_from_slice(&component.to_le_bytes());
+        }
     }
     match previous {
         Some(previous) => body.extend(
@@ -474,6 +477,7 @@ pub fn decode(frame: &[u8], previous: Option<&State>) -> Result<State, String> {
             PlateInfo {
                 rotation: [component(0), component(4), component(8)],
                 id: u32::from_le_bytes(word(12)),
+                orientation: [component(16), component(20), component(24), component(28)],
             }
         })
         .collect();
@@ -737,6 +741,7 @@ mod tests {
                     PlateInfo {
                         rotation: [0.01 * step as f32, 0.0, -0.02],
                         id: step as u32 * 3,
+                        orientation: [0.1, -0.2, 0.3 * step as f32, 0.9],
                     };
                     4
                 ],
@@ -781,7 +786,8 @@ mod tests {
             plates: vec![
                 PlateInfo {
                     rotation: [0.0; 3],
-                    id: 1
+                    id: 1,
+                    orientation: [0.0, 0.0, 0.0, 1.0],
                 };
                 12
             ],

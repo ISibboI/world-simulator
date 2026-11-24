@@ -30,8 +30,7 @@ pub struct Uniforms {
     /// Direction towards the light (`w` unused).
     pub light_direction: [f32; 4],
     /// Size of the view in physical pixels (`x`, `y`), for lines of a fixed width; `z` is 1 if
-    /// the render mode shows its colours unlit, 0 if lit; `w` is 1 for the realistic mode's
-    /// materials (lit in linear light, water with a glint; see `planet.wgsl`), 0 otherwise.
+    /// the render mode shows its colours unlit, 0 if lit (`w` unused).
     pub viewport: [f32; 4],
     /// The inverse of `view_projection`, for the view direction of the sky's pixels.
     pub inverse_view_projection: [[f32; 4]; 4],
@@ -48,8 +47,55 @@ pub struct Uniforms {
     pub stars: [f32; 4],
     /// The colours of the stars in sRGB, see [`super::sky::STAR_TEMPERATURES`].
     pub star_colors: [[f32; 4]; 8],
-    /// The camera's position in the world (`xyz`; `w` unused), for the glint on water.
+    /// The camera's position in the world (`xyz`; `w` unused), for the glint on water
+    /// (`realistic.wgsl`).
     pub eye: [f32; 4],
+}
+
+/// The most plates whose orientations the detail shader knows; the detail of plates beyond
+/// (never seen in practice: runs have tens of plates) is anchored to the world frame.
+pub const MAX_PLATES: usize = 256;
+
+/// A vertex of the realistic mode's de-indexed mesh (three own vertices per triangle), which
+/// carries the layers of its cell for the sub-cell detail (`realistic.wgsl`, built by
+/// `modes::realistic::detail_vertices`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct DetailVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    /// Bare ground (sRGB) and the plant cover (`a`).
+    pub bare: [u8; 4],
+    /// Full plant cover (sRGB) and the snow or ice cover (`a`).
+    pub plants: [u8; 4],
+    /// Snow or ice (sRGB) and the water's roughness (GGX α) / 0.5 (`a`).
+    pub snow: [u8; 4],
+    /// Open water (sRGB) and the ruggedness of the relief (`a`).
+    pub water: [u8; 4],
+    /// Positive on land, negative on water: the coast lies where it crosses zero.
+    pub coast: f32,
+    /// The plates of the triangle's three corners, and the corner of this vertex (0 to 2).
+    pub plates: [u16; 4],
+}
+
+/// The realistic mode's second uniform buffer: the orientation of every plate (a quaternion
+/// from its local frame into the world) and the settings of the detail.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct DetailUniforms {
+    pub orientations: [[f32; 4]; MAX_PLATES],
+    /// The frequency of the first octave in cycles per planet radius (`x`, one per cell
+    /// spacing), the most octaves (`y`), the strength of the bump relief (`z`, 0 for none) and
+    /// whether mountains use ridged noise (`w`, 0 or 1).
+    pub detail: [f32; 4],
+}
+
+/// The realistic mode's de-indexed mesh and its uniforms; uploaded when its id changes.
+#[derive(Clone)]
+pub struct Detail {
+    pub id: u64,
+    pub vertices: Arc<Vec<DetailVertex>>,
+    pub uniforms: Arc<DetailUniforms>,
 }
 
 /// A straight piece of a line drawn over the planet with a constant width in pixels (see
@@ -72,6 +118,13 @@ pub const MAX_LINE_SEGMENTS: usize = 64;
 /// GPU resources, stored in egui's callback resources.
 struct PlanetResources {
     pipeline: wgpu::RenderPipeline,
+    /// The realistic mode's surface with sub-cell detail (`realistic.wgsl`).
+    detail_pipeline: wgpu::RenderPipeline,
+    detail_uniform_buffer: wgpu::Buffer,
+    /// The de-indexed mesh last uploaded: its buffer, [`Detail::id`] and number of vertices.
+    detail: Option<(wgpu::Buffer, u64, u32)>,
+    /// Whether this frame draws the detail mesh instead of the planet mesh.
+    detail_shown: bool,
     /// Draws the sun and the stars behind the planet (`sky.wgsl`).
     sky_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
@@ -137,8 +190,8 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
 
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("planet uniforms"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
+        entries: &[0, 1].map(|binding| wgpu::BindGroupLayoutEntry {
+            binding,
             visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
@@ -146,7 +199,7 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
                 min_binding_size: None,
             },
             count: None,
-        }],
+        }),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("planet"),
@@ -219,6 +272,18 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
         render_state.target_format,
         msaa_samples,
     );
+    let detail_pipeline = detail_pipeline(
+        device,
+        &pipeline_layout,
+        render_state.target_format,
+        msaa_samples,
+    );
+    let detail_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("detail uniforms"),
+        size: std::mem::size_of::<DetailUniforms>() as wgpu::BufferAddress,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
     let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet uniforms"),
@@ -229,10 +294,16 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("planet uniforms"),
         layout: &bind_group_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: uniform_buffer.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: detail_uniform_buffer.as_entire_binding(),
+            },
+        ],
     });
     render_state
         .renderer
@@ -240,6 +311,10 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
         .callback_resources
         .insert(PlanetResources {
             pipeline,
+            detail_pipeline,
+            detail_uniform_buffer,
+            detail: None,
+            detail_shown: false,
             sky_pipeline,
             uniform_buffer,
             bind_group,
@@ -251,6 +326,59 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
             overlay: None,
             overlay_shown: false,
         });
+}
+
+/// The pipeline of the realistic surface: the de-indexed [`DetailVertex`] mesh, drawn like the
+/// planet mesh (depth write, back faces culled).
+fn detail_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    target_format: wgpu::TextureFormat,
+    msaa_samples: u32,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("realistic.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("realistic surface"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<DetailVertex>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4, 3 => Unorm8x4,
+                    4 => Unorm8x4, 5 => Unorm8x4, 6 => Float32, 7 => Uint16x4
+                ],
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: msaa_samples,
+            ..Default::default()
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(target_format.into())],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// The pipeline of the overlay: [`OverlayVertex`] triangles, depth-tested against the planet
@@ -428,6 +556,8 @@ pub struct Surface {
     /// Changes with every new state of the surface.
     pub vertices_id: u64,
     pub vertices: Arc<Vec<Vertex>>,
+    /// The realistic mode's surface with sub-cell detail, drawn instead of `vertices`.
+    pub detail: Option<Detail>,
 }
 
 /// Triangles drawn over the planet by the render mode (arrows). Like [`Surface`], it is passed
@@ -493,6 +623,38 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
             }
             resources.overlay_shown = true;
         }
+        resources.detail_shown = false;
+        if let Some(detail) = self
+            .surface
+            .as_ref()
+            .and_then(|surface| surface.detail.as_ref())
+            .filter(|detail| !detail.vertices.is_empty())
+        {
+            queue.write_buffer(
+                &resources.detail_uniform_buffer,
+                0,
+                bytemuck::bytes_of(detail.uniforms.as_ref()),
+            );
+            let bytes: &[u8] = bytemuck::cast_slice(detail.vertices.as_slice());
+            let fits = |buffer: &wgpu::Buffer| buffer.size() >= bytes.len() as u64;
+            match &mut resources.detail {
+                Some((_, id, _)) if *id == detail.id => {}
+                Some((buffer, id, count)) if fits(buffer) => {
+                    queue.write_buffer(buffer, 0, bytes);
+                    *id = detail.id;
+                    *count = detail.vertices.len() as u32;
+                }
+                _ => {
+                    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("realistic surface"),
+                        contents: bytes,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                    resources.detail = Some((buffer, detail.id, detail.vertices.len() as u32));
+                }
+            }
+            resources.detail_shown = true;
+        }
         let Some(surface) = &self.surface else {
             return Vec::new();
         };
@@ -542,10 +704,20 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
             }
             return;
         };
-        render_pass.set_pipeline(&resources.pipeline);
-        render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+        match &resources.detail {
+            Some((buffer, _, count)) if resources.detail_shown => {
+                render_pass.set_pipeline(&resources.detail_pipeline);
+                render_pass.set_vertex_buffer(0, buffer.slice(..));
+                render_pass.draw(0..*count, 0..1);
+            }
+            _ => {
+                render_pass.set_pipeline(&resources.pipeline);
+                render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+        }
         // After the planet, so that its depth hides the sun where the planet is in front.
         if self.sun {
             render_pass.set_pipeline(&resources.sky_pipeline);
@@ -578,6 +750,7 @@ mod tests {
         let shaders = [
             ("planet.wgsl", include_str!("planet.wgsl")),
             ("sky.wgsl", include_str!("sky.wgsl")),
+            ("realistic.wgsl", include_str!("realistic.wgsl")),
             ("overlay.wgsl", include_str!("overlay.wgsl")),
             ("outline.wgsl", include_str!("outline.wgsl")),
         ];

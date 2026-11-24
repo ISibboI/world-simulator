@@ -1,7 +1,9 @@
 //! The realistic mode (#92): the planet as a camera in space would see it.
 //!
-//! Every cell gets a surface material on the CPU from its data ([`material`]), which the planet
-//! shader lights in linear light with the simulation's sun (`planet.wgsl`, realistic branch):
+//! Every cell gets the layers of its surface on the CPU from its data ([`Layers`]), and the mode
+//! draws its own de-indexed mesh with them ([`detail_vertices`]), which `realistic.wgsl` mixes
+//! per pixel with sub-cell detail anchored to the plates and lights in linear light with the
+//! simulation's sun:
 //!
 //! - **Water** (the ocean below sea level, lakes): a dark body colour by depth, from turquoise
 //!   shelves to the deep blue of the open ocean, plus a sun glint (GGX reflection with the
@@ -14,19 +16,17 @@
 //!   where the summers are cold; bare rock above the tree line of high mountains.
 //!
 //! The colours are reflectances (albedos) of the usual ranges (ocean water below 0.06 before the
-//! glint, forest 0.04–0.1, grassland 0.08–0.2, desert 0.3–0.4, fresh snow 0.8), stored sRGB-encoded in
-//! the vertex colours; the alpha channel tells the shader water (its roughness, < 0.5) from land
-//! (1). The relief is true to scale (no exaggeration, decision 6 on #92). Rivers are left out
-//! (invisible from space at this scale). The options choose the light (the sun by default) and
-//! the season: the sun's declination and distance, snow, sea ice and the greenness of the
-//! chosen month, or the annual state.
-//!
-//! Sub-cell detail, the atmosphere and clouds are later steps (`notes/issue-92/plan.md`); the
-//! colours change in steps of a cell, as the data does.
+//! glint, forest 0.04–0.1, grassland 0.08–0.2, desert 0.3–0.4, fresh snow 0.8). The relief is
+//! true to scale (no exaggeration, decision 6 on #92). Rivers are left out (invisible from space
+//! at this scale). The options choose the light (the sun by default), the season (the sun's
+//! declination and distance, snow, sea ice and the greenness of the chosen month, or the annual
+//! state) and the detail level ([`Quality`]). See `notes/issue-92/surface.md` and
+//! `notes/issue-92/detail.md`.
 
 use super::{Legend, ModeData, ModeOption, OptionKind, OptionValues, Period, RenderMode, Swatch};
 use crate::viewer::CellInfo;
 use crate::viewer::lighting::Light;
+use crate::viewer::renderer::{DetailUniforms, DetailVertex, MAX_PLATES};
 
 pub struct Realistic;
 
@@ -34,6 +34,8 @@ pub struct Realistic;
 pub const LIGHT: usize = 0;
 /// Index of the season option.
 pub const SEASON: usize = 1;
+/// Index of the detail option.
+pub const DETAIL: usize = 2;
 
 const OPTIONS: &[ModeOption] = &[
     ModeOption {
@@ -47,7 +49,45 @@ const OPTIONS: &[ModeOption] = &[
                 sun's position, seasonal snow and sea ice, and the greenness of the vegetation",
         kind: OptionKind::Choice(Period::CHOICES),
     },
+    ModeOption {
+        label: "Detail",
+        hover: "Sub-cell detail (coastlines, snow and tree lines, colour variation, relief), \
+                generated on the fly with more octaves where a pixel covers less ground: Low \
+                (2 octaves, one pattern, no relief) for slow devices, Medium (4), High (6, ridged \
+                mountains)",
+        kind: OptionKind::Choice(Quality::CHOICES),
+    },
 ];
+
+/// The detail level of the realistic mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quality {
+    Low,
+    Medium,
+    High,
+}
+
+impl Quality {
+    /// The choices of the option, in the order of the values; the first is the default.
+    pub const CHOICES: &'static [&'static str] = &["Medium", "Low", "High"];
+
+    pub fn of(options: &OptionValues) -> Self {
+        match options.get(DETAIL) {
+            1 => Quality::Low,
+            2 => Quality::High,
+            _ => Quality::Medium,
+        }
+    }
+
+    /// The most octaves, the strength of the bump relief, and whether mountains are ridged.
+    fn settings(self) -> (f32, f32, bool) {
+        match self {
+            Quality::Low => (2.0, 0.0, false),
+            Quality::Medium => (4.0, 0.35, false),
+            Quality::High => (6.0, 0.35, true),
+        }
+    }
+}
 
 /// Reflectances of the surfaces in linear RGB.
 const DEEP_OCEAN: [f32; 3] = [0.006, 0.016, 0.042];
@@ -76,20 +116,6 @@ const MAX_ROUGHNESS: f32 = 0.45;
 impl RenderMode for Realistic {
     fn label(&self) -> &'static str {
         "Realistic"
-    }
-
-    fn colors(&self, data: &ModeData) -> Option<Vec<[f32; 4]>> {
-        let season = season(data.options);
-        Some(
-            data.cells
-                .iter()
-                .map(|cell| {
-                    let material = material(cell, season, data.abiotic);
-                    let [r, g, b] = material.albedo.map(srgb);
-                    [r, g, b, material.roughness.unwrap_or(1.0)]
-                })
-                .collect(),
-        )
     }
 
     fn options(&self) -> &'static [ModeOption] {
@@ -140,17 +166,65 @@ pub fn season(options: &OptionValues) -> Period {
     Period::of(options, SEASON)
 }
 
-/// The surface of a cell.
+/// The surface of a cell: its colour at the cell centre, and the layers the sub-cell detail
+/// mixes per pixel (see [`Layers`]).
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
-    /// Reflectance in linear RGB.
+    /// Reflectance at the cell centre in linear RGB.
     pub albedo: [f32; 3],
-    /// For water, the roughness of its surface (GGX α); `None` for land and ice.
+    /// For open water, the roughness of its surface (GGX α); `None` for land and ice.
     pub roughness: Option<f32>,
+    pub layers: Layers,
+}
+
+/// The layers of a cell's surface, which the detail shader mixes per pixel; at the cell centre
+/// they give the cell's colour. Reflectances in linear RGB.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Layers {
+    /// Whether the cell is water (ocean or lake).
+    pub water_cell: bool,
+    /// Bare ground and the full plant cover of the land, and the share of the plants.
+    pub bare: [f32; 3],
+    pub plants: [f32; 3],
+    pub cover: f32,
+    /// Snow or ice (sea ice on water) and its share.
+    pub snow: [f32; 3],
+    pub snow_cover: f32,
+    /// Open water and the roughness of its surface (GGX α).
+    pub water: [f32; 3],
+    pub water_roughness: f32,
+    /// How rugged the land is, 0 (plains, water) to 1 (high young mountains): the amplitude of
+    /// the bump relief.
+    pub relief: f32,
+}
+
+#[cfg(test)]
+impl Layers {
+    /// The reflectance at the cell centre (without the shader's sharpening of the snow).
+    pub fn albedo(&self) -> [f32; 3] {
+        let ground = if self.water_cell {
+            self.water
+        } else {
+            mix(self.bare, self.plants, self.cover)
+        };
+        mix(ground, self.snow, self.snow_cover)
+    }
 }
 
 /// The surface of a cell in a season (the annual state for [`Period::Annual`]).
+#[cfg(test)]
 pub fn material(cell: &CellInfo, season: Period, abiotic: bool) -> Material {
+    let layers = layers(cell, season, abiotic);
+    Material {
+        albedo: layers.albedo(),
+        roughness: (layers.water_cell && layers.snow_cover <= 0.5)
+            .then_some(layers.water_roughness),
+        layers,
+    }
+}
+
+fn layers(cell: &CellInfo, season: Period, abiotic: bool) -> Layers {
     let finite = |value: f32, fallback: f32| if value.is_finite() { value } else { fallback };
     let annual_temperature = finite(cell.temperature, 10.0);
     let temperature = finite(season.temperature(cell), annual_temperature);
@@ -166,34 +240,19 @@ pub fn material(cell: &CellInfo, season: Period, abiotic: bool) -> Material {
         _ => smoothstep(-1.0, -6.0, temperature),
     };
     let land = cell.elevation >= 0.0;
-    if cell.ice > 0.5 {
-        let albedo = if land { ICE_SHEET } else { SEA_ICE };
-        return Material {
-            albedo,
-            roughness: None,
-        };
-    }
-    if !land || cell.lake_depth > 0.0 {
-        let water = if land {
-            LAKE
-        } else {
-            let depth = (-cell.elevation).max(1.0);
-            let t = ((depth / SHELF_DEPTH).ln() / (DEEP_DEPTH / SHELF_DEPTH).ln()).clamp(0.0, 1.0);
-            mix(SHELF, DEEP_OCEAN, t)
-        };
-        if freezing > 0.5 {
-            return Material {
-                albedo: SEA_ICE,
-                roughness: None,
-            };
-        }
-        let [east, north] = season.wind(cell);
-        let wind = finite((east * east + north * north).sqrt(), 7.0);
-        return Material {
-            albedo: water,
-            roughness: Some(water_roughness(wind)),
-        };
-    }
+    let water_cell = !land || cell.lake_depth > 0.0;
+    let water = if !land {
+        let depth = (-cell.elevation).max(1.0);
+        let t = ((depth / SHELF_DEPTH).ln() / (DEEP_DEPTH / SHELF_DEPTH).ln()).clamp(0.0, 1.0);
+        mix(SHELF, DEEP_OCEAN, t)
+    } else if water_cell {
+        LAKE
+    } else {
+        SHELF
+    };
+    let [east, north] = season.wind(cell);
+    let wind = finite((east * east + north * north).sqrt(), 7.0);
+    let water_roughness = water_roughness(wind);
 
     // Moisture index P / PET of the year (1 humid, < 0.2 arid).
     let moisture = if cell.potential_evaporation > 0.0 {
@@ -203,8 +262,8 @@ pub fn material(cell: &CellInfo, season: Period, abiotic: bool) -> Material {
     };
     let arid = 1.0 - smoothstep(0.1, 0.4, moisture);
     let bare = mix(mix(ROCK, SOIL, 0.5), SAND, arid);
-    let ground = if abiotic {
-        bare
+    let (plants, cover, forested) = if abiotic {
+        (bare, 0.0, 0.0)
     } else {
         // Plants need a warm season (the tree line is near a warmest month of 10 °C) and
         // water; trees more of both than grasses.
@@ -224,24 +283,155 @@ pub fn material(cell: &CellInfo, season: Period, abiotic: bool) -> Material {
             ),
         };
         let grass = mix(grass, STEPPE, 0.7 * dormant);
-        let plants = mix(grass, FOREST, trees);
-        let ground = mix(bare, plants, cover);
-        // Where summers stay cold: tundra.
-        mix(ground, TUNDRA, smoothstep(8.0, 2.0, warmest) * (1.0 - arid))
+        (mix(grass, FOREST, trees), cover, trees)
     };
-    // Bare rock above the tree line of high mountains.
-    let ground = mix(ground, ROCK, smoothstep(2500.0, 4500.0, cell.elevation));
-    // Seasonal snow where there is precipitation to fall as snow; forests hide most of it.
-    let snow_cover = freezing * smoothstep(0.02, 0.15, precipitation);
-    let forested = if abiotic {
+    // Where summers stay cold: tundra; above the tree line of high mountains: bare rock. (Both
+    // layers alike, so that the mix of the two stays the cell's colour.)
+    let tundra = if abiotic {
         0.0
     } else {
-        smoothstep(0.5, 1.0, moisture) * smoothstep(6.0, 12.0, warmest)
+        smoothstep(8.0, 2.0, warmest) * (1.0 - arid)
     };
-    let snow = mix(SNOW, SNOWY_FOREST, forested);
-    Material {
-        albedo: mix(ground, snow, snow_cover),
-        roughness: None,
+    let high = smoothstep(2500.0, 4500.0, cell.elevation);
+    let adjust = |albedo: [f32; 3]| mix(mix(albedo, TUNDRA, tundra), ROCK, high);
+    let (bare, plants) = (adjust(bare), adjust(plants));
+    // Bump relief: high land and young orogens are rugged.
+    let relief = if land {
+        (smoothstep(300.0, 3000.0, cell.elevation) * 0.7 + 0.3 * cell.orogenic.clamp(0.0, 1.0))
+            .clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let (snow, snow_cover) = if cell.ice > 0.5 {
+        (if land { ICE_SHEET } else { SEA_ICE }, 1.0)
+    } else if !land {
+        (SEA_ICE, freezing)
+    } else if water_cell {
+        // Frozen lakes look like snow-covered land.
+        (SNOW, freezing)
+    } else {
+        // Seasonal snow where there is precipitation to fall as snow; forests hide most of it.
+        let snow_cover = freezing * smoothstep(0.02, 0.15, precipitation);
+        (mix(SNOW, SNOWY_FOREST, forested), snow_cover)
+    };
+    Layers {
+        water_cell,
+        bare,
+        plants,
+        cover,
+        snow,
+        snow_cover,
+        water,
+        water_roughness,
+        relief,
+    }
+}
+
+/// The realistic mode's de-indexed mesh with the layers of every cell, three own vertices per
+/// triangle of the mesh (`faces`), at the displayed positions and normals of `data.vertices`.
+///
+/// Water cells get the land layers of their land neighbours (and land cells the water of their
+/// water neighbours), so that a pixel that the noise turns into land next to a water cell shows
+/// the land beside it.
+pub fn detail_vertices(data: &ModeData, faces: &[[u32; 3]]) -> Vec<DetailVertex> {
+    let season = season(data.options);
+    if data.cells.len() != data.vertices.len() || data.cells.len() != data.mesh.len() {
+        return Vec::new();
+    }
+    let own: Vec<Layers> = data
+        .cells
+        .iter()
+        .map(|cell| layers(cell, season, data.abiotic))
+        .collect();
+    let layers: Vec<Layers> = own
+        .iter()
+        .enumerate()
+        .map(|(cell, layers)| {
+            let neighbours = data.mesh.neighbors(cell as u32);
+            let mut layers = *layers;
+            let others: Vec<&Layers> = neighbours
+                .iter()
+                .map(|&neighbour| &own[neighbour as usize])
+                .filter(|other| other.water_cell != layers.water_cell)
+                .collect();
+            if !others.is_empty() {
+                let mean = |pick: &dyn Fn(&Layers) -> [f32; 3]| {
+                    let sum = others.iter().fold([0.0; 3], |sum, other| {
+                        let value = pick(other);
+                        [0, 1, 2].map(|i| sum[i] + value[i])
+                    });
+                    sum.map(|value| value / others.len() as f32)
+                };
+                let count = others.len() as f32;
+                if layers.water_cell {
+                    layers.bare = mean(&|other| other.bare);
+                    layers.plants = mean(&|other| other.plants);
+                    layers.cover = others.iter().map(|other| other.cover).sum::<f32>() / count;
+                } else {
+                    layers.water = mean(&|other| other.water);
+                    layers.water_roughness = others
+                        .iter()
+                        .map(|other| other.water_roughness)
+                        .sum::<f32>()
+                        / count;
+                }
+            }
+            layers
+        })
+        .collect();
+    let unorm = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let color = |albedo: [f32; 3], alpha: f32| {
+        let [r, g, b] = albedo.map(|channel| unorm(srgb(channel)));
+        [r, g, b, unorm(alpha)]
+    };
+    let plate = |cell: u32| data.cells[cell as usize].plate.min(u32::from(u16::MAX)) as u16;
+    let mut vertices = Vec::with_capacity(faces.len() * 3);
+    for &face in faces {
+        let plates = face.map(plate);
+        for (corner, &cell) in face.iter().enumerate() {
+            let layers = &layers[cell as usize];
+            let info = &data.cells[cell as usize];
+            let vertex = &data.vertices[cell as usize];
+            // The coast lies where this crosses zero between a land and a water corner: about
+            // in the middle of the edge, nearer to low land and shallow water.
+            let height = if layers.water_cell {
+                -(0.4 + 0.6 * smoothstep(0.0, 2000.0, -info.elevation))
+            } else {
+                0.4 + 0.6 * smoothstep(0.0, 2000.0, info.elevation)
+            };
+            vertices.push(DetailVertex {
+                position: vertex.position,
+                normal: vertex.normal,
+                bare: color(layers.bare, layers.cover),
+                plants: color(layers.plants, layers.snow_cover),
+                snow: color(layers.snow, layers.water_roughness / 0.5),
+                water: color(layers.water, layers.relief),
+                coast: height,
+                plates: [plates[0], plates[1], plates[2], corner as u16],
+            });
+        }
+    }
+    vertices
+}
+
+/// The realistic mode's uniforms for the detail: the plates' orientations and the settings of
+/// the chosen quality.
+pub fn detail_uniforms(data: &ModeData) -> DetailUniforms {
+    let mut orientations = [[0.0, 0.0, 0.0, 1.0]; MAX_PLATES];
+    for (slot, plate) in orientations.iter_mut().zip(data.plates) {
+        *slot = plate.orientation;
+    }
+    let (octaves, bump, ridged) = Quality::of(data.options).settings();
+    DetailUniforms {
+        orientations,
+        detail: [
+            // One cycle per cell spacing for the first octave.
+            (1.0 / data.mesh.mean_edge_angle().max(1e-4)) as f32,
+            octaves,
+            bump,
+            f32::from(u8::from(ridged)),
+        ],
     }
 }
 
@@ -389,7 +579,10 @@ mod tests {
         let sea = cell(-3000.0, 2.0, 0.5, 0.0);
         let mut sea = sea;
         sea.temperature_january = -12.0;
-        assert_eq!(material(&sea, Period::January, false).albedo, SEA_ICE);
+        assert!(close(
+            material(&sea, Period::January, false).albedo,
+            SEA_ICE
+        ));
         assert!(material(&sea, Period::July, false).roughness.is_some());
         assert!(material(&sea, Period::Annual, false).roughness.is_some());
     }
@@ -406,5 +599,87 @@ mod tests {
             .map(|i| (tundra[i] - TUNDRA[i]).abs())
             .fold(0.0, f32::max);
         assert!(distance < 0.03, "{tundra:?}");
+    }
+
+    #[test]
+    fn the_detail_mesh_carries_the_layers_of_its_corners() {
+        use super::super::super::plate_colors::PlateColors;
+        use super::super::super::{Fields, plate_infos, surface_vertices};
+        use clap::Parser;
+        let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "3"]);
+        let planet = crate::build_planet(&cli).unwrap();
+        let cells = super::super::super::cell_infos(&planet);
+        let plates = plate_infos(&planet);
+        let mesh = planet.tectonics().mesh();
+        let vertices = surface_vertices(mesh, &cells, 1.0, 1e11);
+        let plate_colors = PlateColors::default();
+        let fields = Fields::default();
+        let options = OptionValues::defaults(Realistic.options());
+        let data = ModeData {
+            mesh,
+            vertices: &vertices,
+            cells: &cells,
+            plates: &plates,
+            plate_colors: &plate_colors,
+            fields: &fields,
+            arrow_cells: &[],
+            arrow_spacing: 0.1,
+            options: &options,
+            abiotic: false,
+        };
+        let faces = mesh.faces();
+        let detail = detail_vertices(&data, faces);
+        assert_eq!(detail.len(), faces.len() * 3);
+        let mut coasts = 0;
+        for (triangle, face) in detail.chunks(3).zip(faces) {
+            for (corner, vertex) in triangle.iter().enumerate() {
+                let cell = face[corner] as usize;
+                assert_eq!(vertex.position, vertices[cell].position);
+                assert_eq!(usize::from(vertex.plates[3]), corner);
+                let corner_plates = face.map(|cell| cells[cell as usize].plate as u16);
+                assert_eq!(vertex.plates[..3], corner_plates);
+                // The coast value has the sign of the corner's class: land or water.
+                let layers = layers(&cells[cell], Period::Annual, false);
+                assert_eq!(vertex.coast < 0.0, layers.water_cell);
+                assert!(vertex.coast.abs() >= 0.4 && vertex.coast.abs() <= 1.0);
+            }
+            if triangle[0].coast.signum() != triangle[1].coast.signum() {
+                coasts += 1;
+            }
+        }
+        // The planet has coasts, where water corners take the land of their neighbours.
+        assert!(coasts > 0);
+        // The plates' orientations reach the uniforms; one octave per cell spacing first.
+        let uniforms = detail_uniforms(&data);
+        assert_eq!(uniforms.orientations[0], plates[0].orientation);
+        assert_eq!(uniforms.orientations[plates.len()], [0.0, 0.0, 0.0, 1.0]);
+        let spacing = mesh.mean_edge_angle() as f32;
+        assert!((uniforms.detail[0] * spacing - 1.0).abs() < 1e-3);
+        assert_eq!(uniforms.detail[1], 4.0);
+    }
+
+    #[test]
+    fn the_detail_moves_with_the_plate() {
+        // The shader evaluates the noise at the point in the plate's frame: q⁻¹ · p. When the
+        // plate turns by r (q → r q), its crust moves with it (p → r p), and the point in the
+        // plate's frame stays: the detail does not change.
+        use glam::{Quat, Vec3};
+        let q = Quat::from_axis_angle(Vec3::new(0.3, 1.0, -0.2).normalize(), 0.8);
+        let r = Quat::from_axis_angle(Vec3::new(-1.0, 0.4, 0.5).normalize(), 0.05);
+        let p = Vec3::new(0.2, -0.7, 0.5).normalize();
+        let before = q.inverse() * p;
+        let after = (r * q).inverse() * (r * p);
+        assert!((before - after).length() < 1e-6);
+    }
+
+    #[test]
+    fn quality_levels() {
+        let mut options = OptionValues::defaults(Realistic.options());
+        assert_eq!(Quality::of(&options), Quality::Medium);
+        options.set(DETAIL, 1);
+        assert_eq!(Quality::of(&options), Quality::Low);
+        assert_eq!(Quality::Low.settings(), (2.0, 0.0, false));
+        options.set(DETAIL, 2);
+        assert_eq!(Quality::of(&options).settings().0, 6.0);
     }
 }

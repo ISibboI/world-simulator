@@ -130,6 +130,7 @@ mod tests {
             .map(|&id| PlateInfo {
                 rotation: [0.0; 3],
                 id,
+                orientation: [0.0, 0.0, 0.0, 1.0],
             })
             .collect()
     }
@@ -194,6 +195,7 @@ mod tests {
         split_plates.push(PlateInfo {
             rotation: [0.0; 3],
             id: 20,
+            orientation: [0.0, 0.0, 0.0, 1.0],
         });
         for (vertex, info) in split.iter_mut().enumerate() {
             if info.plate == 3 && mesh.vertex(vertex as u32).z > 0.0 {
