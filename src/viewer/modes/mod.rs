@@ -19,6 +19,7 @@
 //! which lines) lists them in [`RenderMode::options`]; the switcher shows them above the
 //! legend and the mode reads their values from [`ModeData::options`].
 
+mod crust_age;
 mod moisture;
 mod ocean_currents;
 mod plate_motion;
@@ -58,6 +59,8 @@ pub enum RenderModeId {
     OceanCurrents,
     /// The prevailing low-level winds as arrows (annual, January or July).
     Wind,
+    /// Age of the ocean floor with isochrons; continents in grey.
+    CrustAge,
     /// Lithosphere strength: weak zones and what weakens them.
     LithosphereStrength,
 }
@@ -73,6 +76,7 @@ impl RenderModeId {
             RenderModeId::Moisture => &moisture::Moisture,
             RenderModeId::OceanCurrents => &ocean_currents::OceanCurrents,
             RenderModeId::Wind => &wind::Wind,
+            RenderModeId::CrustAge => &crust_age::CrustAge,
             RenderModeId::LithosphereStrength => &strength::LithosphereStrength,
         }
     }
@@ -98,6 +102,7 @@ impl RenderModeId {
             RenderModeId::Moisture => "moisture",
             RenderModeId::OceanCurrents => "ocean-currents",
             RenderModeId::Wind => "wind",
+            RenderModeId::CrustAge => "crust-age",
             RenderModeId::LithosphereStrength => "lithosphere-strength",
         }
     }
