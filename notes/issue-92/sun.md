@@ -50,6 +50,8 @@ the sun model already supports.
 
 ### The simulation's results are unchanged
 
+(Since #149 the climate follows the brightening sun during a run; see `notes/issue-149/`.)
+
 `presets::Epoch::solar_constant` now calls `sun::solar_constant`, the same expression as before
 (bit for bit; the presets test checks the default and epoch parameters). The climate keeps the
 solar constant of its epoch for the whole run: the sun model is not yet used by the climate.

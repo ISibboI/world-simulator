@@ -153,9 +153,11 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Biosphere::Modern)]
     biosphere: Biosphere,
 
-    /// Time of the planet's history in Ga before present (0 is today, 3.5 the Archean): sets the
-    /// solar constant of the fainter young Sun and, unless `--co2` is given, a greenhouse forcing
-    /// that offsets it. See `presets::Epoch`.
+    /// Time of the planet's history in Ga before present (0 is today, 3.5 the Archean) at the
+    /// start of the run: sets the solar constant of the fainter young Sun, which then brightens
+    /// during the run (~1% per 100 Myr; `--set temperature.solar_brightening=0` keeps it), and,
+    /// unless `--co2` is given, a greenhouse forcing that offsets it at the start and then stays
+    /// fixed. See `presets::Epoch`.
     #[arg(long, default_value_t = 0.0)]
     epoch: f64,
 
@@ -512,7 +514,7 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
     info!(
         biosphere = ?cli.biosphere,
         epoch_ga = cli.epoch,
-        solar_constant = parameters.temperature.orbit.solar_constant,
+        solar_constant_at_start = parameters.temperature.orbit.solar_constant,
         greenhouse_forcing = parameters.temperature.greenhouse_forcing,
         "Planet presets (after the overrides; `--set temperature.solar_constant` does not \
          change the greenhouse forcing)"
@@ -1180,7 +1182,7 @@ fn snapshot(
     info!(
         "    temperature global {:5.1} °C, equator {:5.1} °C, poles {:6.1} °C | \
          land seasonal range {:4.1} K | permanently frozen {:4.1}% | heat transport {:+.1}/{:+.1} PW \
-         (ocean at 20°N {:+.1}, 20°S {:+.1}) | gyres {:.0} Sv",
+         (ocean at 20°N {:+.1}, 20°S {:+.1}) | gyres {:.0} Sv | solar constant {:.1} W/m²",
         planet_statistics.global_temperature,
         planet_statistics.equatorial_temperature,
         planet_statistics.polar_temperature,
@@ -1191,6 +1193,7 @@ fn snapshot(
         planet_statistics.heat_transport[2],
         planet_statistics.heat_transport[3],
         planet_statistics.gyre_transport,
+        planet_statistics.solar_constant,
     );
 
     let (groups, classes) = koppen::land_shares(&koppen::classes(planet));
