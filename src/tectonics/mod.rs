@@ -1128,6 +1128,7 @@ impl Simulation {
             })
             .sum();
         self.collision_inflow += 0.5 * inflow * self.boundary_length_per_cell() * dt / 1e12;
+        self.record_partitioning(&boundaries);
 
         let subduction = self.subduction_rates(&boundaries);
         let slabs = self.sinking_slabs(&boundaries);

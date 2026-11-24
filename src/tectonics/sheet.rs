@@ -329,6 +329,10 @@ pub struct SheetStatistics {
     /// Wall time (s) spent in the solve and in the transport so far.
     pub solve_seconds: f64,
     pub transport_seconds: f64,
+    /// At converging collision cells, the mean convergence (cm/yr) of the plates' rotations
+    /// and of the material at the boundary (rotations plus deformation): the difference is
+    /// taken up by the deforming margins instead of the boundary.
+    pub collision_convergence: (f64, f64),
     /// Mass moved by the transport so far (areal mass summed over samples, kg/m²).
     pub moved: f64,
 }
@@ -570,8 +574,8 @@ impl Simulation {
             let k = 0.5 * params.basal_drag * params.boundary_coupling_width * length_per_cell;
             if k > 0.0 {
                 let t = r.cross(balance.normals[index]);
-                let relative = velocity(boundary.plate, r) - velocity(boundary.other, r)
-                    + deformation(boundary);
+                // The rotations only: the deformation's part is in the sheet's solve.
+                let relative = velocity(boundary.plate, r) - velocity(boundary.other, r);
                 let shear = t * (k * relative.dot(t));
                 force[cell] -= shear;
                 if let Some(other) = other_cell(boundary) {
@@ -592,8 +596,7 @@ impl Simulation {
             let boundary = &balance.boundaries[index];
             let r = self.mesh.vertex(boundary.cell);
             let n = balance.normals[index];
-            let relative =
-                velocity(boundary.plate, r) - velocity(boundary.other, r) + deformation(boundary);
+            let relative = velocity(boundary.plate, r) - velocity(boundary.other, r);
             let resisting = n * (coupling * relative.dot(n));
             force[boundary.cell as usize] -= resisting;
             if let Some(other) = other_cell(boundary) {
@@ -642,12 +645,12 @@ impl Simulation {
                 let own = energy(crust);
                 neighbours.clear();
                 let mut any = own > 0.0;
+                // All neighbours, also those of other plates: a belt straddling a boundary
+                // does not push across it (its other half pushes back).
                 for &n in self.mesh.neighbors(cell) {
-                    if self.owners[n as usize].plate == plate {
-                        let e = energy(&crusts[n as usize]);
-                        any |= e > 0.0;
-                        neighbours.push((self.mesh.vertex(n), e));
-                    }
+                    let e = energy(&crusts[n as usize]);
+                    any |= e > 0.0;
+                    neighbours.push((self.mesh.vertex(n), e));
                 }
                 if any && let Some(g) = gradient(r, basis, own, &neighbours) {
                     force[cell as usize] -= g * (sheet.gpe_factor * cell_area / radius);
@@ -849,6 +852,51 @@ impl Simulation {
         }
         statistics.blocks = blocks.len();
 
+        // Couplings across plate boundaries (shear coupling and the yielding resistances of the
+        // torque balance), acting on the deformation velocities of both sides: the part of the
+        // resisting force that comes from the rotations is in the forces already. (node or
+        // u32::MAX for a side that does not deform, coefficient, direction in each side's
+        // frame)
+        let mut couplings: Vec<(u32, u32, f64, DVec3, DVec3)> = Vec::new();
+        if let Some(balance) = self.force_balance.as_ref() {
+            let k_shear =
+                0.5 * params.basal_drag * params.boundary_coupling_width * self.boundary_length_per_cell();
+            let mut entries: Vec<(usize, f64, DVec3)> = Vec::new();
+            for (index, boundary) in balance.boundaries.iter().enumerate() {
+                if k_shear > 0.0 {
+                    let r = mesh.vertex(boundary.cell);
+                    entries.push((index, k_shear, r.cross(balance.normals[index])));
+                }
+            }
+            for &(index, coupling) in &balance.nascent {
+                entries.push((index, coupling, balance.normals[index]));
+            }
+            for (index, k, direction) in entries {
+                let boundary = &balance.boundaries[index];
+                let mut sides = [u32::MAX; 2];
+                let mut frames = [DVec3::ZERO; 2];
+                for (side, cell) in [boundary.cell, boundary.neighbor].into_iter().enumerate() {
+                    let owner = self.owners[cell as usize];
+                    let w = &mut work[owner.plate as usize];
+                    frames[side] =
+                        self.plates[owner.plate as usize].rotation.inverse() * direction;
+                    let i = w.index[owner.local as usize] as usize;
+                    if w.node[i] == u32::MAX && w.block[i] != u32::MAX {
+                        w.node[i] = nodes.len() as u32;
+                        nodes.push((
+                            owner.plate,
+                            owner.local,
+                            Node::Rigid(blocks[w.block[i] as usize].1),
+                        ));
+                    }
+                    sides[side] = w.node[i];
+                }
+                if sides != [u32::MAX; 2] {
+                    couplings.push((sides[0], sides[1], k, frames[0], frames[1]));
+                }
+            }
+        }
+
         // Edges between nodes of the same plate (each once), with their spring constants.
         // (node a, node b, k, unit chord in the plate frame)
         let mut edges: Vec<(u32, u32, f64, DVec3)> = Vec::new();
@@ -913,6 +961,26 @@ impl Simulation {
                 }
             }
         }
+        for &(a, b, k, da, db) in &couplings {
+            for (node, d) in [(a, da), (b, db)] {
+                if node == u32::MAX {
+                    continue;
+                }
+                let (_, local, kind) = nodes[node as usize];
+                match kind {
+                    Node::Weak(_) => {
+                        let (e1, e2) = geometry.basis[local as usize];
+                        let t = DVec2::new(d.dot(e1), d.dot(e2));
+                        weak_diag[node_weak[node as usize]] +=
+                            DMat2::from_cols(t * t.x, t * t.y) * k;
+                    }
+                    Node::Rigid(first) => {
+                        let m = mesh.vertex(local).cross(d);
+                        block_diag[block_index_of_first[first]] += dynamics::outer(m, m) * k;
+                    }
+                }
+            }
+        }
         let weak_inverse: Vec<DMat2> = weak_diag.iter().map(|m| m.inverse()).collect();
         let block_inverse: Vec<DMat3> = block_diag
             .iter()
@@ -958,26 +1026,43 @@ impl Simulation {
                 y[block.1 + 1] += f.y;
                 y[block.1 + 2] += f.z;
             }
+            let scatter = |y: &mut [f64], node: u32, f: DVec3| {
+                let (_, local, kind) = nodes[node as usize];
+                match kind {
+                    Node::Weak(first) => {
+                        let (e1, e2) = geometry.basis[local as usize];
+                        y[first] += f.dot(e1);
+                        y[first + 1] += f.dot(e2);
+                    }
+                    Node::Rigid(first) => {
+                        let t = mesh.vertex(local).cross(f);
+                        y[first] += t.x;
+                        y[first + 1] += t.y;
+                        y[first + 2] += t.z;
+                    }
+                }
+            };
             for &(a, b, k, e) in &edges {
                 let delta = velocities[b as usize] - velocities[a as usize];
                 let s = k * delta.dot(e);
                 // (K u)_a = −k ((u_b − u_a) · e) e, (K u)_b = +k (…) e.
-                for (node, sign) in [(a, -1.0), (b, 1.0)] {
-                    let (_, local, kind) = nodes[node as usize];
-                    let f = e * (sign * s);
-                    match kind {
-                        Node::Weak(first) => {
-                            let (e1, e2) = geometry.basis[local as usize];
-                            y[first] += f.dot(e1);
-                            y[first + 1] += f.dot(e2);
-                        }
-                        Node::Rigid(first) => {
-                            let t = mesh.vertex(local).cross(f);
-                            y[first] += t.x;
-                            y[first + 1] += t.y;
-                            y[first + 2] += t.z;
-                        }
+                scatter(y, a, e * -s);
+                scatter(y, b, e * s);
+            }
+            for &(a, b, k, da, db) in &couplings {
+                let along = |node: u32, d: DVec3| {
+                    if node == u32::MAX {
+                        0.0
+                    } else {
+                        velocities[node as usize].dot(d)
                     }
+                };
+                let s = k * (along(b, db) - along(a, da));
+                if a != u32::MAX {
+                    scatter(y, a, da * -s);
+                }
+                if b != u32::MAX {
+                    scatter(y, b, db * s);
                 }
             }
         };
@@ -1644,6 +1729,31 @@ impl Simulation {
             sheet.strain_rate[owner.local as usize] as f64,
             sheet.dilatation[owner.local as usize] as f64,
         )
+    }
+
+    /// How the convergence at continental collisions is taken up (see
+    /// [`SheetStatistics::collision_convergence`]).
+    pub(super) fn record_partitioning(&mut self, boundaries: &[dynamics::BoundaryCell]) {
+        let (mut rigid, mut material, mut count) = (0.0, 0.0, 0usize);
+        for boundary in boundaries {
+            if boundary.kind != BoundaryKind::Collision {
+                continue;
+            }
+            let r = self.mesh.vertex(boundary.cell);
+            let plates = (self.plates[boundary.plate as usize].angular_velocity
+                - self.plates[boundary.other as usize].angular_velocity)
+                .cross(r)
+                .dot(boundary.normal);
+            if plates <= 0.0 {
+                continue;
+            }
+            rigid += plates;
+            material += boundary.convergence;
+            count += 1;
+        }
+        let to_cm = self.params.planet_radius * 100.0 / 1e6;
+        let n = count.max(1) as f64;
+        self.sheet_statistics.collision_convergence = (rigid / n * to_cm, material / n * to_cm);
     }
 
     /// Statistics of the deformation.

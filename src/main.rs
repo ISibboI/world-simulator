@@ -1068,7 +1068,8 @@ fn snapshot(
          the continental crust; plate interiors {:.1}%), ≥ 1e-15/s {:.1}% | weak samples {}, \
          blocks {}, speed rms {:.2} max {:.2} cm/yr | solve {} iterations (residual {:.1e}; \
          {:.1} per solve, {} unconverged; {:.1} s solve, {:.1} s transport) | fronts vacated {}, grown {} | splits {} | moved \
-         {:.3e} Gt, ledger {:+.3e} Gt",
+         {:.3e} Gt, ledger {:+.3e} Gt | collisions converge at {:.2} cm/yr by the plates' \
+         rotations, {:.2} cm/yr at the boundary",
         100.0 * sheet.area_1e16,
         100.0 * sheet.continental_area_1e16,
         100.0 * sheet.continental_share_1e16,
@@ -1089,6 +1090,8 @@ fn snapshot(
         sheet.splits,
         sheet.moved * cell_area / 1e12,
         statistics.ledger.deformation * cell_area / 1e12,
+        sheet.collision_convergence.0,
+        sheet.collision_convergence.1,
     );
     info!(
         "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
