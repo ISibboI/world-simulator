@@ -341,6 +341,20 @@ impl Period {
         }
     }
 
+    /// The evaporation (of the ocean, evapotranspiration of land) of a cell in m/yr.
+    pub fn evaporation(self, cell: &CellInfo) -> f32 {
+        match self {
+            Period::Annual => cell.evaporation,
+            Period::January => cell.evaporation_january,
+            Period::July => cell.evaporation_july,
+        }
+    }
+
+    /// Precipitation minus evaporation of a cell in m/yr.
+    pub fn balance(self, cell: &CellInfo) -> f32 {
+        self.precipitation(cell) - self.evaporation(cell)
+    }
+
     /// The low-level wind of a cell (eastward, northward) in m/s.
     pub fn wind(self, cell: &CellInfo) -> [f32; 2] {
         match self {
