@@ -83,8 +83,8 @@ impl Quality {
     fn settings(self) -> (f32, f32, bool) {
         match self {
             Quality::Low => (2.0, 0.0, false),
-            Quality::Medium => (4.0, 0.35, false),
-            Quality::High => (6.0, 0.35, true),
+            Quality::Medium => (4.0, 0.2, false),
+            Quality::High => (6.0, 0.2, true),
         }
     }
 }

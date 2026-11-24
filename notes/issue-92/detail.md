@@ -55,8 +55,8 @@ there.
 
 Per pixel (`realistic.wgsl`):
 
-1. **Derivatives first**, in uniform control flow: the pixel footprint on the sphere
-   (`fwidth` of the unit position) and that of the coast value.
+1. **Derivatives first**, in uniform control flow: the pixel footprint on the sphere (the
+   longer of the screen derivatives of the unit position) and that of the coast value.
 2. **Anchor:** the plate of the nearest corner, i.e. the largest barycentric coordinate. The
    point is rotated into that plate's frame, `q⁻¹ · p`. Within a plate the noise therefore
    moves rigidly with the crust. The plate changes on the Voronoi-like edges between cells of
@@ -73,23 +73,32 @@ Per pixel (`realistic.wgsl`):
    pixels per cell (a larger window or a high-DPI screen) give more octaves. It also anti-aliases
    the noise without MSAA, which the web lacks.
 5. **Noise:** gradient noise with analytic derivatives (Quílez) and an integer hash of the
-   lattice point (the same on every GPU), summed as fBm. A second, independent fBm gives the
-   pattern for snow, plants and colour. The Low level reuses the first.
+   lattice point (the same on every GPU), summed as fBm. The sum is scaled by 2.7 to a standard
+   deviation of about 0.4; the raw sum's is about 0.15, as the review measured by Monte Carlo. A
+   second, independent fBm gives the pattern for snow, plants and colour. The Low level reuses
+   the first.
 6. **Features:**
-   - **coast:** `coast + 0.8 w n₁`, anti-aliased over a pixel. This gives fractal coastlines,
-     bays and sub-cell lakes and islands;
+   - **coast:** `coast + 0.5 w n₁` (n clamped to ±1), anti-aliased over a pixel. This gives
+     fractal coastlines and bays, and islands and lakes where the land is low or the water
+     shallow. In the deep ocean (coast value near −1) no island can appear, since the noise
+     reaches at most ±0.5;
    - **snow and ice:** the cover plus `3.2 w s(1−s) n₂`, sharpened around one half. Ice and snow
      edges are crisp, while full and absent cover stay as they are;
    - **plants:** the cover plus `2.4 w c(1−c) (n₂ − n₁) 0.7`. Partial cover breaks into patches
      and the tree line becomes ragged;
-   - **colour variation:** ±15% brightness from both patterns, everywhere. It changes no class;
+   - **colour variation:** ±15% brightness from both patterns at |n| = 1 (≈ ±6% rms),
+     everywhere. It changes no class;
    - **bump relief** (Medium and High): the noise gradient, rotated back into the world and made
-     tangential, tilts the normal of rugged land by `0.35 × ruggedness`. Ruggedness comes from
+     tangential, tilts the normal of rugged land by `0.2 × ruggedness / √octaves`. Every octave
+     adds as much slope, so this normalisation keeps the relief equally rough on large screens.
+     The gradient is taken with respect to the noise coordinates (cycles per cell spacing), so
+     the implied heights scale with the cell size: a few km rms on fully rugged land. Ruggedness comes from
      the elevation (0.3–3 km) and the orogenic share. High uses ridged noise for mountains (the
      gradient sign flips with the noise sign). Water lies flat on the sphere.
 7. **Lighting:** as in stage 1 (sun, ambient, Fresnel/GGX glint on open water, haze at the limb).
-   The reflectances are decoded with a polynomial fit of the sRGB curve, which is cheaper than
-   `pow`.
+   The reflectances are decoded with the exact sRGB curve, the same one the CPU encodes them
+   with. A polynomial fit was tried and measured no faster, and it was 10–27% off for the
+   dark water.
 
 **Quality option** of the Realistic mode (Detail: Medium | Low | High; Medium is the default
 until the defaults are decided):
@@ -108,12 +117,14 @@ screens.
 
 | | Topographic | Low | Medium | High |
 |---|---|---|---|---|
-| Desktop, llvmpipe (software), MSAA 4× | 23 ms | 44 ms | 53 ms | 54 ms |
-| Web, chromium with SwiftShader (software WebGL2) | 125 ms | 320 ms | 420 ms | 407 ms |
+| Desktop, llvmpipe (software), MSAA 4× | 23 ms | 46 ms | 61 ms | 61 ms |
+| Web, chromium with SwiftShader (software WebGL2) | 125 ms | 327 ms | 420 ms | 415 ms |
 
 Both renderers run on the CPU, so these are worst cases and only the ratios matter.
 
-- The realistic surface costs 2–3.4× the topographic one. About a third of that is the
+- The realistic surface costs 2–3.4× the topographic one. The level hardly matters above Low,
+  because at this window size the footprint, not the level, limits the octaves; Low saves the
+  second pattern and the relief. About a third of that is the
   de-indexed mesh with its 8 varyings; a flat colour without any shading measured 31 ms against
   23 ms on llvmpipe. Shading and noise make up the rest.
 - On real GPUs, including phones, the pixel work is far below one frame. Mobile GPUs were not
@@ -136,10 +147,19 @@ Both renderers run on the CPU, so these are worst cases and only the ratios matt
 - **Visual:** desktop at each level, web (SwiftShader) and phone width (390×844). On the phone
   the planet is small, so the footprint allows fewer octaves and the detail is coarser.
 
+**Memory left as it is:**
+- In the realistic mode the indexed planet mesh is still built and uploaded, although only the
+  detail mesh is drawn. Picking and the outline use its positions.
+- The detail buffer stays allocated after switching to a data mode, about 13 MB at 6
+  subdivisions, 3 MB at 5.
+
 ## Grid artefacts and limits (accepted)
 
-- **Seams:** the detail switches plate on the edges between cells of different plates, a crisp
-  seam along plate boundaries.
+- **Seams:** the detail switches plate where the barycentric coordinates of two corners of
+  different plates are equal, in the middle of the triangle where the noise has full weight. The
+  result is a crisp seam along plate boundaries, also in coastlines on active margins. It is
+  consistent across shared edges. A cross-fade of the two plates' noise near the seam could
+  soften it later.
 - **Ice edges** between a fully iced cell and an ice-free one still follow the triangles of the
   mesh in steps of about a cell, made ragged by the noise.
 - **Snow sharpening:** the cell centre of a partly snowy cell (a cover between 0.2 and 0.8) shows
@@ -154,6 +174,7 @@ Both renderers run on the CPU, so these are worst cases and only the ratios matt
 
 - `desktop-medium.png`, `desktop-low.png`, `desktop-high.png`;
 - `zoom-low.png` / `zoom-high.png`: a coast with sub-cell lakes, and the polar ice edge;
-- `frames-8-9-10.png`: three consecutive frames;
+- `frames-8-9-10.png`: three consecutive frames (8, 9 and 10 Myr);
 - `web-medium.png`: the web version (chromium with SwiftShader);
-- `phone.png`: phone width.
+- `phone.png`: phone width with the legend open. The Detail row fits, and the open ocean shows
+  no specks.

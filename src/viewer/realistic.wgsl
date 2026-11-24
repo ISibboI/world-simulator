@@ -97,11 +97,14 @@ const WATER_F0: f32 = 0.02;
 const HAZE: vec3<f32> = vec3<f32>(0.11, 0.2, 0.42);
 // Most octaves of the noise.
 const MAX_OCTAVES: i32 = 6;
+// Scale of the fractal sum (see `fbm`).
+const FBM_SCALE: f32 = 2.7;
 
-// sRGB to linear, a polynomial fit of the sRGB curve (within 0.3% of white, Hoffmann's fit
-// as used in many engines): cheaper than `pow`, four times per pixel.
+// Exact sRGB transfer functions (the CPU encodes the reflectances with the same curve).
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
-    return c * (c * (c * 0.305306011 + 0.682171111) + 0.012522878);
+    let low = c / 12.92;
+    let high = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(high, low, c <= vec3<f32>(0.04045));
 }
 
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
@@ -173,7 +176,8 @@ fn noise(x: vec3<f32>) -> vec4<f32> {
 }
 
 // Fractal sum of `octaves` (fractional: the last one fades in) octaves of noise at `x`: value
-// (x, about ±1) and gradient with respect to `x` (yzw).
+// (x) and gradient with respect to `x` (yzw), scaled so that the value has a standard deviation
+// of about 0.4 (|value| > 1 in about 1% of the pixels; the raw sum's is about 0.15).
 fn fbm(x: vec3<f32>, octaves: f32) -> vec4<f32> {
     var sum = vec4<f32>(0.0);
     var amplitude = 0.7;
@@ -187,15 +191,15 @@ fn fbm(x: vec3<f32>, octaves: f32) -> vec4<f32> {
         amplitude *= 0.5;
         frequency *= 2.0;
     }
-    return sum;
+    return sum * FBM_SCALE;
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let up = normalize(input.position);
     // Derivatives first, while the control flow is uniform: the size of a pixel on the
-    // surface in planet radii, and how fast the coast value changes across it.
-    let footprint = length(fwidth(up));
+    // surface in planet radii (its longer side), and how fast the coast value changes across it.
+    let footprint = max(length(dpdx(up)), length(dpdy(up)));
     let coast_width = fwidth(input.corner_coast.w);
 
     // The nearest corner, its plate and the plate's frame.
@@ -232,8 +236,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let n_pattern = clamp(pattern, -1.0, 1.0);
 
     // Coast: the coast value with noise, anti-aliased over a pixel.
-    let coast = input.corner_coast.w + weight * 0.8 * n_shape;
-    let edge = coast_width + weight * 1.6 * base * footprint + 1e-4;
+    // (At most ±0.5 against corner values of ±0.4 to ±1: islands and lakes can appear only
+    // where the land is low or the water shallow, never in the deep ocean.)
+    let coast = input.corner_coast.w + weight * 0.5 * n_shape;
+    let edge = coast_width + weight * 2.0 * base * footprint + 1e-4;
     let land = smoothstep(-edge, edge, coast);
     // Snow line and plant cover: partial covers break up into patches; full and no cover stay.
     // Snow and ice have crisp edges: the snow cover is sharpened around one half.
@@ -265,7 +271,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var slope = rotate(orientation, shape.yzw);
     slope -= dot(slope, up) * up;
     let ridged = detail.settings.w * select(1.0, -1.0, shape.x > 0.0);
-    let tilt = detail.settings.z * input.water.a * mix(1.0, ridged, detail.settings.w);
+    // Every octave adds as much slope: normalised by their number, so that the relief does not
+    // get rougher with more pixels per cell.
+    let tilt = detail.settings.z * input.water.a * mix(1.0, ridged, detail.settings.w)
+        / sqrt(max(octaves, 1.0));
     let land_normal = normalize(mesh_normal - tilt * slope);
     let n = normalize(mix(land_normal, up, 1.0 - land));
 
