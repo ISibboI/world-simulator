@@ -21,6 +21,7 @@
 
 mod crust;
 mod crust_age;
+mod hydrology;
 mod moisture;
 mod ocean_currents;
 mod plate_motion;
@@ -71,6 +72,8 @@ pub enum RenderModeId {
     Sediment,
     /// Lithosphere strength: weak zones and what weakens them.
     LithosphereStrength,
+    /// Rivers, drainage basins, endorheic areas and lakes.
+    Hydrology,
 }
 
 impl RenderModeId {
@@ -88,6 +91,7 @@ impl RenderModeId {
             RenderModeId::Crust => &crust::Crust,
             RenderModeId::Sediment => &sediment::Sediment,
             RenderModeId::LithosphereStrength => &strength::LithosphereStrength,
+            RenderModeId::Hydrology => &hydrology::Hydrology,
         }
     }
 
@@ -116,6 +120,7 @@ impl RenderModeId {
             RenderModeId::Crust => "crust",
             RenderModeId::Sediment => "sediment",
             RenderModeId::LithosphereStrength => "lithosphere-strength",
+            RenderModeId::Hydrology => "hydrology",
         }
     }
 
