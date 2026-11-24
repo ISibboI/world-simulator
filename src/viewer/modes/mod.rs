@@ -19,15 +19,20 @@
 //! which lines) lists them in [`RenderMode::options`]; the switcher shows them above the
 //! legend and the mode reads their values from [`ModeData::options`].
 
+mod crust;
 mod crust_age;
 mod moisture;
 mod ocean_currents;
 mod plate_motion;
 mod plates;
+mod sediment;
+mod strength;
 pub mod switcher;
 mod temperature;
 mod topographic;
 mod wind;
+
+pub use sediment::bulk as bulk_sediment;
 
 use clap::ValueEnum;
 use glam::Vec3;
@@ -60,6 +65,12 @@ pub enum RenderModeId {
     Wind,
     /// Age of the ocean floor with isochrons; continents in grey.
     CrustAge,
+    /// Crust type (oceanic, transitional, continental) and thickness.
+    Crust,
+    /// Sediment thickness on land and sea floor (logarithmic), with optional isopachs.
+    Sediment,
+    /// Lithosphere strength: weak zones and what weakens them.
+    LithosphereStrength,
 }
 
 impl RenderModeId {
@@ -74,6 +85,9 @@ impl RenderModeId {
             RenderModeId::OceanCurrents => &ocean_currents::OceanCurrents,
             RenderModeId::Wind => &wind::Wind,
             RenderModeId::CrustAge => &crust_age::CrustAge,
+            RenderModeId::Crust => &crust::Crust,
+            RenderModeId::Sediment => &sediment::Sediment,
+            RenderModeId::LithosphereStrength => &strength::LithosphereStrength,
         }
     }
 
@@ -99,6 +113,9 @@ impl RenderModeId {
             RenderModeId::OceanCurrents => "ocean-currents",
             RenderModeId::Wind => "wind",
             RenderModeId::CrustAge => "crust-age",
+            RenderModeId::Crust => "crust",
+            RenderModeId::Sediment => "sediment",
+            RenderModeId::LithosphereStrength => "lithosphere-strength",
         }
     }
 

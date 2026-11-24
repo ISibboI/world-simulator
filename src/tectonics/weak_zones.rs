@@ -72,7 +72,7 @@ const PLUME_TAIL_RADIUS: f64 = 0.0785;
 const PLUME_HEAD_STAGE: f64 = 20.0;
 
 /// Weakest lithosphere (the axis of a spreading ridge) relative to old lithosphere.
-const MIN_STRENGTH: f64 = 0.05;
+pub const MIN_STRENGTH: f64 = 0.05;
 
 /// Half-width (rad, ~2200 km) of the band around the reference great circle in which a break may
 /// form; the plate beyond it on either side moves as a rigid block.
@@ -95,16 +95,53 @@ const UNBREAKABLE: f64 = 1e12;
 /// This is the one place where the strength history of the lithosphere is combined; code that
 /// needs the strength of a sample should call it.
 pub(super) fn lithosphere_strength(crust: &Crust, time: f64) -> f64 {
-    let thermal = (crust.strength_age(time).max(0.0) / FULL_STRENGTH_AGE)
-        .sqrt()
-        .min(1.0);
-    let thinning = if crust.is_continental_origin() {
-        (crust.basement().thickness / REFERENCE_CONTINENTAL_THICKNESS).min(1.0)
-    } else {
-        1.0
-    };
-    let suture = 1.0 - (1.0 - SUTURE_WEAKENING) * crust.orogenic;
-    (thermal * thinning * suture).max(MIN_STRENGTH)
+    let terms = StrengthTerms::of(crust, time);
+    combine_strength(terms.thermal, terms.thinning, crust.orogenic)
+}
+
+/// The terms of [`lithosphere_strength`] that depend on more than [`Crust::orogenic`], for the
+/// view (see [`Simulation::lithosphere_strength_terms`]); [`combine_strength`] combines them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StrengthTerms {
+    /// Relative thickness of the thermal boundary layer, from the thermal age
+    /// ([`Crust::strength_age`], see [`thermal_strength`]), 0 to 1.
+    pub thermal: f64,
+    /// Thinning of stretched continental lithosphere with its crust, 0 to 1 (1 for other
+    /// lithosphere).
+    pub thinning: f64,
+}
+
+impl StrengthTerms {
+    fn of(crust: &Crust, time: f64) -> Self {
+        let thinning = if crust.is_continental_origin() {
+            (crust.basement().thickness / REFERENCE_CONTINENTAL_THICKNESS).min(1.0)
+        } else {
+            1.0
+        };
+        Self {
+            thermal: thermal_strength(crust.strength_age(time)),
+            thinning,
+        }
+    }
+}
+
+/// The thermal term of [`lithosphere_strength`] for lithosphere of thermal age `age` (Myr):
+/// `√(age / FULL_STRENGTH_AGE)`, at most 1.
+pub fn thermal_strength(age: f64) -> f64 {
+    (age.max(0.0) / FULL_STRENGTH_AGE).sqrt().min(1.0)
+}
+
+/// The orogenic term of [`lithosphere_strength`] for an orogenic weakening `orogenic`
+/// ([`Crust::orogenic`], 0 to 1): 1 for undeformed lithosphere, [`SUTURE_WEAKENING`] for a
+/// fresh belt.
+pub fn orogenic_strength(orogenic: f64) -> f64 {
+    1.0 - (1.0 - SUTURE_WEAKENING) * orogenic
+}
+
+/// [`lithosphere_strength`] from its terms (see [`StrengthTerms`]) and the orogenic weakening
+/// ([`Crust::orogenic`]): their product, at least [`MIN_STRENGTH`].
+pub fn combine_strength(thermal: f64, thinning: f64, orogenic: f64) -> f64 {
+    (thermal * thinning * orogenic_strength(orogenic)).max(MIN_STRENGTH)
 }
 
 /// The thermal age (Myr) to which `plume` reheats the lithosphere at `r` now, or `None` outside
@@ -166,6 +203,12 @@ impl Simulation {
     /// Relative strength of the lithosphere at a world cell (see [`lithosphere_strength`]).
     pub fn lithosphere_strength(&self, cell: u32) -> f64 {
         lithosphere_strength(&self.surface_crust(cell), self.time)
+    }
+
+    /// The terms of the strength of the lithosphere at a world cell that the view cannot
+    /// rebuild from what it shows (see [`StrengthTerms`]).
+    pub fn lithosphere_strength_terms(&self, cell: u32) -> StrengthTerms {
+        StrengthTerms::of(&self.surface_crust(cell), self.time)
     }
 }
 

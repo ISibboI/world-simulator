@@ -2,8 +2,8 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (48 bytes per cell
-//! instead of 120, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (51 bytes per cell
+//! instead of 128, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
@@ -28,23 +28,21 @@ enum Code {
     /// ln(1 + value) with this step, 2 bytes, for values spanning many orders of magnitude;
     /// `u16::MAX` is NaN.
     Logarithmic(f32),
-    /// An integer of up to 16 bits (larger ones are clamped).
+    /// An integer of up to 16 bits.
     Integer16,
-    /// An integer of up to 8 bits.
-    Integer8,
 }
 
 impl Code {
     const fn bytes(self) -> usize {
         match self {
-            Code::Share | Code::Root(_) | Code::Signed8(_) | Code::Integer8 => 1,
+            Code::Share | Code::Root(_) | Code::Signed8(_) => 1,
             _ => 2,
         }
     }
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 30] = [
+const CHANNELS: [Code; 32] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -57,6 +55,10 @@ const CHANNELS: [Code; 30] = [
     Code::Share,
     // Time since the last orogeny: 0.25 Myr.
     Code::Unsigned(0.25),
+    // Thermal and thinning terms of the lithosphere strength (shares; the combined strength
+    // is good to ~0.005, against a range of 0.05 to 1).
+    Code::Share,
+    Code::Share,
     // Temperatures (annual, January, July): 0.1 °C.
     Code::Signed(0.1),
     Code::Signed(0.1),
@@ -95,9 +97,15 @@ const CHANNELS: [Code; 30] = [
     Code::Signed8(0.25),
     Code::Signed8(0.25),
     Code::Signed8(0.25),
+    // Plate (clamped to 16 bits) and the low 16 bits of the flags. The flags take 9 bits, so
+    // most of the high byte is zero and costs next to nothing after the delta and lz4.
     Code::Integer16,
-    Code::Integer8,
+    Code::Integer16,
 ];
+
+/// The channels of the integer attributes: plate and flags.
+const PLATE: usize = 30;
+const FLAGS: usize = 31;
 
 /// Bytes per cell of the quantised attributes.
 pub const BYTES_PER_CELL: usize = {
@@ -119,6 +127,8 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.sediment,
         cell.orogenic,
         cell.since_orogeny,
+        cell.strength_thermal,
+        cell.strength_thinning,
         cell.temperature,
         cell.temperature_january,
         cell.temperature_july,
@@ -196,7 +206,7 @@ fn quantise(code: Code, value: f32) -> u16 {
                 .round()
                 .clamp(0.0, (88.0 / step).floor().min(f32::from(u16::MAX - 1))) as u16
         }
-        Code::Integer16 | Code::Integer8 => unreachable!("integers are not quantised"),
+        Code::Integer16 => unreachable!("integers are not quantised"),
     }
 }
 
@@ -246,7 +256,7 @@ fn dequantise(code: Code, value: u16) -> f32 {
                 (f32::from(value) * step).exp_m1()
             }
         }
-        Code::Integer16 | Code::Integer8 => unreachable!("integers are not quantised"),
+        Code::Integer16 => unreachable!("integers are not quantised"),
     }
 }
 
@@ -266,9 +276,9 @@ impl Planes {
             let values = attributes(cell);
             let mut plane = 0;
             for (channel, code) in CHANNELS.iter().enumerate() {
-                let value = match code {
-                    Code::Integer16 => cell.plate.min(u32::from(u16::MAX)) as u16,
-                    Code::Integer8 => (cell.flags & 0xFF) as u16,
+                let value = match channel {
+                    PLATE => cell.plate.min(u32::from(u16::MAX)) as u16,
+                    FLAGS => (cell.flags & 0xFFFF) as u16,
                     _ => quantise(*code, values[channel]),
                 };
                 for byte in 0..code.bytes() {
@@ -305,30 +315,32 @@ impl Planes {
                     sediment: value(3),
                     orogenic: value(4),
                     since_orogeny: value(5),
-                    temperature: value(6),
-                    temperature_january: value(7),
-                    temperature_july: value(8),
-                    precipitation: value(9),
-                    precipitation_january: value(10),
-                    precipitation_july: value(11),
-                    potential_evaporation: value(12),
-                    evaporation: value(13),
-                    evaporation_january: value(14),
-                    evaporation_july: value(15),
-                    ice: value(16),
-                    discharge: value(17),
-                    current_east: value(18),
-                    current_north: value(19),
-                    streamfunction: value(20),
-                    gyre_heating: value(21),
-                    wind_east: value(22),
-                    wind_north: value(23),
-                    wind_january_east: value(24),
-                    wind_january_north: value(25),
-                    wind_july_east: value(26),
-                    wind_july_north: value(27),
-                    plate: u32::from(values[28]),
-                    flags: u32::from(values[29]),
+                    strength_thermal: value(6),
+                    strength_thinning: value(7),
+                    temperature: value(8),
+                    temperature_january: value(9),
+                    temperature_july: value(10),
+                    precipitation: value(11),
+                    precipitation_january: value(12),
+                    precipitation_july: value(13),
+                    potential_evaporation: value(14),
+                    evaporation: value(15),
+                    evaporation_january: value(16),
+                    evaporation_july: value(17),
+                    ice: value(18),
+                    discharge: value(19),
+                    current_east: value(20),
+                    current_north: value(21),
+                    streamfunction: value(22),
+                    gyre_heating: value(23),
+                    wind_east: value(24),
+                    wind_north: value(25),
+                    wind_january_east: value(26),
+                    wind_january_north: value(27),
+                    wind_july_east: value(28),
+                    wind_july_north: value(29),
+                    plate: u32::from(values[PLATE]),
+                    flags: u32::from(values[FLAGS]),
                 }
             })
             .collect()
@@ -352,7 +364,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 6;
+const VERSION: u8 = 8;
 /// Bytes per plate: its rotation and id.
 pub const PLATE_BYTES: usize = 16;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -472,6 +484,8 @@ mod tests {
             } else {
                 x * 0.25
             },
+            strength_thermal: (x * 0.013).fract(),
+            strength_thinning: 1.0 - (x * 0.007).fract(),
             temperature: (x * 0.1).cos() * 30.0,
             temperature_january: f32::NAN,
             temperature_july: -12.34,
@@ -515,8 +529,9 @@ mod tests {
             wind_july_east: (x * 0.19).cos() * 7.0,
             wind_july_north: -0.1,
             plate: (index % 13) as u32,
-            // All flag bits the history keeps, the oceanic bit (6) among them.
-            flags: (index % 2) as u32 | ((index % 3) as u32) << 5,
+            // All flag bits the history keeps (the oceanic bit 6, the felsic bit 7 and the
+            // metasediment bit 8 among them).
+            flags: (index * 37 % 512) as u32,
         }
     }
 
@@ -540,6 +555,16 @@ mod tests {
             (original.sediment, decoded.sediment, 0.5),
             (original.orogenic, decoded.orogenic, 0.5 / 254.0),
             (original.since_orogeny, decoded.since_orogeny, 0.125),
+            (
+                original.strength_thermal,
+                decoded.strength_thermal,
+                0.5 / 254.0,
+            ),
+            (
+                original.strength_thinning,
+                decoded.strength_thinning,
+                0.5 / 254.0,
+            ),
             (original.temperature, decoded.temperature, 0.05),
             (
                 original.temperature_january,
@@ -632,7 +657,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 48);
+        assert_eq!(BYTES_PER_CELL, 51);
     }
 
     #[test]
@@ -719,7 +744,12 @@ mod tests {
         };
         let key = encode(&state, None);
         let delta = encode(&state, Some(&state));
-        assert!(delta.len() < 2_000, "{} bytes", delta.len());
+        // lz4 compresses runs of zeros at most about 255:1.
+        assert!(
+            delta.len() < 10_000 * BYTES_PER_CELL / 200,
+            "{} bytes",
+            delta.len()
+        );
         assert!(key.len() > delta.len());
     }
 

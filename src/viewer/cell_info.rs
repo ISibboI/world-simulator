@@ -6,12 +6,12 @@ use eframe::egui;
 use glam::DVec3;
 
 use crate::planet::Planet;
-use crate::tectonics::BoundaryClass;
+use crate::tectonics::{self, BoundaryClass};
 
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 120 bytes per cell, 4.9 MB
+/// buffer (to the page on the web) and read back without parsing: 128 bytes per cell, 5.2 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -28,6 +28,13 @@ pub struct CellInfo {
     pub orogenic: f32,
     /// Time since the last orogeny in Myr, or NaN if there was none.
     pub since_orogeny: f32,
+    /// The terms of the lithosphere strength that the view cannot rebuild from the other
+    /// attributes (see [`crate::tectonics::Simulation::lithosphere_strength_terms`]), 0 to 1: the thermal term (from
+    /// the thermal age, which a plume may have reset) and the thinning of stretched continental
+    /// lithosphere. [`CellInfo::lithosphere_strength`] combines them with
+    /// [`CellInfo::orogenic`].
+    pub strength_thermal: f32,
+    pub strength_thinning: f32,
     /// Annual mean surface temperature in °C (NaN if unknown).
     pub temperature: f32,
     /// Mean surface temperature of the first month of the year (early January, the month
@@ -75,8 +82,9 @@ pub struct CellInfo {
     /// The plate covering the cell.
     pub plate: u32,
     /// Bit flags: [`CellInfo::CONTINENTAL`], the boundary class
-    /// ([`CellInfo::BOUNDARY_SHIFT`]), [`CellInfo::DEFORMING_BAND`] and [`CellInfo::OCEANIC`].
-    /// The frame history keeps the low 8 bits.
+    /// ([`CellInfo::BOUNDARY_SHIFT`]), [`CellInfo::DEFORMING_BAND`], [`CellInfo::OCEANIC`],
+    /// [`CellInfo::FELSIC`] and [`CellInfo::METASEDIMENT`]. The frame history keeps the low 16
+    /// bits.
     pub flags: u32,
 }
 
@@ -96,6 +104,15 @@ impl CellInfo {
     /// [`crate::tectonics::Crust::is_oceanic`]); crust that is neither this nor
     /// [`CellInfo::CONTINENTAL`] is transitional (thick arcs, thinned continental margins).
     pub const OCEANIC: u32 = 1 << 6;
+    /// [`CellInfo::flags`]: the basement (the crystalline crust without its metasediment, see
+    /// [`crate::tectonics::Crust::basement`]) is mostly felsic ([`crate::tectonics::Crust::felsic`]
+    /// above 0.5): continental crust, mature arcs and thinned continental margins, rather than
+    /// oceanic crust and intra-oceanic arcs or plateaus built on it.
+    pub const FELSIC: u32 = 1 << 7;
+    /// [`CellInfo::flags`]: most of the crystalline crust (by mass) is metasediment, sediment
+    /// buried and metamorphosed during the simulation ([`crate::tectonics::Crust::metasediment`]
+    /// above 0.5): accretionary wedges and the sediment-fed parts of orogens.
+    pub const METASEDIMENT: u32 = 1 << 8;
 
     pub fn is_continental(&self) -> bool {
         self.flags & Self::CONTINENTAL != 0
@@ -119,8 +136,70 @@ impl CellInfo {
         }
     }
 
+    /// Strength of the lithosphere relative to old, undeformed lithosphere, 0.05 to 1 (see
+    /// [`crate::tectonics::combine_strength`]); NaN if a term is unknown.
+    pub fn lithosphere_strength(&self) -> f32 {
+        let terms = [self.strength_thermal, self.strength_thinning, self.orogenic];
+        if terms.iter().any(|term| term.is_nan()) {
+            return f32::NAN;
+        }
+        tectonics::combine_strength(
+            f64::from(self.strength_thermal),
+            f64::from(self.strength_thinning),
+            f64::from(self.orogenic),
+        ) as f32
+    }
+
+    /// The orogenic term of the lithosphere strength (see
+    /// [`crate::tectonics::orogenic_strength`]).
+    pub fn strength_orogenic(&self) -> f32 {
+        tectonics::orogenic_strength(f64::from(self.orogenic)) as f32
+    }
+
+    /// What weakens the lithosphere most: its weakest term, or `None` where it has (nearly)
+    /// its full strength or a term is unknown.
+    pub fn weakness(&self) -> Option<Weakness> {
+        let strength = self.lithosphere_strength();
+        if strength.is_nan() || strength >= FULL_STRENGTH {
+            return None;
+        }
+        let (thermal, thinning, orogenic) = (
+            self.strength_thermal,
+            self.strength_thinning,
+            self.strength_orogenic(),
+        );
+        Some(if thermal <= thinning && thermal <= orogenic {
+            // A plume reset the thermal age where the thermal term is clearly below the one of
+            // the lithosphere's age (both quantised in past frames: 0.25 Myr steps of the age
+            // change the term by up to 0.015 next to a ridge axis, the term itself by 0.002).
+            let by_age = tectonics::thermal_strength(f64::from(self.age)) as f32;
+            if by_age - thermal > PLUME_RESET_MARGIN {
+                Weakness::Plume
+            } else {
+                Weakness::Young
+            }
+        } else if thinning <= orogenic {
+            Weakness::Thinned
+        } else {
+            Weakness::Orogenic
+        })
+    }
+
     pub fn is_oceanic(&self) -> bool {
         self.flags & Self::OCEANIC != 0
+    }
+
+    pub fn is_felsic(&self) -> bool {
+        self.flags & Self::FELSIC != 0
+    }
+
+    pub fn is_metasedimentary(&self) -> bool {
+        self.flags & Self::METASEDIMENT != 0
+    }
+
+    /// The type of the crust, from its flags and thickness.
+    pub fn crust_type(&self) -> CrustType {
+        CrustType::of(self)
     }
 
     pub fn in_deforming_band(&self) -> bool {
@@ -137,6 +216,135 @@ impl CellInfo {
             flags |= Self::DEFORMING_BAND;
         }
         flags
+    }
+}
+
+/// Lithosphere at least this strong counts as having its full strength (no [`Weakness`]).
+pub const FULL_STRENGTH: f32 = 0.98;
+
+/// See [`CellInfo::weakness`].
+const PLUME_RESET_MARGIN: f32 = 0.025;
+
+/// The weakest term of the lithosphere strength at a cell (see [`CellInfo::weakness`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Weakness {
+    /// Young (hot, thin) lithosphere: young sea floor, arcs, freshly rifted continental crust.
+    Young,
+    /// Lithosphere a plume heated (its thermal age reset), carried along with the plate.
+    Plume,
+    /// Stretched (thinned) continental lithosphere.
+    Thinned,
+    /// Orogenic belts, sutures and accreted terranes that have not healed yet.
+    Orogenic,
+}
+
+impl Weakness {
+    pub const ALL: [Weakness; 4] = [
+        Weakness::Young,
+        Weakness::Plume,
+        Weakness::Thinned,
+        Weakness::Orogenic,
+    ];
+
+    /// Short name, for the cell widget.
+    pub fn label(self) -> &'static str {
+        match self {
+            Weakness::Young => "young",
+            Weakness::Plume => "plume-heated",
+            Weakness::Thinned => "thinned crust",
+            Weakness::Orogenic => "orogenic",
+        }
+    }
+}
+
+/// Continental crust thicker than this (m) is shown as a thick orogen (Tibet and the Andes
+/// reach ~70 km; normal continental crust is ~35–40 km).
+pub const THICK_CRUST: f32 = 50_000.0;
+
+/// The type of a cell's crust, a refinement of the simulation's oceanic / transitional /
+/// continental classification ([`crate::tectonics::Crust::is_oceanic`],
+/// [`crate::tectonics::Crust::is_continental`]) by the composition of the basement
+/// ([`CellInfo::FELSIC`]) and, for continental crust, its thickness; crust that is mostly
+/// metasediment ([`CellInfo::METASEDIMENT`]) is a type of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CrustType {
+    /// Crust that is mostly metasediment ([`CellInfo::METASEDIMENT`]), whatever its class:
+    /// accretionary wedges.
+    Metasedimentary,
+    /// Normal oceanic crust: thin and dense.
+    Oceanic,
+    /// Transitional crust on a mafic basement: intra-oceanic arcs and thickened oceanic crust.
+    MaficTransitional,
+    /// Transitional crust on a felsic basement: thinned continental crust (rifts, passive
+    /// margins).
+    ThinnedContinental,
+    /// Continental (too buoyant to subduct) on a mafic basement: thick intra-oceanic arcs
+    /// (whose additions are only 40 % felsic).
+    MaficContinental,
+    /// Felsic continental crust up to [`THICK_CRUST`].
+    Continental,
+    /// Felsic continental crust thicker than [`THICK_CRUST`] (the whole crystalline column,
+    /// metasediment included): orogens and plateaus.
+    ThickContinental,
+}
+
+impl CrustType {
+    pub const ALL: [CrustType; 7] = [
+        CrustType::Metasedimentary,
+        CrustType::Oceanic,
+        CrustType::MaficTransitional,
+        CrustType::ThinnedContinental,
+        CrustType::MaficContinental,
+        CrustType::Continental,
+        CrustType::ThickContinental,
+    ];
+
+    pub fn of(cell: &CellInfo) -> Self {
+        if cell.is_metasedimentary() {
+            CrustType::Metasedimentary
+        } else if cell.is_continental() {
+            if !cell.is_felsic() {
+                CrustType::MaficContinental
+            } else if cell.crust_thickness > THICK_CRUST {
+                CrustType::ThickContinental
+            } else {
+                CrustType::Continental
+            }
+        } else if cell.is_oceanic() {
+            CrustType::Oceanic
+        } else if cell.is_felsic() {
+            CrustType::ThinnedContinental
+        } else {
+            CrustType::MaficTransitional
+        }
+    }
+
+    /// The simulation's coarse class: "oceanic", "transitional" or "continental"
+    /// ("metasedimentary" crust can be of any class).
+    #[cfg(test)]
+    pub fn class(self) -> &'static str {
+        match self {
+            CrustType::Metasedimentary => "metasedimentary",
+            CrustType::Oceanic => "oceanic",
+            CrustType::MaficTransitional | CrustType::ThinnedContinental => "transitional",
+            CrustType::MaficContinental | CrustType::Continental | CrustType::ThickContinental => {
+                "continental"
+            }
+        }
+    }
+
+    /// A short description for the cell widget (short enough for phones; the legend of the
+    /// crust mode names the classes).
+    pub fn label(self) -> &'static str {
+        match self {
+            CrustType::Metasedimentary => "metasedimentary",
+            CrustType::Oceanic => "oceanic",
+            CrustType::MaficTransitional => "arc or plateau",
+            CrustType::ThinnedContinental => "thinned continental",
+            CrustType::MaficContinental => "oceanic arc",
+            CrustType::Continental => "continental",
+            CrustType::ThickContinental => "thick continental",
+        }
     }
 }
 
@@ -195,6 +403,7 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
         .map(|index| {
             let cell = index as u32;
             let crust = simulation.surface_crust(cell);
+            let strength = simulation.lithosphere_strength_terms(cell);
             CellInfo {
                 elevation: simulation.surface_elevation(cell) as f32,
                 crust_thickness: crust.thickness as f32,
@@ -206,6 +415,8 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 } else {
                     f32::NAN
                 },
+                strength_thermal: strength.thermal as f32,
+                strength_thinning: strength.thinning as f32,
                 temperature: field(&temperature.annual_mean, index),
                 temperature_january: month(0, index),
                 temperature_july: month(6, index),
@@ -235,6 +446,14 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                     boundaries.band[index],
                 ) | if crust.is_oceanic() {
                     CellInfo::OCEANIC
+                } else {
+                    0
+                } | if crust.basement().felsic > 0.5 {
+                    CellInfo::FELSIC
+                } else {
+                    0
+                } | if crust.metasediment > 0.5 {
+                    CellInfo::METASEDIMENT
                 } else {
                     0
                 },
@@ -287,7 +506,7 @@ pub struct Row {
 
 /// The labels of the rows, always all of them in this order, so that the widget does not
 /// change its layout from cell to cell.
-pub const ROW_LABELS: [&str; 19] = [
+pub const ROW_LABELS: [&str; 20] = [
     "Position",
     "Elevation",
     "Surface",
@@ -297,6 +516,7 @@ pub const ROW_LABELS: [&str; 19] = [
     "Lithosphere age",
     "Sediment",
     "Orogeny",
+    "Strength",
     "Temperature",
     "Jan / Jul",
     "Precipitation",
@@ -329,6 +549,15 @@ fn known(value: f32, format: impl Fn(f32) -> String) -> Option<String> {
     value.is_finite().then(|| format(value))
 }
 
+/// A thickness in metres, in km from 1 km on (short enough for the widget on phones).
+fn format_thickness(metres: f32) -> String {
+    if metres >= 999.5 {
+        format!("{:.1} km", metres / 1000.0)
+    } else {
+        format!("{metres:.0} m")
+    }
+}
+
 fn format_temperature(value: f32) -> Option<String> {
     known(value, |t| format!("{t:.1} °C"))
 }
@@ -344,7 +573,7 @@ pub fn format_rows(
     longitude: f64,
 ) -> Vec<Row> {
     let land = info.elevation >= 0.0;
-    let values: [Option<String>; 19] = [
+    let values: [Option<String>; 20] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
         Some(
@@ -365,13 +594,7 @@ pub fn format_rows(
         },
         Some(format!(
             "{}, {:.1} km",
-            if info.is_continental() {
-                "continental"
-            } else if info.is_oceanic() {
-                "oceanic"
-            } else {
-                "transitional"
-            },
+            info.crust_type().label(),
             info.crust_thickness / 1000.0
         )),
         known(info.age, |age| {
@@ -383,7 +606,13 @@ pub fn format_rows(
                 format!("{age:.0} Myr")
             }
         }),
-        Some(format!("{:.0} m (as rock)", info.sediment)),
+        known(info.sediment, |rock| {
+            format!(
+                "{} ({} as rock)",
+                format_thickness(super::modes::bulk_sediment(rock)),
+                format_thickness(rock)
+            )
+        }),
         (info.since_orogeny.is_finite() || info.orogenic > 0.0).then(|| {
             format!(
                 "{:.0}%, last {}",
@@ -392,6 +621,7 @@ pub fn format_rows(
                     .unwrap_or_else(|| NOT_APPLICABLE.to_owned())
             )
         }),
+        format_strength(info),
         format_temperature(info.temperature),
         (info.temperature_january.is_finite() || info.temperature_july.is_finite()).then(|| {
             let month = |t| format_temperature(t).unwrap_or_else(|| NOT_APPLICABLE.to_owned());
@@ -459,6 +689,16 @@ fn format_current(info: &CellInfo) -> Option<String> {
         text += &format!(", {:+.0} W/m²", info.gyre_heating);
     }
     Some(text)
+}
+
+/// The lithosphere strength of a cell and its weakest term: "0.42, weakest: orogenic".
+fn format_strength(info: &CellInfo) -> Option<String> {
+    known(info.lithosphere_strength(), |strength| {
+        match info.weakness() {
+            Some(weakness) => format!("{strength:.2}, weakest: {}", weakness.label()),
+            None => format!("{strength:.2} (full)"),
+        }
+    })
 }
 
 /// Annual precipitation minus evaporation, with the evaporation: "+312 mm/yr (evap. 500)".
@@ -710,6 +950,8 @@ mod tests {
             sediment: 512.3,
             orogenic: 0.25,
             since_orogeny: 87.6,
+            strength_thermal: 1.0,
+            strength_thinning: 0.8,
             temperature: 12.34,
             temperature_january: -3.21,
             temperature_july: 25.0,
@@ -733,7 +975,7 @@ mod tests {
             wind_july_east: -4.0,
             wind_july_north: -2.0,
             plate: 7,
-            flags: CellInfo::CONTINENTAL,
+            flags: CellInfo::CONTINENTAL | CellInfo::FELSIC,
         }
     }
 
@@ -794,7 +1036,9 @@ mod tests {
         );
         assert_eq!(row(&rows, "Crust").unwrap(), "continental, 35.2 km");
         assert_eq!(row(&rows, "Lithosphere age").unwrap(), "old (≥ 1000 Myr)");
-        assert_eq!(row(&rows, "Sediment").unwrap(), "512 m (as rock)");
+        assert_eq!(row(&rows, "Sediment").unwrap(), "774 m (512 m as rock)");
+        assert_eq!(format_thickness(12_345.0), "12.3 km");
+        assert_eq!(format_thickness(999.0), "999 m");
         assert_eq!(row(&rows, "Orogeny").unwrap(), "25%, last 88 Myr ago");
         assert_eq!(row(&rows, "Temperature").unwrap(), "12.3 °C");
         assert_eq!(row(&rows, "Jan / Jul").unwrap(), "-3.2 °C / 25.0 °C");
@@ -843,6 +1087,8 @@ mod tests {
             age: 42.4,
             orogenic: 0.0,
             since_orogeny: f32::NAN,
+            strength_thermal: 0.6,
+            strength_thinning: 1.0,
             temperature: f32::NAN,
             temperature_january: f32::NAN,
             temperature_july: f32::NAN,
@@ -894,7 +1140,7 @@ mod tests {
         let transitional = format_rows(&transitional, None, 0.0, 0.0);
         assert_eq!(
             row(&transitional, "Crust").unwrap(),
-            "transitional, 14.0 km"
+            "arc or plateau, 14.0 km"
         );
         assert_eq!(row(&transitional, "Lithosphere age").unwrap(), "42 Myr");
         assert_eq!(row(&rows, "Orogeny"), None);
@@ -912,6 +1158,42 @@ mod tests {
         assert_eq!(row(&rows, "Permanent ice").unwrap(), "75%");
         // No rivers in the ocean.
         assert_eq!(row(&rows, "River discharge"), None);
+    }
+
+    #[test]
+    fn crust_types_refine_the_simulation_classes() {
+        let cell = |flags: u32, thickness: f32| CellInfo {
+            flags,
+            crust_thickness: thickness,
+            ..info()
+        };
+        let (c, o, f) = (CellInfo::CONTINENTAL, CellInfo::OCEANIC, CellInfo::FELSIC);
+        assert_eq!(cell(o, 7e3).crust_type(), CrustType::Oceanic);
+        assert_eq!(cell(0, 15e3).crust_type(), CrustType::MaficTransitional);
+        assert_eq!(cell(f, 18e3).crust_type(), CrustType::ThinnedContinental);
+        assert_eq!(cell(c, 30e3).crust_type(), CrustType::MaficContinental);
+        assert_eq!(cell(c | f, 35e3).crust_type(), CrustType::Continental);
+        assert_eq!(cell(c | f, 50e3).crust_type(), CrustType::Continental);
+        assert_eq!(cell(c | f, 65e3).crust_type(), CrustType::ThickContinental);
+        // A thick mafic arc stays a mafic arc.
+        assert_eq!(cell(c, 65e3).crust_type(), CrustType::MaficContinental);
+        // Mostly metasediment, whatever the class.
+        let m = CellInfo::METASEDIMENT;
+        for flags in [o | m, m, f | m, c | f | m] {
+            assert_eq!(cell(flags, 25e3).crust_type(), CrustType::Metasedimentary);
+        }
+        // The coarse classes are those of the simulation's flags.
+        for flags in [o, 0, f, c, c | f] {
+            let info = cell(flags, 20e3);
+            let class = if info.is_continental() {
+                "continental"
+            } else if info.is_oceanic() {
+                "oceanic"
+            } else {
+                "transitional"
+            };
+            assert_eq!(info.crust_type().class(), class);
+        }
     }
 
     #[test]
@@ -957,7 +1239,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 120);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 128);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 
@@ -983,8 +1265,8 @@ mod tests {
         for (cell, info) in infos.iter().enumerate() {
             assert_eq!(info.boundary(), boundaries.classes[cell]);
             assert_eq!(info.in_deforming_band(), boundaries.band[cell]);
-            // The frame history keeps 8 bits of the flags.
-            assert_eq!(info.flags & !0xFF, 0);
+            // The frame history keeps 16 bits of the flags.
+            assert_eq!(info.flags & !0xFFFF, 0);
             let cell = cell as u32;
             assert_eq!(info.plate, simulation.owner(cell).plate);
             assert_eq!(
@@ -998,6 +1280,14 @@ mod tests {
             assert_eq!(
                 info.is_oceanic(),
                 simulation.surface_crust(cell).is_oceanic()
+            );
+            assert_eq!(
+                info.is_felsic(),
+                simulation.surface_crust(cell).basement().felsic > 0.5
+            );
+            assert_eq!(
+                info.is_metasedimentary(),
+                simulation.surface_crust(cell).metasediment > 0.5
             );
             assert!(info.temperature.is_finite());
             assert!(info.temperature_january.is_finite() && info.temperature_july.is_finite());
