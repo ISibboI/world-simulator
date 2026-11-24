@@ -1320,8 +1320,9 @@ impl eframe::App for Viewer {
         if changed {
             if mode != self.mode {
                 self.set_mode(mode);
-            } else {
-                // Another setting of the mode.
+            } else if self.mode != RenderModeId::Realistic {
+                // Another setting of the mode. (The realistic mode's only setting, the light,
+                // changes the uniforms alone: no new colours or overlay.)
                 self.display_outdated = true;
             }
             ui.ctx().request_repaint();

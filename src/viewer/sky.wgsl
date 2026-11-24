@@ -78,6 +78,7 @@ const STARS_PER_CELL: f32 = 0.077;
 // Limiting magnitude, and the magnitude that fills a pixel with white.
 const FAINTEST: f32 = 7.0;
 const SATURATED: f32 = 1.5;
+const BRIGHTEST: f32 = -1.5;
 // Growth of the star counts per magnitude: N(< m) ∝ 10^(0.45 m).
 const COUNT_SLOPE: f32 = 0.45;
 
@@ -148,7 +149,9 @@ fn stars(direction: vec3<f32>) -> vec3<f32> {
             let y = 0.2 + 0.6 * unit(h);
             let star = normalize(face_point(face, ((f32(c.x) + x) / cells) * 2.0 - 1.0, ((f32(c.y) + y) / cells) * 2.0 - 1.0));
             h = hash(h);
-            let magnitude = FAINTEST + log2(max(unit(h), 1e-7)) * 0.30103 / COUNT_SLOPE;
+            // At most as bright as the brightest stars of Earth's sky (−1.5), so that halos stay
+            // within the neighbouring cells.
+            let magnitude = max(FAINTEST + log2(max(unit(h), 1e-7)) * 0.30103 / COUNT_SLOPE, BRIGHTEST);
             h = hash(h);
             // Temperature: 3200 K (M), 4000 and 4800 K (K, mostly giants), G, F, A, late and
             // early B (see STAR_TEMPERATURES), weighted like the
@@ -160,7 +163,7 @@ fn stars(direction: vec3<f32>) -> vec3<f32> {
             else if t < 0.93 { kind = 6u; }
             let flux = exp2((SATURATED - magnitude) * 0.4 * 3.321928);
             // A point spread of about a pixel, wider for stars that overflow it (as in photos).
-            let sigma = pixel * clamp(0.55 + 0.25 * log2(max(flux, 1.0)), 0.55, 1.6);
+            let sigma = pixel * clamp(0.55 + 0.25 * log2(max(flux, 1.0)), 0.55, 1.3);
             let distance = length(cross(direction, star));
             let value = flux * exp(-0.5 * distance * distance / (sigma * sigma));
             color += uniforms.star_colors[kind].rgb * pow(min(value, 1.0), 1.0 / 2.2);

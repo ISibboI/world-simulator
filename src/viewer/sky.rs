@@ -7,20 +7,20 @@
 //! glare) in the frame. Stars appear only in a long exposure of a dark scene: the night side,
 //! with the sun hidden behind the planet or out of view. The view meters like a camera with an
 //! automatic exposure that sets the brightest ~0.1–1% of the frame to white
-//! ([`Exposure::new`]): it measures the share of the view covered by the sunlit planet
-//! (weighted by the cosine of the sun's incidence, the brightness of a Lambertian surface) and
-//! whether the visible sun is in or near the view (its glare). Below 0.1% the stars are fully visible, above 1% they
-//! are gone, and in between they fade, so they fade smoothly while the terminator or a thin
-//! crescent comes into view. The ambient fill light of `SunAmbient` is a visual aid, not light,
-//! and is not metered. With the camera light the whole visible side is lit, so there are no
-//! stars (and no sun) in that mode.
+//! ([`Exposure::new`]): the share of the view covered by the sunlit planet (weighted by the
+//! cosine of the sun's incidence, the brightness of a Lambertian surface) fades the stars out
+//! between 0.1% and 1%; the glare of the visible part of the sun fades them out as the sun
+//! approaches the frame (from 1.5 times the view's half-width to its edge). So they fade
+//! smoothly while the terminator, a thin crescent or the sun comes into view. The ambient fill
+//! light of `SunAmbient` is a visual aid, not light, and is not metered. With the camera light
+//! the whole visible side is lit, so there are no stars (and no sun) in that mode.
 //!
 //! **Stars.** A procedural sky, not Earth's: a deterministic star field fixed in space (the
 //! planet does not spin), generated in the shader from a hash of cells on a cube map. Their
 //! magnitudes follow the counts of the real sky, about 2.5–3 times more stars per magnitude
 //! (`N(<m) ∝ 10^(0.45 m)`), down to magnitude 7 (~15 000 stars over the sky, as a long exposure
 //! records them); their colours are black bodies from 3200 K (M giants) to 20 000 K (B stars),
-//! weighted like the naked-eye stars, most of which are K giants and A–F stars. See
+//! weighted like the naked-eye stars, most of which are K giants and A–B stars. See
 //! `notes/issue-92/stars.md`.
 
 use glam::{Mat4, Vec3, Vec4};
@@ -34,9 +34,10 @@ const STARS_FADE_END: f32 = 1e-2;
 /// How far beyond the view the sun's glare still sets the exposure, in multiples of the view's
 /// half-width (in normalised device coordinates).
 const GLARE_REACH: f32 = 1.5;
-/// Samples of the view in each direction for the metering (a sample is 1/30 000 of the view).
-const METER_COLUMNS: usize = 200;
-const METER_ROWS: usize = 150;
+/// Samples of the view in each direction for the metering (a sample is 1/6000 of the view, a
+/// fifth of the share where the stars start to fade; the cosine weighting smooths the steps).
+const METER_COLUMNS: usize = 96;
+const METER_ROWS: usize = 64;
 
 /// Temperatures of the star colours in K, the colours [`star_colors`] gives in this order
 /// (`sky.wgsl` picks one per star with its own weights).
@@ -80,15 +81,15 @@ impl Exposure {
             sun_visible > 0.0 && clip.w > 0.0 && clip.x.abs() <= clip.w && clip.y.abs() <= clip.w;
         // Glare of the sun in or near the view (lens flare and veiling glare reach well beyond
         // the frame): full inside it, fading out to 1.5 times its half-width.
-        let glare = if sun_visible > 0.0 && clip.w > 0.0 {
+        let glare = if clip.w > 0.0 {
             let edge = (clip.x.abs().max(clip.y.abs())) / clip.w;
-            1.0 - smoothstep(1.0, GLARE_REACH, edge)
+            sun_visible * (1.0 - smoothstep(1.0, GLARE_REACH, edge))
         } else {
             0.0
         };
         let sunlit = sunlit_share(view_projection.inverse(), sun);
-        let metered = sunlit.max(glare);
-        let stars = 1.0 - smoothstep(STARS_FADE_START, STARS_FADE_END, metered);
+        // Each of the two hides the stars on its own; the glare fades them over its reach.
+        let stars = (1.0 - smoothstep(STARS_FADE_START, STARS_FADE_END, sunlit)) * (1.0 - glare);
         Self {
             sun_visible,
             sun_in_view,
@@ -201,19 +202,18 @@ mod tests {
         assert_eq!(exposure.sun_visible, 1.0);
         assert!(exposure.sun_in_view);
         assert_eq!(exposure.stars, 0.0);
-        // Just out of view (30° beside it; the view reaches ~26°): its glare still hides them.
+        // Just out of view (30° beside it; the view reaches ~26°): its glare still dims them.
         let angle = 30f32.to_radians();
         let sun = Vec3::new(-angle.cos(), angle.sin(), 0.0);
         let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047);
         assert!(!exposure.sun_in_view);
-        assert_eq!(exposure.stars, 0.0);
+        assert!(exposure.stars < 0.5, "{exposure:?}");
     }
 
     #[test]
     fn the_stars_fade_as_the_crescent_grows() {
         // The camera moves from behind the planet (eclipse) towards the day side: the sunlit
-        // share grows, and the stars fade with it (except while the sun itself is in view,
-        // which hides them anyway).
+        // share grows, and the stars fade with it (the sun in or near the view hides them too).
         let sun = -Vec3::X;
         let mut previous = 0.0;
         let mut faded = false;
@@ -223,14 +223,13 @@ mod tests {
             let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047);
             assert!(exposure.sunlit >= previous, "{degrees}° {exposure:?}");
             previous = exposure.sunlit;
-            if exposure.sun_in_view {
+            // The glare of the sun in or near the view may hide them further.
+            let expected = 1.0 - smoothstep(STARS_FADE_START, STARS_FADE_END, exposure.sunlit);
+            assert!(exposure.stars <= expected);
+            if exposure.sun_in_view && exposure.sun_visible == 1.0 {
                 assert_eq!(exposure.stars, 0.0);
-            } else {
-                // The glare of the sun just out of view may hide them further.
-                let expected = 1.0 - smoothstep(STARS_FADE_START, STARS_FADE_END, exposure.sunlit);
-                assert!(exposure.stars <= expected);
-                faded |= exposure.stars > 0.0 && exposure.stars < 1.0;
             }
+            faded |= exposure.stars > 0.0 && exposure.stars < 1.0;
         }
         assert!(faded, "no partial fade");
         assert!(previous > STARS_FADE_END);
