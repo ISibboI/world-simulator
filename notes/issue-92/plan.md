@@ -1,7 +1,37 @@
 # #92: photorealistic render mode — plan
 
-Status: plan only (2026-11-24), nothing implemented. Decisions for Sebastian at the end.
-Revised after an independent review (§12).
+Status (2026-11-24): Sebastian decided (§0); step 1 (the sun and the light options) is
+implemented, see [sun.md](sun.md). Revised after an independent review (§12).
+
+## 0. Sebastian's decisions (comment 7131174342, 2026-11-24) and the order of work
+
+1. **Light:** the sun fixed in space by default, and a camera light as an option. The sun mimics
+   the real sun including its evolution: for the simulated time frame the younger, fainter sun of
+   the early planet with plates and oceans; later the time frame will be freely choosable, so the
+   sun must represent any state from that early sun through today to a reasonable time into the
+   future before the red-giant phase.
+2. **Merges:** accept the one-time re-roll of detail (stage 6 not needed for now).
+3. **Vegetation** from the continuous climate fields: yes.
+4. **Season option:** yes.
+5. **Zoom:** none for now, to limit the render detail.
+6. **Relief:** realistic, no mountain inflation in this mode (instead of the global 40×).
+7. **Clouds:** later, as an optional decoration.
+8. **Rivers:** none, since they are invisible from space.
+9. **Default detail levels:** decided later.
+
+Also: render detail is generated on the fly, more detail for cells closer to the camera
+(level of detail, LOD: view-dependent, for planets usually a chunked quadtree LOD such as CDLOD).
+Stars only if they make sense (a short exposure of a sunlit planet shows none).
+
+**Order of work:** each step is a separate PR that waits for Sebastian's merge before the next
+starts.
+1. **Sun and light options** (done, [sun.md](sun.md)): `src/sun.rs` (luminosity, temperature,
+   radius, colour, apparent size and direction of the sun at any age from the zero-age main
+   sequence to 10 Gyr); a view-wide Light option Camera | Sun | Sun + ambient for the shaded
+   modes; the sun drawn in the background. No frame-format change.
+2. Then the stages of §10 (plate frames, realistic mode MVP, …), adapted to the decisions: no
+   relief exaggeration in the realistic mode, LOD for the detail, no rivers, Season option,
+   clouds later, stars only if they make sense.
 
 Goal (from the issue): a render mode that shows the planet in space, lit by the sun (which is
 drawn too), with procedurally generated detail inside each cell (relief, rock/soil/vegetation/ice

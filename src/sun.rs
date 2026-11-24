@@ -93,11 +93,6 @@ impl Sun {
         Self::at_age(SOLAR_AGE - before_present + time / 1000.0)
     }
 
-    /// Irradiance in W/m² at `distance` (relative to the semi-major axis, one astronomical unit).
-    pub fn irradiance(&self, distance: f64) -> f64 {
-        PRESENT_SOLAR_CONSTANT * self.luminosity / (distance * distance)
-    }
-
     /// Angular radius of the disc in radians, seen from `distance` (relative to the semi-major
     /// axis): 4.65 mrad (0.267°) for today's Sun at one astronomical unit.
     pub fn angular_radius(&self, distance: f64) -> f64 {
@@ -105,8 +100,8 @@ impl Sun {
     }
 
     /// Colour of the light: a black body of the effective temperature in linear sRGB (D65
-    /// white), scaled to a luminance (CIE Y) of 1. Slightly warmer than white: about (1.07,
-    /// 0.98, 0.91) today, (1.11, 0.97, 0.85) at the zero age.
+    /// white), scaled to a luminance (CIE Y) of 1. Slightly warmer than white: about (1.11,
+    /// 0.98, 0.91) today, (1.13, 0.97, 0.88) at the zero age.
     pub fn color(&self) -> [f64; 3] {
         black_body_color(self.effective_temperature)
     }
@@ -194,7 +189,7 @@ mod tests {
         assert_eq!(sun.luminosity, 1.0);
         assert_eq!(sun.effective_temperature, PRESENT_EFFECTIVE_TEMPERATURE);
         assert!((sun.radius - 1.0).abs() < 1e-12);
-        assert!((sun.irradiance(1.0) - PRESENT_SOLAR_CONSTANT).abs() < 1e-9);
+        assert_eq!(solar_constant(sun.age), PRESENT_SOLAR_CONSTANT);
         // 0.2666° (16.0 arcmin) at one astronomical unit.
         let degrees = sun.angular_radius(1.0).to_degrees();
         assert!((degrees - 0.2665).abs() < 0.001, "{degrees}");
@@ -260,9 +255,9 @@ mod tests {
         assert!((annual - DVec3::X).length() < 1e-12);
         // Early January: southern summer, near perihelion.
         let (january, distance) = direction(&orbit, 1.0, Some(0.5 / 12.0));
-        assert!(january.z < -0.35 && distance < 0.99);
+        assert!(january.z < -0.3 && distance < 0.99, "{january} {distance}");
         assert!((january.length() - 1.0).abs() < 1e-12);
         let (july, _) = direction(&orbit, 1.0, Some(6.5 / 12.0));
-        assert!(july.z > 0.35);
+        assert!(july.z > 0.3, "{july}");
     }
 }

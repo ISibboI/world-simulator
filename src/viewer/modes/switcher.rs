@@ -1,13 +1,15 @@
 //! The mode switcher in the top left corner of the 3D view: a drop-down list of the render
 //! modes and the legend of the active one (colour bar, swatches, arrow scale), which can be
-//! hidden, with the settings of the mode (see [`super::RenderMode::options`]) above the legend.
+//! hidden, with the settings of the mode (see [`super::RenderMode::options`]) above the legend,
+//! and for modes that shade their colours the light ([`Light`]), a setting of the whole view.
 //! It is free there: the parameter panel is in the top right corner, the cell widget
 //! in the bottom left, and the banner across the middle. Like those, the legend starts hidden
 //! on narrow screens (phones), where only the drop-down list remains.
 
 use eframe::egui;
 
-use super::{Legend, OptionKind, OptionValues, RenderModeId, Swatch, SwatchShape};
+use super::{Legend, OptionKind, OptionValues, RenderModeId, Shading, Swatch, SwatchShape};
+use crate::viewer::lighting::Light;
 
 /// Screens narrower than this (in points) start with the legend hidden, as the other panels.
 const NARROW_SCREEN: f32 = 600.0;
@@ -33,6 +35,8 @@ pub struct SwitcherView<'a> {
     /// The top of what lies below the switcher in the same corner (the cell widget): the
     /// legend scrolls rather than reach it.
     pub bottom: f32,
+    /// A description of the sun, shown under the light option.
+    pub sun: String,
 }
 
 /// The switcher's state.
@@ -42,6 +46,8 @@ pub struct ModeSwitcher {
     /// The values of every mode's options, in the order of [`RenderModeId::all`]; a mode keeps
     /// them while another one is shown.
     options: Vec<OptionValues>,
+    /// Where the light comes from, for every mode that shades its colours.
+    light: Light,
 }
 
 impl Default for ModeSwitcher {
@@ -52,11 +58,17 @@ impl Default for ModeSwitcher {
                 .iter()
                 .map(|mode| OptionValues::defaults(mode.mode().options()))
                 .collect(),
+            light: Light::default(),
         }
     }
 }
 
 impl ModeSwitcher {
+    /// Where the light comes from.
+    pub fn light(&self) -> Light {
+        self.light
+    }
+
     /// The values of the options of `mode`.
     pub fn options(&self, mode: RenderModeId) -> &OptionValues {
         static NONE: OptionValues = OptionValues(Vec::new());
@@ -111,6 +123,7 @@ impl ModeSwitcher {
         };
         let mut options_changed = false;
         let all_options = &mut self.options;
+        let light = &mut self.light;
         let response = egui::Area::new(egui::Id::unique("render mode switcher"))
             .anchor(egui::Align2::LEFT_TOP, [MARGIN, MARGIN])
             .show(ctx, |ui| {
@@ -126,6 +139,9 @@ impl ModeSwitcher {
                             .and_then(|index| all_options.get_mut(index))
                         {
                             options_changed = option_controls(ui, *mode, values);
+                        }
+                        if mode.mode().shading() == Shading::Lit {
+                            options_changed |= light_controls(ui, light, &view.sun);
                         }
                         // Long legends scroll (phones in landscape, small windows).
                         // Above the cell widget, but at least a share of the screen (they
@@ -188,6 +204,30 @@ fn option_controls(ui: &mut egui::Ui, mode: RenderModeId, values: &mut OptionVal
             }
         }
     }
+    ui.separator();
+    changed
+}
+
+/// The controls of the light, with a description of the sun under them; returns whether the
+/// light changed.
+fn light_controls(ui: &mut egui::Ui, light: &mut Light, sun: &str) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(Light::LABEL).on_hover_text(Light::HOVER);
+        for (index, &choice) in Light::CHOICES.iter().enumerate() {
+            let selected = light.index() == index;
+            if ui
+                .selectable_label(selected, choice)
+                .on_hover_text(Light::HOVER)
+                .clicked()
+                && !selected
+            {
+                *light = Light::from_index(index);
+                changed = true;
+            }
+        }
+    });
+    ui.add(egui::Label::new(egui::RichText::new(sun).small()).wrap());
     ui.separator();
     changed
 }
