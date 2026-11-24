@@ -29,7 +29,11 @@ starts.
    radius, colour, apparent size and direction of the sun at any age from the zero-age main
    sequence to 10 Gyr); a view-wide Light option Camera | Sun | Sun + ambient for the shaded
    modes; the sun drawn in the background. No frame-format change.
-2. Then the stages of §10 (plate frames, realistic mode MVP, …), adapted to the decisions: no
+2. **Stars and the realistic mode** (done, [stars.md](stars.md)): a procedural star field
+   whose visibility follows a camera's exposure. A new render mode **Realistic**, first in the
+   list (topographic surface as a placeholder), now holds the Light option (default Sun), the
+   sun and the stars; the data modes are lit from the camera again (Sebastian on #148).
+3. Then the stages of §10 (plate frames, realistic mode MVP, …), adapted to the decisions: no
    relief exaggeration in the realistic mode, LOD for the detail, no rivers, Season option,
    clouds later, stars only if they make sense.
 

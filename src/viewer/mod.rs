@@ -37,6 +37,7 @@ mod parameters;
 mod picking;
 mod plate_colors;
 mod renderer;
+mod sky;
 mod timeline;
 
 use std::sync::Arc;
@@ -1114,7 +1115,11 @@ impl Viewer {
             glam::camera::rh::proj::directx::perspective(field_of_view, aspect_ratio, 0.1, 10.0);
         let view_projection = projection * view;
         let sun = self.sun();
-        let lighting = Lighting::new(self.switcher.light(), eye, &sun);
+        let lighting = Lighting::new(self.light(), eye, &sun);
+        // Metered only when the sky is drawn (sun light).
+        let exposure = self
+            .sky_shown()
+            .then(|| sky::Exposure::new(view_projection, eye, sun.direction, sun.angular_radius));
         Uniforms {
             view_projection: view_projection.to_cols_array_2d(),
             light_direction: lighting.direction.extend(0.0).to_array(),
@@ -1129,14 +1134,39 @@ impl Viewer {
             ],
             inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
             sun_direction: sun.direction.extend(sun.angular_radius).to_array(),
-            sun_color: [sun.disc_color[0], sun.disc_color[1], sun.disc_color[2], 0.0],
+            sun_color: [
+                sun.disc_color[0],
+                sun.disc_color[1],
+                sun.disc_color[2],
+                exposure.map_or(1.0, |exposure| exposure.sun_visible),
+            ],
             light_color: [
                 lighting.color[0],
                 lighting.color[1],
                 lighting.color[2],
                 lighting.ambient,
             ],
+            stars: [
+                exposure.map_or(0.0, |exposure| exposure.stars),
+                field_of_view / viewport.y.max(1.0),
+                0.0,
+                0.0,
+            ],
+            star_colors: sky::star_colors(),
         }
+    }
+
+    /// Where the light comes from: the realistic mode's choice, the camera in the data modes.
+    fn light(&self) -> Light {
+        match self.mode {
+            RenderModeId::Realistic => modes::realistic::light(self.switcher.options(self.mode)),
+            _ => Light::Camera,
+        }
+    }
+
+    /// Whether the sky (the sun and the stars) is drawn: only with the sun's light.
+    fn sky_shown(&self) -> bool {
+        self.light() != Light::Camera
     }
 
     /// The sun of the displayed state.
@@ -1240,8 +1270,7 @@ impl eframe::App for Viewer {
                             surface: self.display.clone(),
                             overlay: self.overlay.clone(),
                             lines,
-                            sun: self.mode.mode().shading() == Shading::Lit
-                                && self.switcher.light() != Light::Camera,
+                            sun: self.sky_shown(),
                         },
                     ));
             });
@@ -1285,14 +1314,15 @@ impl eframe::App for Viewer {
             points_per_radius: self.points_per_radius,
             waiting: self.waiting_for_fields(),
             bottom: cell_panel.map_or(f32::INFINITY, |rect| rect.top()),
-            sun: self.sun().describe(),
+            sun: (self.mode == RenderModeId::Realistic).then(|| self.sun().describe()),
         };
         let (changed, switcher) = self.switcher.show(ui.ctx(), &mut mode, &view);
         if changed {
             if mode != self.mode {
                 self.set_mode(mode);
-            } else {
-                // Another setting of the mode.
+            } else if self.mode != RenderModeId::Realistic {
+                // Another setting of the mode. (The realistic mode's only setting, the light,
+                // changes the uniforms alone: no new colours or overlay.)
                 self.display_outdated = true;
             }
             ui.ctx().request_repaint();

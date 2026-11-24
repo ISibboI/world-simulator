@@ -1,10 +1,11 @@
 //! How the planet is lit (#92): from the camera, as the view always did, or by the sun of the
 //! simulation ([`crate::sun`]), with or without an ambient light that brightens the night side.
 //!
-//! The choice ([`Light`]) is one setting of the view for every render mode that shades its
-//! colours ([`super::modes::Shading::Lit`]); modes that show their colours unlit ignore it. With
-//! the sun's light, the sun itself is drawn in the background when it is in view (`sky.wgsl`);
-//! with the camera light it is not, since a visible sun would contradict the lighting.
+//! The choice ([`Light`]) is an option of the realistic mode only (`modes::realistic`); the
+//! data modes are always lit from the camera, as before #92. With the sun's light, the sun itself
+//! is drawn in the background when it is in view (`sky.wgsl`); with the camera light it is not,
+//! since a visible sun would contradict the lighting. The stars appear with the sun's light as
+//! far as the camera's exposure allows (see [`super::sky`]).
 //!
 //! The sun stands fixed in space: the simulated planet does not spin, so the sun's longitude
 //! ([`SUN_LONGITUDE`]) is a fixed time of day, chosen so that the default camera sees a
@@ -33,13 +34,13 @@ const CAMERA_AMBIENT: f32 = 0.3;
 const SUN_AMBIENT: f32 = 0.2;
 
 /// Where the light comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Light {
     /// From the upper left of the camera, so the visible side is always lit (with 30% ambient
-    /// light): the default, as the data modes are meant to be read everywhere.
-    #[default]
+    /// light): the light of the data modes, and a choice in the realistic mode.
     Camera,
-    /// Only the sun: a day side, a terminator and a dark night side.
+    /// Only the sun: a day side, a terminator and a dark night side. The default of the
+    /// realistic mode.
     Sun,
     /// The sun plus an ambient light that makes the night side visible.
     SunAmbient,
@@ -47,25 +48,28 @@ pub enum Light {
 
 impl Light {
     /// The choices of the option, in the order of [`Light::from_index`].
-    pub const CHOICES: &'static [&'static str] = &["Camera", "Sun", "Sun + ambient"];
+    pub const CHOICES: &'static [&'static str] = &["Sun", "Sun + ambient", "Camera"];
     pub const LABEL: &'static str = "Light";
-    pub const HOVER: &'static str = "Where the light comes from: the camera (the visible side is \
-         always lit), the sun of the simulation (fixed in space; drag round to see the night \
-         side), or the sun plus an ambient light that keeps the night side visible";
+    pub const HOVER: &'static str = "Where the light comes from: the sun of the simulation \
+         (fixed in space; drag round to see the night side), the sun plus an ambient light that \
+         keeps the night side visible, or the camera (the visible side is always lit). With the \
+         sun's light, stars show where a camera would see them: on the night side, with the \
+         sun hidden or out of view";
 
+    #[cfg(test)]
     pub fn index(self) -> usize {
         match self {
-            Light::Camera => 0,
-            Light::Sun => 1,
-            Light::SunAmbient => 2,
+            Light::Sun => 0,
+            Light::SunAmbient => 1,
+            Light::Camera => 2,
         }
     }
 
     pub fn from_index(index: usize) -> Self {
         match index {
-            1 => Light::Sun,
-            2 => Light::SunAmbient,
-            _ => Light::Camera,
+            1 => Light::SunAmbient,
+            2 => Light::Camera,
+            _ => Light::Sun,
         }
     }
 }
@@ -217,6 +221,6 @@ mod tests {
         for (index, _) in Light::CHOICES.iter().enumerate() {
             assert_eq!(Light::from_index(index).index(), index);
         }
-        assert_eq!(Light::default(), Light::Camera);
+        assert_eq!(Light::from_index(0), Light::Sun);
     }
 }
