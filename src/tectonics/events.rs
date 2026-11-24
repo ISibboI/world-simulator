@@ -1779,19 +1779,17 @@ impl Simulation {
             self.params.events.suture_convergence / (self.params.planet_radius * 100.0 / 1e6);
         // Per pair: colliding cells (not clearly diverging), converging colliding cells, trench
         // cells and the summed convergence (rad/Myr) of the colliding cells; collision motion
-        // along the smoothed boundary normals (like dynamics).
+        // along the smoothed boundary normals (`BoundaryCell::convergence`).
         let mut contacts: HashMap<(u32, u32), (usize, usize, usize, f64)> = HashMap::default();
         // Colliding (cell, other plate) contacts that converge.
         let mut converging: HashSet<(u32, u32)> = HashSet::default();
-        let normals: Vec<DVec3> = boundaries.iter().map(|boundary| boundary.normal).collect();
-        for (boundary, &normal) in boundaries.iter().zip(&normals) {
+        for boundary in boundaries {
             let pair = pair_key(boundary.plate, boundary.other);
             if boundary.kind == BoundaryKind::Collision {
-                let r = self.mesh.vertex(boundary.cell);
-                let convergence = (self.plates[boundary.plate as usize].angular_velocity
-                    - self.plates[boundary.other as usize].angular_velocity)
-                    .cross(r)
-                    .dot(normal);
+                // The motion of the material at the boundary (rotations and deformation, see
+                // `sheet`): a belt whose convergence is taken up by deforming margins sutures,
+                // and the plates' convergence continues as deformation inside the joined plate.
+                let convergence = boundary.convergence;
                 let entry = contacts.entry(pair).or_default();
                 if convergence > -min_convergence {
                     entry.0 += 1;

@@ -512,12 +512,13 @@ impl Simulation {
         viscosity.max(params.min_viscosity)
     }
 
-    /// The force (N, world frame, tangent) acting on the lithosphere of every world cell, from
+    /// The force (N, world frame, tangent) acting on the lithosphere of every world cell of the
+    /// `deforming` plates (zero elsewhere), from
     /// the last torque balance (see [`super::dynamics::ForceBalance`]): drag against the mantle,
     /// slab pull, slab resistance, shear coupling and the collision and yielding resistances at
     /// the solved plate velocities; ridge push spread over the young sea floor instead of the
     /// ridge cells; and the push of thickened continental crust.
-    fn cell_forces(&self) -> Vec<DVec3> {
+    fn cell_forces(&self, deforming: &[bool]) -> Vec<DVec3> {
         let params = &self.params;
         let radius = params.planet_radius;
         let cell_count = self.mesh.len();
@@ -537,6 +538,9 @@ impl Simulation {
         for cell in 0..cell_count as u32 {
             let r = self.mesh.vertex(cell);
             let plate = self.owners[cell as usize].plate;
+            if !deforming[plate as usize] {
+                continue;
+            }
             let coefficient = params.basal_drag
                 * if crusts[cell as usize].is_continental() {
                     params.continental_drag_factor
@@ -619,6 +623,9 @@ impl Simulation {
         for cell in 0..cell_count as u32 {
             let crust = &crusts[cell as usize];
             let plate = self.owners[cell as usize].plate;
+            if !deforming[plate as usize] {
+                continue;
+            }
             let r = self.mesh.vertex(cell);
             let basis = self.sheet_geometry.basis[cell as usize];
             let push = |crust: &Crust| {
@@ -689,7 +696,6 @@ impl Simulation {
             return;
         }
         let start = web_time::Instant::now();
-        let forces = self.cell_forces();
         let params = self.params.clone();
         let params = &params;
         let sheet = &params.sheet;
@@ -739,24 +745,7 @@ impl Simulation {
                 }
             })
             .collect();
-        for (cell, owner) in self.owners.iter().enumerate() {
-            let w = &mut work[owner.plate as usize];
-            let i = w.index[owner.local as usize] as usize;
-            w.force[i] += self.plates[owner.plate as usize].rotation.inverse() * forces[cell];
-        }
-
-        let mut statistics = std::mem::take(&mut self.sheet_statistics);
-        statistics.weak_samples = 0;
-        let mut unknowns = 0usize;
-        let mut nodes: Vec<(u32, u32, Node)> = Vec::new();
-        // Per block: plate, first unknown, drag matrix, generalised force, sample count.
-        let mut blocks: Vec<(u32, usize, DMat3, DVec3, usize)> = Vec::new();
-        // Per weak node: drag coefficient and force (tangent basis).
-        let mut drag: Vec<f64> = Vec::new();
-        let mut rhs: Vec<f64> = Vec::new();
-        let mut stack = Vec::new();
-
-        for (p, (plate, w)) in self.plates.iter().zip(work.iter_mut()).enumerate() {
+        for (plate, w) in self.plates.iter().zip(work.iter_mut()) {
             for (i, &local) in w.samples.iter().enumerate() {
                 let l = local as usize;
                 let crust = plate.crust[l].expect("samples have crust");
@@ -784,6 +773,33 @@ impl Simulation {
                     .count();
                 w.weak[i] = w.viscosity[i] < sheet.rigid_viscosity && neighbours >= 3;
             }
+        }
+        // Forces only for plates that can deform (a plate without weak samples is rigid).
+        let deforming: Vec<bool> = work.iter().map(|w| w.weak.iter().any(|&weak| weak)).collect();
+        let forces = self.cell_forces(&deforming);
+        for (cell, owner) in self.owners.iter().enumerate() {
+            if deforming[owner.plate as usize] {
+                let w = &mut work[owner.plate as usize];
+                let i = w.index[owner.local as usize] as usize;
+                w.force[i] += self.plates[owner.plate as usize].rotation.inverse() * forces[cell];
+            }
+        }
+
+        let mut statistics = std::mem::take(&mut self.sheet_statistics);
+        statistics.weak_samples = 0;
+        let mut unknowns = 0usize;
+        let mut nodes: Vec<(u32, u32, Node)> = Vec::new();
+        // Per block: plate, first unknown, drag matrix, generalised force, sample count.
+        let mut blocks: Vec<(u32, usize, DMat3, DVec3, usize)> = Vec::new();
+        // Per weak node: drag coefficient and force (tangent basis).
+        let mut drag: Vec<f64> = Vec::new();
+        let mut rhs: Vec<f64> = Vec::new();
+        let mut stack = Vec::new();
+
+        for (p, w) in work.iter_mut().enumerate() {
+            if !deforming[p] {
+                continue;
+            }
             // Remove the net torque of the forces (drag-weighted rigid rotation).
             let (mut matrix, mut torque) = (DMat3::ZERO, DVec3::ZERO);
             for (i, &local) in w.samples.iter().enumerate() {
@@ -798,10 +814,6 @@ impl Simulation {
                 for (i, &local) in w.samples.iter().enumerate() {
                     w.force[i] -= rotation.cross(mesh.vertex(local)) * w.drag[i];
                 }
-            }
-            // A plate without weak samples is rigid: no unknowns, no deformation.
-            if !w.weak.iter().any(|&weak| weak) {
-                continue;
             }
             // Rigid blocks: connected components of rigid samples.
             for first in 0..w.samples.len() {
