@@ -87,6 +87,7 @@ fn isoline_interval(options: &OptionValues) -> Option<f32> {
 /// The colour of a type (Okabe & Ito 2008).
 fn type_color(crust: CrustType) -> [u8; 3] {
     match crust {
+        CrustType::Metasedimentary => [86, 180, 233],
         CrustType::Oceanic => [0, 114, 178],
         CrustType::MaficTransitional => [0, 158, 115],
         CrustType::ThinnedContinental => [240, 228, 66],
@@ -99,6 +100,7 @@ fn type_color(crust: CrustType) -> [u8; 3] {
 /// The label of a type in the legend.
 fn type_label(crust: CrustType) -> &'static str {
     match crust {
+        CrustType::Metasedimentary => "Metasediment (accretionary wedge)",
         CrustType::Oceanic => "Oceanic",
         CrustType::MaficTransitional => "Arc, plateau (transitional)",
         CrustType::ThinnedContinental => "Thinned continental (transitional)",

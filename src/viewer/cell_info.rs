@@ -75,8 +75,9 @@ pub struct CellInfo {
     /// The plate covering the cell.
     pub plate: u32,
     /// Bit flags: [`CellInfo::CONTINENTAL`], the boundary class
-    /// ([`CellInfo::BOUNDARY_SHIFT`]), [`CellInfo::DEFORMING_BAND`], [`CellInfo::OCEANIC`] and
-    /// [`CellInfo::FELSIC`]. The frame history keeps the low 8 bits.
+    /// ([`CellInfo::BOUNDARY_SHIFT`]), [`CellInfo::DEFORMING_BAND`], [`CellInfo::OCEANIC`],
+    /// [`CellInfo::FELSIC`] and [`CellInfo::METASEDIMENT`]. The frame history keeps the low 16
+    /// bits.
     pub flags: u32,
 }
 
@@ -101,6 +102,10 @@ impl CellInfo {
     /// above 0.5): continental crust, mature arcs and thinned continental margins, rather than
     /// oceanic crust and intra-oceanic arcs or plateaus built on it.
     pub const FELSIC: u32 = 1 << 7;
+    /// [`CellInfo::flags`]: most of the crystalline crust (by mass) is metasediment, sediment
+    /// buried and metamorphosed during the simulation ([`crate::tectonics::Crust::metasediment`]
+    /// above 0.5): accretionary wedges and the sediment-fed parts of orogens.
+    pub const METASEDIMENT: u32 = 1 << 8;
 
     pub fn is_continental(&self) -> bool {
         self.flags & Self::CONTINENTAL != 0
@@ -132,6 +137,10 @@ impl CellInfo {
         self.flags & Self::FELSIC != 0
     }
 
+    pub fn is_metasedimentary(&self) -> bool {
+        self.flags & Self::METASEDIMENT != 0
+    }
+
     /// The type of the crust, from its flags and thickness.
     pub fn crust_type(&self) -> CrustType {
         CrustType::of(self)
@@ -161,9 +170,13 @@ pub const THICK_CRUST: f32 = 50_000.0;
 /// The type of a cell's crust, a refinement of the simulation's oceanic / transitional /
 /// continental classification ([`crate::tectonics::Crust::is_oceanic`],
 /// [`crate::tectonics::Crust::is_continental`]) by the composition of the basement
-/// ([`CellInfo::FELSIC`]) and, for continental crust, its thickness.
+/// ([`CellInfo::FELSIC`]) and, for continental crust, its thickness; crust that is mostly
+/// metasediment ([`CellInfo::METASEDIMENT`]) is a type of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CrustType {
+    /// Crust that is mostly metasediment ([`CellInfo::METASEDIMENT`]), whatever its class:
+    /// accretionary wedges.
+    Metasedimentary,
     /// Normal oceanic crust: thin and dense.
     Oceanic,
     /// Transitional crust on a mafic basement: intra-oceanic arcs and thickened oceanic crust.
@@ -182,7 +195,8 @@ pub enum CrustType {
 }
 
 impl CrustType {
-    pub const ALL: [CrustType; 6] = [
+    pub const ALL: [CrustType; 7] = [
+        CrustType::Metasedimentary,
         CrustType::Oceanic,
         CrustType::MaficTransitional,
         CrustType::ThinnedContinental,
@@ -192,7 +206,9 @@ impl CrustType {
     ];
 
     pub fn of(cell: &CellInfo) -> Self {
-        if cell.is_continental() {
+        if cell.is_metasedimentary() {
+            CrustType::Metasedimentary
+        } else if cell.is_continental() {
             if !cell.is_felsic() {
                 CrustType::MaficContinental
             } else if cell.crust_thickness > THICK_CRUST {
@@ -209,10 +225,12 @@ impl CrustType {
         }
     }
 
-    /// The simulation's coarse class: "oceanic", "transitional" or "continental".
+    /// The simulation's coarse class: "oceanic", "transitional" or "continental"
+    /// ("metasedimentary" crust can be of any class).
     #[cfg(test)]
     pub fn class(self) -> &'static str {
         match self {
+            CrustType::Metasedimentary => "metasedimentary",
             CrustType::Oceanic => "oceanic",
             CrustType::MaficTransitional | CrustType::ThinnedContinental => "transitional",
             CrustType::MaficContinental | CrustType::Continental | CrustType::ThickContinental => {
@@ -225,6 +243,7 @@ impl CrustType {
     /// crust mode names the classes).
     pub fn label(self) -> &'static str {
         match self {
+            CrustType::Metasedimentary => "metasedimentary",
             CrustType::Oceanic => "oceanic",
             CrustType::MaficTransitional => "arc or plateau",
             CrustType::ThinnedContinental => "thinned continental",
@@ -334,6 +353,10 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                     0
                 } | if crust.basement().felsic > 0.5 {
                     CellInfo::FELSIC
+                } else {
+                    0
+                } | if crust.metasediment > 0.5 {
+                    CellInfo::METASEDIMENT
                 } else {
                     0
                 },
@@ -1024,6 +1047,11 @@ mod tests {
         assert_eq!(cell(c | f, 65e3).crust_type(), CrustType::ThickContinental);
         // A thick mafic arc stays a mafic arc.
         assert_eq!(cell(c, 65e3).crust_type(), CrustType::MaficContinental);
+        // Mostly metasediment, whatever the class.
+        let m = CellInfo::METASEDIMENT;
+        for flags in [o | m, m, f | m, c | f | m] {
+            assert_eq!(cell(flags, 25e3).crust_type(), CrustType::Metasedimentary);
+        }
         // The coarse classes are those of the simulation's flags.
         for flags in [o, 0, f, c, c | f] {
             let info = cell(flags, 20e3);
@@ -1107,8 +1135,8 @@ mod tests {
         for (cell, info) in infos.iter().enumerate() {
             assert_eq!(info.boundary(), boundaries.classes[cell]);
             assert_eq!(info.in_deforming_band(), boundaries.band[cell]);
-            // The frame history keeps 8 bits of the flags.
-            assert_eq!(info.flags & !0xFF, 0);
+            // The frame history keeps 16 bits of the flags.
+            assert_eq!(info.flags & !0xFFFF, 0);
             let cell = cell as u32;
             assert_eq!(info.plate, simulation.owner(cell).plate);
             assert_eq!(
@@ -1126,6 +1154,10 @@ mod tests {
             assert_eq!(
                 info.is_felsic(),
                 simulation.surface_crust(cell).basement().felsic > 0.5
+            );
+            assert_eq!(
+                info.is_metasedimentary(),
+                simulation.surface_crust(cell).metasediment > 0.5
             );
             assert!(info.temperature.is_finite());
             assert!(info.temperature_january.is_finite() && info.temperature_july.is_finite());

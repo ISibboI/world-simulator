@@ -21,15 +21,16 @@ Render mode **Crust** (`--render-mode crust`, `?render-mode=crust`), `src/viewer
 - Legend (all modes): a colour square now wraps together with its label (before, a long label
   could leave its square at the end of the previous row).
 
-Data: one flag bit, no frame growth. `CellInfo::OCEANIC` (bit 6) is copied verbatim from PR
-#140; `CellInfo::FELSIC` (bit 7, basement felsic share > 0.5) is new. All 8 flag bits the frame
-history keeps are now used. Simulation results are unchanged.
+Data: `CellInfo::OCEANIC` (bit 6, as merged with #140); `CellInfo::FELSIC` (bit 7, basement
+felsic share > 0.5) and `CellInfo::METASEDIMENT` (bit 8) are new. The frame history keeps 16
+flag bits (was 8; +1 B/cell raw). Simulation results are unchanged.
 
-**Not shown: metamorphosed sediment** (named in the issue). The simulation tracks it as a mass
-share, but at 500 Myr only 1.3–2.2 % of the cells have more than 5 % of it and 0.2–0.6 % more
-than half (accretionary wedges, about one cell wide). Showing it needs a ninth flag bit or a
-share channel (the flags channel widened to 2 bytes, +1 B/cell raw, little after delta + lz4;
-past frames are per run, so no compatibility issue). Left for a decision.
+**Metamorphosed sediment** (named in the issue; added on #142's request "expand bit flags"): the
+simulation tracks it as a mass share; at 500 Myr only 1.3–2.2 % of the cells have more than 5 % of
+it and 0.2–0.6 % more than half (accretionary wedges, about one cell wide). Crust that is mostly
+metasediment (`CellInfo::METASEDIMENT`, flag bit 8) is shown as its own type; the flags channel of
+the frame history is now 16 bits wide (+1 B/cell raw, codec version 7). Flag analysis:
+[flags.md](flags.md).
 
 Screenshots: desktop [type](crust-type.png), [thickness + 10 km isolines](crust-thickness.png),
 [both](crust-both.png); web at phone width (390 px) [type](web-phone-type.png),
