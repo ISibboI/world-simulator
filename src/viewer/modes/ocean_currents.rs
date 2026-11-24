@@ -16,9 +16,7 @@
 //! transport, the gyres (ψ: clockwise or anticlockwise), or the sea-surface temperature;
 //! streamlines are isolines of ψ (between two of them flows the same transport).
 
-use glam::DVec3;
-
-use super::super::arrows::{ArrowStyle, Sample, base_point, sample_cells};
+use super::super::arrows::{ArrowStyle, Sample, sample_cells};
 use super::super::overlay::{LineStyle, OverlayBuilder, isolines};
 use super::{
     ArrowScale, ColorScale, DEFAULT_ARROW_SPACING, Legend, ModeData, ModeOption, OptionKind,
@@ -100,19 +98,6 @@ fn streamfunction(cell: &CellInfo) -> f32 {
     }
 }
 
-/// Unit vectors to the east and to the north at a direction from the planet centre.
-fn east_north(position: DVec3) -> (DVec3, DVec3) {
-    let up = position.normalize_or(DVec3::Z);
-    let east = DVec3::Z.cross(up).try_normalize().unwrap_or(DVec3::Y);
-    (east, up.cross(east))
-}
-
-/// The transport of a cell as a vector in world coordinates, in Sv per 100 km.
-fn vector(position: DVec3, [east, north]: [f32; 2]) -> DVec3 {
-    let (e, n) = east_north(position);
-    (e * f64::from(east) + n * f64::from(north)) / UNIT
-}
-
 /// Subdivisions of the coarse mesh of the climate model (`TemperatureParams`'s default, at most
 /// those of the planet's mesh).
 const COARSE_SUBDIVISIONS: u32 = 4;
@@ -172,31 +157,22 @@ fn arrow_cells(data: &ModeData) -> (Vec<u32>, f64) {
     sample_cells(data.mesh, COARSE_SUBDIVISIONS.min(data.mesh.subdivisions()))
 }
 
-/// The arrows of the currents by kind (all [`Kind::Neutral`] without the warm/cold colours).
+/// The arrows of the currents (in Sv per 100 km) by kind (all [`Kind::Neutral`] without the
+/// warm/cold colours).
 fn arrows(data: &ModeData, warm_cold: bool) -> (Vec<(Kind, Sample)>, f64) {
     let (cells, spacing) = arrow_cells(data);
-    if data.cells.len() != data.mesh.len() {
-        return (Vec::new(), spacing);
-    }
-    let samples = cells
+    let samples = data
+        .tangent_samples(&cells, spacing, |cell| {
+            current(cell).map(|[east, north]| [east / UNIT as f32, north / UNIT as f32])
+        })
         .into_iter()
-        .filter_map(|cell| {
-            let current = current(&data.cells[cell as usize])?;
-            let position = data.mesh.vertex(cell);
-            let vector = vector(position, current);
-            vector.try_normalize()?;
+        .map(|(cell, sample)| {
             let kind = if warm_cold {
                 kind(&data.cells[cell as usize])
             } else {
                 Kind::Neutral
             };
-            Some((
-                kind,
-                Sample {
-                    base: base_point(data.mesh, cell, spacing, |vertex| data.position(vertex)),
-                    vector,
-                },
-            ))
+            (kind, sample)
         })
         .collect();
     (samples, spacing)
@@ -498,16 +474,6 @@ mod tests {
         assert_eq!(kind(&cell(-30.0)), Kind::Cold);
         assert_eq!(kind(&cell(5.0)), Kind::Neutral);
         assert_eq!(kind(&cell(f32::NAN)), Kind::Neutral);
-    }
-
-    #[test]
-    fn vectors_point_east_and_north() {
-        let position = DVec3::new(1.0, 0.0, 0.0);
-        // East at longitude 0 is +y, north +z; 10 m²/s is 1 Sv per 100 km.
-        let v = vector(position, [10.0, 0.0]);
-        assert!((v - DVec3::Y).length() < 1e-9, "{v}");
-        let v = vector(position, [0.0, 20.0]);
-        assert!((v - 2.0 * DVec3::Z).length() < 1e-9, "{v}");
     }
 
     #[test]
