@@ -42,7 +42,6 @@ use glam::{DMat2, DMat3, DVec2, DVec3};
 use super::deformation::excess_potential_energy;
 use super::dynamics::{BoundaryKind, SECONDS_PER_MYR};
 use super::ledger::Term;
-use super::weak_zones::lithosphere_strength;
 use super::*;
 use super::crust::{age_for_thermal_fraction, thermal_fraction};
 
@@ -468,13 +467,20 @@ enum Node {
 }
 
 impl Simulation {
-    /// The relative strength (0–1) of the lithosphere under `crust` for the sheet: the strength
-    /// proxy of [`lithosphere_strength`] (thermal age, plume reheating, thinning, orogenic
-    /// weakening) times the weaker creep of continental lithosphere and the weakening by
-    /// thickened crust, whose hot lower crust replaces the strong mantle lid (`(h₀/h)²` above
-    /// the reference thickness).
+    /// The relative strength (0–1) of the lithosphere under `crust` for the sheet: the
+    /// thermal state (thermal age since formation, stretching or plume reheating; see
+    /// [`Crust::strength_age`]) and the remaining orogenic weakening of the strength proxy
+    /// ([`super::weak_zones::lithosphere_strength`]), times the weaker creep of continental lithosphere and the
+    /// weakening by thickened crust, whose hot lower crust replaces the strong mantle lid
+    /// (`(h₀/h)²` above the reference thickness). Unlike the proxy for where plates break, thin
+    /// (stretched) continental crust is not weaker in itself: once its lithosphere has cooled
+    /// it carries less weak crust over the same mantle lid (passive margins are strong).
     pub(super) fn sheet_strength(&self, crust: &Crust) -> f64 {
-        let mut strength = lithosphere_strength(crust, self.time);
+        let mut strength = super::weak_zones::combine_strength(
+            super::weak_zones::thermal_strength(crust.strength_age(self.time)),
+            1.0,
+            crust.orogenic,
+        );
         if crust.is_continental_origin() {
             strength *= self.params.sheet.continental_strength;
             let thickness = crust.thickness.max(1.0);
