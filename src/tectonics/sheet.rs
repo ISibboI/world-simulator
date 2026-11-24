@@ -39,11 +39,11 @@
 
 use glam::{DMat2, DMat3, DVec2, DVec3};
 
+use super::crust::{age_for_thermal_fraction, thermal_fraction};
 use super::deformation::excess_potential_energy;
 use super::dynamics::{BoundaryKind, SECONDS_PER_MYR};
 use super::ledger::Term;
 use super::*;
-use super::crust::{age_for_thermal_fraction, thermal_fraction};
 
 /// Parameters of the deforming plates (`--set sheet.NAME=VALUE`).
 #[derive(Clone, Debug)]
@@ -538,7 +538,6 @@ impl Simulation {
         let cell_count = self.mesh.len();
         let cell_area = 4.0 * std::f64::consts::PI * radius * radius / cell_count as f64;
         let mut force = vec![DVec3::ZERO; cell_count];
-        let trace = tracing::enabled!(tracing::Level::TRACE);
         let Some(balance) = self.force_balance.as_ref() else {
             return force;
         };
@@ -566,7 +565,6 @@ impl Simulation {
             let mantle = mantle - r * mantle.dot(r);
             force[cell as usize] += (mantle - velocity(plate, r)) * coefficient;
         }
-        let checkpoint_drag = trace.then(|| force.clone()).unwrap_or_default();
         // The cell of the other plate next to a boundary cell, where forces on the other plate
         // act.
         let other_cell = |boundary: &dynamics::BoundaryCell| {
@@ -607,7 +605,6 @@ impl Simulation {
                 }
             }
         }
-        let checkpoint_boundaries = trace.then(|| force.clone()).unwrap_or_default();
         for &index in &balance.active_collisions {
             let boundary = &balance.boundaries[index];
             let r = self.mesh.vertex(boundary.cell);
@@ -627,7 +624,6 @@ impl Simulation {
                 force[other as usize] += resisting;
             }
         }
-        let checkpoint_couplings = trace.then(|| force.clone()).unwrap_or_default();
         // Ridge push as the gradient of the potential energy of cooling sea floor, which falls
         // linearly with age until `ridge_push_age` (Turcotte & Schubert): the force per unit
         // length transmitted at age a is `ridge_push · min(a / A, 1)`. And the potential energy
@@ -681,21 +677,6 @@ impl Simulation {
                 }
                 if any && let Some(g) = gradient(r, basis, own, &neighbours) {
                     force[cell as usize] -= g * (sheet.gpe_factor * cell_area / radius);
-                }
-            }
-        }
-        if trace {
-            for cell in 0..cell_count {
-                if force[cell].length() > 1e19 {
-                    tracing::trace!(
-                        cell,
-                        total = force[cell].length(),
-                        drag = checkpoint_drag[cell].length(),
-                        boundaries = (checkpoint_boundaries[cell] - checkpoint_drag[cell]).length(),
-                        couplings = (checkpoint_couplings[cell] - checkpoint_boundaries[cell]).length(),
-                        body = (force[cell] - checkpoint_couplings[cell]).length(),
-                        "Large cell force"
-                    );
                 }
             }
         }
@@ -789,7 +770,10 @@ impl Simulation {
             }
         }
         // Forces only for plates that can deform (a plate without weak samples is rigid).
-        let deforming: Vec<bool> = work.iter().map(|w| w.weak.iter().any(|&weak| weak)).collect();
+        let deforming: Vec<bool> = work
+            .iter()
+            .map(|w| w.weak.iter().any(|&weak| weak))
+            .collect();
         let forces = self.cell_forces(&deforming);
         for (cell, owner) in self.owners.iter().enumerate() {
             if deforming[owner.plate as usize] {
@@ -846,8 +830,7 @@ impl Simulation {
                     count += 1;
                     for &n in mesh.neighbors(w.samples[i]) {
                         let j = w.index[n as usize];
-                        if j != u32::MAX && !w.weak[j as usize] && w.block[j as usize] == u32::MAX
-                        {
+                        if j != u32::MAX && !w.weak[j as usize] && w.block[j as usize] == u32::MAX {
                             w.block[j as usize] = id;
                             stack.push(j);
                         }
@@ -891,8 +874,10 @@ impl Simulation {
         // frame)
         let mut couplings: Vec<(u32, u32, f64, DVec3, DVec3)> = Vec::new();
         if let Some(balance) = self.force_balance.as_ref() {
-            let k_shear =
-                0.5 * params.basal_drag * params.boundary_coupling_width * self.boundary_length_per_cell();
+            let k_shear = 0.5
+                * params.basal_drag
+                * params.boundary_coupling_width
+                * self.boundary_length_per_cell();
             let mut entries: Vec<(usize, f64, DVec3)> = Vec::new();
             for (index, boundary) in balance.boundaries.iter().enumerate() {
                 if k_shear > 0.0 {
@@ -910,8 +895,7 @@ impl Simulation {
                 for (side, cell) in [boundary.cell, boundary.neighbor].into_iter().enumerate() {
                     let owner = self.owners[cell as usize];
                     let w = &mut work[owner.plate as usize];
-                    frames[side] =
-                        self.plates[owner.plate as usize].rotation.inverse() * direction;
+                    frames[side] = self.plates[owner.plate as usize].rotation.inverse() * direction;
                     let i = w.index[owner.local as usize] as usize;
                     if w.node[i] == u32::MAX && w.block[i] != u32::MAX {
                         w.node[i] = nodes.len() as u32;
@@ -1107,8 +1091,8 @@ impl Simulation {
                 }
             }
             for (index, block) in blocks.iter().enumerate() {
-                let v = block_inverse[index]
-                    * DVec3::new(r[block.1], r[block.1 + 1], r[block.1 + 2]);
+                let v =
+                    block_inverse[index] * DVec3::new(r[block.1], r[block.1 + 1], r[block.1 + 2]);
                 z[block.1] = v.x;
                 z[block.1 + 1] = v.y;
                 z[block.1 + 2] = v.z;
@@ -1118,15 +1102,22 @@ impl Simulation {
         // The operator must be symmetric (and positive definite) for conjugate gradients.
         #[cfg(debug_assertions)]
         if unknowns > 0 {
-            let a: Vec<f64> = (0..unknowns).map(|i| ((i * 7919 % 101) as f64) - 50.0).collect();
-            let b: Vec<f64> = (0..unknowns).map(|i| ((i * 104729 % 97) as f64) - 48.0).collect();
+            let a: Vec<f64> = (0..unknowns)
+                .map(|i| ((i * 7919 % 101) as f64) - 50.0)
+                .collect();
+            let b: Vec<f64> = (0..unknowns)
+                .map(|i| ((i * 104729 % 97) as f64) - 48.0)
+                .collect();
             let (mut aa, mut ab) = (vec![0.0; unknowns], vec![0.0; unknowns]);
             apply(&a, &mut aa);
             apply(&b, &mut ab);
             let x: f64 = aa.iter().zip(&b).map(|(p, q)| p * q).sum();
             let y: f64 = ab.iter().zip(&a).map(|(p, q)| p * q).sum();
             let scale: f64 = aa.iter().map(|v| v.abs()).sum::<f64>() * 100.0;
-            debug_assert!((x - y).abs() <= 1e-9 * scale, "asymmetric sheet operator: {x} vs {y}");
+            debug_assert!(
+                (x - y).abs() <= 1e-9 * scale,
+                "asymmetric sheet operator: {x} vs {y}"
+            );
             let positive: f64 = aa.iter().zip(&a).map(|(p, q)| p * q).sum();
             debug_assert!(positive > 0.0, "sheet operator not positive: {positive}");
         }
@@ -1733,7 +1724,13 @@ impl Simulation {
                 self.plates[plate as usize].sheet.split_timer = 0.0;
                 self.plates[new_plate as usize].sheet.split_timer = 0.0;
                 self.sheet_statistics.splits += 1;
-                tracing::debug!(plate, new_plate, cells = piece.len(), time = self.time, "Deforming plate split");
+                tracing::debug!(
+                    plate,
+                    new_plate,
+                    cells = piece.len(),
+                    time = self.time,
+                    "Deforming plate split"
+                );
             }
         }
     }
@@ -1817,18 +1814,18 @@ mod tests {
     #[test]
     fn deforming_plates_stay_consistent() {
         // Runs the solve (with its symmetry check in debug builds) and the transport.
-        let mut simulation = Simulation::new(
-            SphereMesh::icosphere(4),
-            8,
-            TectonicParams::default(),
-            3,
-        );
+        let mut simulation =
+            Simulation::new(SphereMesh::icosphere(4), 8, TectonicParams::default(), 3);
         let mass = simulation.total_mass();
         for _ in 0..15 {
             simulation.step(1.0);
         }
         let ledger = &simulation.ledger;
-        assert!(ledger.deformation.abs() < 1e-9 * mass, "{}", ledger.deformation);
+        assert!(
+            ledger.deformation.abs() < 1e-9 * mass,
+            "{}",
+            ledger.deformation
+        );
         assert!(simulation.sheet_statistics.solves > 0);
     }
 
@@ -1842,8 +1839,14 @@ mod tests {
             bits.extend(plate.angular_velocity.to_array().map(f64::to_bits));
             for crust in plate.crust.iter().flatten() {
                 bits.extend(
-                    [crust.thickness, crust.density, crust.birth, crust.sediment, crust.orogenic]
-                        .map(f64::to_bits),
+                    [
+                        crust.thickness,
+                        crust.density,
+                        crust.birth,
+                        crust.sediment,
+                        crust.orogenic,
+                    ]
+                    .map(f64::to_bits),
                 );
             }
         }
@@ -1863,7 +1866,10 @@ mod tests {
         rigid.sheet.enabled = false;
         let mut stiff = TectonicParams::default();
         stiff.sheet.rigid_viscosity = 0.0;
-        assert!(run(rigid) == run(stiff), "stiff deforming plates differ from rigid plates");
+        assert!(
+            run(rigid) == run(stiff),
+            "stiff deforming plates differ from rigid plates"
+        );
     }
 
     /// A simulation whose plate 0 has the deformation velocity `field(r)` (rad/Myr, plate
@@ -1915,7 +1921,10 @@ mod tests {
         assert!((after - mass).abs() < 1e-9 * mass, "{mass} → {after}");
         assert!(simulation.ledger.deformation.abs() < 1e-9 * mass);
         if let (Some(before), Some(after)) = (before, thickness(&simulation)) {
-            assert!(after > before, "converging crust thickens: {before} → {after}");
+            assert!(
+                after > before,
+                "converging crust thickens: {before} → {after}"
+            );
         }
     }
 

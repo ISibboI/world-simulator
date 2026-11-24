@@ -1041,7 +1041,11 @@ impl Simulation {
         tracing::trace!(substeps, "Tectonic step");
         if substeps > 10 && tracing::enabled!(tracing::Level::TRACE) {
             for (index, plate) in self.plates.iter().enumerate() {
-                let cells = self.owners.iter().filter(|o| o.plate as usize == index).count();
+                let cells = self
+                    .owners
+                    .iter()
+                    .filter(|o| o.plate as usize == index)
+                    .count();
                 let samples = plate.crust.iter().filter(|c| c.is_some()).count();
                 tracing::trace!(
                     index,

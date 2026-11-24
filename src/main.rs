@@ -1571,4 +1571,3 @@ fn log_sediment_reservoirs(statistics: &PlanetStatistics) {
         100.0 * r.shelf_on_filled_basins,
     );
 }
-
