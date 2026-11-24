@@ -14,8 +14,9 @@
 //! surface may be over-exposed** (#159): the exposure is at most the one that shows the
 //! brightest sunlit point in view as it looks in daylight under the sun at the zenith
 //! ([`Exposure::headroom`]), however small the lit part of the frame is, so a thin crescent
-//! keeps its colours. Only the sun itself (and its glint on water) may clip, as it does for the
-//! eye. The ambient fill light of `SunAmbient` is a visual aid, not light: it is not metered
+//! keeps its colours (the shader caps the incidence of bump-tilted normals and keeps the limb
+//! haze at its daylight brightness to match). Only the sun itself (and its glint on water) may
+//! clip, as it does for the eye. The ambient fill light of `SunAmbient` is a visual aid, not light: it is not metered
 //! and not brightened by the exposure. With the camera light the whole visible side is lit, so
 //! there are no stars (and no sun) in that mode.
 //!
@@ -242,7 +243,9 @@ fn sun_visibility(eye: Vec3, sun: Vec3, sun_radius: f32) -> f32 {
 /// visible cap around the eye direction has the angular radius `α = acos(1/|eye|)`, so the lit
 /// point nearest to the subsolar point is `max(θ − α, 0)` from it, `θ` the angle between the
 /// sun and the eye direction. (The whole visible cap is in the frame: the planet's angular
-/// radius is ~12.8° at the camera's 4.5 radii, the view's half-height 17°.)
+/// radius is ~12.8° at the camera's 4.5 radii, the view's half-angle on its narrow axis 17°;
+/// where panels cover part of the planet, the cap is merely conservative.) The bump relief can
+/// tilt normals further towards the sun; `realistic.wgsl` caps their incidence to match.
 fn brightest_incidence(eye: Vec3, sun: Vec3) -> f32 {
     let distance = eye.length();
     if distance <= 1.0 {
@@ -385,33 +388,30 @@ mod tests {
 
     #[test]
     fn the_brightest_point_is_exact() {
-        // Brute force over the visible cap: the largest cosine of the incidence.
+        // Independent check: the largest p·sun over the visible cap {p·eye ≥ 1} lies at the
+        // subsolar point if it is visible, else on the cap's boundary circle, sampled densely.
         let eye = Vec3::new(0.3, -4.0, 1.2);
+        let axis = eye.normalize();
+        let radius = (1.0 / eye.length()).acos();
+        let (u, v) = axis.any_orthonormal_pair();
         for sun in [
             Vec3::new(0.0, 1.0, 0.0),
             Vec3::new(0.2, 0.9, -0.3).normalize(),
             Vec3::new(1.0, 0.0, 0.0),
             Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(-0.1, 0.95, 0.2).normalize(),
         ] {
-            let mut best: f32 = 0.0;
-            let steps = 400;
-            for i in 0..steps {
-                for j in 0..steps {
-                    let theta = std::f32::consts::PI * (i as f32 + 0.5) / steps as f32;
-                    let phi = std::f32::consts::TAU * j as f32 / steps as f32;
-                    let p = Vec3::new(
-                        theta.sin() * phi.cos(),
-                        theta.sin() * phi.sin(),
-                        theta.cos(),
-                    );
-                    if p.dot(eye) >= 1.0 {
-                        best = best.max(p.dot(sun));
-                    }
-                }
+            let mut best: f32 = if sun.dot(eye) >= 1.0 { 1.0 } else { 0.0 };
+            for step in 0..100_000 {
+                let phi = std::f32::consts::TAU * step as f32 / 100_000.0;
+                let p = axis * radius.cos() + (u * phi.cos() + v * phi.sin()) * radius.sin();
+                best = best.max(p.dot(sun));
             }
             let exact = brightest_incidence(eye, sun);
-            assert!((exact - best).abs() < 0.02, "{sun}: {exact} vs {best}");
-            assert!(exact >= best - 1e-4, "{sun}: {exact} < {best}");
+            assert!(
+                (exact - best).abs() <= 1e-3 * best.max(1e-3) + 1e-5,
+                "{sun}: {exact} vs {best}"
+            );
         }
     }
 

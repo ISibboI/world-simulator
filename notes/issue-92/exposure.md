@@ -102,8 +102,15 @@ Now the exposure is also capped by the **brightest lit point in view**.
   `c_max = cos(max(θ − α, 0))`, or 0 when that is beyond 90°.
 - The share meter still darkens the scene for stars and glare as before. The cap only lowers
   the target.
+- Two parts of the shader would escape the cap, so it handles them itself:
+  - the **bump relief** tilts normals beyond `c_max` towards the sun, so the shader caps the
+    incidence at `2^−E`. A reflectance therefore never shows brighter than under the zenith sun
+    in daylight. At the daylight exposure this cap is 1 and changes nothing;
+  - the **limb haze** also lights the twilight band, which `c_max` does not see. It keeps its
+    daylight brightness at any exposure, so the blue arc at the limb of an eclipse view (sun
+    just hidden) stays blue instead of clipping.
 - What may still clip: the sun's disc and glow, and its mirror image, the glint on water, which
-  is the sun seen in the water. The thin haze added at the limb is small.
+  is the sun seen in the water.
 - The ambient fill of **Sun + ambient** is not brightened by the exposure, so the readable
   night side cannot drive anything to white either.
 
