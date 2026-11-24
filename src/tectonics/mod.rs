@@ -1039,24 +1039,6 @@ impl Simulation {
         let max_substep_angle = self.params.max_substep_movement * self.mesh.mean_edge_angle();
         let substeps = (max_angle / max_substep_angle).ceil().max(1.0) as usize;
         tracing::trace!(substeps, "Tectonic step");
-        if substeps > 10 && tracing::enabled!(tracing::Level::TRACE) {
-            for (index, plate) in self.plates.iter().enumerate() {
-                let cells = self
-                    .owners
-                    .iter()
-                    .filter(|o| o.plate as usize == index)
-                    .count();
-                let samples = plate.crust.iter().filter(|c| c.is_some()).count();
-                tracing::trace!(
-                    index,
-                    cells,
-                    samples,
-                    omega = plate.angular_velocity.length(),
-                    frame = plate.sheet.frame.length(),
-                    "Fast plate check"
-                );
-            }
-        }
         let start = self.felsic_and_sediment();
         for _ in 0..substeps {
             self.substep(dt / substeps as f64);

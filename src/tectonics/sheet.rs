@@ -565,15 +565,6 @@ impl Simulation {
             let mantle = mantle - r * mantle.dot(r);
             force[cell as usize] += (mantle - velocity(plate, r)) * coefficient;
         }
-        // The cell of the other plate next to a boundary cell, where forces on the other plate
-        // act.
-        let other_cell = |boundary: &dynamics::BoundaryCell| {
-            self.mesh
-                .neighbors(boundary.cell)
-                .iter()
-                .copied()
-                .find(|&n| self.owners[n as usize].plate == boundary.other)
-        };
         // The relative deformation velocity (m/s) across a boundary, as in the torque balance.
         let deformation = |boundary: &dynamics::BoundaryCell| {
             (self.deformation_velocity_absolute(boundary.cell)
@@ -600,9 +591,7 @@ impl Simulation {
                 let relative = velocity(boundary.plate, r) - velocity(boundary.other, r);
                 let shear = t * (k * relative.dot(t));
                 force[cell] -= shear;
-                if let Some(other) = other_cell(boundary) {
-                    force[other as usize] += shear;
-                }
+                force[boundary.neighbor as usize] += shear;
             }
         }
         for &index in &balance.active_collisions {
@@ -620,9 +609,7 @@ impl Simulation {
             let relative = velocity(boundary.plate, r) - velocity(boundary.other, r);
             let resisting = n * (coupling * relative.dot(n));
             force[boundary.cell as usize] -= resisting;
-            if let Some(other) = other_cell(boundary) {
-                force[other as usize] += resisting;
-            }
+            force[boundary.neighbor as usize] += resisting;
         }
         // Ridge push as the gradient of the potential energy of cooling sea floor, which falls
         // linearly with age until `ridge_push_age` (Turcotte & Schubert): the force per unit
@@ -778,8 +765,49 @@ impl Simulation {
         for (cell, owner) in self.owners.iter().enumerate() {
             if deforming[owner.plate as usize] {
                 let w = &mut work[owner.plate as usize];
+                debug_assert!(
+                    w.index[owner.local as usize] != u32::MAX,
+                    "cell {cell} shows local vertex {} of plate {}, which has no crust",
+                    owner.local,
+                    owner.plate
+                );
                 let i = w.index[owner.local as usize] as usize;
                 w.force[i] += self.plates[owner.plate as usize].rotation.inverse() * forces[cell];
+            }
+        }
+
+        // The couplings across plate boundaries (shear coupling and the yielding resistances
+        // of the torque balance): (boundary index, coefficient N·s/m, direction, world frame).
+        let mut entries: Vec<(usize, f64, DVec3)> = Vec::new();
+        // Per plate (its frame): the torque of the couplings on the last step's deformation,
+        // which the torque balance included (lagged, see `update_plate_velocities`). The
+        // forces of the rotations here are balanced against it, so it is not removed below.
+        let mut lagged_torque = vec![DVec3::ZERO; plate_count];
+        if let Some(balance) = self.force_balance.as_ref() {
+            let k_shear = 0.5
+                * params.basal_drag
+                * params.boundary_coupling_width
+                * self.boundary_length_per_cell();
+            for (index, boundary) in balance.boundaries.iter().enumerate() {
+                if k_shear > 0.0 {
+                    let r = mesh.vertex(boundary.cell);
+                    entries.push((index, k_shear, r.cross(balance.normals[index])));
+                }
+            }
+            for &(index, coupling) in &balance.nascent {
+                entries.push((index, coupling, balance.normals[index]));
+            }
+            for &(index, k, direction) in &entries {
+                let boundary = &balance.boundaries[index];
+                let relative = (self.deformation_velocity_absolute(boundary.cell)
+                    - self.deformation_velocity_absolute(boundary.neighbor))
+                    * (radius / SECONDS_PER_MYR);
+                let force = direction * (-k * relative.dot(direction));
+                for (cell, sign) in [(boundary.cell, 1.0), (boundary.neighbor, -1.0)] {
+                    let plate = self.owners[cell as usize].plate as usize;
+                    lagged_torque[plate] += self.plates[plate].rotation.inverse()
+                        * (mesh.vertex(cell).cross(force) * sign);
+                }
             }
         }
 
@@ -808,7 +836,7 @@ impl Simulation {
                 torque += r.cross(w.force[i]);
             }
             if matrix.determinant().abs() > 0.0 {
-                let rotation = matrix.inverse() * torque;
+                let rotation = matrix.inverse() * (torque + lagged_torque[p]);
                 for (i, &local) in w.samples.iter().enumerate() {
                     w.force[i] -= rotation.cross(mesh.vertex(local)) * w.drag[i];
                 }
@@ -874,21 +902,7 @@ impl Simulation {
         // frame)
         let mut couplings: Vec<(u32, u32, f64, DVec3, DVec3)> = Vec::new();
         if let Some(balance) = self.force_balance.as_ref() {
-            let k_shear = 0.5
-                * params.basal_drag
-                * params.boundary_coupling_width
-                * self.boundary_length_per_cell();
-            let mut entries: Vec<(usize, f64, DVec3)> = Vec::new();
-            for (index, boundary) in balance.boundaries.iter().enumerate() {
-                if k_shear > 0.0 {
-                    let r = mesh.vertex(boundary.cell);
-                    entries.push((index, k_shear, r.cross(balance.normals[index])));
-                }
-            }
-            for &(index, coupling) in &balance.nascent {
-                entries.push((index, coupling, balance.normals[index]));
-            }
-            for (index, k, direction) in entries {
+            for &(index, k, direction) in &entries {
                 let boundary = &balance.boundaries[index];
                 let mut sides = [u32::MAX; 2];
                 let mut frames = [DVec3::ZERO; 2];
@@ -896,6 +910,10 @@ impl Simulation {
                     let owner = self.owners[cell as usize];
                     let w = &mut work[owner.plate as usize];
                     frames[side] = self.plates[owner.plate as usize].rotation.inverse() * direction;
+                    debug_assert!(
+                        w.index[owner.local as usize] != u32::MAX,
+                        "boundary cell {cell} shows a sample without crust"
+                    );
                     let i = w.index[owner.local as usize] as usize;
                     if w.node[i] == u32::MAX && w.block[i] != u32::MAX {
                         w.node[i] = nodes.len() as u32;
@@ -1325,7 +1343,12 @@ impl Simulation {
             plate.angular_velocity += rotation * frame * (SECONDS_PER_MYR / radius);
             // Velocities are non-zero only at the active samples, strain rates only at the
             // strained ones: clear the last step's, then set the new ones.
+            // Every sample's velocity is written (also zeros: a sample grown at a front after
+            // the last solve is not in `active`).
             for &local in &plate.sheet.active {
+                plate.sheet.velocity[local as usize] = DVec3::ZERO;
+            }
+            for &local in &w.samples {
                 plate.sheet.velocity[local as usize] = DVec3::ZERO;
             }
             for &local in &plate.sheet.strained {
@@ -1516,20 +1539,22 @@ impl Simulation {
                     let v = v as usize;
                     let old = plate.crust[v].expect("touched samples have crust");
                     let mut new = mixtures[v].take().expect("set above").crust(time);
-                    if old.is_continental_origin() && new.thickness > 0.0 {
-                        let ratio = new.thickness / old.thickness.max(1e-9);
-                        if ratio < 1.0 {
+                    // Strain from the divergence of the velocity (not from the thickness
+                    // change, which advection of a thickness gradient also causes).
+                    let strain = plate.sheet.dilatation[v] as f64 * dt * scale * SECONDS_PER_MYR;
+                    if old.is_continental_origin() && new.thickness > 0.0 && strain != 0.0 {
+                        if strain > 0.0 {
                             // Stretching heats the lithosphere (McKenzie's β).
-                            let beta = 1.0 / ratio;
+                            let beta = 1.0 + strain;
                             let fraction = 1.0 - (1.0 - thermal_fraction(new.age(time))) / beta;
                             if let Some(age) = age_for_thermal_fraction(fraction) {
                                 new.birth = new.birth.max(time - age);
                             }
-                        } else if ratio > 1.0 && new.is_continental_origin() {
+                        } else if new.is_continental_origin() {
                             // Shortening deforms it: orogenic in proportion to the strain.
-                            let strain = 1.0 - 1.0 / ratio;
-                            new.orogenic = (new.orogenic + strain).min(1.0);
-                            if strain > 1e-3 {
+                            let shortening = -strain;
+                            new.orogenic = (new.orogenic + shortening).min(1.0);
+                            if shortening > 1e-3 {
                                 new.orogeny = time;
                             }
                         }
@@ -1926,6 +1951,28 @@ mod tests {
                 "converging crust thickens: {before} → {after}"
             );
         }
+    }
+
+    #[test]
+    fn advection_without_strain_leaves_the_lithosphere_unmarked() {
+        // A rigid drift within the frame has no strain: crust moves, but no orogenic marking or
+        // thermal reset from thickness changes of advected gradients.
+        let mut simulation = with_velocity(|r| DVec3::Z.cross(r) * 0.01);
+        let marks = |s: &Simulation| {
+            s.plates[0]
+                .crust
+                .iter()
+                .flatten()
+                .map(|c| (c.orogenic.to_bits(), c.birth.max(-1e9).to_bits()))
+                .filter(|&(o, _)| o != 0.0f64.to_bits())
+                .count()
+        };
+        let before = marks(&simulation);
+        simulation.params.sheet.fronts = 0;
+        for _ in 0..10 {
+            simulation.transport_crust(1.0);
+        }
+        assert!(marks(&simulation) <= before, "advection marked crust as orogenic");
     }
 
     #[test]

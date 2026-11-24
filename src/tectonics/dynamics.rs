@@ -212,7 +212,8 @@ impl Simulation {
     /// [`polarity::Segment::subducting`]). `boundaries` are the current [`Self::boundary_cells`].
     /// Returns whether any segment started or stopped subducting. With `record`, segments whose
     /// slab was decaying and that subduct again are counted (once per step: the velocity solve
-    /// records, the slab update does not).
+    /// records, the slab update does not), and the plates' rotations are the mean rotations of
+    /// the torque balance (see `Simulation::deformation_velocity_absolute`).
     pub(super) fn update_segment_motion(
         &mut self,
         boundaries: &[BoundaryCell],
@@ -221,6 +222,16 @@ impl Simulation {
         let params = &self.params;
         let min_convergence = params.min_trench_convergence / (params.planet_radius * 100.0 / 1e6);
         let yield_rate = params.diffuse_convergence / (params.planet_radius * 100.0 / 1e6);
+        // The deformation of the plates at a cell (see `sheet`). The velocity solve (`record`)
+        // has just set the plates' mean rotations, before their frames follow their largest
+        // blocks again, so there it is taken relative to those.
+        let deformation = |cell: u32| {
+            if record {
+                self.deformation_velocity_absolute(cell)
+            } else {
+                self.deformation_velocity(cell)
+            }
+        };
         // Per segment id: Σ normal convergence, Σ |strike-slip|, cells, converging cells, cells
         // converging faster than a diffuse zone creeps.
         let mut sums: HashMap<u32, (f64, f64, usize, usize, usize)> = HashMap::default();
@@ -240,8 +251,8 @@ impl Simulation {
             let relative = (self.plates[boundary.plate as usize].angular_velocity
                 - self.plates[boundary.other as usize].angular_velocity)
                 .cross(r)
-                + self.deformation_velocity(boundary.cell)
-                - self.deformation_velocity(boundary.neighbor);
+                + deformation(boundary.cell)
+                - deformation(boundary.neighbor);
             let entry = sums.entry(id).or_default();
             let convergence = relative.dot(boundary.normal);
             entry.0 += convergence;

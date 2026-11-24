@@ -289,11 +289,18 @@ impl Simulation {
             matched_rotation: self.plates[plate as usize].matched_rotation,
             initiated_at: None,
             id: self.next_plate_id,
-            sheet: self.plates[plate as usize].sheet.clone(),
+            sheet: {
+                // The split's own state: no pending split or timer of the parent.
+                let mut sheet = self.plates[plate as usize].sheet.clone();
+                sheet.pending_split = None;
+                sheet.split_timer = 0.0;
+                sheet
+            },
         };
         self.next_plate_id += 1;
-        // The tracked crust of the remaining part is no longer accurate.
+        // The tracked crust of the remaining part is no longer accurate, nor its pending split.
         self.plates[plate as usize].tracked = None;
+        self.plates[plate as usize].sheet.pending_split = None;
         let new_index = self.plates.len() as u32;
         self.plates.push(new_plate);
 

@@ -402,3 +402,28 @@ Not adopted:
 * crustal flow and rift stretching are kept; calibration checks thickness, and they act at
   different places (crustal flow: across boundaries too; rift stretching: at diverging
   boundaries, the sheet inside plates).
+
+### Further changes during calibration (2026-11-25)
+
+* **Couplings across boundaries in the sheet's solve.** With the boundary couplings (shear
+  coupling, yielding/belt resistances) only lagged, collision margins retreated faster than the
+  plates converged (boundaries opening at −0.5…−0.8 cm/yr while the plates converged at
+  1.4–1.7 cm/yr). The couplings now act implicitly on the deformation velocities of both sides
+  within the one solve over all plates (symmetric "inter-plate edges"); the part from the
+  rotations stays a force. Now the margins take up ~40–60% of the collision convergence.
+* **GPE across boundaries.** The potential-energy gradient uses the neighbours of all plates: a
+  belt straddling a boundary no longer pushes across it.
+* **Sutures follow the material convergence** at the boundary (rotations plus deformation): a
+  collision whose convergence is taken up by deforming margins sutures, and the plates'
+  convergence continues inside the joined plate as deformation (Asia after India's suture).
+* **Sheet strength without the thinning term** of the break proxy: thin (stretched) continental
+  crust is not weak once it has cooled (passive margins are strong); the thermal reset of
+  stretching keeps young rifts weak.
+* **GPE factor 2** (calibrated, 4 seeds × 500 Myr): with the crust-only Airy estimate
+  continents thickened and emerged (flooded continental crust 18% vs 25% on `main`, crust
+  > 50 km 8% vs 4.7%, shelves 4.0% vs 5.5% of the surface); with 2 they are back at `main`'s
+  values (25%, 3.1%, 5.6%).
+* **Front cap**: a retreating front hands its column on only where the receivers stay below
+  `max_crust_thickness` (without it, vacated fronts piled crust to 350 km).
+* `sheet.fronts` (0/1/2) to switch the moving edges off, retreat only, or both (default 2;
+  4 seeds each: no clear difference in thickness or flooding beyond seed scatter).
