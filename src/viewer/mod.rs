@@ -472,6 +472,8 @@ struct Viewer {
     /// threshold, and the time step (Myr).
     exaggeration: f64,
     river_threshold: f64,
+    /// Whether the running simulation has no life (`--biosphere abiotic`).
+    abiotic: bool,
     dt: f64,
     /// The epoch of the running simulation (Gyr before present), for the sun.
     epoch: f64,
@@ -592,6 +594,7 @@ impl Viewer {
             paused: false,
             step_pending: false,
             exaggeration: initial.cli.exaggeration,
+            abiotic: initial.cli.biosphere == crate::presets::Biosphere::Abiotic,
             river_threshold: initial.cli.river_threshold,
             dt: initial.cli.dt,
             epoch: initial.cli.epoch,
@@ -654,6 +657,7 @@ impl Viewer {
         self.time = None;
         self.duration = launch.cli.duration;
         self.exaggeration = launch.cli.exaggeration;
+        self.abiotic = launch.cli.biosphere == crate::presets::Biosphere::Abiotic;
         self.river_threshold = launch.cli.river_threshold;
         self.dt = launch.cli.dt;
         self.epoch = launch.cli.epoch;
@@ -687,8 +691,17 @@ impl Viewer {
     /// Switches to another render mode: requests its fields and remembers it.
     fn set_mode(&mut self, mode: RenderModeId) {
         tracing::info!(mode = mode.name(), "Render mode");
+        let exaggeration = self.shown_exaggeration();
         self.mode = mode;
         self.display_outdated = true;
+        // The realistic mode shows the relief true to scale: rebuild the surface.
+        if self.shown_exaggeration() != exaggeration
+            && let Some(picking) = &self.picking
+            && !picking.cells.is_empty()
+        {
+            let (cells, plates) = (picking.cells.clone(), picking.plates.clone());
+            self.show(self.shown_time, cells, plates, self.fields.clone());
+        }
         let layers = mode.mode().layers();
         if layers != self.requested {
             self.requested = layers;
@@ -743,6 +756,7 @@ impl Viewer {
             arrow_cells,
             arrow_spacing,
             options: self.switcher.options(self.mode),
+            abiotic: self.abiotic,
         };
         let mode = self.mode.mode();
         self.displays += 1;
@@ -855,6 +869,7 @@ impl Viewer {
         plates: Arc<Vec<PlateInfo>>,
         fields: Fields,
     ) {
+        let exaggeration = self.shown_exaggeration();
         let Some(picking) = &mut self.picking else {
             return;
         };
@@ -866,12 +881,7 @@ impl Viewer {
             );
             return;
         }
-        let vertices = surface_vertices(
-            &picking.mesh,
-            &cells,
-            self.exaggeration,
-            self.river_threshold,
-        );
+        let vertices = surface_vertices(&picking.mesh, &cells, exaggeration, self.river_threshold);
         picking.max_radius = vertices
             .iter()
             .map(|vertex| f64::from(Vec3::from(vertex.position).length()))
@@ -1190,7 +1200,11 @@ impl Viewer {
                     Shading::Lit => 0.0,
                     Shading::Unlit => 1.0,
                 },
-                0.0,
+                if self.mode == RenderModeId::Realistic {
+                    1.0
+                } else {
+                    0.0
+                },
             ],
             inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
             sun_direction: sun.direction.extend(sun.angular_radius).to_array(),
@@ -1213,6 +1227,16 @@ impl Viewer {
                 0.0,
             ],
             star_colors: sky::star_colors(),
+            eye: eye.extend(0.0).to_array(),
+        }
+    }
+
+    /// The relief exaggeration of the shown surface: true to scale in the realistic mode
+    /// (decision 6 on #92), `--exaggeration` in the data modes.
+    fn shown_exaggeration(&self) -> f64 {
+        match self.mode {
+            RenderModeId::Realistic => 1.0,
+            _ => self.exaggeration,
         }
     }
 
@@ -1231,7 +1255,13 @@ impl Viewer {
 
     /// The sun of the displayed state.
     fn sun(&self) -> SunView {
-        SunView::new(self.epoch, self.shown_time)
+        let season = match self.mode {
+            RenderModeId::Realistic => lighting::season_fraction(modes::realistic::season(
+                self.switcher.options(self.mode),
+            )),
+            _ => None,
+        };
+        SunView::new(self.epoch, self.shown_time, season)
     }
 }
 
@@ -1387,9 +1417,9 @@ impl eframe::App for Viewer {
         if changed {
             if mode != self.mode {
                 self.set_mode(mode);
-            } else if self.mode != RenderModeId::Realistic {
-                // Another setting of the mode. (The realistic mode's only setting, the light,
-                // changes the uniforms alone: no new colours or overlay.)
+            } else {
+                // Another setting of the mode (in the realistic mode the light only needs the
+                // uniforms, but the season changes the colours).
                 self.display_outdated = true;
             }
             ui.ctx().request_repaint();

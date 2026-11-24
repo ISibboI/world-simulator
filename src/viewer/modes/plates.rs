@@ -497,6 +497,7 @@ mod tests {
             arrow_cells: &arrow_cells,
             arrow_spacing,
             options: &OptionValues::default(),
+            abiotic: false,
         };
         let colors = Plates.colors(&data).unwrap();
         assert_eq!(colors.len(), cells.len());

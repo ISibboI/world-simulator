@@ -30,7 +30,8 @@ pub struct Uniforms {
     /// Direction towards the light (`w` unused).
     pub light_direction: [f32; 4],
     /// Size of the view in physical pixels (`x`, `y`), for lines of a fixed width; `z` is 1 if
-    /// the render mode shows its colours unlit, 0 if lit (`w` unused).
+    /// the render mode shows its colours unlit, 0 if lit; `w` is 1 for the realistic mode's
+    /// materials (lit in linear light, water with a glint; see `planet.wgsl`), 0 otherwise.
     pub viewport: [f32; 4],
     /// The inverse of `view_projection`, for the view direction of the sky's pixels.
     pub inverse_view_projection: [[f32; 4]; 4],
@@ -47,6 +48,8 @@ pub struct Uniforms {
     pub stars: [f32; 4],
     /// The colours of the stars in sRGB, see [`super::sky::STAR_TEMPERATURES`].
     pub star_colors: [[f32; 4]; 8],
+    /// The camera's position in the world (`xyz`; `w` unused), for the glint on water.
+    pub eye: [f32; 4],
 }
 
 /// A straight piece of a line drawn over the planet with a constant width in pixels (see
@@ -559,6 +562,60 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
             render_pass.set_pipeline(&resources.line_pipeline);
             render_pass.set_vertex_buffer(0, resources.line_buffer.slice(..));
             render_pass.draw(0..6, 0..resources.line_count);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every shader of the view parses, validates (without optional capabilities) and
+    /// translates to GLSL ES 3.00 for WebGL2 with naga, wgpu's shader translator: a shader that
+    /// naga cannot translate for the web fails here, not only in the browser. (wgpu's own GL
+    /// options and the device limits of WebGL2 are not checked.)
+    #[test]
+    fn shaders_translate_to_webgl2() {
+        use naga::back::glsl;
+        let shaders = [
+            ("planet.wgsl", include_str!("planet.wgsl")),
+            ("sky.wgsl", include_str!("sky.wgsl")),
+            ("overlay.wgsl", include_str!("overlay.wgsl")),
+            ("outline.wgsl", include_str!("outline.wgsl")),
+        ];
+        for (name, source) in shaders {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
+            let info = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            for entry_point in &module.entry_points {
+                let options = glsl::Options {
+                    version: glsl::Version::Embedded {
+                        version: 300,
+                        is_webgl: true,
+                    },
+                    ..glsl::Options::default()
+                };
+                let pipeline_options = glsl::PipelineOptions {
+                    shader_stage: entry_point.stage,
+                    entry_point: entry_point.name.clone(),
+                    multiview: None,
+                };
+                let mut output = String::new();
+                glsl::Writer::new(
+                    &mut output,
+                    &module,
+                    &info,
+                    &options,
+                    &pipeline_options,
+                    naga::proc::BoundsCheckPolicies::default(),
+                )
+                .and_then(|mut writer| writer.write().map(|_| ()))
+                .unwrap_or_else(|error| panic!("{name} {}: {error:?}", entry_point.name));
+                assert!(output.contains("#version 300 es"), "{name}");
+            }
         }
     }
 }

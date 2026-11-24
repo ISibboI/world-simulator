@@ -33,7 +33,11 @@ starts.
    whose visibility follows a camera's exposure. A new render mode **Realistic**, first in the
    list (topographic surface as a placeholder), now holds the Light option (default Sun), the
    sun and the stars; the data modes are lit from the camera again (Sebastian on #148).
-3. Then the stages of §10 (plate frames, realistic mode MVP, …), adapted to the decisions: no
+3. **Realistic surface, stages 0 + 1** ([surface.md](surface.md)): per-cell materials from the
+   climate and crust, sun-lit in linear light, relief true to scale, sun glint on water, Season
+   option, naga test for WebGL2. Stage 0's plate orientation moves to stage 2 (no use without
+   noise); biosphere from the launch options; no frame change.
+4. Then stage 2 onwards of §10 (with stage 0's plate frames), adapted to the decisions: no
    relief exaggeration in the realistic mode, LOD for the detail, no rivers, Season option,
    clouds later, stars only if they make sense.
 

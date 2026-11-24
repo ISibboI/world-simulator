@@ -160,6 +160,8 @@ pub struct ModeData<'a> {
     pub arrow_spacing: f64,
     /// The values of the mode's [`RenderMode::options`].
     pub options: &'a OptionValues,
+    /// Whether the planet has no life (`--biosphere abiotic`): no vegetation.
+    pub abiotic: bool,
 }
 
 impl ModeData<'_> {
@@ -819,6 +821,7 @@ mod tests {
             arrow_cells: &[],
             arrow_spacing: 0.1,
             options: &OptionValues::default(),
+            abiotic: false,
         };
         let colors = SedimentTest.colors(&data).unwrap();
         let new_vertices = recolored(&vertices, &colors).unwrap();
