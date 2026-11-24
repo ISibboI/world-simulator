@@ -10,9 +10,14 @@
 //! ([`Exposure::new`]): the share of the view covered by the sunlit planet (weighted by the
 //! cosine of the sun's incidence, the brightness of a Lambertian surface) darkens the scene
 //! between 0.1% and 1%; the glare of the visible part of the sun does so as the sun approaches
-//! the frame (from 1.5 times the view's half-width to its edge). The ambient fill light of
-//! `SunAmbient` is a visual aid, not light, and is not metered. With the camera light the whole
-//! visible side is lit, so there are no stars (and no sun) in that mode.
+//! the frame (from 1.5 times the view's half-width to its edge). On top of that, **no lit
+//! surface may be over-exposed** (#159): the exposure is at most the one that shows the
+//! brightest sunlit point in view as it looks in daylight under the sun at the zenith
+//! ([`Exposure::headroom`]), however small the lit part of the frame is, so a thin crescent
+//! keeps its colours. Only the sun itself (and its glint on water) may clip, as it does for the
+//! eye. The ambient fill light of `SunAmbient` is a visual aid, not light: it is not metered
+//! and not brightened by the exposure. With the camera light the whole visible side is lit, so
+//! there are no stars (and no sun) in that mode.
 //!
 //! **Adaptation.** The meter gives the exposure the scene asks for ([`Exposure::target`], in
 //! stops above the daylight exposure, up to [`DARK_ADAPTED`]); the view's exposure follows it
@@ -93,6 +98,9 @@ pub struct Exposure {
     /// How dark the metered scene is, from 0 (exposed for daylight) to 1 (a long exposure that
     /// shows all stars).
     pub darkness: f32,
+    /// The largest cosine of the sun's incidence on the visible surface (1 when the subsolar
+    /// point is in view, 0 when only the night side is): the brightest lit point.
+    pub brightest: f32,
 }
 
 impl Exposure {
@@ -121,13 +129,27 @@ impl Exposure {
             sun_in_view,
             sunlit,
             darkness,
+            brightest: brightest_incidence(eye, sun),
+        }
+    }
+
+    /// The most exposure, in stops above the daylight exposure, that keeps the brightest lit
+    /// point in view from over-exposing: a reflectance `a` lit at incidence cosine `c` shows as
+    /// `a c 2^stops`, at most `a` (its brightness under the zenith sun in daylight) for
+    /// `stops = log₂(1/c)`. Unlimited ([`DARK_ADAPTED`]) when no lit surface is in view.
+    pub fn headroom(&self) -> f32 {
+        if self.brightest <= 0.0 {
+            DARK_ADAPTED
+        } else {
+            (1.0 / self.brightest).log2().clamp(0.0, DARK_ADAPTED)
         }
     }
 
     /// The exposure the scene asks for, in stops above the daylight exposure (0 to
-    /// [`DARK_ADAPTED`]).
+    /// [`DARK_ADAPTED`]): as dark as the metered scene asks, but never so much that the
+    /// brightest lit point over-exposes.
     pub fn target(&self) -> f32 {
-        DARK_ADAPTED * self.darkness
+        (DARK_ADAPTED * self.darkness).min(self.headroom())
     }
 }
 
@@ -213,6 +235,23 @@ fn sun_visibility(eye: Vec3, sun: Vec3, sun_radius: f32) -> f32 {
     let to_centre = -eye / distance;
     let separation = to_centre.cross(sun).length().atan2(to_centre.dot(sun));
     ((separation - (planet_radius - sun_radius)) / (2.0 * sun_radius.max(1e-6))).clamp(0.0, 1.0)
+}
+
+/// The largest cosine of the incidence of the sun (`sun`, a unit vector) on the part of the unit
+/// sphere visible from `eye`, 0 if none of it is lit. Exact, however thin the lit crescent: the
+/// visible cap around the eye direction has the angular radius `α = acos(1/|eye|)`, so the lit
+/// point nearest to the subsolar point is `max(θ − α, 0)` from it, `θ` the angle between the
+/// sun and the eye direction. (The whole visible cap is in the frame: the planet's angular
+/// radius is ~12.8° at the camera's 4.5 radii, the view's half-height 17°.)
+fn brightest_incidence(eye: Vec3, sun: Vec3) -> f32 {
+    let distance = eye.length();
+    if distance <= 1.0 {
+        return 1.0;
+    }
+    let cap = (1.0 / distance).acos();
+    let toward_eye = eye / distance;
+    let angle = toward_eye.cross(sun).length().atan2(toward_eye.dot(sun));
+    (angle - cap).max(0.0).cos().max(0.0)
 }
 
 /// The share of the view covered by the sunlit unit sphere, weighted by the cosine of the
@@ -315,6 +354,78 @@ mod tests {
         let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047);
         assert!(!exposure.sun_in_view);
         assert!(exposure.darkness < 0.5, "{exposure:?}");
+    }
+
+    #[test]
+    fn no_lit_surface_is_over_exposed() {
+        // #159: from behind the planet towards the day side, the thin crescent must never be
+        // brightened beyond its daylight look at the zenith sun: the brightest lit point times
+        // the exposure's gain stays at most 1.
+        let sun = -Vec3::X;
+        for degrees in 0..=180 {
+            let angle = (degrees as f32).to_radians();
+            let eye = Vec3::new(angle.cos(), angle.sin(), 0.0) * 4.5;
+            let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047);
+            let target = exposure.target();
+            assert!(
+                exposure.brightest * target.exp2() <= 1.0 + 1e-4,
+                "{degrees}° {exposure:?} target {target}"
+            );
+        }
+        // The angle of the report: a thin crescent, 40° from the eclipse. It filled less than
+        // 0.2% of the frame, which asked for ~13.6 stops; now it is shown at most ~1.1 stops
+        // brighter than daylight.
+        let angle = 40f32.to_radians();
+        let eye = Vec3::new(angle.cos(), angle.sin(), 0.0) * 4.5;
+        let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047);
+        assert!(exposure.darkness > 0.9, "{exposure:?}");
+        assert!(exposure.target() < 1.2, "{exposure:?}");
+        assert!(exposure.target() > 1.0, "{exposure:?}");
+    }
+
+    #[test]
+    fn the_brightest_point_is_exact() {
+        // Brute force over the visible cap: the largest cosine of the incidence.
+        let eye = Vec3::new(0.3, -4.0, 1.2);
+        for sun in [
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.2, 0.9, -0.3).normalize(),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+        ] {
+            let mut best: f32 = 0.0;
+            let steps = 400;
+            for i in 0..steps {
+                for j in 0..steps {
+                    let theta = std::f32::consts::PI * (i as f32 + 0.5) / steps as f32;
+                    let phi = std::f32::consts::TAU * j as f32 / steps as f32;
+                    let p = Vec3::new(
+                        theta.sin() * phi.cos(),
+                        theta.sin() * phi.sin(),
+                        theta.cos(),
+                    );
+                    if p.dot(eye) >= 1.0 {
+                        best = best.max(p.dot(sun));
+                    }
+                }
+            }
+            let exact = brightest_incidence(eye, sun);
+            assert!((exact - best).abs() < 0.02, "{sun}: {exact} vs {best}");
+            assert!(exact >= best - 1e-4, "{sun}: {exact} < {best}");
+        }
+    }
+
+    #[test]
+    fn eclipse_and_daylight_targets() {
+        let eye = Vec3::new(4.5, 0.0, 0.0);
+        // Only the night side in view: fully dark-adapted, all stars.
+        let eclipse = Exposure::new(view_projection(eye), eye, -Vec3::X, 0.0047);
+        assert_eq!(eclipse.brightest, 0.0);
+        assert_eq!(eclipse.target(), DARK_ADAPTED);
+        // The full day side: daylight.
+        let day = Exposure::new(view_projection(eye), eye, Vec3::X, 0.0047);
+        assert_eq!(day.brightest, 1.0);
+        assert_eq!(day.target(), 0.0);
     }
 
     #[test]

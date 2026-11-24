@@ -17,8 +17,10 @@ sets the planet, the sun with its glow, and the stars.
    as before. This gives a darkness from 0 (daylight) to 1 (a dark scene), the former star
    visibility: it falls from 1 to 0 while the sunlit share grows from 0.1% to 1% of the frame,
    and with the glare of the sun.
-2. **Target exposure.** The scene asks for `target = 14 stops × darkness` above the daylight
-   exposure (a stop is a factor of 2).
+2. **Target exposure.** The scene asks for `14 stops × darkness` above the daylight
+   exposure (a stop is a factor of 2), **capped so that no lit surface over-exposes** (#159,
+   below): `target = min(14 × darkness, log₂(1 / c_max))`, where `c_max` is the largest cosine
+   of the sun's incidence on the visible surface.
 3. **Adaptation.** The view's exposure `E` (in stops, i.e. in log luminance) moves exponentially
    towards the target in real time:
 
@@ -78,12 +80,52 @@ sRGB colours ×14.5 at 0.25 s, ×5 at 0.5 s, ×1.8 at 1 s), nearly normal at 1.5
 converged after ~3.3 s. (With τ = 0.3 s and the sRGB-correct factor the flash was hardly visible
 in the screenshots, so τ is at the upper end of 0.2–0.5 s.)
 
-### Intermediate scenes
+### Intermediate scenes: no lit surface over-exposes (#159)
 
-Steady states between the two follow the meter as before: a thin crescent (0.1–1% of the frame)
-or the sun just outside the frame gives a partial exposure, e.g. darkness 0.5 → 7 stops →
-limiting magnitude 3.7 (~4 stars clearly visible, ~20 down to the limit), and the crescent itself is over-exposed (white), as in a
-photo exposed for the sky.
+Before #159 a thin crescent (0.1–1% of the frame) asked for a partial or nearly full dark
+exposure, because the meter only saw the share of the frame. The crescent itself, in full
+sunlight, was then over-exposed to white. Sebastian saw this on his phone with the camera nearly
+behind the planet. His requirement: "Exposure should be aimed such that no part of the picture is
+overexposed. The sun can aim for some overexposure, because it is so bright that the eye cannot
+adjust to it in real life."
+
+Now the exposure is also capped by the **brightest lit point in view**.
+
+- A surface of reflectance `a`, lit at the incidence cosine `c`, shows as `a · c · 2^E` (linear,
+  before clipping). It stays at most `a`, its look under the zenith sun in daylight, for
+  `E ≤ log₂(1/c)`. With `c_max` the largest `c` in view, the cap is `log₂(1/c_max)`. No
+  reflectance exceeds 0.86 (fresh snow), so nothing reaches white.
+- `c_max` is **exact and does not depend on the crescent's size in pixels**. The visible cap of
+  the planet around the eye direction has the angular radius `α = acos(1/d)` (`d` the camera
+  distance in radii: 77.2° at 4.5). The lit point nearest to the subsolar point is
+  `max(θ − α, 0)` from it, `θ` the angle between the sun and the eye direction, so
+  `c_max = cos(max(θ − α, 0))`, or 0 when that is beyond 90°.
+- The share meter still darkens the scene for stars and glare as before. The cap only lowers
+  the target.
+- What may still clip: the sun's disc and glow, and its mirror image, the glint on water, which
+  is the sun seen in the water. The thin haze added at the limb is small.
+- The ambient fill of **Sun + ambient** is not brightened by the exposure, so the readable
+  night side cannot drive anything to white either.
+
+Camera turning in the equatorial plane from the eclipse view (sun behind the planet) towards
+the day side, camera at 4.5 radii, 16:10 view (from the unit tests):
+
+| Angle from the eclipse | `c_max` | Target before | Target now |
+|---|---|---|---|
+| 0–12° | 0 (night side only) | 14 | 14 (all stars) |
+| 13° | 0.003 (sun at the limb) | 2.8 | 2.8 |
+| 20–25° | 0.13–0.21 (sun beside the planet) | 0 (glare) | 0 |
+| 30° | 0.30 | 3.6 | 1.8 |
+| 35° | 0.38 | 12.9 | 1.4 |
+| 40° (the report's view) | 0.46 | 13.6 (crescent white) | 1.1 |
+| 50° | 0.60 | 7.7 | 0.7 |
+| ≥ 60° | ≥ 0.73 | 0 | 0 |
+
+So the crescent keeps its colours: ocean, land and ice at their daylight look. It appears up to
+log₂(1/c_max) stops brighter than in daylight, so a crescent lit at a grazing angle is not
+almost black. A few bright stars still show beside a thin crescent (limiting magnitude
+9 − 0.753 (14 − E): about −0.2 at 1.8 stops). Only a few grazing degrees, where `c_max` is close
+to 0, let the exposure rise further, and there the lit sliver is equally dark.
 
 ## Light options
 
