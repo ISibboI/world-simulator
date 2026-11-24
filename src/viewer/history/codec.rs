@@ -2,8 +2,8 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (42 bytes per cell
-//! instead of 96, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (48 bytes per cell
+//! instead of 120, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
@@ -17,6 +17,8 @@ enum Code {
     Signed(f32),
     /// Unsigned fixed point with this step, 2 bytes; `u16::MAX` is NaN.
     Unsigned(f32),
+    /// Signed fixed point with this step, 1 byte; `i8::MIN` is NaN.
+    Signed8(f32),
     /// A share from 0 to 1 in steps of 1/254, 1 byte; 255 is NaN.
     Share,
     /// A non-negative value up to this maximum on a square-root axis in 254 steps, 1 byte; 255
@@ -35,14 +37,14 @@ enum Code {
 impl Code {
     const fn bytes(self) -> usize {
         match self {
-            Code::Share | Code::Root(_) | Code::Integer8 => 1,
+            Code::Share | Code::Root(_) | Code::Signed8(_) | Code::Integer8 => 1,
             _ => 2,
         }
     }
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 24] = [
+const CHANNELS: [Code; 30] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -84,6 +86,15 @@ const CHANNELS: [Code; 24] = [
     Code::Signed(0.05),
     // Heating by the gyres: 1 W/m², ±32 kW/m².
     Code::Signed(1.0),
+    // Wind (annual mean, January, July; east and north): 0.25 m/s, ±31.75 m/s. The climate
+    // model's low-level winds reach about 8 m/s (18 m/s with the thermally driven winds), and
+    // a quarter of a metre per second is 3 % of the longest arrow.
+    Code::Signed8(0.25),
+    Code::Signed8(0.25),
+    Code::Signed8(0.25),
+    Code::Signed8(0.25),
+    Code::Signed8(0.25),
+    Code::Signed8(0.25),
     Code::Integer16,
     Code::Integer8,
 ];
@@ -124,6 +135,12 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.current_north,
         cell.streamfunction,
         cell.gyre_heating,
+        cell.wind_east,
+        cell.wind_north,
+        cell.wind_january_east,
+        cell.wind_january_north,
+        cell.wind_july_east,
+        cell.wind_july_north,
         0.0,
         0.0,
     ]
@@ -147,6 +164,14 @@ fn quantise(code: Code, value: f32) -> u16 {
                 return u16::MAX;
             }
             (value / step).round().clamp(0.0, f32::from(u16::MAX - 1)) as u16
+        }
+        Code::Signed8(step) => {
+            if value.is_nan() {
+                return i8::MIN as u8 as u16;
+            }
+            (value / step)
+                .round()
+                .clamp(-f32::from(i8::MAX), f32::from(i8::MAX)) as i8 as u8 as u16
         }
         Code::Share => {
             if value.is_nan() {
@@ -187,6 +212,14 @@ fn dequantise(code: Code, value: u16) -> f32 {
         }
         Code::Unsigned(step) => {
             if value == u16::MAX {
+                f32::NAN
+            } else {
+                f32::from(value) * step
+            }
+        }
+        Code::Signed8(step) => {
+            let value = value as u8 as i8;
+            if value == i8::MIN {
                 f32::NAN
             } else {
                 f32::from(value) * step
@@ -288,8 +321,14 @@ impl Planes {
                     current_north: value(19),
                     streamfunction: value(20),
                     gyre_heating: value(21),
-                    plate: u32::from(values[22]),
-                    flags: u32::from(values[23]),
+                    wind_east: value(22),
+                    wind_north: value(23),
+                    wind_january_east: value(24),
+                    wind_january_north: value(25),
+                    wind_july_east: value(26),
+                    wind_july_north: value(27),
+                    plate: u32::from(values[28]),
+                    flags: u32::from(values[29]),
                 }
             })
             .collect()
@@ -313,7 +352,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 5;
+const VERSION: u8 = 6;
 /// Bytes per plate: its rotation and id.
 pub const PLATE_BYTES: usize = 16;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -465,6 +504,16 @@ mod tests {
             current_north: (x * 0.2).cos() * 40.0,
             streamfunction: (x * 0.01).sin() * 60.0,
             gyre_heating: (x * 0.07).cos() * 150.0,
+            wind_east: (x * 0.11).sin() * 9.0,
+            wind_north: (x * 0.13).cos() * 0.7,
+            wind_january_east: if index.is_multiple_of(4) {
+                f32::NAN
+            } else {
+                -(x * 0.05).sin() * 50.0
+            },
+            wind_january_north: (x * 0.17).sin() * 3.0,
+            wind_july_east: (x * 0.19).cos() * 7.0,
+            wind_july_north: -0.1,
             plate: (index % 13) as u32,
             flags: (index % 2) as u32,
         }
@@ -535,6 +584,21 @@ mod tests {
             (original.current_north, decoded.current_north, 0.05),
             (original.streamfunction, decoded.streamfunction, 0.05),
             (original.gyre_heating, decoded.gyre_heating, 1.0),
+            (original.wind_east, decoded.wind_east, 0.125),
+            (original.wind_north, decoded.wind_north, 0.125),
+            // Beyond the range: clamped.
+            (
+                original.wind_january_east.clamp(-31.75, 31.75),
+                decoded.wind_january_east,
+                0.125,
+            ),
+            (
+                original.wind_january_north,
+                decoded.wind_january_north,
+                0.125,
+            ),
+            (original.wind_july_east, decoded.wind_july_east, 0.125),
+            (original.wind_july_north, decoded.wind_july_north, 0.125),
         ];
         for (index, (a, b, tolerance)) in pairs.into_iter().enumerate() {
             if a.is_nan() {
@@ -567,7 +631,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 42);
+        assert_eq!(BYTES_PER_CELL, 48);
     }
 
     #[test]

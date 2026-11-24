@@ -28,8 +28,8 @@
 
 use super::super::overlay::{LineStyle, OverlayBuilder, isolines};
 use super::{
-    ColorScale, Legend, ModeData, ModeOption, OptionKind, OptionValues, RenderMode, Shading,
-    Swatch, SwatchShape, coastlines, rgba,
+    ColorScale, Legend, ModeData, ModeOption, OptionKind, OptionValues, Period, RenderMode,
+    Shading, Swatch, SwatchShape, coastlines, rgba,
 };
 use crate::viewer::CellInfo;
 
@@ -54,47 +54,6 @@ impl View {
     }
 }
 
-/// Which precipitation is shown: the value of the option [`PERIOD`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Period {
-    Annual,
-    January,
-    July,
-}
-
-impl Period {
-    fn of(options: &OptionValues) -> Self {
-        match options.get(PERIOD) {
-            1 => Period::January,
-            2 => Period::July,
-            _ => Period::Annual,
-        }
-    }
-
-    /// The precipitation in m/yr.
-    fn precipitation(self, cell: &CellInfo) -> f32 {
-        match self {
-            Period::Annual => cell.precipitation,
-            Period::January => cell.precipitation_january,
-            Period::July => cell.precipitation_july,
-        }
-    }
-
-    /// The evaporation (of the ocean, evapotranspiration of land) in m/yr.
-    fn evaporation(self, cell: &CellInfo) -> f32 {
-        match self {
-            Period::Annual => cell.evaporation,
-            Period::January => cell.evaporation_january,
-            Period::July => cell.evaporation_july,
-        }
-    }
-
-    /// Precipitation minus evaporation in m/yr.
-    fn balance(self, cell: &CellInfo) -> f32 {
-        self.precipitation(cell) - self.evaporation(cell)
-    }
-}
-
 /// Indices of the options.
 const SHOW: usize = 0;
 const PERIOD: usize = 1;
@@ -113,7 +72,7 @@ const OPTIONS: [ModeOption; 3] = [
         hover: "The year, or the rate of January (northern winter) or July (northern summer), as \
                 if it lasted a year (precipitation and P − E); the aridity index is always that \
                 of the year",
-        kind: OptionKind::Choice(&["Year", "January", "July"]),
+        kind: OptionKind::Choice(Period::CHOICES),
     },
     ModeOption {
         label: "Desert edge",
@@ -341,7 +300,7 @@ fn log_scale(
 }
 
 /// The precipitation scale (log10 of mm/yr) for a period.
-fn precipitation_scale(period: Period) -> ColorScale {
+pub(super) fn precipitation_scale(period: Period) -> ColorScale {
     log_scale(
         &YL_GN_BU,
         PRECIPITATION_RANGE,
@@ -372,7 +331,7 @@ fn aridity_scale() -> ColorScale {
 
 /// The value on the axis of the scales: log10 of mm/yr or of the index, NaN where unknown. Zero
 /// precipitation lies at the dry end.
-fn axis(value: f32, scale_unit: f32) -> f32 {
+pub(super) fn axis(value: f32, scale_unit: f32) -> f32 {
     if value.is_nan() {
         f32::NAN
     } else {
@@ -401,7 +360,7 @@ impl RenderMode for Moisture {
     fn colors(&self, data: &ModeData) -> Option<Vec<[f32; 4]>> {
         Some(match View::of(data.options) {
             View::Precipitation => {
-                let period = Period::of(data.options);
+                let period = Period::of(data.options, PERIOD);
                 precipitation_scale(period).colors(
                     data.cells
                         .iter()
@@ -410,7 +369,7 @@ impl RenderMode for Moisture {
                 )
             }
             View::Balance => {
-                let period = Period::of(data.options);
+                let period = Period::of(data.options, PERIOD);
                 balance_scale(period).colors(
                     data.cells
                         .iter()
@@ -468,7 +427,7 @@ impl RenderMode for Moisture {
 
     fn legend(&self, options: &OptionValues, data: Option<&ModeData>) -> Legend {
         let view = View::of(options);
-        let period = Period::of(options);
+        let period = Period::of(options, PERIOD);
         let mut swatches = Vec::new();
         let missing = data.is_some_and(|data| {
             data.cells.iter().any(|cell| match view {
@@ -682,7 +641,7 @@ mod tests {
     fn options_choose_what_is_shown() {
         let mut options = OptionValues::defaults(&OPTIONS);
         assert_eq!(View::of(&options), View::Precipitation);
-        assert_eq!(Period::of(&options), Period::Annual);
+        assert_eq!(Period::of(&options, PERIOD), Period::Annual);
         assert!(!options.is_on(DESERT_LINE));
         options.set(PERIOD, 2);
         let legend = Moisture.legend(&options, None);
@@ -740,7 +699,7 @@ mod tests {
             let colors = Moisture.colors(&data).unwrap();
             assert_eq!(colors.len(), cells.len());
             for (cell, color) in cells.iter().zip(&colors) {
-                let period = Period::of(&options);
+                let period = Period::of(&options, PERIOD);
                 let expected = match show {
                     0 => precipitation_scale(period)
                         .color(f64::from(axis(period.precipitation(cell), 1000.0)))
