@@ -161,10 +161,14 @@ pub(super) struct PlateSheet {
     pub(super) strain_rate: Vec<f32>,
     /// Rate of area change (1/s; positive where the sheet stretches).
     pub(super) dilatation: Vec<f32>,
-    /// log₁₀ of the effective viscosity of the last solve (NaN if unknown).
-    pub(super) log_viscosity: Vec<f32>,
+    /// Effective viscosity (Pa·s·m) of the last solve (NaN if unknown).
+    pub(super) viscosity: Vec<f32>,
+    /// The local vertices with a strain rate (non-zero entries of `strain_rate`).
+    pub(super) strained: Vec<u32>,
     /// Whether any sample has a deformation velocity.
     pub(super) moving: bool,
+    /// The local vertices with a deformation velocity, in order.
+    pub(super) active: Vec<u32>,
     /// The rotation (plate frame, m/s per unit radius) of the largest block that the frame
     /// took over at the last solve, for the warm start of the next one.
     pub(super) frame: DVec3,
@@ -182,8 +186,10 @@ impl PlateSheet {
             front: vec![1.0; cell_count],
             strain_rate: vec![0.0; cell_count],
             dilatation: vec![0.0; cell_count],
-            log_viscosity: vec![f32::NAN; cell_count],
+            viscosity: vec![f32::NAN; cell_count],
+            strained: Vec::new(),
             moving: false,
+            active: Vec::new(),
             frame: DVec3::ZERO,
             split_timer: 0.0,
             pending_split: None,
@@ -196,7 +202,7 @@ impl PlateSheet {
         self.front[local] = 1.0;
         self.strain_rate[local] = 0.0;
         self.dilatation[local] = 0.0;
-        self.log_viscosity[local] = f32::NAN;
+        self.viscosity[local] = f32::NAN;
     }
 }
 
@@ -682,53 +688,78 @@ impl Simulation {
         let cell_count = self.mesh.len();
         let cell_area = 4.0 * std::f64::consts::PI * radius * radius / cell_count as f64;
         let geometry = &self.sheet_geometry;
+        let mesh = &self.mesh;
         let spring = 4.0 / 3f64.sqrt();
         let to_rad_per_myr = SECONDS_PER_MYR / radius;
-
-        // Per plate: forces on its samples (plate frame), drag coefficient and viscosity.
         let plate_count = self.plates.len();
-        let mut sample_force: Vec<Vec<DVec3>> = vec![vec![DVec3::ZERO; cell_count]; plate_count];
-        for cell in 0..cell_count {
-            let owner = self.owners[cell];
-            let inverse = self.plates[owner.plate as usize].rotation.inverse();
-            sample_force[owner.plate as usize][owner.local as usize] += inverse * forces[cell];
+
+        // Per plate: its samples, and per sample (in the order of `samples`) the force (plate
+        // frame), drag coefficient, viscosity, whether it is weak, its block and its node.
+        struct Work {
+            samples: Vec<u32>,
+            /// Position of a local vertex in `samples` (u32::MAX: no sample).
+            index: Vec<u32>,
+            force: Vec<DVec3>,
+            drag: Vec<f64>,
+            viscosity: Vec<f64>,
+            weak: Vec<bool>,
+            block: Vec<u32>,
+            node: Vec<u32>,
+        }
+        let mut work: Vec<Work> = self
+            .plates
+            .iter()
+            .map(|plate| {
+                let samples: Vec<u32> = (0..cell_count as u32)
+                    .filter(|&local| plate.crust[local as usize].is_some())
+                    .collect();
+                let mut index = vec![u32::MAX; cell_count];
+                for (i, &local) in samples.iter().enumerate() {
+                    index[local as usize] = i as u32;
+                }
+                let n = samples.len();
+                Work {
+                    samples,
+                    index,
+                    force: vec![DVec3::ZERO; n],
+                    drag: vec![0.0; n],
+                    viscosity: vec![0.0; n],
+                    weak: vec![false; n],
+                    block: vec![u32::MAX; n],
+                    node: vec![u32::MAX; n],
+                }
+            })
+            .collect();
+        for (cell, owner) in self.owners.iter().enumerate() {
+            let w = &mut work[owner.plate as usize];
+            let i = w.index[owner.local as usize] as usize;
+            w.force[i] += self.plates[owner.plate as usize].rotation.inverse() * forces[cell];
         }
 
         let mut statistics = std::mem::take(&mut self.sheet_statistics);
         statistics.weak_samples = 0;
-        statistics.blocks = 0;
-        // The system over all plates: unknowns, nodes per sample, blocks.
         let mut unknowns = 0usize;
-        // Per plate and local vertex: node (u32::MAX: none), block id (u32::MAX: weak).
-        let mut node_of: Vec<Vec<u32>> = Vec::with_capacity(plate_count);
-        let mut block_of: Vec<Vec<u32>> = Vec::with_capacity(plate_count);
         let mut nodes: Vec<(u32, u32, Node)> = Vec::new();
         // Per block: plate, first unknown, drag matrix, generalised force, sample count.
         let mut blocks: Vec<(u32, usize, DMat3, DVec3, usize)> = Vec::new();
         // Per weak node: drag coefficient and force (tangent basis).
         let mut drag: Vec<f64> = Vec::new();
         let mut rhs: Vec<f64> = Vec::new();
-        let mut viscosity: Vec<Vec<f64>> = Vec::with_capacity(plate_count);
-        let mut coefficient_of: Vec<Vec<f64>> = Vec::with_capacity(plate_count);
+        let mut stack = Vec::new();
 
-        for (p, plate) in self.plates.iter().enumerate() {
-            let mut b = vec![0.0; cell_count];
-            let mut c = vec![0.0; cell_count];
-            let mut weak = vec![false; cell_count];
-            for local in 0..cell_count {
-                let Some(crust) = plate.crust[local] else {
-                    continue;
-                };
-                let previous = plate.sheet.strain_rate[local] as f64;
-                let target = self.sheet_viscosity(&crust, previous);
-                let old = plate.sheet.log_viscosity[local];
-                b[local] = if old.is_finite() {
-                    // Under-relaxed in log space: the strain rate is the last step's.
-                    math::powf(10.0, 0.5 * (old as f64 + math::log10(target)))
+        for (p, (plate, w)) in self.plates.iter().zip(work.iter_mut()).enumerate() {
+            for (i, &local) in w.samples.iter().enumerate() {
+                let l = local as usize;
+                let crust = plate.crust[l].expect("samples have crust");
+                let target = self.sheet_viscosity(&crust, plate.sheet.strain_rate[l] as f64);
+                let old = plate.sheet.viscosity[l] as f64;
+                // Under-relaxed (geometric mean): the strain rate is the last step's.
+                w.viscosity[i] = if old.is_finite() && old > 0.0 {
+                    (old * target).sqrt()
                 } else {
                     target
                 };
-                c[local] = params.basal_drag
+                w.drag[i] = params.basal_drag
                     * if crust.is_continental() {
                         params.continental_drag_factor
                     } else {
@@ -737,65 +768,53 @@ impl Simulation {
                     * cell_area;
                 // Samples with fewer than three neighbours in the plate (slivers, necks one
                 // cell wide) have no meaningful strain: they move with their surroundings.
-                let neighbours = self
-                    .mesh
-                    .neighbors(local as u32)
+                let neighbours = mesh
+                    .neighbors(local)
                     .iter()
-                    .filter(|&&n| plate.crust[n as usize].is_some())
+                    .filter(|&&n| w.index[n as usize] != u32::MAX)
                     .count();
-                weak[local] = b[local] < sheet.rigid_viscosity && neighbours >= 3;
+                w.weak[i] = w.viscosity[i] < sheet.rigid_viscosity && neighbours >= 3;
             }
             // Remove the net torque of the forces (drag-weighted rigid rotation).
-            let forces = &mut sample_force[p];
             let (mut matrix, mut torque) = (DMat3::ZERO, DVec3::ZERO);
-            for local in 0..cell_count {
-                if plate.crust[local].is_some() {
-                    let r = self.mesh.vertex(local as u32);
-                    let normal = r * forces[local].dot(r);
-                    forces[local] -= normal;
-                    matrix += (DMat3::IDENTITY - dynamics::outer(r, r)) * c[local];
-                    torque += r.cross(forces[local]);
-                }
+            for (i, &local) in w.samples.iter().enumerate() {
+                let r = mesh.vertex(local);
+                let normal = r * w.force[i].dot(r);
+                w.force[i] -= normal;
+                matrix += (DMat3::IDENTITY - dynamics::outer(r, r)) * w.drag[i];
+                torque += r.cross(w.force[i]);
             }
             if matrix.determinant().abs() > 0.0 {
-                let w = matrix.inverse() * torque;
-                for local in 0..cell_count {
-                    if plate.crust[local].is_some() {
-                        let r = self.mesh.vertex(local as u32);
-                        forces[local] -= w.cross(r) * c[local];
-                    }
+                let rotation = matrix.inverse() * torque;
+                for (i, &local) in w.samples.iter().enumerate() {
+                    w.force[i] -= rotation.cross(mesh.vertex(local)) * w.drag[i];
                 }
             }
             // A plate without weak samples is rigid: no unknowns, no deformation.
-            let any_weak = weak.iter().any(|&w| w);
-            if !any_weak {
-                node_of.push(vec![u32::MAX; cell_count]);
-                block_of.push(vec![u32::MAX; cell_count]);
-                viscosity.push(b);
-                coefficient_of.push(c);
+            if !w.weak.iter().any(|&weak| weak) {
                 continue;
             }
             // Rigid blocks: connected components of rigid samples.
-            let mut block = vec![u32::MAX; cell_count];
-            let mut stack = Vec::new();
-            for start in 0..cell_count {
-                if plate.crust[start].is_none() || weak[start] || block[start] != u32::MAX {
+            for first in 0..w.samples.len() {
+                if w.weak[first] || w.block[first] != u32::MAX {
                     continue;
                 }
                 let id = blocks.len() as u32;
-                block[start] = id;
-                stack.push(start as u32);
+                w.block[first] = id;
+                stack.push(first as u32);
                 let (mut m, mut f, mut count) = (DMat3::ZERO, DVec3::ZERO, 0);
-                while let Some(v) = stack.pop() {
-                    let r = self.mesh.vertex(v);
-                    m += (DMat3::IDENTITY - dynamics::outer(r, r)) * c[v as usize];
-                    f += r.cross(forces[v as usize]);
+                while let Some(i) = stack.pop() {
+                    let i = i as usize;
+                    let r = mesh.vertex(w.samples[i]);
+                    m += (DMat3::IDENTITY - dynamics::outer(r, r)) * w.drag[i];
+                    f += r.cross(w.force[i]);
                     count += 1;
-                    for &n in self.mesh.neighbors(v) {
-                        let n = n as usize;
-                        if plate.crust[n].is_some() && !weak[n] && block[n] == u32::MAX {
-                            block[n] = id;
-                            stack.push(n as u32);
+                    for &n in mesh.neighbors(w.samples[i]) {
+                        let j = w.index[n as usize];
+                        if j != u32::MAX && !w.weak[j as usize] && w.block[j as usize] == u32::MAX
+                        {
+                            w.block[j as usize] = id;
+                            stack.push(j);
                         }
                     }
                 }
@@ -806,41 +825,27 @@ impl Simulation {
                 unknowns += 3;
             }
             // Nodes: weak samples and rigid samples next to a weak one.
-            let mut node = vec![u32::MAX; cell_count];
-            for local in 0..cell_count {
-                if plate.crust[local].is_none() {
-                    continue;
-                }
-                let kind = if weak[local] {
+            for (i, &local) in w.samples.iter().enumerate() {
+                let kind = if w.weak[i] {
                     let first = unknowns;
                     unknowns += 2;
-                    let (e1, e2) = geometry.basis[local];
-                    drag.push(c[local]);
-                    rhs.push(forces[local].dot(e1));
-                    rhs.push(forces[local].dot(e2));
+                    let (e1, e2) = geometry.basis[local as usize];
+                    drag.push(w.drag[i]);
+                    rhs.push(w.force[i].dot(e1));
+                    rhs.push(w.force[i].dot(e2));
+                    statistics.weak_samples += 1;
                     Node::Weak(first)
-                } else if self
-                    .mesh
-                    .neighbors(local as u32)
-                    .iter()
-                    .any(|&n| plate.crust[n as usize].is_some() && weak[n as usize])
-                {
-                    Node::Rigid(blocks[block[local] as usize].1)
+                } else if mesh.neighbors(local).iter().any(|&n| {
+                    let j = w.index[n as usize];
+                    j != u32::MAX && w.weak[j as usize]
+                }) {
+                    Node::Rigid(blocks[w.block[i] as usize].1)
                 } else {
                     continue;
                 };
-                node[local] = nodes.len() as u32;
-                nodes.push((p as u32, local as u32, kind));
+                w.node[i] = nodes.len() as u32;
+                nodes.push((p as u32, local, kind));
             }
-            statistics.weak_samples += weak
-                .iter()
-                .zip(&plate.crust)
-                .filter(|(w, c)| **w && c.is_some())
-                .count();
-            node_of.push(node);
-            block_of.push(block);
-            viscosity.push(b);
-            coefficient_of.push(c);
         }
         statistics.blocks = blocks.len();
 
@@ -848,10 +853,14 @@ impl Simulation {
         // (node a, node b, k, unit chord in the plate frame)
         let mut edges: Vec<(u32, u32, f64, DVec3)> = Vec::new();
         for (index, &(p, local, kind)) in nodes.iter().enumerate() {
-            let p = p as usize;
+            let w = &work[p as usize];
+            let i = w.index[local as usize] as usize;
             for slot in geometry.edges(local) {
-                let n = geometry.neighbor[slot];
-                let other = node_of[p][n as usize];
+                let j = w.index[geometry.neighbor[slot] as usize];
+                if j == u32::MAX {
+                    continue;
+                }
+                let other = w.node[j as usize];
                 if other == u32::MAX || (other as usize) < index {
                     continue;
                 }
@@ -860,39 +869,33 @@ impl Simulation {
                 {
                     continue;
                 }
-                let (va, vb) = (viscosity[p][local as usize], viscosity[p][n as usize]);
+                let (va, vb) = (w.viscosity[i], w.viscosity[j as usize]);
                 let k = spring * 2.0 * va * vb / (va + vb);
                 edges.push((index as u32, other, k, geometry.direction[slot]));
             }
         }
 
-        // Right-hand side of the blocks, and the block-Jacobi preconditioner.
+        // Right-hand side, and the block-Jacobi preconditioner.
         let mut b_vector = vec![0.0; unknowns];
-        let mut weak_index = 0;
-        let mut weak_diag: Vec<DMat2> = Vec::new();
+        let mut weak_diag: Vec<DMat2> = Vec::with_capacity(drag.len());
         let mut node_weak: Vec<usize> = vec![usize::MAX; nodes.len()];
         for (index, &(_, _, kind)) in nodes.iter().enumerate() {
             if let Node::Weak(first) = kind {
-                b_vector[first] = rhs[2 * weak_index];
-                b_vector[first + 1] = rhs[2 * weak_index + 1];
-                weak_diag.push(DMat2::from_diagonal(DVec2::splat(drag[weak_index])));
-                node_weak[index] = weak_index;
-                weak_index += 1;
+                let k = weak_diag.len();
+                b_vector[first] = rhs[2 * k];
+                b_vector[first + 1] = rhs[2 * k + 1];
+                weak_diag.push(DMat2::from_diagonal(DVec2::splat(drag[k])));
+                node_weak[index] = k;
             }
         }
         let mut block_diag: Vec<DMat3> = blocks.iter().map(|block| block.2).collect();
-        for block in &blocks {
+        let mut block_index_of_first = vec![usize::MAX; unknowns];
+        for (index, block) in blocks.iter().enumerate() {
             b_vector[block.1] = block.3.x;
             b_vector[block.1 + 1] = block.3.y;
             b_vector[block.1 + 2] = block.3.z;
+            block_index_of_first[block.1] = index;
         }
-        let block_index_of_first: Vec<usize> = {
-            let mut map = vec![usize::MAX; unknowns];
-            for (index, block) in blocks.iter().enumerate() {
-                map[block.1] = index;
-            }
-            map
-        };
         for &(a, b, k, e) in &edges {
             for node in [a, b] {
                 let (_, local, kind) = nodes[node as usize];
@@ -904,7 +907,7 @@ impl Simulation {
                             DMat2::from_cols(t * t.x, t * t.y) * k;
                     }
                     Node::Rigid(first) => {
-                        let m = self.mesh.vertex(local).cross(e);
+                        let m = mesh.vertex(local).cross(e);
                         block_diag[block_index_of_first[first]] += dynamics::outer(m, m) * k;
                     }
                 }
@@ -923,7 +926,6 @@ impl Simulation {
             .collect();
 
         // Node velocity (m/s, plate frame) from the unknowns.
-        let mesh = &self.mesh;
         let node_velocity = |x: &[f64], node: usize| -> DVec3 {
             let (_, local, kind) = nodes[node];
             match kind {
@@ -936,7 +938,11 @@ impl Simulation {
                 }
             }
         };
-        let apply = |x: &[f64], y: &mut [f64]| {
+        let mut velocities = vec![DVec3::ZERO; nodes.len()];
+        let mut apply = |x: &[f64], y: &mut [f64]| {
+            for (node, velocity) in velocities.iter_mut().enumerate() {
+                *velocity = node_velocity(x, node);
+            }
             y.fill(0.0);
             for (index, &(_, _, kind)) in nodes.iter().enumerate() {
                 if let Node::Weak(first) = kind {
@@ -953,7 +959,7 @@ impl Simulation {
                 y[block.1 + 2] += f.z;
             }
             for &(a, b, k, e) in &edges {
-                let delta = node_velocity(x, b as usize) - node_velocity(x, a as usize);
+                let delta = velocities[b as usize] - velocities[a as usize];
                 let s = k * delta.dot(e);
                 // (K u)_a = −k ((u_b − u_a) · e) e, (K u)_b = +k (…) e.
                 for (node, sign) in [(a, -1.0), (b, 1.0)] {
@@ -984,7 +990,8 @@ impl Simulation {
                 }
             }
             for (index, block) in blocks.iter().enumerate() {
-                let v = block_inverse[index] * DVec3::new(r[block.1], r[block.1 + 1], r[block.1 + 2]);
+                let v = block_inverse[index]
+                    * DVec3::new(r[block.1], r[block.1 + 1], r[block.1 + 2]);
                 z[block.1] = v.x;
                 z[block.1 + 1] = v.y;
                 z[block.1 + 2] = v.z;
@@ -1007,34 +1014,36 @@ impl Simulation {
             debug_assert!(positive > 0.0, "sheet operator not positive: {positive}");
         }
 
-        // Warm start from the last step's velocities.
+        // Warm start from the last step's velocities (relative to the plate's mean rotation).
         let mut x = vec![0.0; unknowns];
+        let previous = |p: u32, local: u32| {
+            let sheet = &self.plates[p as usize].sheet;
+            sheet.velocity[local as usize] / to_rad_per_myr + sheet.frame.cross(mesh.vertex(local))
+        };
         for &(p, local, kind) in &nodes {
             if let Node::Weak(first) = kind {
-                let sheet = &self.plates[p as usize].sheet;
-                let u = sheet.velocity[local as usize] / to_rad_per_myr
-                    + sheet.frame.cross(mesh.vertex(local));
+                let u = previous(p, local);
                 let (e1, e2) = geometry.basis[local as usize];
                 x[first] = u.dot(e1);
                 x[first + 1] = u.dot(e2);
             }
         }
-        for (index, block) in blocks.iter().enumerate() {
-            let plate = &self.plates[block.0 as usize];
-            let mut torque = DVec3::ZERO;
-            for local in 0..cell_count {
-                if block_of[block.0 as usize][local] == index as u32 {
-                    let r = mesh.vertex(local as u32);
-                    let u = plate.sheet.velocity[local] / to_rad_per_myr
-                        + plate.sheet.frame.cross(r);
-                    torque += r.cross(u) * coefficient_of[block.0 as usize][local];
+        let mut block_torque = vec![DVec3::ZERO; blocks.len()];
+        for (p, w) in work.iter().enumerate() {
+            for (i, &local) in w.samples.iter().enumerate() {
+                if w.block[i] != u32::MAX {
+                    let r = mesh.vertex(local);
+                    block_torque[w.block[i] as usize] +=
+                        r.cross(previous(p as u32, local)) * w.drag[i];
                 }
             }
+        }
+        for (block, torque) in blocks.iter().zip(&block_torque) {
             if block.2.determinant().abs() > 0.0 {
-                let w = block.2.inverse() * torque;
-                x[block.1] = w.x;
-                x[block.1 + 1] = w.y;
-                x[block.1 + 2] = w.z;
+                let rotation = block.2.inverse() * *torque;
+                x[block.1] = rotation.x;
+                x[block.1 + 1] = rotation.y;
+                x[block.1 + 2] = rotation.z;
             }
         }
 
@@ -1082,9 +1091,6 @@ impl Simulation {
             }
             iterations += 1;
             residual = dot(&r, &r).sqrt() / norm_b;
-            if iterations % 20 == 1 {
-                tracing::trace!(iterations, residual, rz, alpha, "Sheet solve");
-            }
         }
         statistics.iterations = iterations;
         statistics.residual = residual;
@@ -1097,119 +1103,80 @@ impl Simulation {
         // Velocities of all samples (m/s, plate frame); the frame follows the largest block.
         let split_speed = sheet.split_speed / 100.0 / (SECONDS_PER_MYR / 1e6);
         let min_block = (params.events.min_plate_area * cell_count as f64).ceil() as usize;
-        let split_time = sheet.split_time;
         let (mut speed_sum, mut speed_max, mut speed_count) = (0.0f64, 0.0f64, 0usize);
-        for p in 0..plate_count {
-            let plate_blocks: Vec<usize> = blocks
-                .iter()
-                .enumerate()
-                .filter(|(_, block)| block.0 as usize == p)
-                .map(|(index, _)| index)
-                .collect();
-            let block_rotation = |index: usize| {
-                let first = blocks[index].1;
-                DVec3::new(x[first], x[first + 1], x[first + 2])
-            };
-            let main = plate_blocks
+        // Blocks per plate, in order.
+        let mut plate_blocks: Vec<Vec<usize>> = vec![Vec::new(); plate_count];
+        for (index, block) in blocks.iter().enumerate() {
+            plate_blocks[block.0 as usize].push(index);
+        }
+        // Per block, its relative speed (m/s) to the frame at its edge samples (nodes).
+        let mut block_edge: Vec<Vec<u32>> = vec![Vec::new(); blocks.len()];
+        for &(_, local, kind) in &nodes {
+            if let Node::Rigid(first) = kind {
+                block_edge[block_index_of_first[first]].push(local);
+            }
+        }
+        let block_rotation = |index: usize| {
+            let first = blocks[index].1;
+            DVec3::new(x[first], x[first + 1], x[first + 2])
+        };
+        for (p, w) in work.iter().enumerate() {
+            let main = plate_blocks[p]
                 .iter()
                 .copied()
                 .max_by(|&a, &b| blocks[a].4.cmp(&blocks[b].4).then(b.cmp(&a)));
             // Only a block that is a substantial part of the plate carries the frame (a small
             // one's rotation is poorly constrained, e.g. its spin about its own axis).
-            let samples = self.plates[p].crust.iter().filter(|c| c.is_some()).count();
             let main = main.filter(|&index| {
-                blocks[index].4 >= min_block.max(1) && 5 * blocks[index].4 >= samples
+                blocks[index].4 >= min_block.max(1) && 5 * blocks[index].4 >= w.samples.len()
             });
             let frame = main.map_or(DVec3::ZERO, block_rotation);
-            if frame.length() > 1e-9 {
-                for &index in &plate_blocks {
-                    tracing::trace!(
-                        plate = p,
-                        block = index,
-                        samples = blocks[index].4,
-                        rotation = block_rotation(index).length(),
-                        torque = blocks[index].3.length(),
-                        drag = blocks[index].2.determinant(),
-                        norm_b,
-                        residual,
-                        "Fast frame"
-                    );
-                }
-            }
-            let mut velocity = vec![DVec3::ZERO; cell_count];
+            let mut velocity = vec![DVec3::ZERO; w.samples.len()];
             let mut moving = false;
-            for local in 0..cell_count {
-                if self.plates[p].crust[local].is_none() {
-                    continue;
-                }
-                let r = mesh.vertex(local as u32);
-                let block = block_of[p][local];
-                let node = node_of[p][local];
-                let u = if block != u32::MAX {
-                    block_rotation(block as usize).cross(r) - frame.cross(r)
-                } else if node != u32::MAX {
-                    node_velocity(&x, node as usize) - frame.cross(r)
+            for (i, &local) in w.samples.iter().enumerate() {
+                let r = mesh.vertex(local);
+                let u = if w.block[i] != u32::MAX {
+                    block_rotation(w.block[i] as usize).cross(r) - frame.cross(r)
+                } else if w.node[i] != u32::MAX {
+                    node_velocity(&x, w.node[i] as usize) - frame.cross(r)
                 } else {
                     // A rigid plate.
                     DVec3::ZERO
                 };
                 moving |= u != DVec3::ZERO;
-                if block == u32::MAX && node != u32::MAX {
+                if w.weak[i] {
                     let speed = u.length();
                     speed_sum += speed * speed;
-                    if speed > speed_max && tracing::enabled!(tracing::Level::TRACE) {
-                        let crust = self.plates[p].crust[local].expect("checked");
-                        let neighbours = mesh
-                            .neighbors(local as u32)
-                            .iter()
-                            .filter(|&&n| self.plates[p].crust[n as usize].is_some())
-                            .count();
-                        let weak_neighbours = mesh
-                            .neighbors(local as u32)
-                            .iter()
-                            .filter(|&&n| {
-                                self.plates[p].crust[n as usize].is_some()
-                                    && block_of[p][n as usize] == u32::MAX
-                            })
-                            .count();
-                        tracing::trace!(
-                            cm_per_yr = speed * 100.0 * (SECONDS_PER_MYR / 1e6),
-                            viscosity = viscosity[p][local],
-                            force = sample_force[p][local].length(),
-                            neighbours,
-                            weak_neighbours,
-                            thickness = crust.thickness,
-                            age = crust.age(self.time),
-                            continental = crust.is_continental_origin(),
-                            "Fastest weak sample so far"
-                        );
-                    }
                     speed_max = speed_max.max(speed);
                     speed_count += 1;
                 }
-                velocity[local] = u;
+                velocity[i] = u;
             }
-            // Strain rates (from u; rigid rotations give none).
-            let plate = &self.plates[p];
-            let mut strain = vec![0.0f32; cell_count];
-            let mut dilatation = vec![0.0f32; cell_count];
+            // Strain rates (from u; rigid rotations give none), for moving samples and their
+            // neighbours.
+            let mut strain: Vec<(u32, f32, f32)> = Vec::new();
             if moving {
-                for local in 0..cell_count {
-                    if plate.crust[local].is_none() {
+                for (i, &local) in w.samples.iter().enumerate() {
+                    let near_moving = velocity[i] != DVec3::ZERO
+                        || mesh.neighbors(local).iter().any(|&n| {
+                            let j = w.index[n as usize];
+                            j != u32::MAX && velocity[j as usize] != DVec3::ZERO
+                        });
+                    if !near_moving {
                         continue;
                     }
-                    let r = mesh.vertex(local as u32);
-                    let (e1, e2) = geometry.basis[local];
+                    let r = mesh.vertex(local);
+                    let (e1, e2) = geometry.basis[local as usize];
                     let (mut xx, mut vx) = (DMat2::ZERO, DMat2::ZERO);
                     let mut count = 0;
-                    for slot in geometry.edges(local as u32) {
-                        let n = geometry.neighbor[slot] as usize;
-                        if plate.crust[n].is_none() {
+                    for &n in mesh.neighbors(local) {
+                        let j = w.index[n as usize];
+                        if j == u32::MAX {
                             continue;
                         }
-                        let d = (mesh.vertex(n as u32) - r) * radius;
+                        let d = (mesh.vertex(n) - r) * radius;
                         let dx = DVec2::new(d.dot(e1), d.dot(e2));
-                        let dv = velocity[n] - velocity[local];
+                        let dv = velocity[j as usize] - velocity[i];
                         let dv = DVec2::new(dv.dot(e1), dv.dot(e2));
                         xx += DMat2::from_cols(dx * dx.x, dx * dx.y);
                         vx += DMat2::from_cols(dv * dx.x, dv * dx.y);
@@ -1223,28 +1190,23 @@ impl Simulation {
                     let e12 = 0.5 * (g.y_axis.x + g.x_axis.y);
                     let e33 = -(e11 + e22);
                     let second = (0.5 * (e11 * e11 + e22 * e22 + e33 * e33) + e12 * e12).sqrt();
-                    strain[local] = second as f32;
-                    dilatation[local] = (e11 + e22) as f32;
+                    strain.push((local, second as f32, (e11 + e22) as f32));
                 }
             }
             // Splits: blocks moving relative to the main block.
             let mut candidate: Option<(usize, f64)> = None;
-            if let Some(main) = main {
-                for &index in &plate_blocks {
-                    if index == main || blocks[index].4 < min_block || blocks[main].4 < min_block
-                    {
+            if let Some(main) = main
+                && blocks[main].4 >= min_block
+            {
+                for &index in &plate_blocks[p] {
+                    if index == main || blocks[index].4 < min_block {
                         continue;
                     }
                     let relative = block_rotation(index) - frame;
-                    // The relative speed at the block's edge samples (nodes).
-                    let mut fastest = 0.0f64;
-                    for &(np, local, kind) in &nodes {
-                        if np as usize == p
-                            && matches!(kind, Node::Rigid(first) if first == blocks[index].1)
-                        {
-                            fastest = fastest.max(relative.cross(mesh.vertex(local)).length());
-                        }
-                    }
+                    let fastest = block_edge[index]
+                        .iter()
+                        .map(|&local| relative.cross(mesh.vertex(local)).length())
+                        .fold(0.0, f64::max);
                     if fastest > split_speed && candidate.is_none_or(|(_, s)| fastest > s) {
                         candidate = Some((index, fastest));
                     }
@@ -1253,32 +1215,49 @@ impl Simulation {
             let rotation = self.plates[p].rotation;
             let plate = &mut self.plates[p];
             plate.angular_velocity += rotation * frame * (SECONDS_PER_MYR / radius);
-            for local in 0..cell_count {
-                plate.sheet.velocity[local] = velocity[local] * to_rad_per_myr;
-                if plate.crust[local].is_some() {
-                    plate.sheet.log_viscosity[local] =
-                        math::log10(viscosity[p][local].max(1.0)) as f32;
+            // Velocities are non-zero only at the active samples, strain rates only at the
+            // strained ones: clear the last step's, then set the new ones.
+            for &local in &plate.sheet.active {
+                plate.sheet.velocity[local as usize] = DVec3::ZERO;
+            }
+            for &local in &plate.sheet.strained {
+                plate.sheet.strain_rate[local as usize] = 0.0;
+                plate.sheet.dilatation[local as usize] = 0.0;
+            }
+            plate.sheet.active.clear();
+            for (i, &local) in w.samples.iter().enumerate() {
+                if velocity[i] != DVec3::ZERO {
+                    plate.sheet.velocity[local as usize] = velocity[i] * to_rad_per_myr;
+                    plate.sheet.active.push(local);
+                }
+                plate.sheet.viscosity[local as usize] = w.viscosity[i] as f32;
+            }
+            plate.sheet.strained.clear();
+            for &(local, rate, dilatation) in &strain {
+                if rate != 0.0 || dilatation != 0.0 {
+                    plate.sheet.strain_rate[local as usize] = rate;
+                    plate.sheet.dilatation[local as usize] = dilatation;
+                    plate.sheet.strained.push(local);
                 }
             }
-            plate.sheet.strain_rate = strain;
-            plate.sheet.dilatation = dilatation;
             plate.sheet.moving = moving;
             plate.sheet.frame = frame;
             plate.sheet.pending_split = None;
             match candidate {
                 Some((index, _)) => {
                     plate.sheet.split_timer += dt;
-                    if plate.sheet.split_timer >= split_time {
+                    if plate.sheet.split_timer >= sheet.split_time {
                         // Each sample goes to the block whose motion is closer to its own.
                         let other = block_rotation(index) - frame;
-                        let side: Vec<u32> = (0..cell_count as u32)
-                            .filter(|&local| {
-                                plate.crust[local as usize].is_some() && {
-                                    let r = mesh.vertex(local);
-                                    let u = velocity[local as usize];
-                                    (u - other.cross(r)).length_squared() < u.length_squared()
-                                }
+                        let side: Vec<u32> = w
+                            .samples
+                            .iter()
+                            .zip(&velocity)
+                            .filter(|&(&local, u)| {
+                                (*u - other.cross(mesh.vertex(local))).length_squared()
+                                    < u.length_squared()
                             })
+                            .map(|(&local, _)| local)
                             .collect();
                         plate.sheet.pending_split = Some(side);
                     }
@@ -1340,30 +1319,36 @@ impl Simulation {
             return;
         }
         let start = web_time::Instant::now();
-        let before = ledger::plates_mass(&self.plates);
         let geometry = &self.sheet_geometry;
         let cell_count = self.mesh.len();
         let time = self.time;
         let max_thickness = self.params.max_crust_thickness;
-        let mut moved = 0.0;
+        let (mut moved, mut change) = (0.0, 0.0);
+        // Scratch per local vertex, reset after each use.
+        let mut outflow = vec![0.0f64; cell_count];
+        let mut incoming = vec![0.0f64; cell_count];
+        let mut mixtures: Vec<Option<Mixture>> = vec![None; cell_count];
+        let mut transfers: Vec<(u32, u32, f64)> = Vec::new();
+        let mut parts: Vec<(u32, u32, f64)> = Vec::new();
+        let mut touched: Vec<u32> = Vec::new();
         for plate in self.plates.iter_mut() {
             if !plate.sheet.moving {
                 continue;
             }
-            // Sub-cycles keep each sample's outflow below half its column.
-            let mut outflow = vec![0.0f64; cell_count];
-            let mut transfers: Vec<(u32, u32, f64)> = Vec::new();
-            for local in 0..cell_count as u32 {
+            // Faces with a deformation velocity: from the moving samples (each face once).
+            transfers.clear();
+            for &local in &plate.sheet.active {
                 if plate.crust[local as usize].is_none() {
                     continue;
                 }
                 let u = plate.sheet.velocity[local as usize];
                 for slot in geometry.edges(local) {
                     let n = geometry.neighbor[slot];
-                    if n < local || plate.crust[n as usize].is_none() {
+                    let other = plate.sheet.velocity[n as usize];
+                    if plate.crust[n as usize].is_none() || (other != DVec3::ZERO && n < local) {
                         continue;
                     }
-                    let w = 0.5 * (u + plate.sheet.velocity[n as usize]).dot(geometry.direction[slot]);
+                    let w = 0.5 * (u + other).dot(geometry.direction[slot]);
                     if w == 0.0 {
                         continue;
                     }
@@ -1373,41 +1358,40 @@ impl Simulation {
                     transfers.push((from, to, share));
                 }
             }
-            let largest = outflow.iter().copied().fold(0.0, f64::max);
+            // Sub-cycles keep each sample's outflow per cycle below half its column.
+            let mut largest = 0.0f64;
+            for &(from, _, _) in &transfers {
+                largest = largest.max(outflow[from as usize]);
+            }
+            for &(from, _, _) in &transfers {
+                outflow[from as usize] = 0.0;
+            }
             let cycles = (largest / 0.5).ceil().max(1.0) as usize;
             let scale = 1.0 / cycles as f64;
             for _ in 0..cycles {
                 // Room below the cap: receivers take at most what fits.
-                let mut incoming = vec![0.0f64; cell_count];
                 for &(from, to, share) in &transfers {
                     if let Some(crust) = plate.crust[from as usize] {
                         incoming[to as usize] += crust.thickness * share * scale;
                     }
                 }
-                let factor = |to: u32, incoming: &[f64], plate: &Plate| {
+                parts.clear();
+                for &(from, to, share) in &transfers {
                     let thickness = plate.crust[to as usize].map_or(0.0, |c| c.thickness);
                     let room = (max_thickness - thickness).max(0.0);
-                    if incoming[to as usize] > room {
-                        room / incoming[to as usize]
-                    } else {
-                        1.0
-                    }
-                };
-                let mut out = vec![0.0f64; cell_count];
-                let mut parts: Vec<(u32, u32, f64)> = Vec::with_capacity(transfers.len());
-                for &(from, to, share) in &transfers {
-                    let s = share * scale * factor(to, &incoming, plate);
-                    out[from as usize] += s;
+                    let wanted = incoming[to as usize];
+                    let factor = if wanted > room { room / wanted } else { 1.0 };
+                    let s = share * scale * factor;
+                    outflow[from as usize] += s;
                     parts.push((from, to, s));
                 }
-                let mut mixtures: Vec<Option<Mixture>> = vec![None; cell_count];
-                let mut touched: Vec<u32> = Vec::new();
+                touched.clear();
                 for &(from, to, s) in &parts {
                     for v in [from, to] {
                         if mixtures[v as usize].is_none() {
                             let crust = plate.crust[v as usize].expect("transfers between samples");
                             let mut mixture = Mixture::new();
-                            mixture.add(&crust, 1.0 - out[v as usize], time);
+                            mixture.add(&crust, 1.0 - outflow[v as usize], time);
                             mixtures[v as usize] = Some(mixture);
                             touched.push(v);
                         }
@@ -1421,8 +1405,9 @@ impl Simulation {
                 }
                 touched.sort_unstable();
                 for &v in &touched {
-                    let old = plate.crust[v as usize].expect("touched samples have crust");
-                    let mut new = mixtures[v as usize].expect("set above").crust(time);
+                    let v = v as usize;
+                    let old = plate.crust[v].expect("touched samples have crust");
+                    let mut new = mixtures[v].take().expect("set above").crust(time);
                     if old.is_continental_origin() && new.thickness > 0.0 {
                         let ratio = new.thickness / old.thickness.max(1e-9);
                         if ratio < 1.0 {
@@ -1441,14 +1426,16 @@ impl Simulation {
                             }
                         }
                     }
-                    plate.crust[v as usize] = Some(new);
+                    change += new.mass() - old.mass();
+                    plate.crust[v] = Some(new);
+                    outflow[v] = 0.0;
+                    incoming[v] = 0.0;
                 }
             }
         }
-        self.move_fronts(dt);
+        change += self.move_fronts(dt);
         self.sheet_statistics.moved += moved;
-        let after = ledger::plates_mass(&self.plates);
-        self.ledger.record(Term::Deformation, after - before);
+        self.ledger.record(Term::Deformation, change);
         self.sheet_statistics.transport_seconds += start.elapsed().as_secs_f64();
     }
 
@@ -1456,17 +1443,20 @@ impl Simulation {
     /// (see [`PlateSheet::front`]): a front that retreated past the middle of its cell gives the
     /// cell up (the column moves to its neighbours in the plate), one that advanced past the
     /// middle of the next cell takes it (the column is shared with the new sample).
-    fn move_fronts(&mut self, dt: f64) {
+    /// Returns the change of mass (zero up to rounding).
+    fn move_fronts(&mut self, dt: f64) -> f64 {
         let geometry = &self.sheet_geometry;
-        let cell_count = self.mesh.len();
+        let max_thickness = self.params.max_crust_thickness;
         let time = self.time;
+        let mut change = 0.0;
         let mut vacated: Vec<(u32, u32, u32)> = Vec::new();
         let mut grown: Vec<(u32, u32)> = Vec::new();
         for (p, plate) in self.plates.iter_mut().enumerate() {
             if !plate.sheet.moving {
                 continue;
             }
-            for local in 0..cell_count as u32 {
+            for index in 0..plate.sheet.active.len() {
+                let local = plate.sheet.active[index];
                 let l = local as usize;
                 if plate.crust[l].is_none() {
                     continue;
@@ -1507,7 +1497,20 @@ impl Simulation {
                     }
                     let total: f64 = weights.iter().map(|w| w.1).sum();
                     let count = weights.len() as f64;
+                    // Only into room below the maximum thickness: a front that cannot hand its
+                    // column on stays (shortening against crust at the cap stops).
+                    let column = plate.crust[l].expect("checked").thickness;
+                    let fits = weights.iter().all(|&(n, w)| {
+                        let share = if total > 0.0 { w / total } else { 1.0 / count };
+                        plate.crust[n as usize].expect("checked").thickness + share * column
+                            <= max_thickness
+                    });
+                    if !fits {
+                        plate.sheet.front[l] = 0.5;
+                        continue;
+                    }
                     let crust = plate.crust[l].take().expect("checked");
+                    change -= crust.mass();
                     let mut best = (weights[0].0, -1.0);
                     for &(n, w) in &weights {
                         let share = if total > 0.0 { w / total } else { 1.0 / count };
@@ -1518,7 +1521,9 @@ impl Simulation {
                         let mut mixture = Mixture::new();
                         mixture.add(&receiver, 1.0, time);
                         mixture.add(&crust, share, time);
-                        plate.crust[n as usize] = Some(mixture.crust(time));
+                        let mixed = mixture.crust(time);
+                        change += mixed.mass() - receiver.mass();
+                        plate.crust[n as usize] = Some(mixed);
                     }
                     plate.sheet.reset(l);
                     vacated.push((p as u32, local, best.0));
@@ -1529,8 +1534,10 @@ impl Simulation {
                     };
                     let crust = plate.crust[l].expect("checked");
                     let share = (front - 1.0) / front;
-                    plate.crust[n as usize] = Some(scaled(&crust, share));
-                    plate.crust[l] = Some(scaled(&crust, 1.0 - share));
+                    let (outer, inner) = (scaled(&crust, share), scaled(&crust, 1.0 - share));
+                    change += outer.mass() + inner.mass() - crust.mass();
+                    plate.crust[n as usize] = Some(outer);
+                    plate.crust[l] = Some(inner);
                     plate.consumed[n as usize] = false;
                     plate.sheet.reset(n as usize);
                     plate.sheet.velocity[n as usize] = u;
@@ -1569,6 +1576,7 @@ impl Simulation {
         }
         self.sheet_statistics.vacated += vacated.len() as u64;
         self.sheet_statistics.grown += grown.len() as u64;
+        change
     }
 
     /// Splits the plates whose deformation has separated them into parts that move relative to
