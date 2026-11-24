@@ -250,9 +250,9 @@ blocks — named).
   mode in this PR (a strain-rate mode is an easy follow-up if wanted).
 * Determinism: all loops in index order, no hash-map iteration in results, transcendental
   math through `crate::math` (`powf`), so web = desktop with `--web-math`.
-* Parameters: `deformation.*` via `--set` (`enabled`, `strong_viscosity`, `strength_exponent`,
+* Parameters: `sheet.*` via `--set` (`enabled`, `strong_viscosity`, `strength_exponent`,
   `continental_strength`, `stress_exponent`, `split_speed`, `split_time`, …);
-  `--set deformation.enabled=0` restores today's model bit for bit (for the comparison and as
+  `--set sheet.enabled=0` restores today's model bit for bit (for the comparison and as
   an escape hatch).
 
 ## 9. Runtime estimate

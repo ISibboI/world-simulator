@@ -16,7 +16,21 @@ the finished frames, so the viewer's frame rate does not depend on the simulatio
 "Viewer"), paired runs started at the same time on the same machine (tktie, shared with other
 jobs, so absolute numbers vary by ±10%; the pairs see the same load).
 
-SUBDIVISION_TABLE
+Seed 0, 200 Myr, default parameters, branch at 6adca63, `main` at 4200b10:
+
+| subdivisions (cells, spacing) | `main` | branch | branch with `--set sheet.enabled=0` | of it: deformation solve + transport |
+|---|---|---|---|---|
+| 4 (2 562, ~440 km) | 27.9 s (0.14 s/Myr) | 20.3 s (0.10 s/Myr) | — | 0.3 s |
+| 5 (10 242, ~220 km) | 38.0 s (0.19 s/Myr) | 30.0 s (0.15 s/Myr) | — | 0.8 s |
+| 6 (40 962, ~110 km) | 95.6 s, 94.9 s (0.48 s/Myr, ~2.1 Myr per second) | 94.5 s (0.47 s/Myr) | 87.2 s | 4.5 s (4.1 + 0.4) |
+
+At 6 subdivisions the deformation costs ~23 ms per step (~5% of a step); the thermal-equator
+fix saves ~8%. The two runs diverge after the first steps (different events, plate counts),
+so the totals also differ by the trajectories; the 8-seed 1000 Myr comparison
+([results](results.md)) has the run times of the whole set (GitHub runners and tktie mixed,
+so only indicative). The cost of the deformation grows with the weak area, which grows during
+the first ~200 Myr and then stays at ~8% of the surface: ~4.5% of the step time later in a run
+(300 Myr profile below).
 
 ## Where the time goes (profile)
 
