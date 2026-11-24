@@ -86,6 +86,9 @@ pub struct SheetParams {
     pub split_speed: f64,
     /// Time (Myr) for which the speed must be exceeded.
     pub split_time: f64,
+    /// How plate edges move with the material (see [`Simulation::move_fronts`]): 0 not at
+    /// all, 1 only retreating, 2 retreating and advancing.
+    pub fronts: u8,
     /// Relative residual at which the solve stops.
     pub tolerance: f64,
     /// Most conjugate-gradient iterations per step.
@@ -109,6 +112,7 @@ impl Default for SheetParams {
             gpe_factor: 1.0,
             split_speed: 1.5,
             split_time: 5.0,
+            fronts: 2,
             tolerance: 1e-3,
             max_iterations: 200,
         }
@@ -121,6 +125,10 @@ impl SheetParams {
         let field = match name {
             "enabled" => {
                 self.enabled = value != 0.0;
+                return Ok(());
+            }
+            "fronts" => {
+                self.fronts = value.clamp(0.0, 2.0) as u8;
                 return Ok(());
             }
             "max_iterations" => {
@@ -1536,7 +1544,9 @@ impl Simulation {
                 }
             }
         }
-        change += self.move_fronts(dt);
+        if self.params.sheet.fronts > 0 {
+            change += self.move_fronts(dt);
+        }
         self.sheet_statistics.moved += moved;
         self.ledger.record(Term::Deformation, change);
         self.sheet_statistics.transport_seconds += start.elapsed().as_secs_f64();
@@ -1548,6 +1558,7 @@ impl Simulation {
     /// middle of the next cell takes it (the column is shared with the new sample).
     /// Returns the change of mass (zero up to rounding).
     fn move_fronts(&mut self, dt: f64) -> f64 {
+        let fronts = self.params.sheet.fronts;
         let geometry = &self.sheet_geometry;
         let max_thickness = self.params.max_crust_thickness;
         let time = self.time;
@@ -1631,7 +1642,7 @@ impl Simulation {
                     plate.sheet.reset(l);
                     vacated.push((p as u32, local, best.0));
                 } else if front > 1.5 {
-                    let Some((n, _)) = outward else {
+                    let Some((n, _)) = outward.filter(|_| fronts > 1) else {
                         plate.sheet.front[l] = 1.5;
                         continue;
                     };
@@ -1659,7 +1670,8 @@ impl Simulation {
                 target.insert((p, local), receiver);
             }
             for owner in &mut self.owners {
-                if let Some(&receiver) = target.get(&(owner.plate, owner.local)) {
+                // A receiver may itself have been vacated later in the pass.
+                while let Some(&receiver) = target.get(&(owner.plate, owner.local)) {
                     owner.local = receiver;
                 }
             }
@@ -1834,6 +1846,79 @@ mod tests {
         let mut stiff = TectonicParams::default();
         stiff.sheet.rigid_viscosity = 0.0;
         assert!(run(rigid) == run(stiff), "stiff deforming plates differ from rigid plates");
+    }
+
+    /// A simulation whose plate 0 has the deformation velocity `field(r)` (rad/Myr, plate
+    /// frame) at every sample.
+    fn with_velocity(field: impl Fn(DVec3) -> DVec3) -> Simulation {
+        let mut simulation =
+            Simulation::new(SphereMesh::icosphere(4), 4, TectonicParams::default(), 2);
+        let plate = &mut simulation.plates[0];
+        plate.sheet.active.clear();
+        for local in 0..plate.crust.len() as u32 {
+            if plate.crust[local as usize].is_some() {
+                let r = simulation.mesh.vertex(local);
+                let u = field(r);
+                let u = u - r * u.dot(r);
+                plate.sheet.velocity[local as usize] = u;
+                if u != DVec3::ZERO {
+                    plate.sheet.active.push(local);
+                }
+            }
+        }
+        plate.sheet.moving = !plate.sheet.active.is_empty();
+        simulation
+    }
+
+    #[test]
+    fn transport_conserves_mass_and_thickens_converging_crust() {
+        // Converging towards the centre of plate 0 (0.5 cm/yr at a radian).
+        let centre = {
+            let probe = with_velocity(|_| DVec3::ZERO);
+            let plate = &probe.plates[0];
+            let sum: DVec3 = (0..plate.crust.len() as u32)
+                .filter(|&l| plate.crust[l as usize].is_some())
+                .map(|l| probe.mesh.vertex(l))
+                .sum();
+            sum.normalize()
+        };
+        let speed = 0.005 / (6.371e6 * 100.0 / 1e6) * 100.0;
+        let mut simulation = with_velocity(|r| (centre - r) * speed);
+        let mass = ledger::plates_mass(&simulation.plates);
+        let thickness = |s: &Simulation| {
+            let local = s.mesh.nearest(centre);
+            s.plates[0].crust[local as usize].map(|c| c.thickness)
+        };
+        let before = thickness(&simulation);
+        for _ in 0..5 {
+            simulation.transport_crust(1.0);
+        }
+        let after = ledger::plates_mass(&simulation.plates);
+        assert!((after - mass).abs() < 1e-9 * mass, "{mass} → {after}");
+        assert!(simulation.ledger.deformation.abs() < 1e-9 * mass);
+        if let (Some(before), Some(after)) = (before, thickness(&simulation)) {
+            assert!(after > before, "converging crust thickens: {before} → {after}");
+        }
+    }
+
+    #[test]
+    fn moving_fronts_conserve_mass() {
+        // A uniform drift of plate 0 within its frame: its front advances on one side and
+        // retreats on the other.
+        let mut simulation = with_velocity(|r| DVec3::Z.cross(r) * 0.05);
+        let mass = ledger::plates_mass(&simulation.plates);
+        for _ in 0..20 {
+            simulation.transport_crust(1.0);
+        }
+        let statistics = &simulation.sheet_statistics;
+        assert!(statistics.vacated > 0 && statistics.grown > 0);
+        let after = ledger::plates_mass(&simulation.plates);
+        assert!((after - mass).abs() < 1e-9 * mass, "{mass} → {after}");
+        // Every owner points to a sample with crust.
+        for cell in 0..simulation.mesh.len() as u32 {
+            let owner = simulation.owners[cell as usize];
+            assert!(simulation.plates[owner.plate as usize].crust[owner.local as usize].is_some());
+        }
     }
 
     #[test]
