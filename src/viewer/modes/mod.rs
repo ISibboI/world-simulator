@@ -27,11 +27,12 @@ mod plates;
 pub mod switcher;
 mod temperature;
 mod topographic;
+mod wind;
 
 use clap::ValueEnum;
 use glam::Vec3;
 
-use super::arrows::{ArrowStyle, Sample, base_point};
+use super::arrows::{ArrowStyle, Sample, base_point, tangent_vector};
 use super::fields::{Fields, Layer, Layers};
 use super::overlay::{LineStyle, OverlayBuilder, category_boundaries};
 use super::plate_colors::PlateColors;
@@ -55,6 +56,8 @@ pub enum RenderModeId {
     Moisture,
     /// The wind-driven ocean gyres as arrows.
     OceanCurrents,
+    /// The prevailing low-level winds as arrows (annual, January or July).
+    Wind,
     /// Age of the ocean floor with isochrons; continents in grey.
     CrustAge,
 }
@@ -69,6 +72,7 @@ impl RenderModeId {
             RenderModeId::Temperature => &temperature::Temperature,
             RenderModeId::Moisture => &moisture::Moisture,
             RenderModeId::OceanCurrents => &ocean_currents::OceanCurrents,
+            RenderModeId::Wind => &wind::Wind,
             RenderModeId::CrustAge => &crust_age::CrustAge,
         }
     }
@@ -93,6 +97,7 @@ impl RenderModeId {
             RenderModeId::Temperature => "temperature",
             RenderModeId::Moisture => "moisture",
             RenderModeId::OceanCurrents => "ocean-currents",
+            RenderModeId::Wind => "wind",
             RenderModeId::CrustAge => "crust-age",
         }
     }
@@ -151,6 +156,39 @@ impl ModeData<'_> {
                 })
                 .collect(),
         )
+    }
+}
+
+impl ModeData<'_> {
+    /// Arrows of a per-cell field given in local components at `cells` (e.g. from
+    /// [`super::arrows::sample_cells`]) `spacing` apart, with the cell of each: `vector` gives
+    /// the eastward and northward components of a cell in the unit of the arrows, or `None`
+    /// where the field has no value. Zero vectors are left out; nothing while the cells do not
+    /// match the mesh.
+    pub fn tangent_samples(
+        &self,
+        cells: &[u32],
+        spacing: f64,
+        vector: impl Fn(&CellInfo) -> Option<[f32; 2]>,
+    ) -> Vec<(u32, Sample)> {
+        if self.cells.len() != self.mesh.len() {
+            return Vec::new();
+        }
+        cells
+            .iter()
+            .filter_map(|&cell| {
+                let components = vector(&self.cells[cell as usize])?;
+                let vector = tangent_vector(self.mesh.vertex(cell), components);
+                vector.try_normalize()?;
+                Some((
+                    cell,
+                    Sample {
+                        base: base_point(self.mesh, cell, spacing, |vertex| self.position(vertex)),
+                        vector,
+                    },
+                ))
+            })
+            .collect()
     }
 }
 
@@ -258,6 +296,57 @@ impl OptionValues {
     pub fn set(&mut self, index: usize, value: u8) {
         if let Some(slot) = self.0.get_mut(index) {
             *slot = value;
+        }
+    }
+}
+
+/// Which part of the year a mode shows: the year (annual means or totals), January (northern
+/// winter) or July (northern summer); the value of a [`OptionKind::Choice`] option of
+/// [`Period::CHOICES`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Period {
+    Annual,
+    January,
+    July,
+}
+
+impl Period {
+    /// The choices of an option for the period, in the order of the values.
+    pub const CHOICES: &'static [&'static str] = &["Year", "January", "July"];
+
+    /// The period chosen in the option at `index`.
+    pub fn of(options: &OptionValues, index: usize) -> Self {
+        match options.get(index) {
+            1 => Period::January,
+            2 => Period::July,
+            _ => Period::Annual,
+        }
+    }
+
+    /// The surface temperature of a cell in °C.
+    pub fn temperature(self, cell: &CellInfo) -> f32 {
+        match self {
+            Period::Annual => cell.temperature,
+            Period::January => cell.temperature_january,
+            Period::July => cell.temperature_july,
+        }
+    }
+
+    /// The precipitation of a cell in m/yr.
+    pub fn precipitation(self, cell: &CellInfo) -> f32 {
+        match self {
+            Period::Annual => cell.precipitation,
+            Period::January => cell.precipitation_january,
+            Period::July => cell.precipitation_july,
+        }
+    }
+
+    /// The low-level wind of a cell (eastward, northward) in m/s.
+    pub fn wind(self, cell: &CellInfo) -> [f32; 2] {
+        match self {
+            Period::Annual => [cell.wind_east, cell.wind_north],
+            Period::January => [cell.wind_january_east, cell.wind_january_north],
+            Period::July => [cell.wind_july_east, cell.wind_july_north],
         }
     }
 }

@@ -409,6 +409,12 @@ mod tests {
             current_north: 0.0,
             streamfunction: 0.0,
             gyre_heating: 0.0,
+            wind_east: 0.0,
+            wind_north: 0.0,
+            wind_january_east: 0.0,
+            wind_january_north: 0.0,
+            wind_july_east: 0.0,
+            wind_july_north: 0.0,
             plate,
             flags: match kind {
                 Kind::Oceanic => CellInfo::OCEANIC,
