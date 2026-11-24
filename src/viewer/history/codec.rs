@@ -2,8 +2,8 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (47 bytes per cell
-//! instead of 116, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (50 bytes per cell
+//! instead of 128, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
@@ -21,6 +21,10 @@ enum Code {
     Signed8(f32),
     /// A share from 0 to 1 in steps of 1/254, 1 byte; 255 is NaN.
     Share,
+    /// A non-negative value up to this maximum on a square-root axis in 254 steps, 1 byte; 255
+    /// is NaN. Fine near zero, coarser for large values (relative error of about 0.8 % of
+    /// `sqrt(max / value)`).
+    Root(f32),
     /// ln(1 + value) with this step, 2 bytes, for values spanning many orders of magnitude;
     /// `u16::MAX` is NaN.
     Logarithmic(f32),
@@ -33,14 +37,14 @@ enum Code {
 impl Code {
     const fn bytes(self) -> usize {
         match self {
-            Code::Share | Code::Signed8(_) | Code::Integer8 => 1,
+            Code::Share | Code::Root(_) | Code::Signed8(_) | Code::Integer8 => 1,
             _ => 2,
         }
     }
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 29] = [
+const CHANNELS: [Code; 32] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -66,6 +70,14 @@ const CHANNELS: [Code; 29] = [
     Code::Unsigned(0.001),
     Code::Unsigned(0.001),
     Code::Unsigned(0.001),
+    // Evaporation (annual, January, July): 1 byte on a square-root axis up to 8 m/yr (monthly
+    // rates of land reach about 6 m/yr in summer): steps of 4 mm/yr at 30 mm/yr (deserts),
+    // 11 mm/yr at 0.25 m/yr, 22 mm/yr at 1 m/yr, 31 mm/yr at 2 m/yr. P − E so keeps a few mm/yr
+    // where it is small on land, far below a colour step of its scale, and a few per cent over
+    // the ocean.
+    Code::Root(8.0),
+    Code::Root(8.0),
+    Code::Root(8.0),
     // Ice share.
     Code::Share,
     // Discharge: 0.6 % relative (the widget shows 3 digits), up to 10^38 m³/yr.
@@ -120,6 +132,9 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.precipitation_january,
         cell.precipitation_july,
         cell.potential_evaporation,
+        cell.evaporation,
+        cell.evaporation_january,
+        cell.evaporation_july,
         cell.ice,
         cell.discharge,
         cell.current_east,
@@ -170,6 +185,14 @@ fn quantise(code: Code, value: f32) -> u16 {
             }
             (value * 254.0).round().clamp(0.0, 254.0) as u16
         }
+        Code::Root(max) => {
+            if value.is_nan() {
+                return 255;
+            }
+            ((value.max(0.0) / max).sqrt() * 254.0)
+                .round()
+                .clamp(0.0, 254.0) as u16
+        }
         Code::Logarithmic(step) => {
             if value.is_nan() {
                 return u16::MAX;
@@ -213,6 +236,13 @@ fn dequantise(code: Code, value: u16) -> f32 {
                 f32::NAN
             } else {
                 f32::from(value) / 254.0
+            }
+        }
+        Code::Root(max) => {
+            if value == 255 {
+                f32::NAN
+            } else {
+                (f32::from(value) / 254.0).powi(2) * max
             }
         }
         Code::Logarithmic(step) => {
@@ -290,20 +320,23 @@ impl Planes {
                     precipitation_january: value(12),
                     precipitation_july: value(13),
                     potential_evaporation: value(14),
-                    ice: value(15),
-                    discharge: value(16),
-                    current_east: value(17),
-                    current_north: value(18),
-                    streamfunction: value(19),
-                    gyre_heating: value(20),
-                    wind_east: value(21),
-                    wind_north: value(22),
-                    wind_january_east: value(23),
-                    wind_january_north: value(24),
-                    wind_july_east: value(25),
-                    wind_july_north: value(26),
-                    plate: u32::from(values[27]),
-                    flags: u32::from(values[28]),
+                    evaporation: value(15),
+                    evaporation_january: value(16),
+                    evaporation_july: value(17),
+                    ice: value(18),
+                    discharge: value(19),
+                    current_east: value(20),
+                    current_north: value(21),
+                    streamfunction: value(22),
+                    gyre_heating: value(23),
+                    wind_east: value(24),
+                    wind_north: value(25),
+                    wind_january_east: value(26),
+                    wind_january_north: value(27),
+                    wind_july_east: value(28),
+                    wind_july_north: value(29),
+                    plate: u32::from(values[30]),
+                    flags: u32::from(values[31]),
                 }
             })
             .collect()
@@ -327,7 +360,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 6;
+const VERSION: u8 = 7;
 /// Bytes per plate: its rotation and id.
 pub const PLATE_BYTES: usize = 16;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -460,6 +493,13 @@ mod tests {
                 x * 0.0007
             },
             potential_evaporation: (x * 0.05).sin().abs() * 2.0,
+            evaporation: (x * 0.03).cos().abs() * 2.5,
+            evaporation_january: x * 0.004,
+            evaporation_july: if index.is_multiple_of(4) {
+                f32::NAN
+            } else {
+                (x * 0.07).sin().abs() * 3.0
+            },
             ice: if index.is_multiple_of(5) { 1.0 } else { 0.0 },
             discharge: if index.is_multiple_of(7) {
                 0.0
@@ -491,6 +531,13 @@ mod tests {
 
     fn cells(count: usize, time: f32) -> Vec<CellInfo> {
         (0..count).map(|index| cell(index, time)).collect()
+    }
+
+    /// Half a step of `Code::Root(8.0)` at a value (bounded by the steps either side of it).
+    fn root_tolerance(value: f32) -> f32 {
+        let step = (value.max(0.0) / 8.0).sqrt() * 254.0;
+        let at = |q: f32| (q.clamp(0.0, 254.0) / 254.0).powi(2) * 8.0;
+        0.5 * (at(step.ceil() + 1.0) - at(step.floor() - 1.0)) / 2.0
     }
 
     /// Whether `decoded` is `original` within the resolution of the quantisation.
@@ -534,6 +581,22 @@ mod tests {
                 original.potential_evaporation,
                 decoded.potential_evaporation,
                 0.0005,
+            ),
+            // Half a step of the square-root code at the value.
+            (
+                original.evaporation,
+                decoded.evaporation,
+                root_tolerance(original.evaporation),
+            ),
+            (
+                original.evaporation_january,
+                decoded.evaporation_january,
+                root_tolerance(original.evaporation_january),
+            ),
+            (
+                original.evaporation_july,
+                decoded.evaporation_july,
+                root_tolerance(original.evaporation_july),
             ),
             (original.ice, decoded.ice, 0.5 / 254.0),
             // A full step: small negative values keep their sign (one step below zero).
@@ -588,7 +651,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 47);
+        assert_eq!(BYTES_PER_CELL, 50);
     }
 
     #[test]
@@ -598,7 +661,13 @@ mod tests {
         extreme.crust_thickness = 1e9;
         extreme.precipitation = -1.0;
         extreme.discharge = f32::INFINITY;
+        extreme.evaporation = 12.0;
+        extreme.evaporation_january = -0.1;
+        extreme.evaporation_july = 1e-7;
         let decoded = Planes::new(&[extreme]).cell_infos()[0];
+        assert_eq!(decoded.evaporation, 8.0);
+        assert_eq!(decoded.evaporation_january, 0.0);
+        assert_eq!(decoded.evaporation_july, 0.0);
         assert!(decoded.elevation < 0.0);
         assert_eq!(decoded.crust_thickness, 10.0 * f32::from(u16::MAX - 1));
         assert_eq!(decoded.precipitation, 0.0);
@@ -669,7 +738,12 @@ mod tests {
         };
         let key = encode(&state, None);
         let delta = encode(&state, Some(&state));
-        assert!(delta.len() < 2_000, "{} bytes", delta.len());
+        // lz4 compresses runs of zeros at most about 255:1.
+        assert!(
+            delta.len() < 10_000 * BYTES_PER_CELL / 200,
+            "{} bytes",
+            delta.len()
+        );
         assert!(key.len() > delta.len());
     }
 

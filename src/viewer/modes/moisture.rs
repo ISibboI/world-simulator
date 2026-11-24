@@ -1,10 +1,18 @@
 //! Moisture: precipitation (annual, or of January or July) on a logarithmic sequential scale,
-//! or the aridity index of land, the ratio of the annual precipitation to the potential
-//! evaporation (#95).
+//! the aridity index of land, the ratio of the annual precipitation to the potential
+//! evaporation (#95), or P − E, precipitation minus evaporation (#136).
 //!
 //! Everything comes from the cells every frame keeps (annual, January and July precipitation and
-//! the annual potential evaporation of land at 1 mm/yr, see `history::codec`), so past frames
-//! show alike. As in the temperature mode, the colours are shown unlit with the coastlines drawn
+//! evaporation and the annual potential evaporation of land at 1 mm/yr, see `history::codec`),
+//! so past frames show alike.
+//!
+//! P − E is the water the surface gains: over the ocean fresh water (positive in the tropical
+//! convergence zone and the storm tracks, negative in the subtropics), on land the runoff. The
+//! evaporation is the water cycle's (`climate::WaterCycle::evaporation`): the bulk formula over
+//! the ocean, the Budyko-curve evapotranspiration on land, spread over the months by the
+//! potential evaporation. The water cycle conserves water, so P − E sums to zero over the planet.
+//! Lakes evaporate more than the land they cover in the river model, which takes it from the
+//! runoff and does not return it to the air; that is not in the evaporation shown. As in the temperature mode, the colours are shown unlit with the coastlines drawn
 //! as lines.
 //!
 //! The aridity index `AI = P / PET` is UNEP's (Middleton & Thomas, 1997): hyper-arid below
@@ -32,12 +40,15 @@ pub struct Moisture;
 enum View {
     Precipitation,
     Aridity,
+    /// Precipitation minus evaporation.
+    Balance,
 }
 
 impl View {
     fn of(options: &OptionValues) -> Self {
         match options.get(SHOW) {
             1 => View::Aridity,
+            2 => View::Balance,
             _ => View::Precipitation,
         }
     }
@@ -51,14 +62,16 @@ const DESERT_LINE: usize = 2;
 const OPTIONS: [ModeOption; 3] = [
     ModeOption {
         label: "Show",
-        hover: "Precipitation, or the aridity index of land: precipitation divided by the \
-                potential evaporation",
-        kind: OptionKind::Choice(&["Precipitation", "Aridity"]),
+        hover: "Precipitation; the aridity index of land: precipitation divided by the \
+                potential evaporation; or P − E: precipitation minus evaporation, the water the \
+                surface gains (runoff on land)",
+        kind: OptionKind::Choice(&["Precipitation", "Aridity", "P − E"]),
     },
     ModeOption {
         label: "Season",
         hover: "The year, or the rate of January (northern winter) or July (northern summer), as \
-                if it lasted a year; the aridity index is always that of the year",
+                if it lasted a year (precipitation and P − E); the aridity index is always that \
+                of the year",
         kind: OptionKind::Choice(Period::CHOICES),
     },
     ModeOption {
@@ -155,6 +168,68 @@ const ARIDITY_TICKS: [(f64, &str); 7] = [
     (3.0, "3"),
     (10.0, "10"),
 ];
+
+/// P − E: the ends of the scale in mm/yr (symmetric; values beyond are clamped) and the
+/// softness of its signed logarithmic axis, `sign(x) log10(1 + |x| / c)`: about linear within
+/// ±c of zero, logarithmic beyond. With c = 10 mm/yr the runoff of semi-deserts (tens of mm/yr)
+/// still stands apart from zero, while the quantisation of the frames (a few mm/yr in the
+/// months) stays within the near-white middle.
+const BALANCE_RANGE: f64 = 3000.0;
+const BALANCE_SOFTNESS: f64 = 10.0;
+/// Few ticks, so that their labels do not run into each other at phone width.
+const BALANCE_TICKS: [f64; 7] = [-1000.0, -100.0, -20.0, 0.0, 20.0, 100.0, 1000.0];
+
+/// The signed logarithmic axis of the P − E scale, of a value in mm/yr.
+fn balance_axis(millimetres: f64) -> f64 {
+    let magnitude = log(1.0 + millimetres.abs() / BALANCE_SOFTNESS);
+    if millimetres < 0.0 {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
+/// The value of a cell on the P − E axis (from m/yr), NaN where unknown.
+fn balance_value(metres: f32) -> f32 {
+    if metres.is_nan() {
+        f32::NAN
+    } else {
+        balance_axis(f64::from(metres) * 1000.0) as f32
+    }
+}
+
+/// The P − E scale: BrBG (as the aridity, brown where the surface loses water, blue-green where
+/// it gains), white at zero, evenly spread on the signed logarithmic axis.
+fn balance_scale(period: Period) -> ColorScale {
+    let end = balance_axis(BALANCE_RANGE);
+    let last = BR_BG.len() - 1;
+    ColorScale {
+        stops: BR_BG
+            .iter()
+            .enumerate()
+            .map(|(index, &color)| (-end + 2.0 * end * index as f64 / last as f64, color))
+            .collect(),
+        title: match period {
+            Period::Annual => "Annual P − E (mm/yr, logarithmic both ways)",
+            Period::January => "January P − E (mm/yr, logarithmic both ways)",
+            Period::July => "July P − E (mm/yr, logarithmic both ways)",
+        }
+        .into(),
+        ticks: BALANCE_TICKS
+            .into_iter()
+            .map(|tick| {
+                let label = if tick > 0.0 {
+                    format!("+{tick}")
+                } else if tick < 0.0 {
+                    format!("−{}", -tick)
+                } else {
+                    "0".to_owned()
+                };
+                (balance_axis(tick), label.into())
+            })
+            .collect(),
+    }
+}
 
 /// Colours of the ocean (it has no aridity index) and of ice sheets in the aridity view, and of
 /// cells without data.
@@ -293,6 +368,15 @@ impl RenderMode for Moisture {
                     MISSING,
                 )
             }
+            View::Balance => {
+                let period = Period::of(data.options, PERIOD);
+                balance_scale(period).colors(
+                    data.cells
+                        .iter()
+                        .map(|cell| balance_value(period.balance(cell))),
+                    MISSING,
+                )
+            }
             View::Aridity => {
                 let scale = aridity_scale();
                 data.cells
@@ -348,6 +432,7 @@ impl RenderMode for Moisture {
         let missing = data.is_some_and(|data| {
             data.cells.iter().any(|cell| match view {
                 View::Precipitation => period.precipitation(cell).is_nan(),
+                View::Balance => period.balance(cell).is_nan(),
                 View::Aridity => matches!(ground(cell), Ground::Land(index) if index.is_nan()),
             })
         });
@@ -382,6 +467,33 @@ impl RenderMode for Moisture {
                          tracks and on windward slopes."
                     ),
                     precipitation_scale(period),
+                )
+            }
+            View::Balance => {
+                let period_text = match period {
+                    Period::Annual => "over the year",
+                    Period::January => "in January (the rate of the month, per year)",
+                    Period::July => "in July (the rate of the month, per year)",
+                };
+                let land_text = match period {
+                    Period::Annual => {
+                        "On land it is the runoff that feeds the rivers, never much below zero \
+                         (lakes evaporate more, which is not included here)."
+                    }
+                    Period::January | Period::July => {
+                        "On land it is the runoff of the year spread by the season's \
+                         evaporation: below zero where the dry season evaporates water the wet \
+                         one left."
+                    }
+                };
+                (
+                    format!(
+                        "Precipitation minus evaporation {period_text}: the water the surface \
+                         gains. Over the ocean blue-green where it gains fresh water (the \
+                         tropical convergence zone, the storm tracks), brown where evaporation \
+                         wins (the subtropics). {land_text} Over the planet it sums to zero."
+                    ),
+                    balance_scale(period),
                 )
             }
             View::Aridity => (
@@ -460,6 +572,49 @@ mod tests {
     }
 
     #[test]
+    fn balance_diverges_around_zero() {
+        let scale = balance_scale(Period::Annual);
+        // White at zero, symmetric, the full scale at the range.
+        assert_eq!(scale.color(balance_axis(0.0)), Some(BR_BG[5]));
+        let (low, high) = scale.range();
+        assert!((low + high).abs() < 1e-12);
+        assert!((high - balance_axis(BALANCE_RANGE)).abs() < 1e-12);
+        assert_eq!(balance_axis(-500.0), -balance_axis(500.0));
+        // Monotone, about linear near zero (10 mm/yr is log10(2)).
+        assert!((balance_axis(BALANCE_SOFTNESS) - 2f64.log10()).abs() < 1e-9);
+        let mut before = f64::NEG_INFINITY;
+        for step in -300..=300 {
+            let value = balance_axis(f64::from(step) * 10.0);
+            assert!(value > before);
+            before = value;
+        }
+        // Lightness falls away from zero on both arms.
+        for step in 1..50 {
+            let t = f64::from(step) / 50.0;
+            assert!(lightness(&scale, low * t) < lightness(&scale, low * (t - 0.02)));
+            assert!(lightness(&scale, high * t) < lightness(&scale, high * (t - 0.02)));
+        }
+        // Losing water is brown, gaining blue-green.
+        let [r, _, b] = scale.color(balance_axis(-300.0)).unwrap();
+        assert!(r > b);
+        let [r, _, b] = scale.color(balance_axis(300.0)).unwrap();
+        assert!(b > r);
+        assert!(scale.ticks.iter().all(|&(t, _)| t > low && t < high));
+        assert_eq!(scale.ticks[0].1.as_ref(), "−1000");
+        assert_eq!(scale.ticks[6].1.as_ref(), "+1000");
+        // From m/yr; months that are not solved have no value.
+        assert!((balance_value(-0.5) - balance_axis(-500.0) as f32).abs() < 1e-6);
+        assert!(balance_value(f32::NAN).is_nan());
+        let mut cell: CellInfo = bytemuck::Zeroable::zeroed();
+        cell.precipitation = 1.0;
+        cell.evaporation = 1.25;
+        cell.precipitation_july = 0.5;
+        cell.evaporation_july = f32::NAN;
+        assert!((Period::Annual.balance(&cell) + 0.25).abs() < 1e-6);
+        assert!(Period::July.balance(&cell).is_nan());
+    }
+
+    #[test]
     fn the_aridity_index_of_cells() {
         let mut cell: CellInfo = bytemuck::Zeroable::zeroed();
         cell.elevation = 100.0;
@@ -498,6 +653,11 @@ mod tests {
         assert!(legend.scale.unwrap().title.starts_with("Aridity"));
         // Ocean, ice, coastline and desert edge.
         assert_eq!(legend.swatches.len(), 4);
+        options.set(SHOW, 2);
+        let legend = Moisture.legend(&options, None);
+        assert!(legend.scale.unwrap().title.starts_with("July P − E"));
+        // Coastline and desert edge: the ocean has a value.
+        assert_eq!(legend.swatches.len(), 2);
     }
 
     #[test]
@@ -521,7 +681,7 @@ mod tests {
         let (arrow_cells, arrow_spacing) = arrows::sample_cells(mesh, 2);
         let mut options = OptionValues::defaults(&OPTIONS);
         let mut overlay_sizes = Vec::new();
-        for (show, period, desert) in [(0, 0, 0), (0, 1, 1), (1, 2, 1)] {
+        for (show, period, desert) in [(0, 0, 0), (0, 1, 1), (1, 2, 1), (2, 0, 0), (2, 2, 1)] {
             options.set(SHOW, show);
             options.set(PERIOD, period);
             options.set(DESERT_LINE, desert);
@@ -539,13 +699,15 @@ mod tests {
             let colors = Moisture.colors(&data).unwrap();
             assert_eq!(colors.len(), cells.len());
             for (cell, color) in cells.iter().zip(&colors) {
-                let expected = if show == 0 {
-                    let period = Period::of(&options, PERIOD);
-                    precipitation_scale(period)
+                let period = Period::of(&options, PERIOD);
+                let expected = match show {
+                    0 => precipitation_scale(period)
                         .color(f64::from(axis(period.precipitation(cell), 1000.0)))
-                        .unwrap()
-                } else {
-                    aridity_color(&aridity_scale(), cell)
+                        .unwrap(),
+                    1 => aridity_color(&aridity_scale(), cell),
+                    _ => balance_scale(period)
+                        .color(f64::from(balance_value(period.balance(cell))))
+                        .unwrap(),
                 };
                 assert_eq!(*color, rgba(expected));
             }
@@ -624,6 +786,65 @@ mod tests {
                 select(land, &|c| c.precipitation_july),
             );
         }
+        for (land, name) in [(true, "land"), (false, "ocean")] {
+            quantiles(
+                &format!("E year {name} (m)"),
+                select(land, &|c| c.evaporation),
+            );
+            quantiles(
+                &format!("E Jan {name} (m)"),
+                select(land, &|c| c.evaporation_january),
+            );
+            quantiles(
+                &format!("E Jul {name} (m)"),
+                select(land, &|c| c.evaporation_july),
+            );
+            quantiles(
+                &format!("P-E year {name} (m)"),
+                select(land, &|c| c.precipitation - c.evaporation),
+            );
+            quantiles(
+                &format!("P-E Jan {name} (m)"),
+                select(land, &|c| c.precipitation_january - c.evaporation_january),
+            );
+            quantiles(
+                &format!("P-E Jul {name} (m)"),
+                select(land, &|c| c.precipitation_july - c.evaporation_july),
+            );
+        }
+        // The global balance, with the cells weighted by their area (a third of each face
+        // around them; the faces are flat, which is close enough for a sum).
+        let mesh = planet.tectonics().mesh();
+        let mut area = vec![0.0f64; mesh.len()];
+        for face in mesh.faces() {
+            let [a, b, c] = face.map(|v| mesh.vertex(v));
+            let third = (b - a).cross(c - a).length() / 6.0;
+            for v in face {
+                area[*v as usize] += third;
+            }
+        }
+        let total: f64 = area.iter().sum();
+        let mean = |value: &dyn Fn(&CellInfo) -> f32| {
+            cells
+                .iter()
+                .zip(&area)
+                .map(|(c, a)| f64::from(value(c)) * a)
+                .sum::<f64>()
+                / total
+        };
+        let stats = planet.water_cycle();
+        eprintln!(
+            "global mean (mm/yr): P {:.2}, E {:.2}, P-E {:.3} (Jan {:.3}, Jul {:.3}); model: P {:.3} \
+             E {:.3}, clipped {:.2e}",
+            1e3 * mean(&|c| c.precipitation),
+            1e3 * mean(&|c| c.evaporation),
+            1e3 * mean(&|c| c.precipitation - c.evaporation),
+            1e3 * mean(&|c| c.precipitation_january - c.evaporation_january),
+            1e3 * mean(&|c| c.precipitation_july - c.evaporation_july),
+            1e3 * stats.global_precipitation,
+            1e3 * stats.global_evaporation,
+            stats.clipped,
+        );
         quantiles("PET land (m)", select(true, &|c| c.potential_evaporation));
         quantiles("AI land (no ice)", select(true, &land_aridity));
         let land = select(true, &land_aridity);
