@@ -113,6 +113,16 @@
     <!-- The simulator (src/web.rs); the same module also runs the simulation in worker.js. -->
     <link data-trunk rel="rust" href="../Cargo.toml" data-bin="world-simulator" data-wasm-opt="3">
     <link data-trunk rel="copy-file" href="worker.js">
+    <!-- Icons (issue #124; made by notes/issue-124/make-icons.py). Trunk copies favicon.ico
+         with a content hash but drops `sizes` and `type` of a rel="icon" link, so the PNG icons
+         are copied under their own names and linked directly. -->
+    <link data-trunk rel="icon" href="icons/favicon.ico">
+    <link data-trunk rel="copy-file" href="icons/icon-32.png">
+    <link data-trunk rel="copy-file" href="icons/icon-192.png">
+    <link data-trunk rel="copy-file" href="icons/apple-touch-icon.png">
+    <link rel="icon" href="icon-32.png" type="image/png" sizes="32x32">
+    <link rel="icon" href="icon-192.png" type="image/png" sizes="192x192">
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" sizes="180x180">
     <style>
         html, body {
             margin: 0;
