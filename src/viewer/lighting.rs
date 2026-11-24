@@ -9,8 +9,8 @@
 //!
 //! The sun stands fixed in space: the simulated planet does not spin, so the sun's longitude
 //! ([`SUN_LONGITUDE`]) is a fixed time of day, chosen so that the default camera sees a
-//! three-quarter lit disc. Its declination is 0 (an equinox, the annual view); the season option
-//! of the realistic mode will move it. Its age, and with it brightness, size and colour, follows
+//! three-quarter lit disc. Its declination is 0 (an equinox) in the annual view, or that of
+//! mid-January or mid-July with the season option of the realistic mode ([`season_fraction`]). Its age, and with it brightness, size and colour, follows
 //! the displayed time ([`crate::sun::Sun::of_run`]).
 //!
 //! The exposure follows the sun: the sunlit side has the same brightness at any age, only the
@@ -25,6 +25,17 @@ use crate::temperature::OrbitParams;
 /// Longitude of the sun in radians in the planet's frame: 45° west of the default camera
 /// (which looks from longitude 0), on the side the camera light comes from.
 const SUN_LONGITUDE: f64 = -std::f64::consts::FRAC_PI_4;
+
+/// The fraction of the year after perihelion in the middle of the month the season shows (the
+/// simulation's months start at perihelion, early January), or `None` for the annual view.
+pub fn season_fraction(season: crate::viewer::modes::Period) -> Option<f64> {
+    use crate::viewer::modes::Period;
+    match season {
+        Period::Annual => None,
+        Period::January => Some(0.5 / 12.0),
+        Period::July => Some(6.5 / 12.0),
+    }
+}
 
 /// Share of the light that reaches every surface from all sides in [`Light::Camera`] (the view's
 /// lighting before #92, unchanged).
@@ -90,13 +101,14 @@ pub struct SunView {
 }
 
 impl SunView {
-    /// The sun of a run that started `epoch` Gyr before present, `time` Myr into it.
-    pub fn new(epoch: f64, time: f64) -> Self {
+    /// The sun of a run that started `epoch` Gyr before present, `time` Myr into it, at
+    /// `season` (the fraction of the year after perihelion; `None` for the annual view, an
+    /// equinox at the mean distance).
+    pub fn new(epoch: f64, time: f64, season: Option<f64>) -> Self {
         let sun = Sun::of_run(epoch, time);
-        // The annual position (an equinox); the orbit only matters for a season, which the
-        // realistic mode will add.
+        // The orbit of the simulation (`--set` cannot change it).
         let (direction, distance): (DVec3, f64) =
-            sun::direction(&OrbitParams::default(), SUN_LONGITUDE, None);
+            sun::direction(&OrbitParams::default(), SUN_LONGITUDE, season);
         let color = sun.color().map(|channel| channel as f32);
         let brightest = color.iter().copied().fold(f32::MIN_POSITIVE, f32::max);
         Self {
@@ -168,7 +180,7 @@ mod tests {
     use super::*;
 
     fn present() -> SunView {
-        SunView::new(0.0, 0.0)
+        SunView::new(0.0, 0.0, None)
     }
 
     #[test]
@@ -198,6 +210,17 @@ mod tests {
     }
 
     #[test]
+    fn the_season_moves_the_sun() {
+        use crate::viewer::modes::Period;
+        let january = SunView::new(0.0, 0.0, season_fraction(Period::January));
+        let july = SunView::new(0.0, 0.0, season_fraction(Period::July));
+        // About 21° south and north; nearer to the sun in January (perihelion).
+        assert!(january.direction.z < -0.3 && july.direction.z > 0.3);
+        assert!(january.angular_radius > july.angular_radius);
+        assert!(present().direction.z.abs() < 1e-6);
+    }
+
+    #[test]
     fn the_sun_has_a_plausible_size_and_colour() {
         let sun = present();
         assert!((sun.angular_radius.to_degrees() - 0.2665).abs() < 0.001);
@@ -210,7 +233,7 @@ mod tests {
         );
         assert!((sun.disc_color[0] - 1.0).abs() < 1e-6);
         // The young sun of the Archean is smaller and redder.
-        let young = SunView::new(3.5, 0.0);
+        let young = SunView::new(3.5, 0.0, None);
         assert!(young.angular_radius < sun.angular_radius);
         assert!(young.disc_color[2] < sun.disc_color[2]);
         assert!(young.describe().contains("77%"), "{}", young.describe());

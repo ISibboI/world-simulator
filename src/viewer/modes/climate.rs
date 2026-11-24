@@ -365,6 +365,7 @@ mod tests {
                 arrow_cells: &[],
                 arrow_spacing: 0.1,
                 options: &options,
+                abiotic: false,
             };
             let colors = Climate.colors(&data).unwrap();
             assert_eq!(colors.len(), cells.len());

@@ -502,6 +502,7 @@ mod tests {
                 arrow_cells: &arrow_cells,
                 arrow_spacing,
                 options: &options,
+                abiotic: false,
             };
             let colors = Hydrology.colors(&data).unwrap();
             assert_eq!(colors.len(), cells.len());
