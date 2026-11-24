@@ -526,7 +526,8 @@ mod tests {
             wind_july_north: -0.1,
             climate_class: (index % 31) as u32,
             plate: (index % 13) as u32,
-            flags: (index % 2) as u32,
+            // All flag bits the history keeps, the oceanic bit (6) among them.
+            flags: (index % 2) as u32 | ((index % 3) as u32) << 5,
         }
     }
 
@@ -730,7 +731,12 @@ mod tests {
         };
         let key = encode(&state, None);
         let delta = encode(&state, Some(&state));
-        assert!(delta.len() < 2_000, "{} bytes", delta.len());
+        // lz4 compresses runs of zeros at most about 255:1.
+        assert!(
+            delta.len() < 10_000 * BYTES_PER_CELL / 200,
+            "{} bytes",
+            delta.len()
+        );
         assert!(key.len() > delta.len());
     }
 

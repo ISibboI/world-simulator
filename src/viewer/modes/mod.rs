@@ -20,6 +20,7 @@
 //! legend and the mode reads their values from [`ModeData::options`].
 
 mod climate;
+mod crust_age;
 mod moisture;
 mod ocean_currents;
 mod plate_motion;
@@ -58,6 +59,8 @@ pub enum RenderModeId {
     OceanCurrents,
     /// The prevailing low-level winds as arrows (annual, January or July).
     Wind,
+    /// Age of the ocean floor with isochrons; continents in grey.
+    CrustAge,
     /// Köppen–Geiger climate classes of land.
     Climate,
 }
@@ -73,6 +76,7 @@ impl RenderModeId {
             RenderModeId::Moisture => &moisture::Moisture,
             RenderModeId::OceanCurrents => &ocean_currents::OceanCurrents,
             RenderModeId::Wind => &wind::Wind,
+            RenderModeId::CrustAge => &crust_age::CrustAge,
             RenderModeId::Climate => &climate::Climate,
         }
     }
@@ -98,6 +102,7 @@ impl RenderModeId {
             RenderModeId::Moisture => "moisture",
             RenderModeId::OceanCurrents => "ocean-currents",
             RenderModeId::Wind => "wind",
+            RenderModeId::CrustAge => "crust-age",
             RenderModeId::Climate => "climate",
         }
     }
