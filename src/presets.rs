@@ -162,6 +162,10 @@ impl Epoch {
     /// 0.8–1.9 K warmer than today's, the poles 8–10 K warmer, the equator ~2 K cooler, and the
     /// permanent ice covered 7–10% less of the surface. Without it the planet is a snowball
     /// (−36 °C, 95% frozen).
+    ///
+    /// The forcing offsets the sun of the run's start and stays fixed while the sun brightens
+    /// during the run (#149), so long runs warm: there is no carbon cycle that would draw the
+    /// greenhouse down.
     pub fn greenhouse_forcing(&self) -> f64 {
         match self.co2 {
             Some(co2) => CO2_FORCING_PER_E_FOLD * math::ln(co2),
