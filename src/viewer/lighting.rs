@@ -2,8 +2,9 @@
 //! simulation ([`crate::sun`]), with or without an ambient light that brightens the night side.
 //!
 //! The choice ([`Light`]) is one setting of the view for every render mode that shades its
-//! colours ([`super::modes::Shading::Lit`]); modes that show their colours unlit ignore it. The
-//! sun itself is drawn in the background in every mode when it is in view (`sky.wgsl`).
+//! colours ([`super::modes::Shading::Lit`]); modes that show their colours unlit ignore it. With
+//! the sun's light, the sun itself is drawn in the background when it is in view (`sky.wgsl`);
+//! with the camera light it is not, since a visible sun would contradict the lighting.
 //!
 //! The sun stands fixed in space: the simulated planet does not spin, so the sun's longitude
 //! ([`SUN_LONGITUDE`]) is a fixed time of day, chosen so that the default camera sees a
@@ -86,9 +87,12 @@ pub struct SunView {
 
 impl SunView {
     /// The sun of a run that started `epoch` Gyr before present, `time` Myr into it.
-    pub fn new(epoch: f64, orbit: &OrbitParams, time: f64) -> Self {
+    pub fn new(epoch: f64, time: f64) -> Self {
         let sun = Sun::of_run(epoch, time);
-        let (direction, distance): (DVec3, f64) = sun::direction(orbit, SUN_LONGITUDE, None);
+        // The annual position (an equinox); the orbit only matters for a season, which the
+        // realistic mode will add.
+        let (direction, distance): (DVec3, f64) =
+            sun::direction(&OrbitParams::default(), SUN_LONGITUDE, None);
         let color = sun.color().map(|channel| channel as f32);
         let brightest = color.iter().copied().fold(f32::MIN_POSITIVE, f32::max);
         Self {
@@ -160,7 +164,7 @@ mod tests {
     use super::*;
 
     fn present() -> SunView {
-        SunView::new(0.0, &OrbitParams::default(), 0.0)
+        SunView::new(0.0, 0.0)
     }
 
     #[test]
@@ -200,9 +204,9 @@ mod tests {
             "{:?}",
             sun.light_color
         );
-        assert_eq!(sun.disc_color[0], 1.0);
+        assert!((sun.disc_color[0] - 1.0).abs() < 1e-6);
         // The young sun of the Archean is smaller and redder.
-        let young = SunView::new(3.5, &OrbitParams::default(), 0.0);
+        let young = SunView::new(3.5, 0.0);
         assert!(young.angular_radius < sun.angular_radius);
         assert!(young.disc_color[2] < sun.disc_color[2]);
         assert!(young.describe().contains("77%"), "{}", young.describe());

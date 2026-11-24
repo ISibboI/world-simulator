@@ -435,6 +435,8 @@ pub struct PlanetCallback {
     pub overlay: Option<Overlay>,
     /// Lines to draw over the planet, at most [`MAX_LINE_SEGMENTS`] (the rest are dropped).
     pub lines: Vec<LineSegment>,
+    /// Whether to draw the sun (only when the planet is lit by it).
+    pub sun: bool,
 }
 
 impl egui_wgpu::CallbackTrait for PlanetCallback {
@@ -524,8 +526,10 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
         render_pass.set_bind_group(0, &resources.bind_group, &[]);
         let Some(mesh) = resources.mesh.as_ref().filter(|mesh| mesh.has_vertices) else {
             // No planet yet: only the sun.
-            render_pass.set_pipeline(&resources.sky_pipeline);
-            render_pass.draw(0..3, 0..1);
+            if self.sun {
+                render_pass.set_pipeline(&resources.sky_pipeline);
+                render_pass.draw(0..3, 0..1);
+            }
             return;
         };
         render_pass.set_pipeline(&resources.pipeline);
@@ -533,8 +537,10 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
         render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
         // After the planet, so that its depth hides the sun where the planet is in front.
-        render_pass.set_pipeline(&resources.sky_pipeline);
-        render_pass.draw(0..3, 0..1);
+        if self.sun {
+            render_pass.set_pipeline(&resources.sky_pipeline);
+            render_pass.draw(0..3, 0..1);
+        }
         if resources.overlay_shown
             && let Some((buffer, _, count)) = &resources.overlay
         {

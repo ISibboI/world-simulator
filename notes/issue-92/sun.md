@@ -85,16 +85,17 @@ everywhere; the realistic mode will start with Sun (decision for Sebastian, see 
   vs 5772 K).
 - **Ambient light** is artistic. A real night side gets only moonlight, airglow and starlight
   (~10⁻⁶–10⁻⁹ of daylight).
-- **The sun in the background** (`sky.wgsl`): drawn in every mode and with every light option, a
+- **The sun in the background** (`sky.wgsl`): drawn with the Sun and Sun + ambient light (not with the camera light, where a visible sun
+  would contradict the lighting, nor in the unlit modes), a
   full-screen triangle just in front of the far plane, depth-tested against the planet, added to
-  the background: a disc of the true angular size (~0.27°, about 6 px in an 800 px high view),
+  the background: a disc of the true angular size (~0.27°, a radius of about 6 px in an 800 px high view),
   limb darkening (linear law, u = 0.6), a halo falling off as (r/θ)² and a faint ~3° glow. With
   the camera 4.5 radii from the planet (which covers 12.8° around the view direction), the sun is
   in view only when it is nearly behind the planet: between 12.8° and the edge of the view
   (17° vertically, ~26° horizontally in a 16:10 window) from the view direction. Drag the planet
   until the night side faces the camera; the sun then appears beside the planet.
 - **Frame data:** none. The view computes the sun from the run's `--epoch` (from its launch
-  options), the orbit parameters and the simulated time of the displayed frame (live or from the
+  options) and the simulated time of the displayed frame (live or from the
   history), so the frame format and the codec are unchanged (frame growth 0 bytes).
 
 ## Screenshots (4 subdivisions, topographic mode)

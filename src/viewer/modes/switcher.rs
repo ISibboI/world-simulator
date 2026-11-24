@@ -141,7 +141,8 @@ impl ModeSwitcher {
                             options_changed = option_controls(ui, *mode, values);
                         }
                         if mode.mode().shading() == Shading::Lit {
-                            options_changed |= light_controls(ui, light, &view.sun);
+                            // Only the uniforms change: the next frame shows it.
+                            light_controls(ui, light, &view.sun);
                         }
                         // Long legends scroll (phones in landscape, small windows).
                         // Above the cell widget, but at least a share of the screen (they
@@ -208,10 +209,8 @@ fn option_controls(ui: &mut egui::Ui, mode: RenderModeId, values: &mut OptionVal
     changed
 }
 
-/// The controls of the light, with a description of the sun under them; returns whether the
-/// light changed.
-fn light_controls(ui: &mut egui::Ui, light: &mut Light, sun: &str) -> bool {
-    let mut changed = false;
+/// The controls of the light, with a description of the sun under them.
+fn light_controls(ui: &mut egui::Ui, light: &mut Light, sun: &str) {
     ui.horizontal_wrapped(|ui| {
         ui.label(Light::LABEL).on_hover_text(Light::HOVER);
         for (index, &choice) in Light::CHOICES.iter().enumerate() {
@@ -223,13 +222,11 @@ fn light_controls(ui: &mut egui::Ui, light: &mut Light, sun: &str) -> bool {
                 && !selected
             {
                 *light = Light::from_index(index);
-                changed = true;
             }
         }
     });
     ui.add(egui::Label::new(egui::RichText::new(sun).small()).wrap());
     ui.separator();
-    changed
 }
 
 /// Draws a legend `width` points wide.

@@ -18,11 +18,10 @@
 use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
 use crate::math;
-use crate::sun;
+use crate::sun::{self, PRESENT_SOLAR_CONSTANT, SOLAR_AGE};
 use crate::tectonics::TectonicParams;
 use crate::temperature::TemperatureParams;
 
-use crate::sun::{PRESENT_SOLAR_CONSTANT, SOLAR_AGE};
 /// Earth's Bond albedo (CERES: 0.29–0.30; Stephens et al., 2015), to turn a change of the solar
 /// constant into a change of absorbed sunlight.
 pub const BOND_ALBEDO: f64 = 0.3;

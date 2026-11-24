@@ -57,7 +57,7 @@ pub use fields::{Fields, Layers, PlateInfo, plate_infos};
 #[cfg(target_arch = "wasm32")]
 pub use history::store::MemoryStore;
 pub use history::{FrameStore, History};
-use lighting::{Lighting, SunView};
+use lighting::{Light, Lighting, SunView};
 pub use modes::RenderModeId;
 use modes::switcher::{ModeSwitcher, SwitcherView};
 use modes::{ModeData, Shading, recolored};
@@ -454,9 +454,8 @@ struct Viewer {
     exaggeration: f64,
     river_threshold: f64,
     dt: f64,
-    /// The epoch of the running simulation (Gyr before present) and its orbit, for the sun.
+    /// The epoch of the running simulation (Gyr before present), for the sun.
     epoch: f64,
-    orbit: crate::temperature::OrbitParams,
     /// Simulated time (Myr) of the displayed state, for the age of the sun.
     shown_time: f64,
     /// The control of the running simulation.
@@ -571,7 +570,6 @@ impl Viewer {
             river_threshold: initial.cli.river_threshold,
             dt: initial.cli.dt,
             epoch: initial.cli.epoch,
-            orbit: crate::temperature::OrbitParams::default(),
             shown_time: 0.0,
             control: None,
             remember_render_mode,
@@ -632,11 +630,7 @@ impl Viewer {
         self.river_threshold = launch.cli.river_threshold;
         self.dt = launch.cli.dt;
         self.epoch = launch.cli.epoch;
-        self.orbit = launch
-            .cli
-            .parameters()
-            .map(|(parameters, _)| parameters.temperature.orbit)
-            .unwrap_or_default();
+        self.shown_time = 0.0;
         // A new history (the old one is deleted first); the view shows the previous planet,
         // without time controls, until the new simulation sends its first state.
         self.history = None;
@@ -1142,7 +1136,7 @@ impl Viewer {
 
     /// The sun of the displayed state.
     fn sun(&self) -> SunView {
-        SunView::new(self.epoch, &self.orbit, self.shown_time)
+        SunView::new(self.epoch, self.shown_time)
     }
 }
 
@@ -1241,6 +1235,8 @@ impl eframe::App for Viewer {
                             surface: self.display.clone(),
                             overlay: self.overlay.clone(),
                             lines,
+                            sun: self.mode.mode().shading() == Shading::Lit
+                                && self.switcher.light() != Light::Camera,
                         },
                     ));
             });

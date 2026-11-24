@@ -6,7 +6,7 @@
 //!
 //! - **luminosity** from Gough (1981), `L(t) = L₀ / (1 + 0.4 (1 − t/t₀))`, which the climate
 //!   already uses for its solar constant ([`crate::presets::Epoch`]): 0.71 L₀ at the zero age,
-//!   0.77 L₀ at 3.5 Ga, 1.29 L₀ at 7.1 Gyr and 1.90 L₀ at 10 Gyr (detailed models: 0.70, 0.77,
+//!   0.77 L₀ at 3.5 Ga, 1.29 L₀ at 7.13 Gyr and 1.91 L₀ at 10 Gyr (detailed models: 0.70, 0.77,
 //!   1.26 and 1.84; Bahcall et al., 2001; Schröder & Smith, 2008);
 //! - **effective temperature** interpolated linearly in age between the points of the solar
 //!   model of Schröder & Smith (2008): 5596 K at the zero age, 5772 K today (IAU 2015 nominal),
