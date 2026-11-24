@@ -13,8 +13,8 @@
 //!   warmest month, from steppe and grassland to forest (none on an abiotic planet); tundra
 //!   where the summers are cold; bare rock above the tree line of high mountains.
 //!
-//! The colours are reflectances (albedos) of the usual ranges (ocean 0.03–0.06 with the glint,
-//! forest 0.05–0.1, grassland 0.15–0.2, desert 0.3–0.4, fresh snow 0.8), stored sRGB-encoded in
+//! The colours are reflectances (albedos) of the usual ranges (ocean water below 0.06 before the
+//! glint, forest 0.04–0.1, grassland 0.08–0.2, desert 0.3–0.4, fresh snow 0.8), stored sRGB-encoded in
 //! the vertex colours; the alpha channel tells the shader water (its roughness, < 0.5) from land
 //! (1). The relief is true to scale (no exaggeration, decision 6 on #92). Rivers are left out
 //! (invisible from space at this scale). The options choose the light (the sun by default) and

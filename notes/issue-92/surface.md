@@ -43,11 +43,16 @@ The colours were checked against the usual albedos (unit tests):
 
 | Surface | Usual albedo |
 |---|---|
-| Ocean | < 0.03, plus the glint |
+| Ocean (deep water body) | < 0.03, plus the glint |
 | Forest | 0.04–0.1 |
 | Grassland | 0.08–0.2 |
 | Desert | 0.3–0.42 |
 | Ice | 0.7–0.9 |
+
+The seasonal rules use the month's rates only. Snow cover follows the month's precipitation
+rate, not the snow accumulated in earlier months, so dry, cold interiors get only partial snow
+in January. The browning of grasses compares the month's precipitation rate with the annual
+potential evaporation. Both are proxies.
 
 The vegetation is a proxy from the climate fields, to be replaced by #90 (life). The Köppen
 classes are not an input; using them as a test oracle is left for the stage with sub-cell detail.
@@ -65,9 +70,13 @@ the result to sRGB. The data modes keep their old path, unchanged.
   eye adaptation (#156) come from `light_color`, decoded to linear light. The ambient share of
   **Sun + ambient** is decoded the same way, so the night side has the same sRGB brightness as
   before.
+- **Colour space:** reflectances are encoded with the exact sRGB curve on the CPU and decoded
+  with it in the shader; the output is encoded the same way. The light colour and its exposure
+  gain use the 2.2 power law of the eye adaptation.
 - **Water:** the normal is the sphere's normal, not the mesh normal tilted by a coast. The
   glint uses a GGX distribution, Schlick's Fresnel term with F0 = 0.02 (water) and Smith–Schlick
-  shadowing. The water body is seen through the surface, which reflects the share F. The sky
+  shadowing (α from the wind, see above, used as GGX α). The water body is seen through the
+  surface, which reflects the Fresnel share of the view direction. The sky
   reflected in the water is black space, so only the sun is reflected. Water is blended over half
   a coast triangle (alpha 0.6 → 0.4).
 - **Haze:** a cheap stand-in for the atmosphere, (1 − up·v)³ on the day side, in Rayleigh blue.
@@ -77,11 +86,13 @@ the result to sRGB. The data modes keep their old path, unchanged.
   and a data mode. Picking and the cell outline follow the shown vertices.
 - **Season** (Year | January | July): the sun's declination and distance for mid-January and
   mid-July (`lighting::season_fraction`; the months start at perihelion), plus the materials of
-  that month. Year is an equinox at the mean distance, with the annual materials.
+  that month. The distance changes the size of the sun's disc. It does not change the
+  brightness, which the exposure normalises. Year is an equinox at the mean distance, with the annual materials.
 - **Validation:** a unit test (`renderer::tests::shaders_translate_to_webgl2`) parses and
   validates every shader of the view with naga (dev-dependency, wgpu's version 30.0.2). It also
-  translates each entry point to GLSL ES 3.00 for WebGL2, so a shader the web cannot run fails in
-  `cargo test`.
+  translates each entry point to GLSL ES 3.00 for WebGL2, so a shader that naga cannot translate
+  for the web fails in `cargo test`. wgpu's own GL options and the WebGL2 limits are not
+  checked.
 
 ## Grid artefacts and limits (accepted)
 
@@ -98,11 +109,12 @@ the result to sRGB. The data modes keep their old path, unchanged.
 
 5 subdivisions, 10 Myr, seed 0, Sun light:
 
-- `desktop-year.png`: the annual state; glint on the ocean, haze at the limb, deserts, green
-  coasts, polar ice.
+- `desktop-year.png`: the annual state. A broad, soft sun glint on the ocean (wind-roughened),
+  haze at the limb, deserts and green coasts, polar ice.
 - `desktop-january.png` / `desktop-july.png`: the sun's declination moves the polar night; the
   materials of the month.
-- `desktop-terminator.png`: the terminator, with the glint near a coast.
-- `desktop-abiotic.png`: `--biosphere abiotic`, bare land with no vegetation.
-- `web.png` and `phone-legend.png`: chromium with SwiftShader at 1280×800, and at phone width
-  (390×844) with the legend open. The Light and Season rows wrap.
+- `desktop-north.png`: a northern continent with vegetation, an ice sheet and the glint.
+- `web-abiotic.png`: the web version (chromium with SwiftShader) with `biosphere=abiotic`, bare
+  land.
+- `phone-legend.png`: phone width (390×844) with the legend open. The Light and Season rows
+  wrap.

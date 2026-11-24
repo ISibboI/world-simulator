@@ -568,9 +568,10 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
 
 #[cfg(test)]
 mod tests {
-    /// Every shader of the view parses, validates under WebGL2's downlevel capabilities and
-    /// translates to GLSL ES 3.00 (the WebGL2 backend), so that a shader the web cannot run
-    /// fails here and not only in the browser.
+    /// Every shader of the view parses, validates (without optional capabilities) and
+    /// translates to GLSL ES 3.00 for WebGL2 with naga, wgpu's shader translator: a shader that
+    /// naga cannot translate for the web fails here, not only in the browser. (wgpu's own GL
+    /// options and the device limits of WebGL2 are not checked.)
     #[test]
     fn shaders_translate_to_webgl2() {
         use naga::back::glsl;

@@ -55,14 +55,28 @@ const WATER_F0: f32 = 0.02;
 // Colour of the haze at the limb (Rayleigh scattering of a thin atmosphere), in linear light.
 const HAZE: vec3<f32> = vec3<f32>(0.11, 0.2, 0.42);
 
+// Exact sRGB transfer functions (the CPU encodes the reflectances with the same curve).
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let low = c / 12.92;
+    let high = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(high, low, c <= vec3<f32>(0.04045));
+}
+
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let low = c * 12.92;
+    let high = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(high, low, c <= vec3<f32>(0.0031308));
+}
+
 // The realistic mode: the vertex colour is a reflectance (sRGB-encoded), its alpha the
 // roughness of water (< 0.5) or 1 for land. Lit in linear light, encoded to sRGB at the end.
 fn realistic(input: VertexOutput, mesh_normal: vec3<f32>) -> vec3<f32> {
     let l = uniforms.light_direction.xyz;
     let v = normalize(uniforms.eye.xyz - input.position);
     let up = normalize(input.position);
-    let albedo = pow(max(input.color.rgb, vec3<f32>(0.0)), vec3<f32>(2.2));
-    // The light's colour carries the exposure's gain as a factor on sRGB values.
+    let albedo = srgb_to_linear(input.color.rgb);
+    // The light's colour carries the exposure's gain as a factor on sRGB values (2^(stops/2.2),
+    // see `sky::Adaptation`), so it is decoded with the matching power law.
     let sun = pow(max(uniforms.light_color.rgb, vec3<f32>(0.0)), vec3<f32>(2.2));
     let ambient = pow(uniforms.light_color.w, 2.2);
     // Water (alpha below 0.5, blended over half a coast triangle) lies flat on the sphere.
@@ -72,17 +86,20 @@ fn realistic(input: VertexOutput, mesh_normal: vec3<f32>) -> vec3<f32> {
     let nv = max(dot(n, v), 1e-3);
     // Sun glint: GGX distribution, Schlick's Fresnel, Smith–Schlick shadowing.
     let roughness = clamp(input.color.a, 0.03, 0.45);
-    let h = normalize(l + v);
+    // (Offset so that a sun exactly behind the camera's line of sight gives no NaN.)
+    let h = normalize(l + v + vec3<f32>(0.0, 0.0, 1e-6));
     let nh = max(dot(n, h), 0.0);
     let fresnel = WATER_F0 + (1.0 - WATER_F0) * pow(1.0 - max(dot(v, h), 0.0), 5.0);
-    let a2 = roughness * roughness * roughness * roughness;
+    let a2 = roughness * roughness;
     let d = nh * nh * (a2 - 1.0) + 1.0;
     let distribution = a2 / (PI * d * d);
     let k = roughness * 0.5;
     let shadowing = nl / (nl * (1.0 - k) + k) * nv / (nv * (1.0 - k) + k);
     let glint = distribution * fresnel * shadowing / (4.0 * nv) * water;
-    // The water body is seen through the surface, which reflects the share `fresnel`.
-    let body = albedo * (1.0 - fresnel * water);
+    // The water body is seen through the surface, which reflects the share given by the
+    // Fresnel factor of the view direction.
+    let reflected = WATER_F0 + (1.0 - WATER_F0) * pow(1.0 - nv, 5.0);
+    let body = albedo * (1.0 - reflected * water);
     var color = body * (ambient + sun * nl) + sun * glint;
     // A thin haze towards the limb of the day side (the atmosphere seen at a slant).
     let slant = 1.0 - max(dot(up, v), 0.0);
@@ -90,7 +107,7 @@ fn realistic(input: VertexOutput, mesh_normal: vec3<f32>) -> vec3<f32> {
     let haze = slant * slant * slant * day;
     let luminance = dot(sun, vec3<f32>(0.2126, 0.7152, 0.0722));
     color = color * (1.0 - 0.4 * haze) + HAZE * haze * luminance;
-    return pow(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
+    return linear_to_srgb(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)));
 }
 
 @fragment
