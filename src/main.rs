@@ -1062,6 +1062,34 @@ fn snapshot(
         statistics.metamorphosed.0 + statistics.metamorphosed.1,
         statistics.metamorphosed.1,
     );
+    let sheet = simulation.sheet_statistics();
+    info!(
+        "    deformation: strain rate ≥ 1e-16/s {:.1}% of the surface (continental {:.1}%, {:.1}% of \
+         the continental crust; plate interiors {:.1}%), ≥ 1e-15/s {:.1}% | weak samples {}, \
+         blocks {}, speed rms {:.2} max {:.2} cm/yr | solve {} iterations (residual {:.1e}; \
+         {:.1} per solve, {} unconverged; {:.1} s solve, {:.1} s transport) | fronts vacated {}, grown {} | splits {} | moved \
+         {:.3e} Gt, ledger {:+.3e} Gt",
+        100.0 * sheet.area_1e16,
+        100.0 * sheet.continental_area_1e16,
+        100.0 * sheet.continental_share_1e16,
+        100.0 * sheet.interior_area_1e16,
+        100.0 * sheet.area_1e15,
+        sheet.weak_samples,
+        sheet.blocks,
+        sheet.rms_speed,
+        sheet.max_speed,
+        sheet.iterations,
+        sheet.residual,
+        sheet.total_iterations as f64 / sheet.solves.max(1) as f64,
+        sheet.unconverged,
+        sheet.solve_seconds,
+        sheet.transport_seconds,
+        sheet.vacated,
+        sheet.grown,
+        sheet.splits,
+        sheet.moved * cell_area / 1e12,
+        statistics.ledger.deformation * cell_area / 1e12,
+    );
     info!(
         "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
          cell, {} mismatches",
@@ -1529,3 +1557,4 @@ fn log_sediment_reservoirs(statistics: &PlanetStatistics) {
         100.0 * r.shelf_on_filled_basins,
     );
 }
+

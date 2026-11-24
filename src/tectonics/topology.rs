@@ -289,6 +289,7 @@ impl Simulation {
             matched_rotation: self.plates[plate as usize].matched_rotation,
             initiated_at: None,
             id: self.next_plate_id,
+            sheet: self.plates[plate as usize].sheet.clone(),
         };
         self.next_plate_id += 1;
         // The tracked crust of the remaining part is no longer accurate.
@@ -356,6 +357,7 @@ impl Simulation {
                 Some(vertex) => {
                     receiving.crust[vertex as usize] = Some(crust);
                     receiving.consumed[vertex as usize] = false;
+                    receiving.sheet.reset(vertex as usize);
                     vertex
                 }
                 None => {

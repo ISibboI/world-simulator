@@ -44,6 +44,9 @@ pub struct MassLedger {
     pub additions_lost: f64,
     /// Change caused by lateral crustal flow (should be ~0; the thickness cap removes crust).
     pub crustal_flow: f64,
+    /// Change caused by the deformation of the plates (transport and moving edges; should be
+    /// ~0).
+    pub deformation: f64,
     /// Change caused by merging plates (hidden crust of the absorbed plate is lost).
     pub merges: f64,
     /// Change caused by splitting plates (should be 0).
@@ -76,6 +79,7 @@ pub(super) enum Term {
     SubductionErosion,
     AdditionsLost,
     CrustalFlow,
+    Deformation,
     Merges,
     Splits,
     RemovedPlates,
@@ -106,6 +110,7 @@ impl MassLedger {
             Term::SubductionErosion => &mut self.subduction_erosion,
             Term::AdditionsLost => &mut self.additions_lost,
             Term::CrustalFlow => &mut self.crustal_flow,
+            Term::Deformation => &mut self.deformation,
             Term::Merges => &mut self.merges,
             Term::Splits => &mut self.splits,
             Term::RemovedPlates => &mut self.removed_plates,

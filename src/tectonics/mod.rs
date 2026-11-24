@@ -47,6 +47,7 @@ mod ledger;
 mod mantle;
 mod matching;
 mod polarity;
+mod sheet;
 mod statistics;
 mod topology;
 mod weak_zones;
@@ -61,6 +62,7 @@ pub use initial_sediment::{InitialSedimentParams, PlatformEmplacement};
 pub use ledger::MassLedger;
 pub use mantle::{MantleParams, Plume};
 pub use matching::{MatchingParams, MatchingStatistics};
+pub use sheet::{SheetParams, SheetStatistics};
 pub use statistics::*;
 pub use weak_zones::{MIN_STRENGTH, combine_strength, orogenic_strength, thermal_strength};
 
@@ -288,6 +290,8 @@ pub struct TectonicParams {
     pub polarity_memory: f64,
     /// Maximum fraction of a cell spacing that a plate may move in one substep.
     pub max_substep_movement: f64,
+    /// Deformation of the plates (non-rigid plates, see [`sheet`]).
+    pub sheet: SheetParams,
 }
 
 impl Default for TectonicParams {
@@ -354,6 +358,7 @@ impl Default for TectonicParams {
             segment_radius: 500e3,
             polarity_flip_time: 3.0,
             max_substep_movement: 0.5,
+            sheet: SheetParams::default(),
         }
     }
 }
@@ -364,6 +369,9 @@ impl TectonicParams {
     /// fields; `initial_sediment.enabled` and `initial_sediment.biogenic_pelagic` are off for 0 and
     /// on otherwise) to `value`.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
+        if let Some(name) = name.strip_prefix("sheet.") {
+            return self.sheet.set(name, value);
+        }
         let sediment = &mut self.initial_sediment;
         let field = match name {
             "initial_sediment.enabled" => {
@@ -487,6 +495,8 @@ pub struct Plate {
     /// gives the last one its index): plates born later get larger ids, see
     /// [`Simulation::plate_id`]. For display only.
     id: u32,
+    /// The deformation of the plate's lithosphere (see [`sheet`]).
+    sheet: sheet::PlateSheet,
 }
 
 /// Initial ocean ages with Earth's roughly triangular age–area distribution: the oceanic cells
@@ -711,6 +721,10 @@ pub struct Simulation {
     time: f64,
     /// The id of the next plate born (see [`Plate::id`]).
     next_plate_id: u32,
+    /// The forces of the last torque balance, for the deformation of the plates.
+    force_balance: Option<dynamics::ForceBalance>,
+    sheet_geometry: sheet::SheetGeometry,
+    sheet_statistics: SheetStatistics,
 }
 
 impl Simulation {
@@ -762,6 +776,7 @@ impl Simulation {
                 tracked: None,
                 matched_rotation: DQuat::IDENTITY,
                 initiated_at: None,
+                sheet: sheet::PlateSheet::new(cell_count),
             })
             .collect();
 
@@ -880,7 +895,11 @@ impl Simulation {
             surface_sharing: SurfaceSharing::default(),
             time: 0.0,
             next_plate_id: plate_count as u32,
+            force_balance: None,
+            sheet_geometry: sheet::SheetGeometry::default(),
+            sheet_statistics: SheetStatistics::default(),
         };
+        simulation.sheet_geometry = sheet::SheetGeometry::new(&simulation.mesh);
         // The sediment cover is part of the initial planet (a stock, not a source); it is
         // added after the plate setup and with its own random numbers, so that it changes
         // nothing else.
@@ -1005,6 +1024,7 @@ impl Simulation {
             .mantle
             .velocities(&self.mesh, self.params.planet_radius);
         self.update_plate_velocities(&mantle_velocity);
+        self.deform_plates(dt);
         // The farthest any cell moves (a small plate turning about a pole inside it moves its
         // cells much less than its angular speed suggests).
         let max_angle = (0..self.mesh.len() as u32)
@@ -1019,6 +1039,20 @@ impl Simulation {
         let max_substep_angle = self.params.max_substep_movement * self.mesh.mean_edge_angle();
         let substeps = (max_angle / max_substep_angle).ceil().max(1.0) as usize;
         tracing::trace!(substeps, "Tectonic step");
+        if substeps > 10 && tracing::enabled!(tracing::Level::TRACE) {
+            for (index, plate) in self.plates.iter().enumerate() {
+                let cells = self.owners.iter().filter(|o| o.plate as usize == index).count();
+                let samples = plate.crust.iter().filter(|c| c.is_some()).count();
+                tracing::trace!(
+                    index,
+                    cells,
+                    samples,
+                    omega = plate.angular_velocity.length(),
+                    frame = plate.sheet.frame.length(),
+                    "Fast plate check"
+                );
+            }
+        }
         let start = self.felsic_and_sediment();
         for _ in 0..substeps {
             self.substep(dt / substeps as f64);
@@ -1153,6 +1187,7 @@ impl Simulation {
     fn substep(&mut self, dt: f64) {
         self.time += dt;
         self.move_plates(dt);
+        self.transport_crust(dt);
         let ResolvedBoundaries {
             additions,
             collisions,

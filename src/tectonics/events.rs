@@ -351,6 +351,7 @@ impl Simulation {
         // Splits append plates, so plates from here on are born in this step.
         let first_new_plate = self.plates.len() as u32;
         self.rift_above_plumes();
+        self.split_deforming_plates();
         if self.configuration_changes == configuration {
             self.initiate_subduction(dt, first_new_plate, boundaries);
         } else {
