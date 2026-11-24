@@ -291,6 +291,12 @@ mod tests {
         PlateInfo {
             rotation: [step as f32, 0.0, 0.0],
             id: step as u32 + 7,
+            orientation: [
+                0.0,
+                0.0,
+                (step as f32 * 0.01).sin(),
+                (step as f32 * 0.01).cos(),
+            ],
         }
     }
 

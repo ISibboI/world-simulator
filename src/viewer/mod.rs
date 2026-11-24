@@ -75,7 +75,7 @@ use parameters::{ParameterPanel, SimulationStatus};
 pub use parameters::{has_option, with_default};
 use plate_colors::PlateColors;
 use renderer::Vertex;
-use renderer::{LineSegment, Overlay, PlanetCallback, Surface, Uniforms};
+use renderer::{Detail, LineSegment, Overlay, PlanetCallback, Surface, Uniforms};
 
 /// Bits of the depth buffer requested from eframe; must match [`renderer::DEPTH_FORMAT`].
 const DEPTH_BUFFER_BITS: u8 = 32;
@@ -539,6 +539,50 @@ struct Viewer {
     /// The number of meshes and surface states received, for [`Surface`]'s ids.
     meshes: u64,
     surfaces: u64,
+    /// Intervals between frames, logged at debug level (see [`FrameTimes`]).
+    frame_times: FrameTimes,
+}
+
+/// Collects the intervals between frames and logs their median and 90th percentile every
+/// [`FrameTimes::PERIOD`] seconds at debug level, while the view redraws (e.g. while it is
+/// dragged): the frame rate of the realistic mode's quality levels on slow devices.
+#[derive(Default)]
+struct FrameTimes {
+    last: Option<web_time::Instant>,
+    since: Option<web_time::Instant>,
+    intervals: Vec<f32>,
+}
+
+impl FrameTimes {
+    const PERIOD: f32 = 2.0;
+    /// Longer pauses are idle time, not frames.
+    const IDLE: f32 = 0.5;
+
+    fn frame(&mut self, mode: RenderModeId) {
+        let now = web_time::Instant::now();
+        if let Some(last) = self.last.replace(now) {
+            let seconds = (now - last).as_secs_f32();
+            if seconds < Self::IDLE {
+                self.intervals.push(seconds);
+            }
+        }
+        let since = *self.since.get_or_insert(now);
+        if (now - since).as_secs_f32() >= Self::PERIOD {
+            self.since = Some(now);
+            let mut intervals = std::mem::take(&mut self.intervals);
+            if intervals.len() >= 5 {
+                intervals.sort_by(f32::total_cmp);
+                let at = |share: f32| intervals[((intervals.len() - 1) as f32 * share) as usize];
+                tracing::debug!(
+                    mode = mode.name(),
+                    frames = intervals.len(),
+                    median_ms = at(0.5) * 1000.0,
+                    p90_ms = at(0.9) * 1000.0,
+                    "Frame times"
+                );
+            }
+        }
+    }
 }
 
 /// The newest state of the running simulation.
@@ -636,6 +680,7 @@ impl Viewer {
             surface: None,
             meshes: 0,
             surfaces: 0,
+            frame_times: FrameTimes::default(),
         };
         viewer.start(ctx, initial);
         viewer
@@ -767,9 +812,16 @@ impl Viewer {
         let mut builder = OverlayBuilder::default();
         mode.overlay(&data, &mut builder);
         let overlay = (!builder.is_empty()).then(|| builder.finish());
+        // The realistic mode draws its own de-indexed mesh with sub-cell detail.
+        let detail = (self.mode == RenderModeId::Realistic).then(|| Detail {
+            id: self.displays,
+            vertices: Arc::new(modes::realistic::detail_vertices(&data, &picking.faces)),
+            uniforms: Arc::new(modes::realistic::detail_uniforms(&data)),
+        });
         self.display = Some(Surface {
             vertices_id: self.displays,
             vertices,
+            detail,
             ..surface.clone()
         });
         self.overlay = overlay.map(|vertices: Vec<OverlayVertex>| Overlay {
@@ -896,6 +948,7 @@ impl Viewer {
             faces: picking.faces.clone(),
             vertices_id: self.surfaces,
             vertices: Arc::new(vertices),
+            detail: None,
         });
         self.fields = fields;
         self.display_outdated = true;
@@ -1200,11 +1253,7 @@ impl Viewer {
                     Shading::Lit => 0.0,
                     Shading::Unlit => 1.0,
                 },
-                if self.mode == RenderModeId::Realistic {
-                    1.0
-                } else {
-                    0.0
-                },
+                0.0,
             ],
             inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
             sun_direction: sun.direction.extend(sun.angular_radius).to_array(),
@@ -1284,6 +1333,7 @@ fn points_per_radius(size: egui::Vec2) -> f32 {
 
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.frame_times.frame(self.mode);
         let mut updated = false;
         while let Ok(event) = self.events.try_recv() {
             match event {

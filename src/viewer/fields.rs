@@ -82,6 +82,10 @@ pub struct PlateInfo {
     /// The plate's id, which stays while its index changes (see
     /// [`crate::tectonics::Simulation::plate_id`]): plate colours follow it.
     pub id: u32,
+    /// The plate's orientation, the rotation from its local frame into the world frame as a
+    /// quaternion (x, y, z, w): the realistic mode anchors its sub-cell detail to it, so that
+    /// the detail moves with the crust (#92).
+    pub orientation: [f32; 4],
 }
 
 impl PlateInfo {
@@ -98,6 +102,7 @@ pub fn plate_infos(planet: &Planet) -> Vec<PlateInfo> {
         .map(|plate| PlateInfo {
             rotation: simulation.angular_velocity(plate).as_vec3().to_array(),
             id: simulation.plate_id(plate),
+            orientation: simulation.plate_rotation(plate).as_quat().to_array(),
         })
         .collect()
 }

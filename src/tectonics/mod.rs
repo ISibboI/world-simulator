@@ -980,6 +980,12 @@ impl Simulation {
         self.plates[plate as usize].id
     }
 
+    /// The orientation of a plate: the rotation from its local frame (in which its crust is
+    /// stored) into the world frame.
+    pub fn plate_rotation(&self, plate: u32) -> DQuat {
+        self.plates[plate as usize].rotation
+    }
+
     /// The rotation axis of a plate scaled by its rotation speed in rad/Myr.
     pub fn angular_velocity(&self, plate: u32) -> DVec3 {
         self.plates[plate as usize].angular_velocity

@@ -37,7 +37,12 @@ starts.
    climate and crust, sun-lit in linear light, relief true to scale, sun glint on water, Season
    option, naga test for WebGL2. Stage 0's plate orientation moves to stage 2 (no use without
    noise); biosphere from the launch options; no frame change.
-4. Then stage 2 onwards of §10 (with stage 0's plate frames), adapted to the decisions: no
+4. **Stage 2, sub-cell detail** ([detail.md](detail.md)): plate orientation in the frames
+   (+16 B per plate, codec 11), de-indexed mesh, plate-anchored noise weighted to zero at cell
+   centres (coasts, snow and tree lines, colour variation, bump relief), octaves limited by the
+   pixel footprint (on-the-fly LOD), Detail option Low/Medium/High. Topographic stays the
+   start-up mode (Sebastian on #157).
+5. Then stage 3 onwards of §10 (with stage 0's plate frames), adapted to the decisions: no
    relief exaggeration in the realistic mode, LOD for the detail, no rivers, Season option,
    clouds later, stars only if they make sense.
 
