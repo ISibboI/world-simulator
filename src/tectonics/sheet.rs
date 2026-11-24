@@ -79,7 +79,13 @@ pub struct SheetParams {
     /// Age (Myr) of sea floor up to which ridge push builds up (its potential energy falls
     /// with age while the plate cools).
     pub ridge_push_age: f64,
-    /// Factor on the force of the potential energy of thickened continental crust.
+    /// Factor on the force of the potential energy of thickened continental crust (Airy
+    /// crust only, see `deformation::excess_potential_energy`). Calibrated to 2: with the
+    /// crust-only estimate, continents thickened and emerged (flooded continental crust 18%
+    /// instead of 25%, crust > 50 km 8% of the continental crust, 4 seeds); the factor stands
+    /// in for the parts of the column's potential energy that are not modelled (thermal
+    /// expansion of thickened, hot lithosphere) and for the discretisation's bulk stiffness
+    /// (see the module documentation).
     pub gpe_factor: f64,
     /// Relative speed (cm/yr) of two blocks of a plate above which the zone between them
     /// becomes a plate boundary.
@@ -109,7 +115,7 @@ impl Default for SheetParams {
             max_softening: 5.0,
             oceanic_min_strength: 0.35,
             ridge_push_age: 80.0,
-            gpe_factor: 1.0,
+            gpe_factor: 2.0,
             split_speed: 1.5,
             split_time: 5.0,
             fronts: 2,
@@ -1730,6 +1736,18 @@ impl Simulation {
                 tracing::debug!(plate, new_plate, cells = piece.len(), time = self.time, "Deforming plate split");
             }
         }
+    }
+
+    /// Velocity (rad/Myr, world frame, at the boundary cell) of the material of a boundary
+    /// cell's plate relative to that of the other plate across the boundary: the plates'
+    /// rotations and their deformation on either side.
+    pub(super) fn material_relative_velocity(&self, boundary: &dynamics::BoundaryCell) -> DVec3 {
+        let r = self.mesh.vertex(boundary.cell);
+        (self.plates[boundary.plate as usize].angular_velocity
+            - self.plates[boundary.other as usize].angular_velocity)
+            .cross(r)
+            + self.deformation_velocity(boundary.cell)
+            - self.deformation_velocity(boundary.neighbor)
     }
 
     /// The deformation velocity (rad/Myr, world frame) of the lithosphere at a world cell.

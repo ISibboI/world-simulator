@@ -248,9 +248,7 @@ impl Simulation {
             (0.0, 0usize, 0usize, 0.0, 0.0);
         for (boundary, &normal_vector) in boundaries.iter().zip(&normals) {
             let r = self.mesh.vertex(boundary.cell);
-            let relative = (self.plates[boundary.plate as usize].angular_velocity
-                - self.plates[boundary.other as usize].angular_velocity)
-                .cross(r);
+            let relative = self.material_relative_velocity(boundary);
             let speed = relative.length();
             speeds.push(speed);
             let cos = if speed > 0.0 {
@@ -329,9 +327,7 @@ impl Simulation {
             .zip(&normals)
             .map(|(boundary, &normal)| {
                 let r = self.mesh.vertex(boundary.cell);
-                let relative = (self.plates[boundary.plate as usize].angular_velocity
-                    - self.plates[boundary.other as usize].angular_velocity)
-                    .cross(r);
+                let relative = self.material_relative_velocity(boundary);
                 let segment = boundary
                     .segment
                     .and_then(|id| self.polarities.segment(boundary.plate, boundary.other, id));
