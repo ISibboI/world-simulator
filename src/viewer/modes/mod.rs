@@ -20,6 +20,7 @@
 //! legend and the mode reads their values from [`ModeData::options`].
 
 mod crust;
+mod crust_age;
 mod moisture;
 mod ocean_currents;
 mod plate_motion;
@@ -58,6 +59,8 @@ pub enum RenderModeId {
     OceanCurrents,
     /// The prevailing low-level winds as arrows (annual, January or July).
     Wind,
+    /// Age of the ocean floor with isochrons; continents in grey.
+    CrustAge,
     /// Crust type (oceanic, transitional, continental) and thickness.
     Crust,
 }
@@ -73,6 +76,7 @@ impl RenderModeId {
             RenderModeId::Moisture => &moisture::Moisture,
             RenderModeId::OceanCurrents => &ocean_currents::OceanCurrents,
             RenderModeId::Wind => &wind::Wind,
+            RenderModeId::CrustAge => &crust_age::CrustAge,
             RenderModeId::Crust => &crust::Crust,
         }
     }
@@ -98,6 +102,7 @@ impl RenderModeId {
             RenderModeId::Moisture => "moisture",
             RenderModeId::OceanCurrents => "ocean-currents",
             RenderModeId::Wind => "wind",
+            RenderModeId::CrustAge => "crust-age",
             RenderModeId::Crust => "crust",
         }
     }
@@ -339,6 +344,20 @@ impl Period {
             Period::January => cell.precipitation_january,
             Period::July => cell.precipitation_july,
         }
+    }
+
+    /// The evaporation (of the ocean, evapotranspiration of land) of a cell in m/yr.
+    pub fn evaporation(self, cell: &CellInfo) -> f32 {
+        match self {
+            Period::Annual => cell.evaporation,
+            Period::January => cell.evaporation_january,
+            Period::July => cell.evaporation_july,
+        }
+    }
+
+    /// Precipitation minus evaporation of a cell in m/yr.
+    pub fn balance(self, cell: &CellInfo) -> f32 {
+        self.precipitation(cell) - self.evaporation(cell)
     }
 
     /// The low-level wind of a cell (eastward, northward) in m/s.
