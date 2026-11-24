@@ -19,6 +19,7 @@ mod render;
 mod sea;
 mod sparse;
 mod sphere;
+mod sun;
 mod tectonics;
 mod temperature;
 mod viewer;

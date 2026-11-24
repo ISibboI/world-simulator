@@ -29,6 +29,7 @@ mod cell_info;
 mod fields;
 mod history;
 mod hydrology;
+mod lighting;
 mod modes;
 mod overlay;
 mod pace;
@@ -57,6 +58,7 @@ pub use fields::{Fields, Layers, PlateInfo, plate_infos};
 #[cfg(target_arch = "wasm32")]
 pub use history::store::MemoryStore;
 pub use history::{FrameStore, History};
+use lighting::{Light, Lighting, SunView};
 pub use modes::RenderModeId;
 use modes::switcher::{ModeSwitcher, SwitcherView};
 use modes::{ModeData, Shading, recolored};
@@ -453,6 +455,10 @@ struct Viewer {
     exaggeration: f64,
     river_threshold: f64,
     dt: f64,
+    /// The epoch of the running simulation (Gyr before present), for the sun.
+    epoch: f64,
+    /// Simulated time (Myr) of the displayed state, for the age of the sun.
+    shown_time: f64,
     /// The control of the running simulation.
     control: Option<Box<dyn SimulationControl>>,
     remember_render_mode: Option<RememberRenderMode>,
@@ -566,6 +572,8 @@ impl Viewer {
             exaggeration: initial.cli.exaggeration,
             river_threshold: initial.cli.river_threshold,
             dt: initial.cli.dt,
+            epoch: initial.cli.epoch,
+            shown_time: 0.0,
             control: None,
             remember_render_mode,
             mode: initial.cli.render_mode,
@@ -624,6 +632,8 @@ impl Viewer {
         self.exaggeration = launch.cli.exaggeration;
         self.river_threshold = launch.cli.river_threshold;
         self.dt = launch.cli.dt;
+        self.epoch = launch.cli.epoch;
+        self.shown_time = 0.0;
         // A new history (the old one is deleted first); the view shows the previous planet,
         // without time controls, until the new simulation sends its first state.
         self.history = None;
@@ -777,7 +787,7 @@ impl Viewer {
             fields: update.fields.clone(),
         });
         if self.viewing.is_none() {
-            self.show(update.cells, update.plates, update.fields);
+            self.show(update.time, update.cells, update.plates, update.fields);
         }
     }
 
@@ -814,7 +824,13 @@ impl Viewer {
     }
 
     /// Shows a state of the current mesh: builds its surface and takes its cells for picking.
-    fn show(&mut self, cells: Arc<Vec<CellInfo>>, plates: Arc<Vec<PlateInfo>>, fields: Fields) {
+    fn show(
+        &mut self,
+        time: f64,
+        cells: Arc<Vec<CellInfo>>,
+        plates: Arc<Vec<PlateInfo>>,
+        fields: Fields,
+    ) {
         let Some(picking) = &mut self.picking else {
             return;
         };
@@ -839,6 +855,7 @@ impl Viewer {
         picking.drainage = hydrology::Drainage::of(&picking.mesh, &cells);
         picking.cells = cells;
         picking.plates = plates;
+        self.shown_time = time;
         self.surfaces += 1;
         self.surface = Some(Surface {
             mesh_id: picking.mesh_id,
@@ -865,8 +882,13 @@ impl Viewer {
                     return;
                 }
                 let fields = Fields::from_frame(&picking.mesh, &frame.cells, &frame.plates);
+                let time = self
+                    .history
+                    .as_ref()
+                    .and_then(|history| history.time(frame.index))
+                    .unwrap_or(self.shown_time);
                 self.frame_error = None;
-                self.show(Arc::new(frame.cells), Arc::new(frame.plates), fields);
+                self.show(time, Arc::new(frame.cells), Arc::new(frame.plates), fields);
             }
             Ok(_) => {}
             // A read that failed after the view went live again is no longer of interest.
@@ -908,12 +930,13 @@ impl Viewer {
         if self.viewing.take().is_some()
             && let Some(latest) = &self.latest
         {
-            let (cells, plates, fields) = (
+            let (time, cells, plates, fields) = (
+                latest.time,
                 latest.cells.clone(),
                 latest.plates.clone(),
                 latest.fields.clone(),
             );
-            self.show(cells, plates, fields);
+            self.show(time, cells, plates, fields);
         }
     }
 
@@ -1089,12 +1112,12 @@ impl Viewer {
         let field_of_view = vertical_field_of_view(aspect_ratio);
         let projection =
             glam::camera::rh::proj::directx::perspective(field_of_view, aspect_ratio, 0.1, 10.0);
-        // Light from the upper left of the camera, so the visible side is always lit.
-        let right = Vec3::Z.cross(eye).normalize_or(Vec3::X);
-        let light = (eye.normalize() + Vec3::Z * 0.5 - right * 0.6).normalize();
+        let view_projection = projection * view;
+        let sun = self.sun();
+        let lighting = Lighting::new(self.switcher.light(), eye, &sun);
         Uniforms {
-            view_projection: (projection * view).to_cols_array_2d(),
-            light_direction: light.extend(0.0).to_array(),
+            view_projection: view_projection.to_cols_array_2d(),
+            light_direction: lighting.direction.extend(0.0).to_array(),
             viewport: [
                 viewport.x,
                 viewport.y,
@@ -1104,7 +1127,21 @@ impl Viewer {
                 },
                 0.0,
             ],
+            inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
+            sun_direction: sun.direction.extend(sun.angular_radius).to_array(),
+            sun_color: [sun.disc_color[0], sun.disc_color[1], sun.disc_color[2], 0.0],
+            light_color: [
+                lighting.color[0],
+                lighting.color[1],
+                lighting.color[2],
+                lighting.ambient,
+            ],
         }
+    }
+
+    /// The sun of the displayed state.
+    fn sun(&self) -> SunView {
+        SunView::new(self.epoch, self.shown_time)
     }
 }
 
@@ -1203,6 +1240,8 @@ impl eframe::App for Viewer {
                             surface: self.display.clone(),
                             overlay: self.overlay.clone(),
                             lines,
+                            sun: self.mode.mode().shading() == Shading::Lit
+                                && self.switcher.light() != Light::Camera,
                         },
                     ));
             });
@@ -1246,6 +1285,7 @@ impl eframe::App for Viewer {
             points_per_radius: self.points_per_radius,
             waiting: self.waiting_for_fields(),
             bottom: cell_panel.map_or(f32::INFINITY, |rect| rect.top()),
+            sun: self.sun().describe(),
         };
         let (changed, switcher) = self.switcher.show(ui.ctx(), &mut mode, &view);
         if changed {

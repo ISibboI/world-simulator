@@ -395,7 +395,8 @@ impl Period {
 /// How the planet's colours are lit, see [`RenderMode::shading`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Shading {
-    /// Diffuse light from the upper left of the camera.
+    /// Diffuse light from the camera or the sun, as the light option of the view chooses
+    /// (see `super::lighting`).
     #[default]
     Lit,
     /// The colours as they are.

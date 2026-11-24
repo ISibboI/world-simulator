@@ -18,13 +18,10 @@
 use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
 use crate::math;
+use crate::sun::{self, PRESENT_SOLAR_CONSTANT, SOLAR_AGE};
 use crate::tectonics::TectonicParams;
 use crate::temperature::TemperatureParams;
 
-/// Today's solar constant in W/m² (Kopp & Lean, 2011).
-pub const PRESENT_SOLAR_CONSTANT: f64 = 1361.0;
-/// Age of the Sun in Gyr (Bouvier & Wadhwa, 2010: 4.568 Gyr for the oldest solids).
-pub const SOLAR_AGE: f64 = 4.57;
 /// Earth's Bond albedo (CERES: 0.29–0.30; Stephens et al., 2015), to turn a change of the solar
 /// constant into a change of absorbed sunlight.
 pub const BOND_ALBEDO: f64 = 0.3;
@@ -135,9 +132,9 @@ impl Epoch {
     /// The solar constant (W/m²) of the epoch, from the brightening of the Sun on the main
     /// sequence (Gough, 1981): `S(t) = S₀ / (1 + 0.4 (1 − t/t₀))` for the age `t` of the Sun and
     /// its present age `t₀`. 0.77 S₀ at 3.5 Ga, 0.92 S₀ at 1 Ga.
+    /// The sun model of the view ([`crate::sun::Sun`]) uses the same formula.
     pub fn solar_constant(&self) -> f64 {
-        let age = SOLAR_AGE - self.before_present;
-        PRESENT_SOLAR_CONSTANT / (1.0 + 0.4 * (1.0 - age / SOLAR_AGE))
+        sun::solar_constant(SOLAR_AGE - self.before_present)
     }
 
     /// Greenhouse forcing (W/m²) of the epoch relative to today's atmosphere.

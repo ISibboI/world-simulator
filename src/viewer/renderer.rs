@@ -1,5 +1,6 @@
-//! GPU resources and the egui paint callback that draws the planet with wgpu, the overlay of
-//! the render mode (arrows) and the outline of the cell under the pointer on top of it.
+//! GPU resources and the egui paint callback that draws the planet with wgpu, the sun behind it
+//! (`sky.wgsl`), the overlay of the render mode (arrows) and the outline of the cell under the
+//! pointer on top of it.
 
 use std::sync::Arc;
 
@@ -26,10 +27,19 @@ pub struct Vertex {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct Uniforms {
     pub view_projection: [[f32; 4]; 4],
+    /// Direction towards the light (`w` unused).
     pub light_direction: [f32; 4],
     /// Size of the view in physical pixels (`x`, `y`), for lines of a fixed width; `z` is 1 if
     /// the render mode shows its colours unlit, 0 if lit (`w` unused).
     pub viewport: [f32; 4],
+    /// The inverse of `view_projection`, for the view direction of the sky's pixels.
+    pub inverse_view_projection: [[f32; 4]; 4],
+    /// Direction towards the sun (`xyz`) and the angular radius of its disc in radians (`w`).
+    pub sun_direction: [f32; 4],
+    /// Colour of the sun's disc in sRGB (`w` unused).
+    pub sun_color: [f32; 4],
+    /// Colour of the light as an sRGB factor (`xyz`) and the share of ambient light (`w`).
+    pub light_color: [f32; 4],
 }
 
 /// A straight piece of a line drawn over the planet with a constant width in pixels (see
@@ -52,6 +62,8 @@ pub const MAX_LINE_SEGMENTS: usize = 64;
 /// GPU resources, stored in egui's callback resources.
 struct PlanetResources {
     pipeline: wgpu::RenderPipeline,
+    /// Draws the sun behind the planet (`sky.wgsl`).
+    sky_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     line_pipeline: wgpu::RenderPipeline,
@@ -191,6 +203,12 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
         render_state.target_format,
         msaa_samples,
     );
+    let sky_pipeline = sky_pipeline(
+        device,
+        &pipeline_layout,
+        render_state.target_format,
+        msaa_samples,
+    );
 
     let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("planet uniforms"),
@@ -212,6 +230,7 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
         .callback_resources
         .insert(PlanetResources {
             pipeline,
+            sky_pipeline,
             uniform_buffer,
             bind_group,
             line_pipeline,
@@ -267,6 +286,68 @@ fn overlay_pipeline(
             module: &shader,
             entry_point: Some("fs_main"),
             targets: &[Some(target_format.into())],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// The pipeline of the sky (the sun): one full-screen triangle behind the planet, depth-tested
+/// against it without writing depth, added to the background.
+fn sky_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    target_format: wgpu::TextureFormat,
+    msaa_samples: u32,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("sky.wgsl"));
+    let additive = wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+        // The target's alpha stays as it is.
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+    };
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("sky"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: msaa_samples,
+            ..Default::default()
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: target_format,
+                blend: Some(additive),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         }),
         multiview_mask: None,
@@ -354,6 +435,8 @@ pub struct PlanetCallback {
     pub overlay: Option<Overlay>,
     /// Lines to draw over the planet, at most [`MAX_LINE_SEGMENTS`] (the rest are dropped).
     pub lines: Vec<LineSegment>,
+    /// Whether to draw the sun (only when the planet is lit by it).
+    pub sun: bool,
 }
 
 impl egui_wgpu::CallbackTrait for PlanetCallback {
@@ -440,14 +523,24 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
         let resources: &PlanetResources = callback_resources
             .get()
             .expect("planet resources are initialised at startup");
+        render_pass.set_bind_group(0, &resources.bind_group, &[]);
         let Some(mesh) = resources.mesh.as_ref().filter(|mesh| mesh.has_vertices) else {
+            // No planet yet: only the sun.
+            if self.sun {
+                render_pass.set_pipeline(&resources.sky_pipeline);
+                render_pass.draw(0..3, 0..1);
+            }
             return;
         };
         render_pass.set_pipeline(&resources.pipeline);
-        render_pass.set_bind_group(0, &resources.bind_group, &[]);
         render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+        // After the planet, so that its depth hides the sun where the planet is in front.
+        if self.sun {
+            render_pass.set_pipeline(&resources.sky_pipeline);
+            render_pass.draw(0..3, 0..1);
+        }
         if resources.overlay_shown
             && let Some((buffer, _, count)) = &resources.overlay
         {
