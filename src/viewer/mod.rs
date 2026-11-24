@@ -340,13 +340,30 @@ fn app_creator(
     })
 }
 
+/// The window icon: the planet of the favicon (issue #124, `web/icons/`).
+#[cfg(not(target_arch = "wasm32"))]
+fn window_icon() -> egui::IconData {
+    let image = image::load_from_memory_with_format(
+        include_bytes!("../../web/icons/icon-256.png"),
+        image::ImageFormat::Png,
+    )
+    .expect("the embedded window icon is a valid PNG")
+    .into_rgba8();
+    egui::IconData {
+        width: image.width(),
+        height: image.height(),
+        rgba: image.into_raw(),
+    }
+}
+
 /// Opens the 3D view and blocks until the window is closed.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run(initial: Launch, start_simulation: StartSimulation) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("World Simulator")
-            .with_inner_size([1200.0, 900.0]),
+            .with_inner_size([1200.0, 900.0])
+            .with_icon(window_icon()),
         depth_buffer: DEPTH_BUFFER_BITS,
         multisampling: MSAA_SAMPLES,
         renderer: eframe::Renderer::Wgpu,
@@ -1366,5 +1383,15 @@ impl eframe::App for Viewer {
         if let Some(on_first_frame) = self.on_first_frame.take() {
             on_first_frame();
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    #[test]
+    fn window_icon_decodes() {
+        let icon = super::window_icon();
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
     }
 }
