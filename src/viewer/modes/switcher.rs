@@ -283,7 +283,22 @@ fn legend(ui: &mut egui::Ui, legend: &Legend, view: &SwitcherView, width: f32) {
             }
             SwatchShape::Fill => {
                 ui.horizontal_wrapped(|ui| {
+                    let font = egui::TextStyle::Body.resolve(ui.style());
                     for swatch in group {
+                        // A square and its label wrap together: a new row if both do not fit
+                        // into the rest of this one.
+                        let label = ui.painter().layout_no_wrap(
+                            swatch.label.to_string(),
+                            font.clone(),
+                            ui.visuals().text_color(),
+                        );
+                        let needed =
+                            bar_height + 2.0 * ui.spacing().item_spacing.x + label.size().x;
+                        let rest = ui.available_size_before_wrap().x;
+                        // (Not at the start of a row, where a long label wraps anyway.)
+                        if needed > rest && rest < ui.max_rect().width() - 1.0 {
+                            ui.end_row();
+                        }
                         swatch_symbol(ui, swatch, bar_height);
                         ui.label(swatch.label.as_ref());
                     }

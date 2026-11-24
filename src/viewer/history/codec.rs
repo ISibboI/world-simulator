@@ -2,7 +2,7 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (49 bytes per cell
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (50 bytes per cell
 //! instead of 124, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
@@ -28,7 +28,7 @@ enum Code {
     /// ln(1 + value) with this step, 2 bytes, for values spanning many orders of magnitude;
     /// `u16::MAX` is NaN.
     Logarithmic(f32),
-    /// An integer of up to 16 bits (larger ones are clamped).
+    /// An integer of up to 16 bits.
     Integer16,
     /// An integer of up to 8 bits.
     Integer8,
@@ -95,13 +95,15 @@ const CHANNELS: [Code; 31] = [
     Code::Signed8(0.25),
     Code::Signed8(0.25),
     Code::Signed8(0.25),
-    // Plate, flags and climate class.
+    // Plate (clamped to 16 bits), the low 16 bits of the flags and the climate class. The flags
+    // take 9 bits, so most of their high byte is zero and costs next to nothing after the delta
+    // and lz4.
     Code::Integer16,
-    Code::Integer8,
+    Code::Integer16,
     Code::Integer8,
 ];
 
-/// The channels of the plate, the flags and the climate class.
+/// The channels of the integer attributes: plate, flags and climate class.
 const PLATE: usize = 28;
 const FLAGS: usize = 29;
 const CLIMATE_CLASS: usize = 30;
@@ -274,10 +276,10 @@ impl Planes {
             let values = attributes(cell);
             let mut plane = 0;
             for (channel, code) in CHANNELS.iter().enumerate() {
-                let value = match (channel, code) {
-                    (_, Code::Integer16) => cell.plate.min(u32::from(u16::MAX)) as u16,
-                    (FLAGS, _) => (cell.flags & 0xFF) as u16,
-                    (CLIMATE_CLASS, _) => cell.climate_class.min(0xFF) as u16,
+                let value = match channel {
+                    PLATE => cell.plate.min(u32::from(u16::MAX)) as u16,
+                    FLAGS => (cell.flags & 0xFFFF) as u16,
+                    CLIMATE_CLASS => cell.climate_class.min(0xFF) as u16,
                     _ => quantise(*code, values[channel]),
                 };
                 for byte in 0..code.bytes() {
@@ -362,7 +364,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 7;
+const VERSION: u8 = 8;
 /// Bytes per plate: its rotation and id.
 pub const PLATE_BYTES: usize = 16;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -526,8 +528,9 @@ mod tests {
             wind_july_north: -0.1,
             climate_class: (index % 31) as u32,
             plate: (index % 13) as u32,
-            // All flag bits the history keeps, the oceanic bit (6) among them.
-            flags: (index % 2) as u32 | ((index % 3) as u32) << 5,
+            // All flag bits the history keeps (the oceanic bit 6, the felsic bit 7 and the
+            // metasediment bit 8 among them).
+            flags: (index * 37 % 512) as u32,
         }
     }
 
@@ -644,7 +647,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 49);
+        assert_eq!(BYTES_PER_CELL, 50);
     }
 
     #[test]
