@@ -6,7 +6,9 @@ use web_time::Instant;
 use tracing::{debug, debug_span};
 
 use crate::climate::{Climate, ClimateParams, WaterCycle};
-use crate::erosion::{CrustClass, ErosionParams, Hydrology, Surface, WaveErosion, erode};
+use crate::erosion::{
+    CrustClass, ErosionParams, Hydrology, Surface, SurfaceWater, WaveErosion, erode,
+};
 use crate::tectonics::{Crust, Simulation, Statistics};
 use crate::temperature::{TemperatureFields, TemperatureModel, TemperatureParams};
 
@@ -21,6 +23,8 @@ pub struct Planet {
     precipitation: Vec<f64>,
     /// Water discharge per cell in m³/yr; all zero while erosion is disabled.
     discharge: Vec<f64>,
+    /// Where the water of every cell went in the last step, and the lakes (for the view).
+    water: SurfaceWater,
     /// Sediment delivered to the oceans in the last step, in m³/yr.
     sediment_flux: f64,
     /// Lakes and endorheic basins in the last step.
@@ -205,6 +209,11 @@ impl Planet {
         let view = climate_elevations(tectonics.mesh(), &elevation, &seeds);
         temperature.update(&view, None);
         let cell_count = tectonics.mesh().len();
+        let water = SurfaceWater::ocean_only(crate::sea::ocean_from(
+            tectonics.mesh(),
+            &elevation,
+            seeds.iter().copied(),
+        ));
         let mut planet = Self {
             tectonics,
             climate,
@@ -213,6 +222,7 @@ impl Planet {
             planet_radius,
             precipitation: vec![0.0; cell_count],
             discharge: vec![0.0; cell_count],
+            water,
             sediment_flux: 0.0,
             hydrology: Hydrology::default(),
             sediment_overfill: 0.0,
@@ -249,6 +259,12 @@ impl Planet {
 
     pub fn discharge(&self) -> &[f64] {
         &self.discharge
+    }
+
+    /// Where the water of every cell goes, the ocean and the lakes, as the last erosion step
+    /// saw them (only the ocean while erosion is disabled); for the view.
+    pub fn surface_water(&self) -> &SurfaceWater {
+        &self.water
     }
 
     /// A fingerprint of the state, the same on every platform for the same state: the time and,
@@ -350,6 +366,7 @@ impl Planet {
             // The lakes' water comes from the ocean.
             self.tectonics.set_lake_water(result.hydrology.lake_volume);
             self.discharge = result.discharge;
+            self.water = result.water;
             self.sediment_flux = result.sediment_to_ocean / dt_years;
             if self.tectonics.time() > dt + 1e-9 {
                 self.inland_change +=
@@ -372,6 +389,13 @@ impl Planet {
             wave.stayed += result.wave.stayed;
             let cell_area = self.cell_area();
             self.sediment_deposition = result.deposited.map(|d| d * cell_area / dt_years);
+        }
+        if self.erosion.is_none() {
+            self.water = SurfaceWater::ocean_only(crate::sea::ocean_from(
+                self.tectonics.mesh(),
+                &elevation,
+                seeds.iter().copied(),
+            ));
         }
         if self.cover_cohort.is_none() && self.tectonics.time() >= self.cover_cohort_time - 1e-9 {
             let mass = self.tectonics.start_cover_cohort();
