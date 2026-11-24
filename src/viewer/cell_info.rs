@@ -11,7 +11,7 @@ use crate::tectonics::BoundaryClass;
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 108 bytes per cell, 4.4 MB
+/// buffer (to the page on the web) and read back without parsing: 120 bytes per cell, 4.9 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -43,6 +43,13 @@ pub struct CellInfo {
     /// Annual potential evaporation of land in m/yr (zero over the ocean, see
     /// [`crate::climate::WaterCycle::potential_evaporation`]).
     pub potential_evaporation: f32,
+    /// Actual evaporation in m/yr, of the year and of January and July (NaN if the water cycle
+    /// does not solve that month): the evaporation of the ocean and the evapotranspiration of
+    /// land (see [`crate::climate::WaterCycle::evaporation`]), without the extra evaporation of
+    /// lakes, which the river model takes from the runoff.
+    pub evaporation: f32,
+    pub evaporation_january: f32,
+    pub evaporation_july: f32,
     /// Permanent ice cover (sea ice, ice sheets), 0 to 1.
     pub ice: f32,
     /// Water discharge in m³/yr (zero while erosion is disabled).
@@ -68,14 +75,15 @@ pub struct CellInfo {
     /// The plate covering the cell.
     pub plate: u32,
     /// Bit flags: [`CellInfo::CONTINENTAL`], the boundary class
-    /// ([`CellInfo::BOUNDARY_SHIFT`]) and [`CellInfo::DEFORMING_BAND`]. The frame history keeps
-    /// the low 8 bits.
+    /// ([`CellInfo::BOUNDARY_SHIFT`]), [`CellInfo::DEFORMING_BAND`] and [`CellInfo::OCEANIC`].
+    /// The frame history keeps the low 8 bits.
     pub flags: u32,
 }
 
 impl CellInfo {
     /// [`CellInfo::flags`]: the crust is continental (see
-    /// [`crate::tectonics::Crust::is_continental`]), otherwise oceanic.
+    /// [`crate::tectonics::Crust::is_continental`]); otherwise oceanic
+    /// ([`CellInfo::OCEANIC`]) or transitional.
     pub const CONTINENTAL: u32 = 1;
     /// [`CellInfo::flags`]: bits 1 to 4 are the code of the cell's
     /// [`BoundaryClass`] (0 inside a plate).
@@ -84,6 +92,10 @@ impl CellInfo {
     /// [`CellInfo::flags`]: the cell is in a deforming band (see
     /// [`crate::tectonics::Simulation::boundary_map`]).
     pub const DEFORMING_BAND: u32 = 1 << 5;
+    /// [`CellInfo::flags`]: the crust is normal oceanic crust (see
+    /// [`crate::tectonics::Crust::is_oceanic`]); crust that is neither this nor
+    /// [`CellInfo::CONTINENTAL`] is transitional (thick arcs, thinned continental margins).
+    pub const OCEANIC: u32 = 1 << 6;
 
     pub fn is_continental(&self) -> bool {
         self.flags & Self::CONTINENTAL != 0
@@ -105,6 +117,10 @@ impl CellInfo {
         } else {
             f32::NAN
         }
+    }
+
+    pub fn is_oceanic(&self) -> bool {
+        self.flags & Self::OCEANIC != 0
     }
 
     pub fn in_deforming_band(&self) -> bool {
@@ -154,11 +170,15 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
     let slot = |month: usize| {
         (solved > 0 && (month * solved).is_multiple_of(12)).then_some(month * solved / 12)
     };
-    let precipitation_of = |month: usize, cell: usize| {
+    let of_month = |monthly: &[Vec<f64>], month: usize, cell: usize| {
         slot(month)
-            .and_then(|slot| cycle.monthly_precipitation.get(slot))
+            .and_then(|slot| monthly.get(slot))
             .map_or(f32::NAN, |values| field(values, cell))
     };
+    let precipitation_of =
+        |month: usize, cell: usize| of_month(&cycle.monthly_precipitation, month, cell);
+    let evaporation_of =
+        |month: usize, cell: usize| of_month(&cycle.monthly_evaporation, month, cell);
     let wind = |winds: Option<&Vec<[f64; 2]>>, cell: usize, component: usize| {
         winds
             .and_then(|winds| winds.get(cell))
@@ -193,6 +213,9 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 precipitation_january: precipitation_of(0, index),
                 precipitation_july: precipitation_of(6, index),
                 potential_evaporation: field(&cycle.potential_evaporation, index),
+                evaporation: field(&cycle.evaporation, index),
+                evaporation_january: evaporation_of(0, index),
+                evaporation_july: evaporation_of(6, index),
                 ice: field(&temperature.ice, index),
                 discharge: field(planet.discharge(), index),
                 current_east: current(index, 0),
@@ -210,7 +233,11 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                     crust.is_continental(),
                     boundaries.classes[index],
                     boundaries.band[index],
-                ),
+                ) | if crust.is_oceanic() {
+                    CellInfo::OCEANIC
+                } else {
+                    0
+                },
             }
         })
         .collect()
@@ -260,7 +287,7 @@ pub struct Row {
 
 /// The labels of the rows, always all of them in this order, so that the widget does not
 /// change its layout from cell to cell.
-pub const ROW_LABELS: [&str; 18] = [
+pub const ROW_LABELS: [&str; 19] = [
     "Position",
     "Elevation",
     "Surface",
@@ -275,6 +302,7 @@ pub const ROW_LABELS: [&str; 18] = [
     "Precipitation",
     "Precip. Jan / Jul",
     "Aridity index",
+    "P − E",
     "Permanent ice",
     "River discharge",
     "Ocean current",
@@ -325,7 +353,7 @@ pub fn format_rows(
     longitude: f64,
 ) -> Vec<Row> {
     let land = info.elevation >= 0.0;
-    let values: [Option<String>; 18] = [
+    let values: [Option<String>; 19] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
         Some(
@@ -348,18 +376,20 @@ pub fn format_rows(
             "{}, {:.1} km",
             if info.is_continental() {
                 "continental"
-            } else {
+            } else if info.is_oceanic() {
                 "oceanic"
+            } else {
+                "transitional"
             },
             info.crust_thickness / 1000.0
         )),
         known(info.age, |age| {
             if age >= OLD_LITHOSPHERE {
                 format!("old (≥ {OLD_LITHOSPHERE:.0} Myr)")
-            } else if info.is_continental() {
-                format!("{age:.0} Myr")
-            } else {
+            } else if info.is_oceanic() {
                 format!("{age:.0} Myr (ocean floor)")
+            } else {
+                format!("{age:.0} Myr")
             }
         }),
         known(info.sediment, |rock| {
@@ -407,6 +437,7 @@ pub fn format_rows(
                     format!("{} ({})", format_aridity(index), aridity_class(index))
                 })
             }),
+        format_balance(info),
         (info.ice > 0.0).then(|| format!("{:.0}%", 100.0 * info.ice)),
         (land && info.discharge > 0.0).then(|| {
             format!(
@@ -443,6 +474,23 @@ fn format_current(info: &CellInfo) -> Option<String> {
         text += &format!(", {:+.0} W/m²", info.gyre_heating);
     }
     Some(text)
+}
+
+/// Annual precipitation minus evaporation, with the evaporation: "+312 mm/yr (evap. 500)".
+fn format_balance(info: &CellInfo) -> Option<String> {
+    let (p, e) = (info.precipitation, info.evaporation);
+    (p.is_finite() && e.is_finite()).then(|| {
+        let balance = ((p - e) * 1000.0).round();
+        // No "-0" or "+0".
+        let sign = if balance > 0.0 {
+            "+"
+        } else if balance < 0.0 {
+            "−"
+        } else {
+            ""
+        };
+        format!("{sign}{:.0} mm/yr (evap. {:.0})", balance.abs(), e * 1000.0)
+    })
 }
 
 /// The direction of a vector (eastward, northward) on an 8-point compass.
@@ -684,6 +732,9 @@ mod tests {
             precipitation_january: 0.0404,
             precipitation_july: 0.1205,
             potential_evaporation: 1.0,
+            evaporation: 0.5,
+            evaporation_january: 0.0102,
+            evaporation_july: 0.9,
             ice: 0.0,
             discharge: 3.15576e11,
             current_east: f32::NAN,
@@ -767,6 +818,7 @@ mod tests {
         assert_eq!(row(&rows, "Precipitation").unwrap(), "812 mm/yr");
         assert_eq!(row(&rows, "Precip. Jan / Jul").unwrap(), "40 / 120 mm/yr");
         assert_eq!(row(&rows, "Aridity index").unwrap(), "0.81 (humid)");
+        assert_eq!(row(&rows, "P − E").unwrap(), "+312 mm/yr (evap. 500)");
         let dry = CellInfo {
             precipitation: 0.1,
             potential_evaporation: 2.0,
@@ -814,12 +866,15 @@ mod tests {
             precipitation_january: f32::NAN,
             precipitation_july: f32::NAN,
             potential_evaporation: 0.0,
+            evaporation: 1.6,
+            evaporation_january: 2.1,
+            evaporation_july: f32::NAN,
             ice: 0.75,
             current_east: -10.0,
             current_north: 10.0,
             streamfunction: 12.0,
             gyre_heating: 25.4,
-            flags: 0,
+            flags: CellInfo::OCEANIC,
             ..info()
         }
     }
@@ -848,10 +903,28 @@ mod tests {
             row(&rows, "Lithosphere age").unwrap(),
             "42 Myr (ocean floor)"
         );
+        let transitional = CellInfo {
+            flags: 0,
+            crust_thickness: 14_000.0,
+            ..ocean()
+        };
+        let transitional = format_rows(&transitional, None, 0.0, 0.0);
+        assert_eq!(
+            row(&transitional, "Crust").unwrap(),
+            "transitional, 14.0 km"
+        );
+        assert_eq!(row(&transitional, "Lithosphere age").unwrap(), "42 Myr");
         assert_eq!(row(&rows, "Orogeny"), None);
         assert_eq!(row(&rows, "Temperature"), None);
         assert_eq!(row(&rows, "Jan / Jul"), None);
         assert_eq!(row(&rows, "Precip. Jan / Jul"), None);
+        // The subtropical ocean loses water.
+        assert_eq!(row(&rows, "P − E").unwrap(), "−788 mm/yr (evap. 1600)");
+        let unknown = CellInfo {
+            evaporation: f32::NAN,
+            ..ocean()
+        };
+        assert_eq!(row(&format_rows(&unknown, None, 0.0, 0.0), "P − E"), None);
         assert_eq!(row(&rows, "Aridity index"), None);
         assert_eq!(row(&rows, "Permanent ice").unwrap(), "75%");
         // No rivers in the ocean.
@@ -901,13 +974,16 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 108);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 120);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 
     #[test]
     fn old_oceanic_crust_has_no_ocean_floor_age() {
-        let info = CellInfo { flags: 0, ..info() };
+        let info = CellInfo {
+            flags: CellInfo::OCEANIC,
+            ..info()
+        };
         let rows = format_rows(&info, None, 0.0, 0.0);
         assert_eq!(row(&rows, "Lithosphere age").unwrap(), "old (≥ 1000 Myr)");
     }
@@ -935,6 +1011,10 @@ mod tests {
             assert_eq!(
                 info.is_continental(),
                 simulation.surface_crust(cell).is_continental()
+            );
+            assert_eq!(
+                info.is_oceanic(),
+                simulation.surface_crust(cell).is_oceanic()
             );
             assert!(info.temperature.is_finite());
             assert!(info.temperature_january.is_finite() && info.temperature_july.is_finite());

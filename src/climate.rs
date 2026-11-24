@@ -222,6 +222,8 @@ pub struct WaterCycle {
     pub clipped: f64,
     /// Precipitation (m/yr) of every solved month.
     pub monthly_precipitation: Vec<Vec<f64>>,
+    /// Evaporation and evapotranspiration (m/yr) of every solved month, as [`Self::evaporation`].
+    pub monthly_evaporation: Vec<Vec<f64>>,
     /// The low-level wind (eastward, northward; m/s) that carries the moisture, as the mean of
     /// the solved months: the zonal profile of the three-cell circulation around each
     /// longitude's ITCZ (see [`low_level_wind`]), plus the thermally driven winds if they are
@@ -489,6 +491,16 @@ impl Climate {
                 m.precipitation
                     .iter()
                     .map(|p| p * to_metres_per_year)
+                    .collect()
+            })
+            .collect();
+        cycle.monthly_evaporation = self
+            .solved
+            .iter()
+            .map(|m| {
+                m.evaporation
+                    .iter()
+                    .map(|e| e * to_metres_per_year)
                     .collect()
             })
             .collect();
