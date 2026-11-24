@@ -60,6 +60,11 @@ feedback) and is a separate decision (see the PR).
 
 ## Light options in the view
 
+> **Changed in step 2** (Sebastian on #148): the Light option now belongs only to the new
+> **Realistic** render mode (first in the list; Sun is its default). The data modes are always
+> lit from the camera again, as before #148. See [stars.md](stars.md). The text below describes
+> step 1.
+
 Where: one **Light** setting of the whole view, in the mode switcher under the options of the
 active mode, shown for every mode that shades its colours (topographic, plate motion, plates;
 the unlit modes show their colours as in their legends and ignore it). One global setting rather

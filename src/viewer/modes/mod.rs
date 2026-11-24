@@ -27,6 +27,7 @@ mod moisture;
 mod ocean_currents;
 mod plate_motion;
 mod plates;
+pub mod realistic;
 mod sediment;
 mod strength;
 pub mod switcher;
@@ -50,6 +51,9 @@ use crate::sphere::SphereMesh;
 /// The render modes, by their names on the command line and in the URL.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum RenderModeId {
+    /// The planet in space, lit by the sun, with the stars (for now with the topographic
+    /// colours).
+    Realistic,
     /// Elevation colours with rivers and permanent ice.
     #[default]
     Topographic,
@@ -83,6 +87,7 @@ impl RenderModeId {
     /// The mode's behaviour.
     pub fn mode(self) -> &'static dyn RenderMode {
         match self {
+            RenderModeId::Realistic => &realistic::Realistic,
             RenderModeId::Topographic => &topographic::Topographic,
             RenderModeId::PlateMotion => &plate_motion::PlateMotion,
             RenderModeId::Plates => &plates::Plates,
@@ -113,6 +118,7 @@ impl RenderModeId {
     /// variant, which a test checks; clap only lends its names).
     pub fn name(self) -> &'static str {
         match self {
+            RenderModeId::Realistic => "realistic",
             RenderModeId::Topographic => "topographic",
             RenderModeId::PlateMotion => "plate-motion",
             RenderModeId::Plates => "plates",
@@ -395,7 +401,7 @@ impl Period {
 /// How the planet's colours are lit, see [`RenderMode::shading`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Shading {
-    /// Diffuse light from the camera or the sun, as the light option of the view chooses
+    /// Diffuse light: from the camera, or in the realistic mode as its light option chooses
     /// (see `super::lighting`).
     #[default]
     Lit,

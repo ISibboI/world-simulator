@@ -1,5 +1,5 @@
-//! GPU resources and the egui paint callback that draws the planet with wgpu, the sun behind it
-//! (`sky.wgsl`), the overlay of the render mode (arrows) and the outline of the cell under the
+//! GPU resources and the egui paint callback that draws the planet with wgpu, the sun and the
+//! stars behind it (`sky.wgsl`), the overlay of the render mode (arrows) and the outline of the cell under the
 //! pointer on top of it.
 
 use std::sync::Arc;
@@ -36,10 +36,16 @@ pub struct Uniforms {
     pub inverse_view_projection: [[f32; 4]; 4],
     /// Direction towards the sun (`xyz`) and the angular radius of its disc in radians (`w`).
     pub sun_direction: [f32; 4],
-    /// Colour of the sun's disc in sRGB (`w` unused).
+    /// Colour of the sun's disc in sRGB (`xyz`) and the share of the disc the planet does not
+    /// hide (`w`), which dims the glow.
     pub sun_color: [f32; 4],
     /// Colour of the light as an sRGB factor (`xyz`) and the share of ambient light (`w`).
     pub light_color: [f32; 4],
+    /// The stars: their visibility from the exposure (`x`, 0 to 1), the size of a pixel in
+    /// radians (`y`; `zw` unused).
+    pub stars: [f32; 4],
+    /// The colours of the stars in sRGB, see [`super::sky::STAR_TEMPERATURES`].
+    pub star_colors: [[f32; 4]; 8],
 }
 
 /// A straight piece of a line drawn over the planet with a constant width in pixels (see
@@ -62,7 +68,7 @@ pub const MAX_LINE_SEGMENTS: usize = 64;
 /// GPU resources, stored in egui's callback resources.
 struct PlanetResources {
     pipeline: wgpu::RenderPipeline,
-    /// Draws the sun behind the planet (`sky.wgsl`).
+    /// Draws the sun and the stars behind the planet (`sky.wgsl`).
     sky_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -293,7 +299,7 @@ fn overlay_pipeline(
     })
 }
 
-/// The pipeline of the sky (the sun): one full-screen triangle behind the planet, depth-tested
+/// The pipeline of the sky (the sun and the stars): one full-screen triangle behind the planet, depth-tested
 /// against it without writing depth, added to the background.
 fn sky_pipeline(
     device: &wgpu::Device,
@@ -435,7 +441,7 @@ pub struct PlanetCallback {
     pub overlay: Option<Overlay>,
     /// Lines to draw over the planet, at most [`MAX_LINE_SEGMENTS`] (the rest are dropped).
     pub lines: Vec<LineSegment>,
-    /// Whether to draw the sun (only when the planet is lit by it).
+    /// Whether to draw the sky, the sun and the stars (only when the planet is lit by the sun).
     pub sun: bool,
 }
 
