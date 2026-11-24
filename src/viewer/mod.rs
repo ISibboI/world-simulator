@@ -1176,7 +1176,7 @@ impl Viewer {
         // The exposure brightens the direct sunlight on the planet, not the ambient fill (a
         // visual aid, see `lighting`); with the camera light it stays at 1.
         let gain = if exposure.is_some() {
-            self.adaptation.gain()
+            self.adaptation.srgb_gain()
         } else {
             1.0
         };

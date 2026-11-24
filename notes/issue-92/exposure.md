@@ -23,7 +23,7 @@ sets the planet, the sun with its glow, and the stars.
    towards the target in real time:
 
    `E ← target + (E − target) · exp(−Δt / τ)`, with τ = **2 s** when the scene gets darker
-   (dark adaptation, `E < target`) and τ = **0.3 s** when it gets brighter (light adaptation).
+   (dark adaptation, `E < target`) and τ = **0.5 s** when it gets brighter (light adaptation).
 
    This is the exact solution for a constant target, so the result does not depend on the frame
    rate. The target of a frame holds until the next frame: after a long idle pause the first
@@ -32,10 +32,13 @@ sets the planet, the sun with its glow, and the stars.
    frames (egui `request_repaint` only while `E` moves). It keeps drawing while the simulation
    is paused and the camera is still, until it has converged.
 4. **What the exposure does.**
-   - **Planet:** the direct sunlight is multiplied by `2^E` (then clipped to white, as before).
+   - **Planet:** the direct sunlight is multiplied by `2^E` in linear light (then clipped to
+     white, as before). The view's colours are sRGB-encoded, so the factor on them is
+     `2^(E / 2.2)` (up to ×82 dark-adapted); the stars' magnitudes are linear flux and are
+     encoded in the shader, so one stop brightens both alike.
      The ambient fill of **Sun + ambient** is not: it is a visual aid, not light, and is not
      metered either, so the readable night side keeps its brightness.
-   - **Sun:** the disc by `2^E`, its glow by `min(2^E, 16)`: a dark-adapted view flashes when the
+   - **Sun:** the disc by the same factor, its glow by at most 16 (on sRGB values): a dark-adapted view flashes when the
      sun appears, without the glare filling the screen.
    - **Stars:** they appear `(14 − E) × 0.753` magnitudes fainter than to a fully dark-adapted
      view (0.753 = 2.5 log₁₀ 2 magnitudes per stop). On screen a star fades out between apparent
@@ -70,14 +73,16 @@ visible (≥ ~20 of 255) about 1.5 magnitudes brighter than that. Stars in a 16:
 
 ### When the sunlit side comes into view (from dark-adapted)
 
-`E(t) = 14 e^(−t/0.3)`: the sunlit side is white for about half a second (`2^E` = 145 at 0.2 s,
-6 at 0.5 s), normal after about 1 s (×1.4) and converged after ~2 s.
+`E(t) = 14 e^(−t/0.5)`: the sunlit side is over-exposed for about a second (factor on the
+sRGB colours ×14.5 at 0.25 s, ×5 at 0.5 s, ×1.8 at 1 s), nearly normal at 1.5 s (×1.25) and
+converged after ~3.3 s. (With τ = 0.3 s and the sRGB-correct factor the flash was hardly visible
+in the screenshots, so τ is at the upper end of 0.2–0.5 s.)
 
 ### Intermediate scenes
 
 Steady states between the two follow the meter as before: a thin crescent (0.1–1% of the frame)
 or the sun just outside the frame gives a partial exposure, e.g. darkness 0.5 → 7 stops →
-limiting magnitude 3.7 (~20 stars), and the crescent itself is over-exposed (white), as in a
+limiting magnitude 3.7 (~4 stars clearly visible, ~20 down to the limit), and the crescent itself is over-exposed (white), as in a
 photo exposed for the sky.
 
 ## Light options
@@ -95,8 +100,9 @@ photo exposed for the sky.
 One more `exp` per frame on the CPU; no new frame data, no textures, WebGL2 as before. The
 uniform `stars` now carries the star dimming (x), the pixel size (y) and the sun's gain (z)
 instead of a visibility. The star shader skips its loop while even the brightest star is
-invisible, and skips the remaining work of stars beyond the limit. While adapting, the view
-draws every frame for up to ~13 s (dark) or ~2 s (light), then goes idle again.
+invisible (with 0.1 magnitudes of margin, so a faint glare tail does not run it for nothing),
+and skips the remaining work of stars beyond the limit. While adapting, the view
+draws every frame for up to ~13 s (dark) or ~3.3 s (light), then goes idle again.
 
 ## Screenshots (4 subdivisions, realistic mode)
 
@@ -108,10 +114,11 @@ times are wall-clock seconds after the drag ended, which itself took ~1 s):
   first, then more and fainter ones.
 - `desktop-eclipse-adapted.png`: the whole eclipse view, adapted.
 - `desktop-light-adaptation.png`: from the adapted eclipse view back to the day side: adapted
-  eclipse, then ~0.3, 0.6, 1, 1.4 and 2.3 s after the drag: over-exposed, settling within ~1 s.
-- `desktop-ambient-and-sunrise.png`: **Sun + ambient** adapted in the eclipse view (the night
-  side keeps its fill brightness, stars as with Sun), then the sunlit crescent coming into view
-  (0, 0.5, 2 s): over-exposed, then normal.
+  eclipse, then ~0.3, 0.7, 1, 1.4 and 2.3 s after the drag: over-exposed, then settling.
+- `desktop-ambient-eclipse.png`: **Sun + ambient**, adapted in the eclipse view: the night side
+  keeps its fill brightness, the stars are as with Sun.
+- `desktop-sunrise.png`: from the adapted eclipse view, the sunlit crescent coming into view
+  (~0.1, 0.7, 1.2 and 3.1 s after the drag): over-exposed, then normal.
 - `web-dark-adaptation.png`: the same dark adaptation in the web version (chromium, SwiftShader
   WebGL2) at 0, 1, 3, 6 and 15 s.
 - `phone-eclipse.png`: phone width (390 × 844), adapted eclipse view and with the legend open.

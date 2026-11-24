@@ -37,8 +37,9 @@ impl RenderMode for Realistic {
         Legend {
             description: "The planet in space, lit by the simulation's sun. The view adapts to \
                           the light like an eye: after the sun goes behind the planet or out of \
-                          view, more stars appear over a few seconds. The surface is the topographic map for now (relief \
-                          exaggerated); realistic colours follow."
+                          view, more stars appear over a few seconds. The surface is the \
+                          topographic map for now (relief exaggerated); realistic colours \
+                          follow."
                 .into(),
             scale: Some(elevation_scale()),
             swatches: vec![

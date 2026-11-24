@@ -64,13 +64,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let outside = max(angle, radius);
     let glow = 0.4 * (radius / outside) * (radius / outside) + 0.06 * exp(-angle / 0.05);
     // The glow fades as the planet covers the disc (the disc itself is cut by the depth test).
-    // The exposure brightens the disc fully and the glow at most 16 times, so that a dark-adapted
-    // view flashes when the sun appears without the glare filling the screen.
+    // The exposure (a factor on sRGB values) brightens the disc fully and the glow at most 16
+    // times, so that a dark-adapted view flashes when the sun appears without the glare filling
+    // the screen.
     let gain = uniforms.stars.z;
     let intensity = mix(glow * uniforms.sun_color.w * min(gain, GLOW_GAIN), limb * gain, disc);
     var color = uniforms.sun_color.rgb * intensity;
-    // Skipped while even the brightest star is beyond the visible limit.
-    if uniforms.stars.x < VISIBLE_LIMIT - BRIGHTEST {
+    // Skipped while even the brightest star is (nearly) beyond the visible limit.
+    if uniforms.stars.x < VISIBLE_LIMIT - BRIGHTEST - 0.1 {
         color += stars(direction, uniforms.stars.x);
     }
     return vec4<f32>(color, 0.0);

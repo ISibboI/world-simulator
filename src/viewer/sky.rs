@@ -58,7 +58,8 @@ pub const STAR_DIMMING_PER_STOP: f32 = 0.752_575;
 /// Time constant of the adaptation to a darker scene (dark adaptation) in seconds.
 pub const DARK_ADAPTATION_SECONDS: f32 = 2.0;
 /// Time constant of the adaptation to a brighter scene (light adaptation) in seconds.
-pub const LIGHT_ADAPTATION_SECONDS: f32 = 0.3;
+pub const LIGHT_ADAPTATION_SECONDS: f32 = 0.5;
+const _: () = assert!(LIGHT_ADAPTATION_SECONDS < DARK_ADAPTATION_SECONDS / 3.0);
 /// Distance from the target, in stops, below which the adaptation counts as converged and
 /// snaps to it (far below a visible change).
 const CONVERGED: f32 = 0.02;
@@ -166,6 +167,8 @@ impl Adaptation {
     /// The step is the exact solution for a constant target, so any split of the time gives
     /// the same result (frame-rate independent).
     pub fn update(&mut self, target: f32, seconds: f32) -> bool {
+        // A broken metering must not keep the view drawing forever.
+        let target = if target.is_finite() { target } else { 0.0 };
         let held = *self.target.get_or_insert_with(|| {
             self.stops = target;
             target
@@ -184,9 +187,11 @@ impl Adaptation {
         self.stops != target
     }
 
-    /// The factor on the sunlight and the sun: 2^stops.
-    pub fn gain(&self) -> f32 {
-        self.stops().exp2()
+    /// The factor on the sunlight and the sun, whose colours are sRGB-encoded: 2^stops in
+    /// linear light, so about 2^(stops / 2.2) on the sRGB values (the stars' magnitudes are
+    /// linear and encoded in the shader).
+    pub fn srgb_gain(&self) -> f32 {
+        (self.stops() / 2.2).exp2()
     }
 
     /// How many magnitudes fainter the stars appear than to a fully dark-adapted view (0 when
@@ -258,6 +263,11 @@ fn srgb(linear: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The brightest star of the field and the apparent magnitude where stars vanish on screen
+    /// (`BRIGHTEST` and `VISIBLE_LIMIT` in `sky.wgsl`).
+    const BRIGHTEST_STAR: f32 = -1.5;
+    const VISIBLE_LIMIT: f32 = 9.0;
 
     /// A view like the 3D view's from `eye` towards the centre.
     fn view_projection(eye: Vec3) -> Mat4 {
@@ -380,9 +390,8 @@ mod tests {
         // In one second: brightening is nearly done, darkening has far to go.
         let dark = adapt(0.0, DARK_ADAPTED, 1.0, 60);
         let light = adapt(DARK_ADAPTED, 0.0, 1.0, 60);
-        assert!(light.stops() < 0.6, "{light:?}");
+        assert!(light.stops() < 2.0, "{light:?}");
         assert!(dark.stops() < 0.5 * DARK_ADAPTED, "{dark:?}");
-        assert!(LIGHT_ADAPTATION_SECONDS < DARK_ADAPTATION_SECONDS / 4.0);
     }
 
     #[test]
@@ -423,12 +432,12 @@ mod tests {
         // About 2 s × ln(14 / 0.02) ≈ 13 s.
         let seconds = frames as f32 / 60.0;
         assert!((10.0..16.0).contains(&seconds), "{seconds}");
-        // Light adaptation converges within about 2 s.
+        // Light adaptation converges within about 3.5 s (0.5 s × ln(700)).
         let mut frames = 0;
         while adaptation.update(0.0, 1.0 / 60.0) {
             frames += 1;
         }
-        assert!(frames < 2 * 60, "{frames}");
+        assert!(frames < 4 * 60, "{frames}");
         assert_eq!(adaptation.stops(), 0.0);
     }
 
@@ -437,14 +446,29 @@ mod tests {
         // In daylight even the brightest star (−1.5) lies beyond the visible limit (9, see
         // `sky.wgsl`); dark-adapted, all of them (to magnitude 7) show.
         let daylight = Adaptation::daylight();
-        assert!(-1.5 + daylight.star_dimming() > 9.0, "{daylight:?}");
-        assert_eq!(daylight.gain(), 1.0);
+        assert!(
+            BRIGHTEST_STAR + daylight.star_dimming() > VISIBLE_LIMIT,
+            "{daylight:?}"
+        );
+        assert_eq!(daylight.srgb_gain(), 1.0);
         let mut dark = Adaptation::default();
         dark.update(DARK_ADAPTED, 0.0);
         assert_eq!(dark.star_dimming(), 0.0);
         // The limiting magnitude rises while the view adapts.
-        let limit = |seconds: f32| 9.0 - adapt(0.0, DARK_ADAPTED, seconds, 10).star_dimming();
+        let limit =
+            |seconds: f32| VISIBLE_LIMIT - adapt(0.0, DARK_ADAPTED, seconds, 10).star_dimming();
         assert!(limit(1.0) < limit(3.0) && limit(3.0) < limit(6.0));
+    }
+
+    #[test]
+    fn the_shader_has_the_same_star_limits() {
+        let shader = include_str!("sky.wgsl");
+        for line in [
+            format!("const BRIGHTEST: f32 = {BRIGHTEST_STAR:?};"),
+            format!("const VISIBLE_LIMIT: f32 = {VISIBLE_LIMIT:?};"),
+        ] {
+            assert!(shader.contains(&line), "{line}");
+        }
     }
 
     #[test]

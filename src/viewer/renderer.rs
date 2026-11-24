@@ -41,8 +41,9 @@ pub struct Uniforms {
     pub sun_color: [f32; 4],
     /// Colour of the light as an sRGB factor (`xyz`) and the share of ambient light (`w`).
     pub light_color: [f32; 4],
-    /// The stars: their visibility from the exposure (`x`, 0 to 1), the size of a pixel in
-    /// radians (`y`; `zw` unused).
+    /// The sky's exposure: how many magnitudes fainter the stars appear than to a dark-adapted
+    /// view (`x`), the size of a pixel in radians (`y`), and the exposure's factor on the sun's
+    /// sRGB colour (`z`; `w` unused). See [`super::sky::Adaptation`].
     pub stars: [f32; 4],
     /// The colours of the stars in sRGB, see [`super::sky::STAR_TEMPERATURES`].
     pub star_colors: [[f32; 4]; 8],
