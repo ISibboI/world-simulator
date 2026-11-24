@@ -2204,6 +2204,7 @@ mod tests {
             convergence: 0.0,
             kind: BoundaryKind::Trench { slab_age: 250.0 },
             segment: None,
+            neighbor: trench_cell,
         };
         let candidates = simulation.initiation_candidates(u32::MAX, &[trench]);
         let invasion = params.invasion_hazard(250.0) * margin_length;

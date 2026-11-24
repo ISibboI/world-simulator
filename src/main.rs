@@ -1397,7 +1397,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -1414,10 +1414,17 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             .neighbors(cell)
             .iter()
             .any(|&m| ocean[m as usize] != marine);
+        // Deformation velocity (cm/yr) east and north.
+        let r = mesh.vertex(cell);
+        let east = glam::DVec3::Z.cross(r).normalize_or_zero();
+        let north = r.cross(east);
+        let u = simulation.deformation_velocity(cell) * (EARTH_RADIUS * 100.0 / 1e6);
+        let (strain, dilatation) = simulation.strain_rate(cell);
         writeln!(
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
-             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{}",
+             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
+             {:.3},{:.3}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -1448,6 +1455,10 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             crust.strength_age(simulation.time()).min(1e4),
             simulation.lithosphere_strength(cell),
             u8::from(marine),
+            strain,
+            dilatation,
+            u.dot(east),
+            u.dot(north),
         )?;
     }
     file.flush()?;

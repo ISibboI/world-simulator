@@ -339,3 +339,66 @@ Burov & Watts 2006 (GSA Today 16); England & McKenzie 1982 (GJRAS 70); England &
 Sci. 26); Houseman & England 1986 (JGR 91); Kohlstedt, Evans & Mackwell 1995 (JGR 100);
 McKenzie 1978 (EPSL 40); Turcotte & Schubert, Geodynamics (ridge push). Numbers are textbook
 values, cited from memory at abstract level.
+
+## Revisions after the plan review ([`review-plan.md`](review-plan.md)) and the first prototype
+
+The review's staging advice (measure the solve first) was followed: a prototype of sections
+3–7 ran before the revisions below; its numbers decided several of them.
+
+1. (high, rigid motion never feels the deformation) **Accepted.** The torque balance's
+   couplings (boundary shear, collision, yielding/belt resistance) now act on the relative
+   velocity of the *material*, rigid part plus the last solve's `u` on both sides (lagged, on
+   the right-hand side and in the active-set tests), and boundary classification, segment
+   rates and the trench tests use the material velocity too (`BoundaryCell::convergence`,
+   `update_segment_motion`). The projection uses the sheet's own drag (per sample); the
+   boundary resistances enter the sheet as forces evaluated at the solved velocities, not as
+   implicit terms (a simplification: they are plastic at speed in the default model, so their
+   force does not depend on the speed).
+2. (high, rigid lock-in) **Fixed before it bit:** rigidity is decided from the
+   strain-rate-independent viscosity `B_strong · s^p`; power-law creep only *softens* above the
+   reference strain rate (capped at 5×), it never stiffens a slow sample. Viscosities are
+   under-relaxed in log space between steps. The threshold `B_rigid = 10²⁸` is a modelling
+   choice ("strain below ~3 × 10⁻¹⁶ s⁻¹ is not resolved"); the deforming-area statistics are
+   reported at 10⁻¹⁶ and 10⁻¹⁵ s⁻¹ with that caveat.
+3. (high, transport inside blocks) **Accepted** (was already planned in the prototype): each
+   plate's frame follows its largest block (if that block holds ≥ 20% of the plate and is at
+   least a minimum plate in size); only weak samples and smaller blocks move through the frame.
+4. (high, front thickness) **Partly.** Fronts never store a cell average: the front position
+   is a separate number; the column changes only by the fluxes between samples. A retreating
+   front drains (thins) its edge sample before it is vacated (at `a < ½`), so edge samples of
+   deforming margins can be thinner by up to about half; measured in the comparison (thin
+   continental slivers at collision fronts). Vacated slots reset their front; slots that stop
+   being edge samples reset to 1; growth clears `consumed` and registers the sample with the
+   matching (`matching::track_sample`).
+5. (high, runtime) **Measured on the prototype at 6 subdivisions:** after fixes, 0.53 s per
+   Myr against 0.45 s on `main` over the first 100 Myr of seed 0 (+18%; solve ~50 ms,
+   transport ~25 ms per step); PCG needs 30–80 iterations warm-started. Profiling and
+   optimisation follow in `performance.md`.
+
+Other changes from the prototype:
+* single-sample blocks have a zero spin mode: a tiny spin drag (10⁻³ of a cell's drag) keeps
+  the block matrices positive definite (without it, PCG diverged);
+* least-squares gradients (ridge push, GPE) need ≥ 3 neighbours not on a line (a nearly
+  collinear pair gave forces of 10²² N);
+* samples with fewer than 3 neighbours in their plate are never weak (slivers moved at metres
+  per year);
+* oceanic lithosphere has a strength floor of 0.35 (`sheet.oceanic_min_strength`): newly
+  formed sea floor at ridge axes (strength 0.05) took the boundary forces and moved at
+  1–6 m/yr. The ridge axis is the plate boundary; young sea floor beside it does not deform
+  internally on Earth (Gordon 1998). Oceanic diffuse deformation of old lithosphere (Central
+  Indian Basin, plastic failure) is therefore not represented by the sheet; it remains the
+  diffuse convergent zones of #42;
+* lowest viscosity 10²⁷ Pa·s·m (Tibet ~5 × 10²⁷): with 10²⁶, weak rifts tore apart at tens
+  of cm/yr.
+
+Not adopted:
+* constant-strain triangles instead of central springs (review, medium): the central-spring
+  network is exactly rotation-invariant, symmetric and was verified positive definite by a
+  debug check; its anisotropy on the icosphere is a grid effect of the same order as the
+  mesh's own irregularity. Bulk/shear ratio 1 instead of 2 named as a caveat.
+* belt GPE twice (review, medium): the torque balance's belt resistance is the force a belt
+  transmits across the boundary; the body force spreads the belt inside the plate. Different
+  forces of the same energy; the calibration checks thickness and relief.
+* crustal flow and rift stretching are kept; calibration checks thickness, and they act at
+  different places (crustal flow: across boundaries too; rift stretching: at diverging
+  boundaries, the sheet inside plates).

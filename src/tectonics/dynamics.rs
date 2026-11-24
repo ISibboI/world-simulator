@@ -71,6 +71,8 @@ pub(super) struct BoundaryCell {
     /// Id of the boundary segment of the pair covering the cell, if any (see
     /// [`super::polarity`]).
     pub(super) segment: Option<u32>,
+    /// A neighbouring cell of the other plate.
+    pub(super) neighbor: u32,
 }
 
 /// The state of the last torque balance (see [`Simulation::update_plate_velocities`]): its
@@ -139,6 +141,7 @@ impl Simulation {
                     convergence: 0.0,
                     kind: BoundaryKind::Other,
                     segment: None,
+                    neighbor,
                 });
                 neighbors.push(neighbor);
             }
@@ -154,9 +157,12 @@ impl Simulation {
             let position = self.mesh.vertex(boundary.cell);
             let crust = self.surface_crust(boundary.cell);
             let other_crust = self.surface_crust(neighbor);
+            // The material velocities: the plates' rotations and their deformation.
             let relative = (self.plates[boundary.plate as usize].angular_velocity
                 - self.plates[boundary.other as usize].angular_velocity)
-                .cross(position);
+                .cross(position)
+                + self.deformation_velocity(boundary.cell)
+                - self.deformation_velocity(neighbor);
             let convergence = relative.dot(boundary.normal);
             let segment =
                 self.polarities
@@ -233,7 +239,9 @@ impl Simulation {
             let r = self.mesh.vertex(boundary.cell);
             let relative = (self.plates[boundary.plate as usize].angular_velocity
                 - self.plates[boundary.other as usize].angular_velocity)
-                .cross(r);
+                .cross(r)
+                + self.deformation_velocity(boundary.cell)
+                - self.deformation_velocity(boundary.neighbor);
             let entry = sums.entry(id).or_default();
             let convergence = relative.dot(boundary.normal);
             entry.0 += convergence;
@@ -337,7 +345,29 @@ impl Simulation {
         // boundary normal n of its cell.
         let length_per_cell = self.boundary_length_per_cell();
         let normals: Vec<DVec3> = boundaries.iter().map(|boundary| boundary.normal).collect();
-        for (boundary, &normal) in boundaries.iter().zip(&normals) {
+        // The deformation of the plates at their boundaries (m/s, the cell's side minus the
+        // other side; see `sheet`): the couplings resist the relative motion of the material,
+        // not of the plates' rotations. From the last deformation solve (lagged).
+        let deformation: Vec<DVec3> = boundaries
+            .iter()
+            .map(|boundary| {
+                (self.deformation_velocity_absolute(boundary.cell)
+                    - self.deformation_velocity_absolute(boundary.neighbor))
+                    * (radius / SECONDS_PER_MYR)
+            })
+            .collect();
+        // Torque on the plate of a boundary cell (and minus it on the other plate, if both) of
+        // the coupling force −k ((Δu) · d) d at the cell.
+        let coupling_torque = |index: usize, k: f64, direction: DVec3| {
+            let r = self.mesh.vertex(boundaries[index].cell);
+            r.cross(direction) * (-k * radius * deformation[index].dot(direction))
+        };
+        let add_torque = |rhs: &mut [f64], plate: usize, torque: DVec3| {
+            for i in 0..3 {
+                rhs[3 * plate + i] += torque[i];
+            }
+        };
+        for (index, (boundary, &normal)) in boundaries.iter().zip(&normals).enumerate() {
             let k = 0.5 * params.basal_drag * params.boundary_coupling_width * length_per_cell;
             if k <= 0.0 {
                 continue;
@@ -348,6 +378,10 @@ impl Simulation {
             add_block(&mut base, size, q, q, block);
             add_block(&mut base, size, p, q, -block);
             add_block(&mut base, size, q, p, -block);
+            let r = self.mesh.vertex(boundary.cell);
+            let torque = coupling_torque(index, k, r.cross(normal));
+            add_torque(&mut rhs, p, torque);
+            add_torque(&mut rhs, q, -torque);
         }
 
         // Collision resistance: the force on the plate −k ((v_p − v_q) · n) n at R r gives the
@@ -416,10 +450,16 @@ impl Simulation {
         let mut converged = false;
         for _ in 0..MAX_ACTIVE_SET_ITERATIONS {
             let mut matrix = base.clone();
-            for (&(boundary, normal, _, _, _), &coupling) in nascent.iter().zip(&nascent_coupling) {
+            let mut rhs = rhs.clone();
+            for (&(boundary, normal, _, _, index), &coupling) in
+                nascent.iter().zip(&nascent_coupling)
+            {
                 if coupling <= 0.0 {
                     continue;
                 }
+                let torque = coupling_torque(index, coupling, normal);
+                add_torque(&mut rhs, boundary.plate as usize, torque);
+                add_torque(&mut rhs, boundary.other as usize, -torque);
                 let r = self.mesh.vertex(boundary.cell);
                 let m = r.cross(normal);
                 let block = outer(m, m) * (coupling * radius * radius);
@@ -429,11 +469,16 @@ impl Simulation {
                 add_block(&mut matrix, size, p, q, -block);
                 add_block(&mut matrix, size, q, p, -block);
             }
-            for ((boundary, normal), _) in collisions
+            for (((boundary, normal), _), &index) in collisions
                 .iter()
                 .zip(&active)
-                .filter(|(_, active)| **active)
+                .zip(&collision_indices)
+                .filter(|((_, active), _)| **active)
             {
+                if coupling > 0.0 {
+                    let torque = coupling_torque(index, coupling, *normal);
+                    add_torque(&mut rhs, boundary.plate as usize, torque);
+                }
                 let r = self.mesh.vertex(boundary.cell);
                 let m = r.cross(*normal);
                 let block = outer(m, m) * (coupling * radius * radius);
@@ -453,7 +498,7 @@ impl Simulation {
                 );
             }
 
-            let solution = solve_linear_system(matrix, rhs.clone(), size);
+            let solution = solve_linear_system(matrix, rhs, size);
             for (plate, omega) in omega.iter_mut().enumerate() {
                 *omega = DVec3::new(
                     solution[3 * plate],
@@ -464,11 +509,16 @@ impl Simulation {
 
             // Collision resistance only acts where the continents converge.
             let mut changed = false;
-            for ((boundary, normal), active) in collisions.iter().zip(active.iter_mut()) {
+            for (((boundary, normal), active), &index) in collisions
+                .iter()
+                .zip(active.iter_mut())
+                .zip(&collision_indices)
+            {
                 let r = self.mesh.vertex(boundary.cell);
                 let relative = (omega[boundary.plate as usize] - omega[boundary.other as usize])
                     .cross(r)
-                    .dot(*normal);
+                    .dot(*normal)
+                    + deformation[index].dot(*normal) / radius;
                 let converging = relative > 0.0;
                 if converging != *active {
                     *active = converging;
@@ -478,14 +528,15 @@ impl Simulation {
             // The effective coupling of the yielding contacts follows the new speeds: the
             // resisting force is the strength where the contact converges (less where it is
             // locked) and nothing where it opens.
-            for (&(boundary, normal, strength, lock, _), coupling) in
+            for (&(boundary, normal, strength, lock, index), coupling) in
                 nascent.iter().zip(nascent_coupling.iter_mut())
             {
                 let r = self.mesh.vertex(boundary.cell);
                 let speed = (omega[boundary.plate as usize] - omega[boundary.other as usize])
                     .cross(r)
                     .dot(normal)
-                    * radius;
+                    * radius
+                    + deformation[index].dot(normal);
                 let target = if speed > 0.0 {
                     strength / speed.max(lock)
                 } else {

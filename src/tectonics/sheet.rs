@@ -208,7 +208,6 @@ pub(super) struct SheetGeometry {
     offsets: Vec<u32>,
     neighbor: Vec<u32>,
     direction: Vec<DVec3>,
-    distance: Vec<f64>,
     face: Vec<f64>,
     basis: Vec<(DVec3, DVec3)>,
     /// Area of a cell on the unit sphere (uniform, as everywhere in the model).
@@ -221,14 +220,12 @@ impl SheetGeometry {
         let mut offsets = Vec::with_capacity(count + 1);
         let mut neighbor = Vec::new();
         let mut direction = Vec::new();
-        let mut distance = Vec::new();
         offsets.push(0);
         for vertex in 0..count as u32 {
             let r = mesh.vertex(vertex);
             for &other in mesh.neighbors(vertex) {
                 let chord = mesh.vertex(other) - r;
                 neighbor.push(other);
-                distance.push(chord.length());
                 direction.push(chord.normalize());
             }
             offsets.push(neighbor.len() as u32);
@@ -282,7 +279,6 @@ impl SheetGeometry {
             offsets,
             neighbor,
             direction,
-            distance,
             face,
             basis,
             area: 4.0 * std::f64::consts::PI / count as f64,
@@ -329,11 +325,6 @@ pub struct SheetStatistics {
     pub transport_seconds: f64,
     /// Mass moved by the transport so far (areal mass summed over samples, kg/m²).
     pub moved: f64,
-}
-
-/// rad/Myr (on the unit sphere) → cm/yr.
-fn cm_per_year(radius: f64) -> f64 {
-    radius * 100.0 / 1e6
 }
 
 /// Accumulates columns of crust mixed together (by mass, as the other mixing code does).
@@ -516,6 +507,7 @@ impl Simulation {
         let cell_count = self.mesh.len();
         let cell_area = 4.0 * std::f64::consts::PI * radius * radius / cell_count as f64;
         let mut force = vec![DVec3::ZERO; cell_count];
+        let trace = tracing::enabled!(tracing::Level::TRACE);
         let Some(balance) = self.force_balance.as_ref() else {
             return force;
         };
@@ -540,7 +532,7 @@ impl Simulation {
             let mantle = mantle - r * mantle.dot(r);
             force[cell as usize] += (mantle - velocity(plate, r)) * coefficient;
         }
-        let checkpoint_drag = force.clone();
+        let checkpoint_drag = trace.then(|| force.clone()).unwrap_or_default();
         // The cell of the other plate next to a boundary cell, where forces on the other plate
         // act.
         let other_cell = |boundary: &dynamics::BoundaryCell| {
@@ -549,6 +541,12 @@ impl Simulation {
                 .iter()
                 .copied()
                 .find(|&n| self.owners[n as usize].plate == boundary.other)
+        };
+        // The relative deformation velocity (m/s) across a boundary, as in the torque balance.
+        let deformation = |boundary: &dynamics::BoundaryCell| {
+            (self.deformation_velocity_absolute(boundary.cell)
+                - self.deformation_velocity_absolute(boundary.neighbor))
+                * (radius / SECONDS_PER_MYR)
         };
         let length_per_cell = self.boundary_length_per_cell();
         for (index, boundary) in balance.boundaries.iter().enumerate() {
@@ -566,7 +564,8 @@ impl Simulation {
             let k = 0.5 * params.basal_drag * params.boundary_coupling_width * length_per_cell;
             if k > 0.0 {
                 let t = r.cross(balance.normals[index]);
-                let relative = velocity(boundary.plate, r) - velocity(boundary.other, r);
+                let relative = velocity(boundary.plate, r) - velocity(boundary.other, r)
+                    + deformation(boundary);
                 let shear = t * (k * relative.dot(t));
                 force[cell] -= shear;
                 if let Some(other) = other_cell(boundary) {
@@ -574,26 +573,28 @@ impl Simulation {
                 }
             }
         }
-        let checkpoint_boundaries = force.clone();
+        let checkpoint_boundaries = trace.then(|| force.clone()).unwrap_or_default();
         for &index in &balance.active_collisions {
             let boundary = &balance.boundaries[index];
             let r = self.mesh.vertex(boundary.cell);
             let n = balance.normals[index];
-            let relative = velocity(boundary.plate, r) - velocity(boundary.other, r);
+            let relative =
+                velocity(boundary.plate, r) - velocity(boundary.other, r) + deformation(boundary);
             force[boundary.cell as usize] -= n * (balance.collision_coupling * relative.dot(n));
         }
         for &(index, coupling) in &balance.nascent {
             let boundary = &balance.boundaries[index];
             let r = self.mesh.vertex(boundary.cell);
             let n = balance.normals[index];
-            let relative = velocity(boundary.plate, r) - velocity(boundary.other, r);
+            let relative =
+                velocity(boundary.plate, r) - velocity(boundary.other, r) + deformation(boundary);
             let resisting = n * (coupling * relative.dot(n));
             force[boundary.cell as usize] -= resisting;
             if let Some(other) = other_cell(boundary) {
                 force[other as usize] += resisting;
             }
         }
-        let checkpoint_couplings = force.clone();
+        let checkpoint_couplings = trace.then(|| force.clone()).unwrap_or_default();
         // Ridge push as the gradient of the potential energy of cooling sea floor, which falls
         // linearly with age until `ridge_push_age` (Turcotte & Schubert): the force per unit
         // length transmitted at age a is `ridge_push · min(a / A, 1)`. And the potential energy
@@ -647,7 +648,7 @@ impl Simulation {
                 }
             }
         }
-        if tracing::enabled!(tracing::Level::TRACE) {
+        if trace {
             for cell in 0..cell_count {
                 if force[cell].length() > 1e19 {
                     tracing::trace!(
@@ -764,6 +765,15 @@ impl Simulation {
                         forces[local] -= w.cross(r) * c[local];
                     }
                 }
+            }
+            // A plate without weak samples is rigid: no unknowns, no deformation.
+            let any_weak = weak.iter().any(|&w| w);
+            if !any_weak {
+                node_of.push(vec![u32::MAX; cell_count]);
+                block_of.push(vec![u32::MAX; cell_count]);
+                viscosity.push(b);
+                coefficient_of.push(c);
+                continue;
             }
             // Rigid blocks: connected components of rigid samples.
             let mut block = vec![u32::MAX; cell_count];
@@ -1134,14 +1144,17 @@ impl Simulation {
                 }
                 let r = mesh.vertex(local as u32);
                 let block = block_of[p][local];
+                let node = node_of[p][local];
                 let u = if block != u32::MAX {
-                    block_rotation(block as usize).cross(r)
+                    block_rotation(block as usize).cross(r) - frame.cross(r)
+                } else if node != u32::MAX {
+                    node_velocity(&x, node as usize) - frame.cross(r)
                 } else {
-                    let node = node_of[p][local] as usize;
-                    node_velocity(&x, node)
-                } - frame.cross(r);
+                    // A rigid plate.
+                    DVec3::ZERO
+                };
                 moving |= u != DVec3::ZERO;
-                if block == u32::MAX {
+                if block == u32::MAX && node != u32::MAX {
                     let speed = u.length();
                     speed_sum += speed * speed;
                     if speed > speed_max && tracing::enabled!(tracing::Level::TRACE) {
@@ -1603,6 +1616,17 @@ impl Simulation {
         plate.rotation * plate.sheet.velocity[owner.local as usize]
     }
 
+    /// The deformation velocity (rad/Myr, world frame) at a world cell relative to the plate's
+    /// drag-weighted mean rotation, as the torque balance solves it (before the frame follows
+    /// the plate's largest block, see [`PlateSheet::frame`]).
+    pub(super) fn deformation_velocity_absolute(&self, cell: u32) -> DVec3 {
+        let owner = self.owners[cell as usize];
+        let plate = &self.plates[owner.plate as usize];
+        let r = self.mesh.vertex(owner.local);
+        let frame = plate.sheet.frame.cross(r) * (SECONDS_PER_MYR / self.params.planet_radius);
+        plate.rotation * (plate.sheet.velocity[owner.local as usize] + frame)
+    }
+
     /// The strain rate (second invariant, 1/s) and the rate of area change (1/s, positive when
     /// stretching) of the lithosphere at a world cell.
     pub fn strain_rate(&self, cell: u32) -> (f64, f64) {
@@ -1640,6 +1664,40 @@ mod tests {
         let ledger = &simulation.ledger;
         assert!(ledger.deformation.abs() < 1e-9 * mass, "{}", ledger.deformation);
         assert!(simulation.sheet_statistics.solves > 0);
+    }
+
+    /// The crust, owners and rotations of a simulation, bit for bit.
+    fn fingerprint(simulation: &Simulation) -> Vec<u64> {
+        let mut bits = Vec::new();
+        for owner in &simulation.owners {
+            bits.extend([owner.plate as u64, owner.local as u64]);
+        }
+        for plate in &simulation.plates {
+            bits.extend(plate.angular_velocity.to_array().map(f64::to_bits));
+            for crust in plate.crust.iter().flatten() {
+                bits.extend(
+                    [crust.thickness, crust.density, crust.birth, crust.sediment, crust.orogenic]
+                        .map(f64::to_bits),
+                );
+            }
+        }
+        bits
+    }
+
+    #[test]
+    fn infinitely_stiff_plates_are_rigid_plates() {
+        let run = |params: TectonicParams| {
+            let mut simulation = Simulation::new(SphereMesh::icosphere(4), 8, params, 5);
+            for _ in 0..10 {
+                simulation.step(1.0);
+            }
+            fingerprint(&simulation)
+        };
+        let mut rigid = TectonicParams::default();
+        rigid.sheet.enabled = false;
+        let mut stiff = TectonicParams::default();
+        stiff.sheet.rigid_viscosity = 0.0;
+        assert!(run(rigid) == run(stiff), "stiff deforming plates differ from rigid plates");
     }
 
     #[test]

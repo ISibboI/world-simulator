@@ -62,8 +62,11 @@ impl Layer {
         match self {
             Layer::PlateVelocity => (0..mesh.len() as u32)
                 .flat_map(|cell| {
+                    // The plate's rotation and the deformation of its lithosphere (#70).
                     let omega = simulation.angular_velocity(simulation.owner(cell).plate);
-                    let velocity = omega.cross(mesh.vertex(cell)) * CM_PER_YEAR;
+                    let velocity = (omega.cross(mesh.vertex(cell))
+                        + simulation.deformation_velocity(cell))
+                        * CM_PER_YEAR;
                     velocity.as_vec3().to_array()
                 })
                 .collect(),
@@ -151,7 +154,8 @@ impl Fields {
     }
 
     /// Every layer for a frame of the history, rebuilt from its cells and plates (see
-    /// [`plate_infos`]) on `mesh`.
+    /// [`plate_infos`]) on `mesh`. Frames keep only the plates' rotations, so the plate
+    /// velocity of a past frame leaves out the deformation inside the plates (#70).
     pub fn from_frame(mesh: &SphereMesh, cells: &[CellInfo], plates: &[PlateInfo]) -> Self {
         let values = Layer::ALL
             .into_iter()
