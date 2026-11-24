@@ -410,6 +410,7 @@ mod tests {
             evaporation_july: 0.0,
             ice: 0.0,
             discharge: 0.0,
+            lake_depth: 0.0,
             current_east: 0.0,
             current_north: 0.0,
             streamfunction: 0.0,
@@ -427,6 +428,7 @@ mod tests {
                 Kind::Transitional => 0,
                 Kind::Continental => CellInfo::CONTINENTAL,
             },
+            drainage: CellInfo::NO_RECEIVER,
         }
     }
 

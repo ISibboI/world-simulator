@@ -2,8 +2,8 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (52 bytes per cell
-//! instead of 132, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (55 bytes per cell
+//! instead of 140, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
@@ -30,7 +30,7 @@ enum Code {
     Logarithmic(f32),
     /// An integer of up to 16 bits.
     Integer16,
-    /// An integer of up to 8 bits.
+    /// An integer of up to 8 bits (the low 8 bits are kept).
     Integer8,
 }
 
@@ -44,7 +44,7 @@ impl Code {
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 33] = [
+const CHANNELS: [Code; 35] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -82,6 +82,9 @@ const CHANNELS: [Code; 33] = [
     Code::Share,
     // Discharge: 0.6 % relative (the widget shows 3 digits), up to 10^38 m³/yr.
     Code::Logarithmic(1.0 / 170.0),
+    // Lake depth: 0.1 % relative (1 mm at 1 m); whether a depression holds a lake is a bit of
+    // the drainage.
+    Code::Logarithmic(1.0 / 1000.0),
     // Ocean current (east, north): 0.05 m²/s (0.005 Sv per 100 km; the interior of the gyres
     // carries 0.5–2 m²/s), ±1638 m²/s.
     Code::Signed(0.05),
@@ -99,18 +102,31 @@ const CHANNELS: [Code; 33] = [
     Code::Signed8(0.25),
     Code::Signed8(0.25),
     Code::Signed8(0.25),
-    // Plate (clamped to 16 bits), the low 16 bits of the flags and the climate class. The flags
-    // take 9 bits, so most of their high byte is zero and costs next to nothing after the delta
-    // and lz4.
+    // Plate (clamped to 16 bits), the low 16 bits of the flags, the drainage and the climate
+    // class. The flags take 9 bits, so most of their high byte is zero and costs next to nothing
+    // after the delta and lz4.
     Code::Integer16,
     Code::Integer16,
     Code::Integer8,
+    Code::Integer8,
 ];
 
-/// The channels of the integer attributes: plate, flags and climate class.
-const PLATE: usize = 30;
-const FLAGS: usize = 31;
-const CLIMATE_CLASS: usize = 32;
+/// The channels of the integer attributes: plate, flags, drainage and climate class.
+const PLATE: usize = 31;
+const FLAGS: usize = 32;
+const DRAINAGE: usize = 33;
+const CLIMATE_CLASS: usize = 34;
+
+/// The value of an integer channel of a cell.
+fn integer(channel: usize, cell: &CellInfo) -> u16 {
+    match channel {
+        PLATE => cell.plate.min(u32::from(u16::MAX)) as u16,
+        FLAGS => (cell.flags & 0xFFFF) as u16,
+        DRAINAGE => (cell.drainage & 0xFF) as u16,
+        CLIMATE_CLASS => cell.climate_class.min(0xFF) as u16,
+        _ => unreachable!("not an integer channel"),
+    }
+}
 
 /// Bytes per cell of the quantised attributes.
 pub const BYTES_PER_CELL: usize = {
@@ -146,6 +162,7 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.evaporation_july,
         cell.ice,
         cell.discharge,
+        cell.lake_depth,
         cell.current_east,
         cell.current_north,
         cell.streamfunction,
@@ -156,6 +173,7 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.wind_january_north,
         cell.wind_july_east,
         cell.wind_july_north,
+        0.0,
         0.0,
         0.0,
         0.0,
@@ -282,10 +300,8 @@ impl Planes {
             let values = attributes(cell);
             let mut plane = 0;
             for (channel, code) in CHANNELS.iter().enumerate() {
-                let value = match channel {
-                    PLATE => cell.plate.min(u32::from(u16::MAX)) as u16,
-                    FLAGS => (cell.flags & 0xFFFF) as u16,
-                    CLIMATE_CLASS => cell.climate_class.min(0xFF) as u16,
+                let value = match code {
+                    Code::Integer16 | Code::Integer8 => integer(channel, cell),
                     _ => quantise(*code, values[channel]),
                 };
                 for byte in 0..code.bytes() {
@@ -336,19 +352,21 @@ impl Planes {
                     evaporation_july: value(17),
                     ice: value(18),
                     discharge: value(19),
-                    current_east: value(20),
-                    current_north: value(21),
-                    streamfunction: value(22),
-                    gyre_heating: value(23),
-                    wind_east: value(24),
-                    wind_north: value(25),
-                    wind_january_east: value(26),
-                    wind_january_north: value(27),
-                    wind_july_east: value(28),
-                    wind_july_north: value(29),
+                    lake_depth: value(20),
+                    current_east: value(21),
+                    current_north: value(22),
+                    streamfunction: value(23),
+                    gyre_heating: value(24),
+                    wind_east: value(25),
+                    wind_north: value(26),
+                    wind_january_east: value(27),
+                    wind_january_north: value(28),
+                    wind_july_east: value(29),
+                    wind_july_north: value(30),
                     climate_class: u32::from(values[CLIMATE_CLASS]),
                     plate: u32::from(values[PLATE]),
                     flags: u32::from(values[FLAGS]),
+                    drainage: u32::from(values[DRAINAGE]),
                 }
             })
             .collect()
@@ -372,7 +390,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 9;
+const VERSION: u8 = 10;
 /// Bytes per plate: its rotation and id.
 pub const PLATE_BYTES: usize = 16;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -518,6 +536,11 @@ mod tests {
             } else {
                 1.0e8 * x
             },
+            lake_depth: if index.is_multiple_of(3) {
+                0.0
+            } else {
+                (x * 0.11).sin().abs() * 3000.0
+            },
             current_east: if index.is_multiple_of(6) {
                 f32::NAN
             } else {
@@ -541,6 +564,8 @@ mod tests {
             // All flag bits the history keeps (the oceanic bit 6, the felsic bit 7 and the
             // metasediment bit 8 among them).
             flags: (index * 37 % 512) as u32,
+            // Every receiver slot (7 is none) and every combination of the bits.
+            drainage: (index % 64) as u32,
         }
     }
 
@@ -652,9 +677,18 @@ mod tests {
             original.discharge,
             decoded.discharge
         );
+        let relative =
+            (original.lake_depth - decoded.lake_depth).abs() / original.lake_depth.max(1.0);
+        assert!(
+            relative < 6e-4,
+            "{} → {}",
+            original.lake_depth,
+            decoded.lake_depth
+        );
         assert_eq!(original.plate, decoded.plate);
         assert_eq!(original.flags, decoded.flags);
         assert_eq!(original.climate_class, decoded.climate_class);
+        assert_eq!(original.drainage, decoded.drainage);
         // Land stays land and sea stays sea.
         assert_eq!(original.elevation >= 0.0, decoded.elevation >= 0.0);
     }
@@ -667,7 +701,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 52);
+        assert_eq!(BYTES_PER_CELL, 55);
     }
 
     #[test]
