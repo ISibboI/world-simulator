@@ -35,9 +35,9 @@ impl RenderMode for Realistic {
 
     fn legend(&self, _options: &OptionValues, _data: Option<&ModeData>) -> Legend {
         Legend {
-            description: "The planet in space, lit by the simulation's sun. Stars show where a \
-                          camera would see them: on the night side, with the sun hidden or out \
-                          of view. The surface is the topographic map for now (relief \
+            description: "The planet in space, lit by the simulation's sun. The view adapts to \
+                          the light like an eye: after the sun goes behind the planet or out of \
+                          view, more stars appear over a few seconds. The surface is the topographic map for now (relief \
                           exaggerated); realistic colours follow."
                 .into(),
             scale: Some(elevation_scale()),

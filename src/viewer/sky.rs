@@ -8,12 +8,21 @@
 //! with the sun hidden behind the planet or out of view. The view meters like a camera with an
 //! automatic exposure that sets the brightest ~0.1–1% of the frame to white
 //! ([`Exposure::new`]): the share of the view covered by the sunlit planet (weighted by the
-//! cosine of the sun's incidence, the brightness of a Lambertian surface) fades the stars out
-//! between 0.1% and 1%; the glare of the visible part of the sun fades them out as the sun
-//! approaches the frame (from 1.5 times the view's half-width to its edge). So they fade
-//! smoothly while the terminator, a thin crescent or the sun comes into view. The ambient fill
-//! light of `SunAmbient` is a visual aid, not light, and is not metered. With the camera light
-//! the whole visible side is lit, so there are no stars (and no sun) in that mode.
+//! cosine of the sun's incidence, the brightness of a Lambertian surface) darkens the scene
+//! between 0.1% and 1%; the glare of the visible part of the sun does so as the sun approaches
+//! the frame (from 1.5 times the view's half-width to its edge). The ambient fill light of
+//! `SunAmbient` is a visual aid, not light, and is not metered. With the camera light the whole
+//! visible side is lit, so there are no stars (and no sun) in that mode.
+//!
+//! **Adaptation.** The meter gives the exposure the scene asks for ([`Exposure::target`], in
+//! stops above the daylight exposure, up to [`DARK_ADAPTED`]); the view's exposure follows it
+//! like an eye (or a camera's auto-exposure) in wall-clock time ([`Adaptation`]): slowly when
+//! the scene gets darker (dark adaptation, a few seconds), fast when it gets brighter (light
+//! adaptation). The exposure brightens the sunlight on the planet and the sun with its glow by
+//! 2^stops, and lets fainter stars through: their limiting magnitude rises by 2.5 log₁₀ 2 ≈ 0.75
+//! magnitudes per stop. So after the sun disappears behind the planet the stars fade in, the
+//! brightest first, and when the sunlit side comes into view the image is briefly over-exposed.
+//! See `notes/issue-92/exposure.md`.
 //!
 //! **Stars.** A procedural sky, not Earth's: a deterministic star field fixed in space (the
 //! planet does not spin), generated in the shader from a hash of cells on a cube map. Their
@@ -27,8 +36,8 @@ use glam::{Mat4, Vec3, Vec4};
 
 use crate::sun;
 
-/// Share of the view the sunlit planet (cosine-weighted) may cover before the stars start to
-/// fade, and where they are gone.
+/// Share of the view the sunlit planet (cosine-weighted) may cover before the metered exposure
+/// starts to drop from [`DARK_ADAPTED`], and where it reaches the daylight exposure.
 const STARS_FADE_START: f32 = 1e-3;
 const STARS_FADE_END: f32 = 1e-2;
 /// How far beyond the view the sun's glare still sets the exposure, in multiples of the view's
@@ -38,6 +47,21 @@ const GLARE_REACH: f32 = 1.5;
 /// fifth of the share where the stars start to fade; the cosine weighting smooths the steps).
 const METER_COLUMNS: usize = 96;
 const METER_ROWS: usize = 64;
+
+/// The exposure of a fully dark-adapted view, in stops (factors of 2) above the daylight
+/// exposure, at which every star of the field shows. The real gap between a sunlit day side and
+/// the stars is ~23 stops (10⁷); 14 are enough for the stars to vanish in daylight (see
+/// [`STAR_DIMMING_PER_STOP`]) and keep the fade-in within seconds.
+pub const DARK_ADAPTED: f32 = 14.0;
+/// Magnitudes per stop: 2.5 log₁₀ 2.
+pub const STAR_DIMMING_PER_STOP: f32 = 0.752_575;
+/// Time constant of the adaptation to a darker scene (dark adaptation) in seconds.
+pub const DARK_ADAPTATION_SECONDS: f32 = 2.0;
+/// Time constant of the adaptation to a brighter scene (light adaptation) in seconds.
+pub const LIGHT_ADAPTATION_SECONDS: f32 = 0.3;
+/// Distance from the target, in stops, below which the adaptation counts as converged and
+/// snaps to it (far below a visible change).
+const CONVERGED: f32 = 0.02;
 
 /// Temperatures of the star colours in K, the colours [`star_colors`] gives in this order
 /// (`sky.wgsl` picks one per star with its own weights).
@@ -65,8 +89,9 @@ pub struct Exposure {
     /// The share of the view covered by the sunlit planet, weighted by the cosine of the
     /// incidence (1 for a view full of surface under the sun at the zenith).
     pub sunlit: f32,
-    /// How visible the stars are, from 0 (exposed for daylight) to 1 (a long exposure).
-    pub stars: f32,
+    /// How dark the metered scene is, from 0 (exposed for daylight) to 1 (a long exposure that
+    /// shows all stars).
+    pub darkness: f32,
 }
 
 impl Exposure {
@@ -88,14 +113,86 @@ impl Exposure {
             0.0
         };
         let sunlit = sunlit_share(view_projection.inverse(), sun);
-        // Each of the two hides the stars on its own; the glare fades them over its reach.
-        let stars = (1.0 - smoothstep(STARS_FADE_START, STARS_FADE_END, sunlit)) * (1.0 - glare);
+        // Each of the two sets a daylight exposure on its own; the glare over its reach.
+        let darkness = (1.0 - smoothstep(STARS_FADE_START, STARS_FADE_END, sunlit)) * (1.0 - glare);
         Self {
             sun_visible,
             sun_in_view,
             sunlit,
-            stars,
+            darkness,
         }
+    }
+
+    /// The exposure the scene asks for, in stops above the daylight exposure (0 to
+    /// [`DARK_ADAPTED`]).
+    pub fn target(&self) -> f32 {
+        DARK_ADAPTED * self.darkness
+    }
+}
+
+/// The exposure of the view as it adapts to the scene in wall-clock time, like an eye: it moves
+/// exponentially towards the metered exposure (in stops, i.e. in log luminance), with
+/// [`DARK_ADAPTATION_SECONDS`] when the scene gets darker and [`LIGHT_ADAPTATION_SECONDS`] when
+/// it gets brighter.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Adaptation {
+    /// The current exposure in stops above the daylight exposure.
+    stops: f32,
+    /// The target set by the last update, which holds until the next one; `None` before the
+    /// first (the view then starts adapted).
+    target: Option<f32>,
+}
+
+impl Adaptation {
+    /// The current exposure in stops above the daylight exposure.
+    pub fn stops(&self) -> f32 {
+        self.stops
+    }
+
+    /// Adapted to daylight (the exposure of the camera light): the sky's exposure starts from
+    /// there when the sun's light is chosen.
+    pub fn daylight() -> Self {
+        Self {
+            stops: 0.0,
+            target: Some(0.0),
+        }
+    }
+
+    /// Advances by `seconds` of wall-clock time during which the scene asked for the target of
+    /// the last update (the scene of the previous frame was shown until now), then sets
+    /// `target` for the time until the next update. Returns whether the exposure still moves,
+    /// i.e. whether the view needs another frame.
+    ///
+    /// The step is the exact solution for a constant target, so any split of the time gives
+    /// the same result (frame-rate independent).
+    pub fn update(&mut self, target: f32, seconds: f32) -> bool {
+        let held = *self.target.get_or_insert_with(|| {
+            self.stops = target;
+            target
+        });
+        let difference = held - self.stops;
+        let time_constant = if difference > 0.0 {
+            DARK_ADAPTATION_SECONDS
+        } else {
+            LIGHT_ADAPTATION_SECONDS
+        };
+        self.stops = held - difference * (-seconds.max(0.0) / time_constant).exp();
+        if (held - self.stops).abs() < CONVERGED {
+            self.stops = held;
+        }
+        self.target = Some(target);
+        self.stops != target
+    }
+
+    /// The factor on the sunlight and the sun: 2^stops.
+    pub fn gain(&self) -> f32 {
+        self.stops().exp2()
+    }
+
+    /// How many magnitudes fainter the stars appear than to a fully dark-adapted view (0 when
+    /// dark-adapted, ~10.5 in daylight, where none is left).
+    pub fn star_dimming(&self) -> f32 {
+        (DARK_ADAPTED - self.stops()) * STAR_DIMMING_PER_STOP
     }
 }
 
@@ -177,7 +274,7 @@ mod tests {
         assert!(!exposure.sun_in_view);
         // The disc covers about a fifth of a 16:10 view, its mean cosine is 2/3.
         assert!(exposure.sunlit > 0.05, "{exposure:?}");
-        assert_eq!(exposure.stars, 0.0);
+        assert_eq!(exposure.darkness, 0.0);
     }
 
     #[test]
@@ -188,7 +285,7 @@ mod tests {
         assert_eq!(exposure.sun_visible, 0.0);
         assert!(!exposure.sun_in_view);
         assert_eq!(exposure.sunlit, 0.0);
-        assert_eq!(exposure.stars, 1.0);
+        assert_eq!(exposure.darkness, 1.0);
     }
 
     #[test]
@@ -201,13 +298,13 @@ mod tests {
         let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047);
         assert_eq!(exposure.sun_visible, 1.0);
         assert!(exposure.sun_in_view);
-        assert_eq!(exposure.stars, 0.0);
+        assert_eq!(exposure.darkness, 0.0);
         // Just out of view (30° beside it; the view reaches ~26°): its glare still dims them.
         let angle = 30f32.to_radians();
         let sun = Vec3::new(-angle.cos(), angle.sin(), 0.0);
         let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047);
         assert!(!exposure.sun_in_view);
-        assert!(exposure.stars < 0.5, "{exposure:?}");
+        assert!(exposure.darkness < 0.5, "{exposure:?}");
     }
 
     #[test]
@@ -225,11 +322,11 @@ mod tests {
             previous = exposure.sunlit;
             // The glare of the sun in or near the view may hide them further.
             let expected = 1.0 - smoothstep(STARS_FADE_START, STARS_FADE_END, exposure.sunlit);
-            assert!(exposure.stars <= expected);
+            assert!(exposure.darkness <= expected);
             if exposure.sun_in_view && exposure.sun_visible == 1.0 {
-                assert_eq!(exposure.stars, 0.0);
+                assert_eq!(exposure.darkness, 0.0);
             }
-            faded |= exposure.stars > 0.0 && exposure.stars < 1.0;
+            faded |= exposure.darkness > 0.0 && exposure.darkness < 1.0;
         }
         assert!(faded, "no partial fade");
         assert!(previous > STARS_FADE_END);
@@ -250,6 +347,104 @@ mod tests {
         assert_eq!(at(planet - 2.0 * radius), 0.0);
         assert!((at(planet) - 0.5).abs() < 1e-3);
         assert_eq!(at(planet + 2.0 * radius), 1.0);
+    }
+
+    /// Adapts from `from` to `to` (stops) in `steps` equal steps over `seconds`.
+    fn adapt(from: f32, to: f32, seconds: f32, steps: usize) -> Adaptation {
+        let mut adaptation = Adaptation::default();
+        adaptation.update(from, 0.0);
+        adaptation.update(to, 0.0);
+        for _ in 0..steps {
+            adaptation.update(to, seconds / steps as f32);
+        }
+        adaptation
+    }
+
+    #[test]
+    fn the_view_starts_adapted_and_stays_still() {
+        let mut adaptation = Adaptation::default();
+        assert!(!adaptation.update(DARK_ADAPTED, 0.016));
+        assert_eq!(adaptation.stops(), DARK_ADAPTED);
+        assert!(!adaptation.update(DARK_ADAPTED, 10.0));
+        assert_eq!(adaptation.stops(), DARK_ADAPTED);
+    }
+
+    #[test]
+    fn dark_adaptation_is_slow_and_light_adaptation_fast() {
+        // After one time constant, 1 − 1/e of the way.
+        let dark = adapt(0.0, DARK_ADAPTED, DARK_ADAPTATION_SECONDS, 100);
+        let expected = DARK_ADAPTED * (1.0 - (-1f32).exp());
+        assert!((dark.stops() - expected).abs() < 1e-3, "{dark:?}");
+        let light = adapt(DARK_ADAPTED, 0.0, LIGHT_ADAPTATION_SECONDS, 100);
+        assert!((light.stops() - DARK_ADAPTED * (-1f32).exp()).abs() < 1e-3);
+        // In one second: brightening is nearly done, darkening has far to go.
+        let dark = adapt(0.0, DARK_ADAPTED, 1.0, 60);
+        let light = adapt(DARK_ADAPTED, 0.0, 1.0, 60);
+        assert!(light.stops() < 0.6, "{light:?}");
+        assert!(dark.stops() < 0.5 * DARK_ADAPTED, "{dark:?}");
+        assert!(LIGHT_ADAPTATION_SECONDS < DARK_ADAPTATION_SECONDS / 4.0);
+    }
+
+    #[test]
+    fn adaptation_does_not_depend_on_the_frame_rate() {
+        for (from, to) in [(0.0, DARK_ADAPTED), (DARK_ADAPTED, 2.0)] {
+            let reference = adapt(from, to, 0.5, 1).stops();
+            for steps in [2, 7, 30, 144] {
+                let stops = adapt(from, to, 0.5, steps).stops();
+                assert!(
+                    (stops - reference).abs() < 1e-3,
+                    "{steps}: {stops} {reference}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_target_applies_from_the_next_frame() {
+        // A long idle pause, then the scene changes: the pause belongs to the old scene, so the
+        // change is not skipped.
+        let mut adaptation = Adaptation::default();
+        adaptation.update(DARK_ADAPTED, 0.0);
+        assert!(adaptation.update(0.0, 120.0));
+        assert_eq!(adaptation.stops(), DARK_ADAPTED);
+        adaptation.update(0.0, 0.1);
+        assert!(adaptation.stops() > 0.5 * DARK_ADAPTED, "{adaptation:?}");
+    }
+
+    #[test]
+    fn adaptation_converges_and_stops() {
+        let mut adaptation = Adaptation::daylight();
+        let mut frames = 0;
+        while adaptation.update(DARK_ADAPTED, 1.0 / 60.0) {
+            frames += 1;
+            assert!(frames < 60 * 30, "{adaptation:?}");
+        }
+        assert_eq!(adaptation.stops(), DARK_ADAPTED);
+        // About 2 s × ln(14 / 0.02) ≈ 13 s.
+        let seconds = frames as f32 / 60.0;
+        assert!((10.0..16.0).contains(&seconds), "{seconds}");
+        // Light adaptation converges within about 2 s.
+        let mut frames = 0;
+        while adaptation.update(0.0, 1.0 / 60.0) {
+            frames += 1;
+        }
+        assert!(frames < 2 * 60, "{frames}");
+        assert_eq!(adaptation.stops(), 0.0);
+    }
+
+    #[test]
+    fn stars_need_dark_adaptation() {
+        // In daylight even the brightest star (−1.5) lies beyond the visible limit (9, see
+        // `sky.wgsl`); dark-adapted, all of them (to magnitude 7) show.
+        let daylight = Adaptation::daylight();
+        assert!(-1.5 + daylight.star_dimming() > 9.0, "{daylight:?}");
+        assert_eq!(daylight.gain(), 1.0);
+        let mut dark = Adaptation::default();
+        dark.update(DARK_ADAPTED, 0.0);
+        assert_eq!(dark.star_dimming(), 0.0);
+        // The limiting magnitude rises while the view adapts.
+        let limit = |seconds: f32| 9.0 - adapt(0.0, DARK_ADAPTED, seconds, 10).star_dimming();
+        assert!(limit(1.0) < limit(3.0) && limit(3.0) < limit(6.0));
     }
 
     #[test]

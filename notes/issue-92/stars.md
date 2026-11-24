@@ -138,4 +138,5 @@ See [step2/](step2/):
 - No atmosphere glow at the limb: that is the atmosphere step.
 - No Milky Way band or nebulae.
 - Stars do not dim the planet's ambient fill.
-- No exposure adaptation over time: the exposure follows the view at once.
+- ~~No exposure adaptation over time~~: done in [exposure.md](exposure.md) (eye adaptation;
+  the instantaneous meter above is now its target).

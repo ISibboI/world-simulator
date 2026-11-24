@@ -516,6 +516,10 @@ struct Viewer {
     yaw: f32,
     /// Elevation angle of the camera above the equator in radians.
     pitch: f32,
+    /// The exposure of the sky's view as it adapts to the scene, and when it was last updated
+    /// (see [`sky::Adaptation`]).
+    adaptation: sky::Adaptation,
+    adapted_at: Option<web_time::Instant>,
     /// Simulated time of the newest state of the running simulation.
     time: Option<f64>,
     /// Simulated duration of the running simulation in Myr.
@@ -618,6 +622,8 @@ impl Viewer {
             hovered: None,
             yaw: 0.0,
             pitch: 0.4,
+            adaptation: sky::Adaptation::default(),
+            adapted_at: None,
             time: None,
             duration: initial.cli.duration,
             failure: None,
@@ -1121,8 +1127,9 @@ impl Viewer {
         ) * CAMERA_DISTANCE
     }
 
-    /// The uniforms for a view of `viewport` physical pixels.
-    fn uniforms(&self, viewport: egui::Vec2) -> Uniforms {
+    /// The view-projection matrix and the vertical field of view for a view of `viewport`
+    /// physical pixels.
+    fn view_projection(&self, viewport: egui::Vec2) -> (glam::Mat4, f32) {
         let aspect_ratio = viewport.x / viewport.y.max(1.0);
         let eye = self.camera_position();
         let view = glam::camera::rh::view::look_at_mat4(eye, Vec3::ZERO, Vec3::Z);
@@ -1130,13 +1137,49 @@ impl Viewer {
         let field_of_view = vertical_field_of_view(aspect_ratio);
         let projection =
             glam::camera::rh::proj::directx::perspective(field_of_view, aspect_ratio, 0.1, 10.0);
-        let view_projection = projection * view;
+        (projection * view, field_of_view)
+    }
+
+    /// Meters the view of `viewport` physical pixels and lets the exposure adapt to it over the
+    /// wall-clock time since the last frame. Returns the metering (only with the sun's light;
+    /// the camera light keeps the daylight exposure) and whether the exposure still moves, so
+    /// that the view needs another frame.
+    fn adapt(&mut self, viewport: egui::Vec2) -> (Option<sky::Exposure>, bool) {
+        let now = web_time::Instant::now();
+        let seconds = self
+            .adapted_at
+            .replace(now)
+            .map_or(0.0, |then| now.duration_since(then).as_secs_f32());
+        if !self.sky_shown() {
+            self.adaptation = sky::Adaptation::daylight();
+            return (None, false);
+        }
+        let (view_projection, _) = self.view_projection(viewport);
+        let sun = self.sun();
+        let exposure = sky::Exposure::new(
+            view_projection,
+            self.camera_position(),
+            sun.direction,
+            sun.angular_radius,
+        );
+        let moving = self.adaptation.update(exposure.target(), seconds);
+        (Some(exposure), moving)
+    }
+
+    /// The uniforms for a view of `viewport` physical pixels, with the metering of the sky
+    /// (`None` with the camera light).
+    fn uniforms(&self, viewport: egui::Vec2, exposure: Option<sky::Exposure>) -> Uniforms {
+        let eye = self.camera_position();
+        let (view_projection, field_of_view) = self.view_projection(viewport);
         let sun = self.sun();
         let lighting = Lighting::new(self.light(), eye, &sun);
-        // Metered only when the sky is drawn (sun light).
-        let exposure = self
-            .sky_shown()
-            .then(|| sky::Exposure::new(view_projection, eye, sun.direction, sun.angular_radius));
+        // The exposure brightens the direct sunlight on the planet, not the ambient fill (a
+        // visual aid, see `lighting`); with the camera light it stays at 1.
+        let gain = if exposure.is_some() {
+            self.adaptation.gain()
+        } else {
+            1.0
+        };
         Uniforms {
             view_projection: view_projection.to_cols_array_2d(),
             light_direction: lighting.direction.extend(0.0).to_array(),
@@ -1158,15 +1201,15 @@ impl Viewer {
                 exposure.map_or(1.0, |exposure| exposure.sun_visible),
             ],
             light_color: [
-                lighting.color[0],
-                lighting.color[1],
-                lighting.color[2],
+                lighting.color[0] * gain,
+                lighting.color[1] * gain,
+                lighting.color[2] * gain,
                 lighting.ambient,
             ],
             stars: [
-                exposure.map_or(0.0, |exposure| exposure.stars),
+                self.adaptation.star_dimming(),
                 field_of_view / viewport.y.max(1.0),
-                0.0,
+                gain,
                 0.0,
             ],
             star_colors: sky::star_colors(),
@@ -1254,7 +1297,14 @@ impl eframe::App for Viewer {
                 self.pitch = (self.pitch + delta.y * ROTATION_SPEED).clamp(-1.5, 1.5);
 
                 let pixels_per_point = ui.ctx().pixels_per_point();
-                let uniforms = self.uniforms(rect.size() * pixels_per_point);
+                let viewport = rect.size() * pixels_per_point;
+                let (exposure, adapting) = self.adapt(viewport);
+                if adapting {
+                    // Keep drawing while the exposure adapts, also with the simulation paused
+                    // and the camera still; stop once it has converged.
+                    ui.ctx().request_repaint();
+                }
+                let uniforms = self.uniforms(viewport, exposure);
                 self.points_per_radius = points_per_radius(rect.size());
                 self.refresh_display();
                 let view_projection = glam::Mat4::from_cols_array_2d(&uniforms.view_projection);
