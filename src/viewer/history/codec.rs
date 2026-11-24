@@ -2,8 +2,8 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (52 bytes per cell
-//! instead of 128, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (54 bytes per cell
+//! instead of 136, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
@@ -44,7 +44,7 @@ impl Code {
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 32] = [
+const CHANNELS: [Code; 34] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -57,6 +57,10 @@ const CHANNELS: [Code; 32] = [
     Code::Share,
     // Time since the last orogeny: 0.25 Myr.
     Code::Unsigned(0.25),
+    // Thermal and thinning terms of the lithosphere strength (shares; the combined strength
+    // is good to ~0.005, against a range of 0.05 to 1).
+    Code::Share,
+    Code::Share,
     // Temperatures (annual, January, July): 0.1 °C.
     Code::Signed(0.1),
     Code::Signed(0.1),
@@ -107,9 +111,9 @@ const CHANNELS: [Code; 32] = [
 ];
 
 /// The channels of the integer attributes: plate, flags and drainage.
-const PLATE: usize = 29;
-const FLAGS: usize = 30;
-const DRAINAGE: usize = 31;
+const PLATE: usize = 31;
+const FLAGS: usize = 32;
+const DRAINAGE: usize = 33;
 
 /// The value of an integer channel of a cell.
 fn integer(channel: usize, cell: &CellInfo) -> u16 {
@@ -141,6 +145,8 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.sediment,
         cell.orogenic,
         cell.since_orogeny,
+        cell.strength_thermal,
+        cell.strength_thinning,
         cell.temperature,
         cell.temperature_january,
         cell.temperature_july,
@@ -328,29 +334,31 @@ impl Planes {
                     sediment: value(3),
                     orogenic: value(4),
                     since_orogeny: value(5),
-                    temperature: value(6),
-                    temperature_january: value(7),
-                    temperature_july: value(8),
-                    precipitation: value(9),
-                    precipitation_january: value(10),
-                    precipitation_july: value(11),
-                    potential_evaporation: value(12),
-                    evaporation: value(13),
-                    evaporation_january: value(14),
-                    evaporation_july: value(15),
-                    ice: value(16),
-                    discharge: value(17),
-                    lake_depth: value(18),
-                    current_east: value(19),
-                    current_north: value(20),
-                    streamfunction: value(21),
-                    gyre_heating: value(22),
-                    wind_east: value(23),
-                    wind_north: value(24),
-                    wind_january_east: value(25),
-                    wind_january_north: value(26),
-                    wind_july_east: value(27),
-                    wind_july_north: value(28),
+                    strength_thermal: value(6),
+                    strength_thinning: value(7),
+                    temperature: value(8),
+                    temperature_january: value(9),
+                    temperature_july: value(10),
+                    precipitation: value(11),
+                    precipitation_january: value(12),
+                    precipitation_july: value(13),
+                    potential_evaporation: value(14),
+                    evaporation: value(15),
+                    evaporation_january: value(16),
+                    evaporation_july: value(17),
+                    ice: value(18),
+                    discharge: value(19),
+                    lake_depth: value(20),
+                    current_east: value(21),
+                    current_north: value(22),
+                    streamfunction: value(23),
+                    gyre_heating: value(24),
+                    wind_east: value(25),
+                    wind_north: value(26),
+                    wind_january_east: value(27),
+                    wind_january_north: value(28),
+                    wind_july_east: value(29),
+                    wind_july_north: value(30),
                     plate: u32::from(values[PLATE]),
                     flags: u32::from(values[FLAGS]),
                     drainage: u32::from(values[DRAINAGE]),
@@ -377,7 +385,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 8;
+const VERSION: u8 = 9;
 /// Bytes per plate: its rotation and id.
 pub const PLATE_BYTES: usize = 16;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -497,6 +505,8 @@ mod tests {
             } else {
                 x * 0.25
             },
+            strength_thermal: (x * 0.013).fract(),
+            strength_thinning: 1.0 - (x * 0.007).fract(),
             temperature: (x * 0.1).cos() * 30.0,
             temperature_january: f32::NAN,
             temperature_july: -12.34,
@@ -573,6 +583,16 @@ mod tests {
             (original.sediment, decoded.sediment, 0.5),
             (original.orogenic, decoded.orogenic, 0.5 / 254.0),
             (original.since_orogeny, decoded.since_orogeny, 0.125),
+            (
+                original.strength_thermal,
+                decoded.strength_thermal,
+                0.5 / 254.0,
+            ),
+            (
+                original.strength_thinning,
+                decoded.strength_thinning,
+                0.5 / 254.0,
+            ),
             (original.temperature, decoded.temperature, 0.05),
             (
                 original.temperature_january,
@@ -674,7 +694,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 52);
+        assert_eq!(BYTES_PER_CELL, 54);
     }
 
     #[test]

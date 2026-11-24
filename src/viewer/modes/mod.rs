@@ -27,6 +27,7 @@ mod ocean_currents;
 mod plate_motion;
 mod plates;
 mod sediment;
+mod strength;
 pub mod switcher;
 mod temperature;
 mod topographic;
@@ -69,6 +70,8 @@ pub enum RenderModeId {
     Crust,
     /// Sediment thickness on land and sea floor (logarithmic), with optional isopachs.
     Sediment,
+    /// Lithosphere strength: weak zones and what weakens them.
+    LithosphereStrength,
     /// Rivers, drainage basins, endorheic areas and lakes.
     Hydrology,
 }
@@ -87,6 +90,7 @@ impl RenderModeId {
             RenderModeId::CrustAge => &crust_age::CrustAge,
             RenderModeId::Crust => &crust::Crust,
             RenderModeId::Sediment => &sediment::Sediment,
+            RenderModeId::LithosphereStrength => &strength::LithosphereStrength,
             RenderModeId::Hydrology => &hydrology::Hydrology,
         }
     }
@@ -115,6 +119,7 @@ impl RenderModeId {
             RenderModeId::CrustAge => "crust-age",
             RenderModeId::Crust => "crust",
             RenderModeId::Sediment => "sediment",
+            RenderModeId::LithosphereStrength => "lithosphere-strength",
             RenderModeId::Hydrology => "hydrology",
         }
     }
