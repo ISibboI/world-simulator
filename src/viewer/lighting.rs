@@ -5,7 +5,7 @@
 //! data modes are always lit from the camera, as before #92. With the sun's light, the sun itself
 //! is drawn in the background when it is in view (`sky.wgsl`); with the camera light it is not,
 //! since a visible sun would contradict the lighting. The stars appear with the sun's light as
-//! far as the camera's exposure allows (see [`super::sky`]).
+//! far as the exposure, which adapts to the scene like an eye, allows (see [`super::sky`]).
 //!
 //! The sun stands fixed in space: the simulated planet does not spin, so the sun's longitude
 //! ([`SUN_LONGITUDE`]) is a fixed time of day, chosen so that the default camera sees a
@@ -53,8 +53,8 @@ impl Light {
     pub const HOVER: &'static str = "Where the light comes from: the sun of the simulation \
          (fixed in space; drag round to see the night side), the sun plus an ambient light that \
          keeps the night side visible, or the camera (the visible side is always lit). With the \
-         sun's light, stars show where a camera would see them: on the night side, with the \
-         sun hidden or out of view";
+         sun's light, stars show where an eye would see them: on the night side, with the \
+         sun hidden or out of view, fading in over a few seconds as the eye adapts to the dark";
 
     #[cfg(test)]
     pub fn index(self) -> usize {

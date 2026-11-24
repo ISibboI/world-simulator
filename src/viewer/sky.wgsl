@@ -2,7 +2,7 @@
 // plane, depth-tested against the planet (which hides them where it is in front), added to the
 // background. The sun's disc has its true angular size (from the sun model), limb darkening, and
 // a glow around it as a camera would show it. The stars are a procedural field fixed in space,
-// as bright as the camera's exposure lets them be (see `sky.rs`).
+// as bright as the adapted exposure lets them be (see `sky.rs`).
 
 struct Uniforms {
     view_projection: mat4x4<f32>,
@@ -15,7 +15,8 @@ struct Uniforms {
     // Colour of the sun's disc in sRGB (rgb) and the share of it the planet does not hide (w).
     sun_color: vec4<f32>,
     light_color: vec4<f32>,
-    // Visibility of the stars (x, 0 to 1) and the size of a pixel in radians (y).
+    // How many magnitudes fainter the stars appear than to a dark-adapted view (x), the size of
+    // a pixel in radians (y), and the exposure's factor on the sun (z, 2^stops).
     stars: vec4<f32>,
     // Black-body colours of the stars from 3200 K to 20000 K (see STAR_TEMPERATURES in sky.rs).
     star_colors: array<vec4<f32>, 8>,
@@ -63,10 +64,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let outside = max(angle, radius);
     let glow = 0.4 * (radius / outside) * (radius / outside) + 0.06 * exp(-angle / 0.05);
     // The glow fades as the planet covers the disc (the disc itself is cut by the depth test).
-    let intensity = mix(glow * uniforms.sun_color.w, limb, disc);
+    // The exposure (a factor on sRGB values) brightens the disc fully and the glow at most 16
+    // times, so that a dark-adapted view flashes when the sun appears without the glare filling
+    // the screen.
+    let gain = uniforms.stars.z;
+    let intensity = mix(glow * uniforms.sun_color.w * min(gain, GLOW_GAIN), limb * gain, disc);
     var color = uniforms.sun_color.rgb * intensity;
-    if uniforms.stars.x > 0.0 {
-        color += stars(direction) * uniforms.stars.x;
+    // Skipped while even the brightest star is (nearly) beyond the visible limit.
+    if uniforms.stars.x < VISIBLE_LIMIT - BRIGHTEST - 0.1 {
+        color += stars(direction, uniforms.stars.x);
     }
     return vec4<f32>(color, 0.0);
 }
@@ -75,12 +81,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 const STAR_CELLS: u32 = 180u;
 // Mean stars per cell: ~15000 over the sky down to the limiting magnitude.
 const STARS_PER_CELL: f32 = 0.077;
-// Limiting magnitude, and the magnitude that fills a pixel with white.
+// Largest factor of the exposure on the sun's glow.
+const GLOW_GAIN: f32 = 16.0;
+// Faintest magnitude of the field, and the magnitude that fills a pixel with white.
 const FAINTEST: f32 = 7.0;
 const SATURATED: f32 = 1.5;
 const BRIGHTEST: f32 = -1.5;
 // Growth of the star counts per magnitude: N(< m) ∝ 10^(0.45 m).
 const COUNT_SLOPE: f32 = 0.45;
+// Stars fade out between these apparent magnitudes (after the exposure's dimming): about 17 and
+// 0 of 255 in sRGB. A dark-adapted view shows the whole field (to FAINTEST); the limiting
+// magnitude of the field is VISIBLE_LIMIT minus the dimming.
+const VISIBLE_FADE: f32 = 8.0;
+const VISIBLE_LIMIT: f32 = 9.0;
 
 // PCG hash (Jarkko & Olano, 2020).
 fn hash(value: u32) -> u32 {
@@ -107,10 +120,10 @@ fn face_point(face: u32, u: f32, v: f32) -> vec3<f32> {
     return vec3<f32>(u, v, sign);
 }
 
-// The colour (sRGB, before the visibility) of the stars at `direction`: every cell of the cube
-// face around it and its neighbours holds a star or none, at a random place in the cell, with a
-// random magnitude and temperature.
-fn stars(direction: vec3<f32>) -> vec3<f32> {
+// The colour (sRGB) of the stars at `direction`, made `dimming` magnitudes fainter by the
+// exposure: every cell of the cube face around it and its neighbours holds a star or none, at a
+// random place in the cell, with a random magnitude and temperature.
+fn stars(direction: vec3<f32>, dimming: f32) -> vec3<f32> {
     let a = abs(direction);
     var face: u32;
     var uv: vec2<f32>;
@@ -151,7 +164,11 @@ fn stars(direction: vec3<f32>) -> vec3<f32> {
             h = hash(h);
             // At most as bright as the brightest stars of Earth's sky (−1.5), so that halos stay
             // within the neighbouring cells.
-            let magnitude = max(FAINTEST + log2(max(unit(h), 1e-7)) * 0.30103 / COUNT_SLOPE, BRIGHTEST);
+            let magnitude = max(FAINTEST + log2(max(unit(h), 1e-7)) * 0.30103 / COUNT_SLOPE, BRIGHTEST)
+                + dimming;
+            if magnitude >= VISIBLE_LIMIT {
+                continue;
+            }
             h = hash(h);
             // Temperature: 3200 K (M), 4000 and 4800 K (K, mostly giants), G, F, A, late and
             // early B (see STAR_TEMPERATURES), weighted like the
@@ -166,7 +183,8 @@ fn stars(direction: vec3<f32>) -> vec3<f32> {
             let sigma = pixel * clamp(0.55 + 0.25 * log2(max(flux, 1.0)), 0.55, 1.3);
             let distance = length(cross(direction, star));
             let value = flux * exp(-0.5 * distance * distance / (sigma * sigma));
-            color += uniforms.star_colors[kind].rgb * pow(min(value, 1.0), 1.0 / 2.2);
+            let fade = 1.0 - smoothstep(VISIBLE_FADE, VISIBLE_LIMIT, magnitude);
+            color += uniforms.star_colors[kind].rgb * pow(min(value, 1.0), 1.0 / 2.2) * fade;
         }
     }
     return color;
