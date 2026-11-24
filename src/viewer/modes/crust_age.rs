@@ -234,7 +234,7 @@ fn sea_floor_statistics(cells: &[CellInfo]) -> Option<(f64, f64, f64)> {
         sum += f64::from(age);
         max = max.max(f64::from(age));
     }
-    (count > 0).then(|| (count as f64 / cells.len() as f64, sum / count as f64, max))
+    (count > 0).then_some((count as f64 / cells.len() as f64, sum / count as f64, max))
 }
 
 impl RenderMode for CrustAge {
