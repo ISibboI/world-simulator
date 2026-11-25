@@ -217,6 +217,17 @@ pub(super) fn match_plates(
     (CellMatches { offsets, entries }, found_per_plate)
 }
 
+/// Adds a crust sample created outside the ownership resolution (a plate's edge advancing,
+/// see `sheet`) to the plate's tracked crust, with `near` a cell near it.
+pub(super) fn track_sample(plate: &mut Plate, local: u32, near: u32) {
+    if let Some(tracked) = plate.tracked.as_mut() {
+        tracked.samples.push((local, near));
+        if let Err(position) = tracked.cells.binary_search(&near) {
+            tracked.cells.insert(position, near);
+        }
+    }
+}
+
 /// Updates each plate's tracked crust after ownership resolution: the matched cells (and cells
 /// filled in gaps) where the plate still has crust, the nearest cells of hidden samples, and the
 /// list of all samples.

@@ -355,6 +355,9 @@ impl TemperatureParams {
 const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
 /// Number of longitude sectors of the thermal equator.
 pub const THERMAL_EQUATOR_SECTORS: usize = 24;
+
+/// Latitude bins of 0.5° between 60°S and 60°N for the thermal equator.
+const EQUATOR_BINS: usize = 240;
 /// The model assumes an Earth-sized planet for the ocean heat transport.
 const EARTH_RADIUS: f64 = 6.371e6;
 
@@ -417,6 +420,12 @@ pub struct TemperatureModel {
     params: TemperatureParams,
     coarse: SphereMesh,
     coarse_latitude: Vec<f64>,
+    /// What [`TemperatureModel::thermal_equator`] needs of the coarse mesh, which does not
+    /// change: per coarse cell its latitude bin (`u32::MAX` outside 60°S–60°N), per sector of
+    /// longitude the weight of every coarse cell, and the smoothing kernel over the bins.
+    equator_bins: Vec<u32>,
+    equator_weights: Vec<Vec<f64>>,
+    equator_kernel: Vec<f64>,
     /// The latitude band of every coarse cell.
     band: Vec<usize>,
     /// The coarse cell each fine cell belongs to.
@@ -498,6 +507,38 @@ impl TemperatureModel {
             interpolation.push(weights);
         }
 
+        // Precomputed for the thermal equator (identical to computing them for every month).
+        let equator_bins = coarse_latitude
+            .iter()
+            .map(|latitude| {
+                let position = (latitude.to_degrees() + 60.0) * 2.0;
+                if (0.0..EQUATOR_BINS as f64).contains(&position) {
+                    position as u32
+                } else {
+                    u32::MAX
+                }
+            })
+            .collect();
+        let equator_weights = (0..THERMAL_EQUATOR_SECTORS)
+            .map(|sector| {
+                let longitude = (sector as f64 + 0.5) / THERMAL_EQUATOR_SECTORS as f64 * TAU - PI;
+                (0..coarse.len() as u32)
+                    .map(|cell| {
+                        let p = coarse.vertex(cell);
+                        let difference =
+                            (math::atan2(p.y, p.x) - longitude + PI).rem_euclid(TAU) - PI;
+                        math::exp(-(difference / 30f64.to_radians()).powi(2))
+                    })
+                    .collect()
+            })
+            .collect();
+        let equator_kernel = (-30i32..=30)
+            .map(|offset| {
+                let distance = offset as f64 / 10.0;
+                math::exp(-0.5 * distance * distance)
+            })
+            .collect();
+
         let count = coarse.len();
         let gyre_model = crate::ocean::GyreModel::new(&coarse, EARTH_RADIUS);
         let ocean_enthalpy = params.ocean_heat_capacity * (15.0 - params.freezing_temperature);
@@ -505,6 +546,9 @@ impl TemperatureModel {
             params,
             coarse,
             coarse_latitude,
+            equator_bins,
+            equator_weights,
+            equator_kernel,
             band,
             fine_to_coarse,
             interpolation,
@@ -1003,11 +1047,7 @@ impl TemperatureModel {
             .iter()
             .map(|month| {
                 (0..THERMAL_EQUATOR_SECTORS)
-                    .map(|sector| {
-                        let centre =
-                            (sector as f64 + 0.5) / THERMAL_EQUATOR_SECTORS as f64 * TAU - PI;
-                        self.thermal_equator(month, centre)
-                    })
+                    .map(|sector| self.thermal_equator(month, sector))
                     .collect()
             })
             .collect();
@@ -1064,28 +1104,24 @@ impl TemperatureModel {
     }
 
     /// The latitude (degrees) between 30°S and 30°N where the mean of a coarse field over the
-    /// longitudes around `longitude` (radians; weighted with a Gaussian of 30° width), smoothed
-    /// with a Gaussian of 5° width in latitude, is largest.
-    fn thermal_equator(&self, field: &[f64], longitude: f64) -> f64 {
+    /// longitudes around the centre of sector `sector` (of [`THERMAL_EQUATOR_SECTORS`] from
+    /// 180°W eastwards; weighted with a Gaussian of 30° width), smoothed with a Gaussian of 5°
+    /// width in latitude, is largest.
+    fn thermal_equator(&self, field: &[f64], sector: usize) -> f64 {
         // Means in bins of 0.5° between 60°S and 60°N, then smoothed.
-        const BINS: usize = 240;
-        let mut sum = [0.0; BINS];
-        let mut count = [0.0; BINS];
-        for (cell, (&latitude, &value)) in self.coarse_latitude.iter().zip(field).enumerate() {
-            let position = (latitude.to_degrees() + 60.0) * 2.0;
-            if (0.0..BINS as f64).contains(&position) {
-                let p = self.coarse.vertex(cell as u32);
-                let difference = (math::atan2(p.y, p.x) - longitude + PI).rem_euclid(TAU) - PI;
-                let weight = math::exp(-(difference / 30f64.to_radians()).powi(2));
-                sum[position as usize] += weight * value;
-                count[position as usize] += weight;
+        let mut sum = [0.0; EQUATOR_BINS];
+        let mut count = [0.0; EQUATOR_BINS];
+        let weights = &self.equator_weights[sector];
+        for ((&bin, &weight), &value) in self.equator_bins.iter().zip(weights).zip(field) {
+            if bin != u32::MAX {
+                sum[bin as usize] += weight * value;
+                count[bin as usize] += weight;
             }
         }
         let smoothed = |bin: usize| {
             let (mut s, mut c) = (0.0, 0.0);
-            for other in bin.saturating_sub(30)..(bin + 31).min(BINS) {
-                let distance = (other as f64 - bin as f64) / 10.0;
-                let weight = math::exp(-0.5 * distance * distance);
+            for other in bin.saturating_sub(30)..(bin + 31).min(EQUATOR_BINS) {
+                let weight = self.equator_kernel[other + 30 - bin];
                 s += weight * sum[other];
                 c += weight * count[other];
             }

@@ -675,6 +675,16 @@ impl Simulation {
         for (owner, new_owner) in owners.iter_mut().zip(new_owners) {
             *owner = new_owner.expect("all cells are owned after gap filling");
         }
+        // Crust placed in gaps starts with a fresh front and viscosity of the deforming plates
+        // (see `sheet`); its velocity follows at the next solve.
+        for &(plate, cell) in &filled {
+            let owner = owners[cell as usize];
+            if owner.plate == plate {
+                let sheet = &mut plates[plate as usize].sheet;
+                sheet.front[owner.local as usize] = 1.0;
+                sheet.viscosity[owner.local as usize] = f32::NAN;
+            }
+        }
         matching::update_crust_cells(mesh, plates, found, &filled, matching_scratch);
         ResolvedBoundaries {
             additions,
