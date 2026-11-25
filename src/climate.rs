@@ -129,6 +129,11 @@ pub struct ClimateParams {
     /// The solve stops when the summed imbalance of the cells' vapour budgets is below this
     /// fraction of the evaporation.
     pub tolerance: f64,
+    /// Whether lakes on cells the climate sees as ocean evaporate at the open-water rate there
+    /// (#168): the climate's ocean and the erosion's lakes are found on surfaces that can differ
+    /// at a sill on which the sea stands (by rounding, the sea-level change of the step, or the
+    /// sample surface). Otherwise such lake cells have no potential evaporation (before #168).
+    pub ocean_lake_evaporation: bool,
 }
 
 impl Default for ClimateParams {
@@ -156,6 +161,7 @@ impl Default for ClimateParams {
             update_iterations: 6,
             months_per_update: 1,
             tolerance: 1e-3,
+            ocean_lake_evaporation: true,
         }
     }
 }
@@ -182,6 +188,10 @@ impl ClimateParams {
             "max_thermal_wind" => &mut self.max_thermal_wind,
             "thermal_wind_equator" => &mut self.thermal_wind_equator,
             "tolerance" => &mut self.tolerance,
+            "ocean_lake_evaporation" => {
+                self.ocean_lake_evaporation = value != 0.0;
+                return Ok(());
+            }
             "months" | "spin_up_iterations" | "update_iterations" | "months_per_update" => {
                 anyhow::ensure!(value >= 1.0, "{name} must be at least 1");
                 let count = value as usize;
@@ -651,6 +661,11 @@ impl Climate {
                         temperature[cell] - params.air_sea_temperature_difference,
                     );
                 evaporation[cell] = transfer * (saturated - air).max(0.0);
+                if params.ocean_lake_evaporation {
+                    // A lake here (the erosion's surface differs at a sill) evaporates as open
+                    // water.
+                    lake_potential[cell] = evaporation[cell] * ice_free(temperature[cell]);
+                }
             } else {
                 // The specific humidity of the surface air follows from the column vapour, but
                 // the air over a wet surface is no more humid than over the ocean.

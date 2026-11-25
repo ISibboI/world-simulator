@@ -214,13 +214,15 @@ impl Planet {
             -crate::sea::SILL_TOLERANCE,
             tectonics.min_sea_fraction(),
         );
-        let view = climate_elevations(tectonics.mesh(), &elevation, &seeds);
+        let open = open_sills(&erosion);
+        let view = climate_elevations(tectonics.mesh(), &elevation, &seeds, open);
         temperature.update(&view, None, tectonics.time());
         let cell_count = tectonics.mesh().len();
         let water = SurfaceWater::ocean_only(crate::sea::ocean_from(
             tectonics.mesh(),
             &elevation,
             seeds.iter().copied(),
+            open,
         ));
         let mut planet = Self {
             tectonics,
@@ -442,7 +444,8 @@ impl Planet {
             -crate::sea::SILL_TOLERANCE,
             self.tectonics.min_sea_fraction(),
         );
-        let view = climate_elevations(self.tectonics.mesh(), &elevation, &seeds);
+        let open = open_sills(&self.erosion);
+        let view = climate_elevations(self.tectonics.mesh(), &elevation, &seeds, open);
         self.temperature
             .update(&view, Some(&self.precipitation), self.tectonics.time());
         self.update_water_cycle(&view);
@@ -474,6 +477,7 @@ impl Planet {
                     class: &class,
                     ocean_volume: self.tectonics.ocean_volume(),
                     ocean_seeds: &seeds,
+                    water_volume: self.tectonics.water_volume(),
                     previous_lakes: &self
                         .water
                         .lake_depth
@@ -503,11 +507,16 @@ impl Planet {
                     self.tectonics.mesh(),
                     &elevation,
                     seeds.iter().copied(),
+                    open,
                 );
                 // The erosion's ocean at the start of the step (its result has the one at the
                 // end).
-                let sample =
-                    crate::sea::ocean_from(self.tectonics.mesh(), surface, seeds.iter().copied());
+                let sample = crate::sea::ocean_from(
+                    self.tectonics.mesh(),
+                    surface,
+                    seeds.iter().copied(),
+                    open,
+                );
                 per_cell.iter().zip(&sample).filter(|(a, b)| a != b).count()
             } else {
                 0
@@ -556,6 +565,7 @@ impl Planet {
                 self.tectonics.mesh(),
                 &elevation,
                 seeds.iter().copied(),
+                open,
             ));
         }
         if self.cover_cohort.is_none() && self.tectonics.time() >= self.cover_cohort_time - 1e-9 {
@@ -815,6 +825,12 @@ fn crust_class(crust: &Crust) -> CrustClass {
     }
 }
 
+/// Whether a sill on which the sea stands connects the basin behind it to the ocean (see
+/// [`crate::sea::ocean_from`]): only without [`ErosionParams::sea_spill`].
+fn open_sills(erosion: &Option<ErosionParams>) -> bool {
+    erosion.as_ref().is_none_or(|params| !params.sea_spill)
+}
+
 /// The surface elevations as the climate and temperature models see them: closed depressions
 /// below sea level are land (raised to sea level; the lapse rate ignores elevations below it
 /// anyway), so that they get runoff and potential evaporation instead of ocean evaporation.
@@ -822,8 +838,9 @@ fn climate_elevations(
     mesh: &crate::sphere::SphereMesh,
     elevation: &[f64],
     seeds: &[usize],
+    open_sills: bool,
 ) -> Vec<f64> {
-    let ocean = crate::sea::ocean_from(mesh, elevation, seeds.iter().copied());
+    let ocean = crate::sea::ocean_from(mesh, elevation, seeds.iter().copied(), open_sills);
     let mut elevation = elevation.to_vec();
     for (e, ocean) in elevation.iter_mut().zip(ocean) {
         if !ocean {

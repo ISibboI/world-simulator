@@ -1252,6 +1252,23 @@ fn snapshot(
         planet_statistics.inland_change,
     );
     info!(
+        "    spill: {} lakes in {} depressions holding water, {} of them with several \
+         (inner sills) | sea-fed basins {} ({:.1} cells covered, sea water {:.0} km³ = {:.2} m \
+         of sea level, evaporation beyond their own inflow {:.0} km³/yr, endorheic land into \
+         them {:.1}% of land) | poured over sills at the end of the step {:.0} km³ ({:.2} m)",
+        hydrology.lake_bodies,
+        hydrology.lakes,
+        hydrology.split_lakes,
+        hydrology.sea_fed_lakes,
+        hydrology.sea_fed_cells,
+        hydrology.sea_water / 1e9,
+        hydrology.sea_water * per_ocean_area,
+        hydrology.sea_fed_evaporation / 1e9,
+        100.0 * hydrology.endorheic_sea_fed_cells / land_cells,
+        hydrology.sea_spill_deficit / 1e9,
+        hydrology.sea_spill_deficit * per_ocean_area,
+    );
+    info!(
         "    temperature global {:5.1} °C, equator {:5.1} °C, poles {:6.1} °C | \
          land seasonal range {:4.1} K | permanently frozen {:4.1}% | heat transport {:+.1}/{:+.1} PW \
          (ocean at 20°N {:+.1}, 20°S {:+.1}) | gyres {:.0} Sv | solar constant {:.1} W/m²",

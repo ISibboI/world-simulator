@@ -189,9 +189,9 @@ fn sea_seeds(
     seas
 }
 
-/// The pass level of every cell from `seeds` (see [`Flood`]).
-#[cfg(test)]
-fn pass_levels(mesh: &SphereMesh, level: &[f64], seeds: &[usize]) -> Vec<f64> {
+/// The pass level of every cell from `seeds` (see [`Flood`]): the lowest level at which water
+/// from the seeds reaches it.
+pub fn pass_levels(mesh: &SphereMesh, level: &[f64], seeds: &[usize]) -> Vec<f64> {
     flood(mesh, level, seeds).pass
 }
 
@@ -229,13 +229,22 @@ pub fn ocean_mask(mesh: &SphereMesh, elevation: &[f64], min_sea_fraction: f64) -
 }
 
 /// The cells below sea level (`elevation < 0`, less [`SILL_TOLERANCE`]) connected to the
-/// `seeds` through cells below sea level or sills at sea level.
+/// `seeds` through cells below sea level, and with `open_sills` also over sills at sea level
+/// (within [`SILL_TOLERANCE`]; the model before #168). Without, a sill on which the sea stands
+/// closes the basin behind it, which the sea fills by pouring over the sill (see
+/// [`crate::erosion::ErosionParams::sea_spill`]).
 pub fn ocean_from(
     mesh: &SphereMesh,
     elevation: &[f64],
     seeds: impl IntoIterator<Item = usize>,
+    open_sills: bool,
 ) -> Vec<bool> {
-    let passable = |cell: usize| elevation[cell] < SILL_TOLERANCE;
+    let sill = if open_sills {
+        SILL_TOLERANCE
+    } else {
+        -SILL_TOLERANCE
+    };
+    let passable = |cell: usize| elevation[cell] < sill;
     let mut reached = vec![false; mesh.len()];
     let mut queue = VecDeque::new();
     for seed in seeds {
