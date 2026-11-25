@@ -504,11 +504,11 @@ impl Planet {
                     &elevation,
                     seeds.iter().copied(),
                 );
-                per_cell
-                    .iter()
-                    .zip(&result.water.ocean)
-                    .filter(|(a, b)| a != b)
-                    .count()
+                // The erosion's ocean at the start of the step (its result has the one at the
+                // end).
+                let sample =
+                    crate::sea::ocean_from(self.tectonics.mesh(), surface, seeds.iter().copied());
+                per_cell.iter().zip(&sample).filter(|(a, b)| a != b).count()
             } else {
                 0
             };

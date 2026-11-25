@@ -1414,7 +1414,7 @@ struct PreviousSnapshot {
 /// number of cells showing the same sample, whether the cell is at a coast, precipitation (m/yr),
 /// discharge (m³/yr), longitude (°), the annual mean, January and July surface temperatures
 /// (°C), evaporation or evapotranspiration (m/yr), and January and July precipitation (m/yr),
-/// …, the lake depth (m, relative to the surface the erosion saw), the plate-local index of the
+/// …, the lake depth (m, relative to the end-of-step surface as the erosion sees it), the plate-local index of the
 /// crust sample shown and the sample surface (m; what the erosion sees with
 /// `erosion.sample_surface`, written whether or not it is on).
 #[cfg(not(target_arch = "wasm32"))]
