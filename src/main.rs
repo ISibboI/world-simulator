@@ -148,8 +148,10 @@ struct Cli {
     cell_dump: bool,
 
     /// From this time (Myr) on, append the closed depressions after every step to `lakes.csv`
-    /// in `--output` (time, then `cell:lake:spill` of every cell in a depression: lake depth and
-    /// depth below the spill level in m), for analysing how long lakes persist.
+    /// in `--output` (time, then `cell:lake:spill` of every cell in a depression at the end of
+    /// the step: lake depth and depth below the spill level in m; `sCELL` for the cells in a
+    /// depression at the start of the step; `f:N:M` for the N depressions with M cells that the
+    /// step's sediment filled), for analysing how long lakes persist.
     #[arg(long)]
     lake_log_from: Option<f64>,
 

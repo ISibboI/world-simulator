@@ -76,7 +76,8 @@ def seed(d):
     r['lake cells per step'] = np.mean([len(l) for l in lakes])
     if filled:
         r['depression cells filled by sediment per step'] = np.mean([f[1] for f in filled])
-        r['lake cells lost per step'] = lost / max(len(steps) - 1, 1)
+    r['lake cells lost per step'] = lost / max(len(steps) - 1, 1)
+    r['lake cells new per step'] = np.mean([len(b - a) for a, b in zip(lakes, lakes[1:])])
     r['depression cells per step'] = np.mean([len(x) for x in dep])
     # lake objects and lifetimes
     comps = [components(l, nb) for l in lakes]
