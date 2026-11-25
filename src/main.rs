@@ -1062,6 +1062,37 @@ fn snapshot(
         statistics.metamorphosed.0 + statistics.metamorphosed.1,
         statistics.metamorphosed.1,
     );
+    let sheet = simulation.sheet_statistics();
+    info!(
+        "    deformation: strain rate ≥ 1e-16/s {:.1}% of the surface (continental {:.1}%, {:.1}% of \
+         the continental crust; plate interiors {:.1}%), ≥ 1e-15/s {:.1}% | weak samples {}, \
+         blocks {}, speed rms {:.2} max {:.2} cm/yr | solve {} iterations (residual {:.1e}; \
+         {:.1} per solve, {} unconverged; {:.1} s solve, {:.1} s transport) | fronts vacated {}, grown {} | splits {} | moved \
+         {:.3e} Gt, ledger {:+.3e} Gt | collisions converge at {:.2} cm/yr by the plates' \
+         rotations, {:.2} cm/yr at the boundary",
+        100.0 * sheet.area_1e16,
+        100.0 * sheet.continental_area_1e16,
+        100.0 * sheet.continental_share_1e16,
+        100.0 * sheet.interior_area_1e16,
+        100.0 * sheet.area_1e15,
+        sheet.weak_samples,
+        sheet.blocks,
+        sheet.rms_speed,
+        sheet.max_speed,
+        sheet.iterations,
+        sheet.residual,
+        sheet.total_iterations as f64 / sheet.solves.max(1) as f64,
+        sheet.unconverged,
+        sheet.solve_seconds,
+        sheet.transport_seconds,
+        sheet.vacated,
+        sheet.grown,
+        sheet.splits,
+        sheet.moved * cell_area / 1e12,
+        statistics.ledger.deformation * cell_area / 1e12,
+        sheet.collision_convergence.0,
+        sheet.collision_convergence.1,
+    );
     info!(
         "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
          cell, {} mismatches",
@@ -1369,7 +1400,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -1386,10 +1417,17 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             .neighbors(cell)
             .iter()
             .any(|&m| ocean[m as usize] != marine);
+        // Deformation velocity (cm/yr) east and north.
+        let r = mesh.vertex(cell);
+        let east = glam::DVec3::Z.cross(r).normalize_or_zero();
+        let north = r.cross(east);
+        let u = simulation.deformation_velocity(cell) * (EARTH_RADIUS * 100.0 / 1e6);
+        let (strain, dilatation) = simulation.strain_rate(cell);
         writeln!(
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
-             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{}",
+             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
+             {:.3},{:.3}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -1420,6 +1458,10 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             crust.strength_age(simulation.time()).min(1e4),
             simulation.lithosphere_strength(cell),
             u8::from(marine),
+            strain,
+            dilatation,
+            u.dot(east),
+            u.dot(north),
         )?;
     }
     file.flush()?;

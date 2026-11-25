@@ -134,9 +134,7 @@ impl Simulation {
             let cell = boundary.cell;
             let position = self.mesh.vertex(cell);
             let crust = self.surface_crust(cell);
-            let relative = (self.plates[boundary.plate as usize].angular_velocity
-                - self.plates[boundary.other as usize].angular_velocity)
-                .cross(position);
+            let relative = self.material_relative_velocity(boundary);
             let convergence = boundary.convergence;
             let strike_slip = relative.dot(position.cross(boundary.normal)).abs();
             // The upper side of a trench or diffuse zone: a neighbour of the other plate is its

@@ -36,9 +36,10 @@ impl RenderMode for PlateMotion {
     fn legend(&self, _options: &OptionValues, data: Option<&ModeData>) -> Legend {
         let style = style(data.map_or(DEFAULT_ARROW_SPACING, |data| data.arrow_spacing));
         Legend {
-            description: "Velocity of the plates over the mantle (the planet's fixed frame), \
-                          over the topographic colours. Arrow length grows with the square root \
-                          of the speed, up to 10 cm/yr."
+            description: "Velocity of the lithosphere over the mantle (the planet's fixed \
+                          frame): the plates' motion plus their internal deformation (past frames \
+                          of the history: the plates' motion only), over the topographic colours. \
+                          Arrow length grows with the square root of the speed, up to 10 cm/yr."
                 .into(),
             scale: None,
             swatches: Vec::new(),

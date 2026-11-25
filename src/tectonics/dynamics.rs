@@ -31,7 +31,7 @@ use glam::{DMat3, DVec3};
 use super::*;
 
 /// Seconds per million years.
-const SECONDS_PER_MYR: f64 = 1e6 * 365.25 * 24.0 * 3600.0;
+pub(super) const SECONDS_PER_MYR: f64 = 1e6 * 365.25 * 24.0 * 3600.0;
 
 /// Maximum number of solves for the set of converging collision contacts and the resisting
 /// forces of subduction initiation. The damped iteration for a yielding contact alone needs
@@ -71,6 +71,28 @@ pub(super) struct BoundaryCell {
     /// Id of the boundary segment of the pair covering the cell, if any (see
     /// [`super::polarity`]).
     pub(super) segment: Option<u32>,
+    /// A neighbouring cell of the other plate.
+    pub(super) neighbor: u32,
+}
+
+/// The state of the last torque balance (see [`Simulation::update_plate_velocities`]): its
+/// boundary cells with their smoothed normals and the converged couplings of the resisting
+/// forces, from which the deformation of the plates takes the forces on each cell (see
+/// [`super::sheet`]).
+#[derive(Clone, Debug, Default)]
+pub(super) struct ForceBalance {
+    pub(super) boundaries: Vec<BoundaryCell>,
+    /// The normals used by the shear and collision couplings, per boundary cell.
+    pub(super) normals: Vec<DVec3>,
+    /// Boundary cells with a yielding (initiation, belt, diffuse-zone) resistance and its
+    /// effective viscous coupling (N·s/m) between the two plates.
+    pub(super) nascent: Vec<(usize, f64)>,
+    /// Collision boundary cells that converge (collision resistance acts on the plate only).
+    pub(super) active_collisions: Vec<usize>,
+    /// Collision resistance coupling (N·s/m) per active collision cell.
+    pub(super) collision_coupling: f64,
+    /// Mantle flow velocity (m/s) at every cell.
+    pub(super) mantle_velocity: Vec<DVec3>,
 }
 
 impl Simulation {
@@ -119,6 +141,7 @@ impl Simulation {
                     convergence: 0.0,
                     kind: BoundaryKind::Other,
                     segment: None,
+                    neighbor,
                 });
                 neighbors.push(neighbor);
             }
@@ -134,9 +157,12 @@ impl Simulation {
             let position = self.mesh.vertex(boundary.cell);
             let crust = self.surface_crust(boundary.cell);
             let other_crust = self.surface_crust(neighbor);
+            // The material velocities: the plates' rotations and their deformation.
             let relative = (self.plates[boundary.plate as usize].angular_velocity
                 - self.plates[boundary.other as usize].angular_velocity)
-                .cross(position);
+                .cross(position)
+                + self.deformation_velocity(boundary.cell)
+                - self.deformation_velocity(neighbor);
             let convergence = relative.dot(boundary.normal);
             let segment =
                 self.polarities
@@ -186,7 +212,8 @@ impl Simulation {
     /// [`polarity::Segment::subducting`]). `boundaries` are the current [`Self::boundary_cells`].
     /// Returns whether any segment started or stopped subducting. With `record`, segments whose
     /// slab was decaying and that subduct again are counted (once per step: the velocity solve
-    /// records, the slab update does not).
+    /// records, the slab update does not), and the plates' rotations are the mean rotations of
+    /// the torque balance (see `Simulation::deformation_velocity_absolute`).
     pub(super) fn update_segment_motion(
         &mut self,
         boundaries: &[BoundaryCell],
@@ -195,6 +222,16 @@ impl Simulation {
         let params = &self.params;
         let min_convergence = params.min_trench_convergence / (params.planet_radius * 100.0 / 1e6);
         let yield_rate = params.diffuse_convergence / (params.planet_radius * 100.0 / 1e6);
+        // The deformation of the plates at a cell (see `sheet`). The velocity solve (`record`)
+        // has just set the plates' mean rotations, before their frames follow their largest
+        // blocks again, so there it is taken relative to those.
+        let deformation = |cell: u32| {
+            if record {
+                self.deformation_velocity_absolute(cell)
+            } else {
+                self.deformation_velocity(cell)
+            }
+        };
         // Per segment id: Σ normal convergence, Σ |strike-slip|, cells, converging cells, cells
         // converging faster than a diffuse zone creeps.
         let mut sums: HashMap<u32, (f64, f64, usize, usize, usize)> = HashMap::default();
@@ -213,7 +250,9 @@ impl Simulation {
             let r = self.mesh.vertex(boundary.cell);
             let relative = (self.plates[boundary.plate as usize].angular_velocity
                 - self.plates[boundary.other as usize].angular_velocity)
-                .cross(r);
+                .cross(r)
+                + deformation(boundary.cell)
+                - deformation(boundary.neighbor);
             let entry = sums.entry(id).or_default();
             let convergence = relative.dot(boundary.normal);
             entry.0 += convergence;
@@ -317,7 +356,29 @@ impl Simulation {
         // boundary normal n of its cell.
         let length_per_cell = self.boundary_length_per_cell();
         let normals: Vec<DVec3> = boundaries.iter().map(|boundary| boundary.normal).collect();
-        for (boundary, &normal) in boundaries.iter().zip(&normals) {
+        // The deformation of the plates at their boundaries (m/s, the cell's side minus the
+        // other side; see `sheet`): the couplings resist the relative motion of the material,
+        // not of the plates' rotations. From the last deformation solve (lagged).
+        let deformation: Vec<DVec3> = boundaries
+            .iter()
+            .map(|boundary| {
+                (self.deformation_velocity_absolute(boundary.cell)
+                    - self.deformation_velocity_absolute(boundary.neighbor))
+                    * (radius / SECONDS_PER_MYR)
+            })
+            .collect();
+        // Torque on the plate of a boundary cell (and minus it on the other plate, if both) of
+        // the coupling force −k ((Δu) · d) d at the cell.
+        let coupling_torque = |index: usize, k: f64, direction: DVec3| {
+            let r = self.mesh.vertex(boundaries[index].cell);
+            r.cross(direction) * (-k * radius * deformation[index].dot(direction))
+        };
+        let add_torque = |rhs: &mut [f64], plate: usize, torque: DVec3| {
+            for i in 0..3 {
+                rhs[3 * plate + i] += torque[i];
+            }
+        };
+        for (index, (boundary, &normal)) in boundaries.iter().zip(&normals).enumerate() {
             let k = 0.5 * params.basal_drag * params.boundary_coupling_width * length_per_cell;
             if k <= 0.0 {
                 continue;
@@ -328,6 +389,10 @@ impl Simulation {
             add_block(&mut base, size, q, q, block);
             add_block(&mut base, size, p, q, -block);
             add_block(&mut base, size, q, p, -block);
+            let r = self.mesh.vertex(boundary.cell);
+            let torque = coupling_torque(index, k, r.cross(normal));
+            add_torque(&mut rhs, p, torque);
+            add_torque(&mut rhs, q, -torque);
         }
 
         // Collision resistance: the force on the plate −k ((v_p − v_q) · n) n at R r gives the
@@ -336,11 +401,15 @@ impl Simulation {
         let coupling = params.collision_resistance * params.basal_drag * cell_area;
         // With the smoothed normals (see `boundary_cells`): the raw ones scatter by ~20°, which
         // made strike-slip contacts look half converging and resisted along strike.
-        let collisions: Vec<(&BoundaryCell, DVec3)> = boundaries
+        let collision_indices: Vec<usize> = boundaries
             .iter()
-            .zip(&normals)
-            .filter(|(boundary, _)| boundary.kind == BoundaryKind::Collision)
-            .map(|(boundary, &normal)| (boundary, normal))
+            .enumerate()
+            .filter(|(_, boundary)| boundary.kind == BoundaryKind::Collision)
+            .map(|(index, _)| index)
+            .collect();
+        let collisions: Vec<(&BoundaryCell, DVec3)> = collision_indices
+            .iter()
+            .map(|&index| (&boundaries[index], normals[index]))
             .collect();
         let mut active = vec![true; collisions.len()];
 
@@ -358,10 +427,11 @@ impl Simulation {
             to_m_per_s(params.locked_convergence),
             to_m_per_s(params.diffuse_convergence),
         );
-        let nascent: Vec<(&BoundaryCell, DVec3, f64, f64)> = boundaries
+        let nascent: Vec<(&BoundaryCell, DVec3, f64, f64, usize)> = boundaries
             .iter()
             .zip(&normals)
-            .filter_map(|(boundary, &normal)| {
+            .enumerate()
+            .filter_map(|(index, (boundary, &normal))| {
                 // Thickened collision belts resist further convergence with their excess
                 // potential energy, also a plastic force (see `Simulation::belt_resistance`).
                 let belt = if boundary.kind == BoundaryKind::Collision {
@@ -379,22 +449,28 @@ impl Simulation {
                 } else {
                     locked_speed
                 };
-                (strength > 0.0).then_some((boundary, normal, strength, lock))
+                (strength > 0.0).then_some((boundary, normal, strength, lock, index))
             })
             .collect();
         let mut nascent_coupling: Vec<f64> = nascent
             .iter()
-            .map(|&(_, _, strength, lock)| strength / lock)
+            .map(|&(_, _, strength, lock, _)| strength / lock)
             .collect();
 
         let mut omega = vec![DVec3::ZERO; plate_count];
         let mut converged = false;
         for _ in 0..MAX_ACTIVE_SET_ITERATIONS {
             let mut matrix = base.clone();
-            for (&(boundary, normal, _, _), &coupling) in nascent.iter().zip(&nascent_coupling) {
+            let mut rhs = rhs.clone();
+            for (&(boundary, normal, _, _, index), &coupling) in
+                nascent.iter().zip(&nascent_coupling)
+            {
                 if coupling <= 0.0 {
                     continue;
                 }
+                let torque = coupling_torque(index, coupling, normal);
+                add_torque(&mut rhs, boundary.plate as usize, torque);
+                add_torque(&mut rhs, boundary.other as usize, -torque);
                 let r = self.mesh.vertex(boundary.cell);
                 let m = r.cross(normal);
                 let block = outer(m, m) * (coupling * radius * radius);
@@ -404,11 +480,16 @@ impl Simulation {
                 add_block(&mut matrix, size, p, q, -block);
                 add_block(&mut matrix, size, q, p, -block);
             }
-            for ((boundary, normal), _) in collisions
+            for (((boundary, normal), _), &index) in collisions
                 .iter()
                 .zip(&active)
-                .filter(|(_, active)| **active)
+                .zip(&collision_indices)
+                .filter(|((_, active), _)| **active)
             {
+                if coupling > 0.0 {
+                    let torque = coupling_torque(index, coupling, *normal);
+                    add_torque(&mut rhs, boundary.plate as usize, torque);
+                }
                 let r = self.mesh.vertex(boundary.cell);
                 let m = r.cross(*normal);
                 let block = outer(m, m) * (coupling * radius * radius);
@@ -428,7 +509,7 @@ impl Simulation {
                 );
             }
 
-            let solution = solve_linear_system(matrix, rhs.clone(), size);
+            let solution = solve_linear_system(matrix, rhs, size);
             for (plate, omega) in omega.iter_mut().enumerate() {
                 *omega = DVec3::new(
                     solution[3 * plate],
@@ -439,11 +520,16 @@ impl Simulation {
 
             // Collision resistance only acts where the continents converge.
             let mut changed = false;
-            for ((boundary, normal), active) in collisions.iter().zip(active.iter_mut()) {
+            for (((boundary, normal), active), &index) in collisions
+                .iter()
+                .zip(active.iter_mut())
+                .zip(&collision_indices)
+            {
                 let r = self.mesh.vertex(boundary.cell);
                 let relative = (omega[boundary.plate as usize] - omega[boundary.other as usize])
                     .cross(r)
-                    .dot(*normal);
+                    .dot(*normal)
+                    + deformation[index].dot(*normal) / radius;
                 let converging = relative > 0.0;
                 if converging != *active {
                     *active = converging;
@@ -453,14 +539,15 @@ impl Simulation {
             // The effective coupling of the yielding contacts follows the new speeds: the
             // resisting force is the strength where the contact converges (less where it is
             // locked) and nothing where it opens.
-            for (&(boundary, normal, strength, lock), coupling) in
+            for (&(boundary, normal, strength, lock, index), coupling) in
                 nascent.iter().zip(nascent_coupling.iter_mut())
             {
                 let r = self.mesh.vertex(boundary.cell);
                 let speed = (omega[boundary.plate as usize] - omega[boundary.other as usize])
                     .cross(r)
                     .dot(normal)
-                    * radius;
+                    * radius
+                    + deformation[index].dot(normal);
                 let target = if speed > 0.0 {
                     strength / speed.max(lock)
                 } else {
@@ -498,6 +585,27 @@ impl Simulation {
             plate.angular_velocity = omega * SECONDS_PER_MYR;
         }
         self.update_segment_motion(&boundaries, true);
+        // What the deformation of the plates needs to know about the forces (see `sheet`).
+        let nascent = nascent
+            .iter()
+            .zip(&nascent_coupling)
+            .filter(|&(_, &coupling)| coupling > 0.0)
+            .map(|(&(_, _, _, _, index), &coupling)| (index, coupling))
+            .collect();
+        let active_collisions = collision_indices
+            .iter()
+            .zip(&active)
+            .filter(|(_, active)| **active)
+            .map(|(&index, _)| index)
+            .collect();
+        self.force_balance = Some(ForceBalance {
+            boundaries,
+            normals,
+            nascent,
+            active_collisions,
+            collision_coupling: coupling,
+            mantle_velocity: mantle_velocity.to_vec(),
+        });
     }
 
     /// Whether a boundary cell belongs to a diffuse contact: no segment yet, or a segment that
@@ -829,7 +937,7 @@ impl Simulation {
     }
 }
 
-fn outer(a: DVec3, b: DVec3) -> DMat3 {
+pub(super) fn outer(a: DVec3, b: DVec3) -> DMat3 {
     DMat3::from_cols(a * b.x, a * b.y, a * b.z)
 }
 
