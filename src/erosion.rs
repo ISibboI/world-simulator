@@ -144,6 +144,11 @@ pub struct ErosionParams {
     /// depression continuing a lake of the previous step holds water down to
     /// [`LAKE_MIN_DEPTH`].
     pub lake_onset_depth: f64,
+    /// Whether the surface processes see every crust sample at one elevation (#112, option b;
+    /// see [`crate::tectonics::Simulation::sample_surface_elevations`]): cells showing the same
+    /// sample are one column, so the lower of two such twins is no pit of its own. Otherwise
+    /// each cell has its own surface (the model before #112 b).
+    pub sample_surface: bool,
 }
 
 impl Default for ErosionParams {
@@ -186,6 +191,7 @@ impl Default for ErosionParams {
             runoff_discharge: true,
             isostatic_incision: true,
             lake_onset_depth: 30.0,
+            sample_surface: true,
         }
     }
 }
@@ -248,6 +254,10 @@ impl ErosionParams {
             }
             "isostatic_incision" => {
                 self.isostatic_incision = value != 0.0;
+                return Ok(());
+            }
+            "sample_surface" => {
+                self.sample_surface = value != 0.0;
                 return Ok(());
             }
             "max_margin_cells" | "max_fan_cells" => {
@@ -327,6 +337,9 @@ pub struct Surface<'a> {
     /// The cells covered by lakes at the end of the previous step (empty if unknown): a
     /// depression on or next to them continues a lake (see [`ErosionParams::lake_onset_depth`]).
     pub previous_lakes: &'a [bool],
+    /// Cells showing one crust sample share an id here (#112 b; empty: every cell is its own
+    /// column). The lakes at the end of the step see such cells at their mean level.
+    pub sample: &'a [u32],
 }
 
 /// Changes caused by one erosion step, and diagnostic fields.
@@ -422,7 +435,10 @@ pub struct SurfaceWater {
     /// or under a lake.
     pub depression: Vec<bool>,
     /// Depth of lake water over the cell's floor (m), zero where there is no lake. The floor is
-    /// pressed down by the water's own load (see [`lake_water_depth`]).
+    /// pressed down by the water's own load (see [`lake_water_depth`]). It is the floor of the
+    /// surface the erosion saw: with [`ErosionParams::sample_surface`], cells showing one crust
+    /// sample share one floor, so on the per-cell surface their water surfaces differ by the
+    /// dynamic topography between them (a few metres; #112 b).
     pub lake_depth: Vec<f64>,
     /// Depth of the cell's floor below the spill level of its depression (m), zero outside
     /// depressions; of the floor without the load of lake water.
@@ -488,6 +504,7 @@ pub fn erode(
         class,
         ocean_volume,
         ocean_seeds,
+        sample,
         ..
     } = *surface;
     let cell_count = mesh.len();
@@ -873,8 +890,9 @@ pub fn erode(
         WaveErosion::default()
     };
 
-    // Relative to the shifted sea level.
-    let coastal = seabed.sea_level(mesh, cell_area, ocean_volume, ocean_seeds);
+    // Relative to the shifted sea level, less the sea level before the step (not zero when the
+    // erosion sees another surface than the tectonics' sea-level solve, #112 b).
+    let coastal = seabed.sea_level(mesh, cell_area, ocean_volume, ocean_seeds) - initial_sea_level;
 
     // The lakes at the end of the step (#160): the depressions the topography had at its start
     // trapped the step's sediment, and a shallow one fills up within much less than a step
@@ -882,15 +900,16 @@ pub fn erode(
     // deliver per Myr). Only what is left of the depressions after the deposition holds
     // water, with the water balance on the new floors. The routing above used the depressions
     // at the start, which is where the water and sediment went during the step.
-    let end_ocean = sea::ocean_from(mesh, &seabed.elevation, ocean_seeds.iter().copied());
-    let end = water_state(
-        mesh,
-        &seabed.elevation,
-        &end_ocean,
-        surface,
-        params,
-        cell_area,
-    );
+    // Cells showing one crust sample are one column (#112 b): the step changed them separately,
+    // but the sample takes the mean of their changes, so the lakes at the end see them at their
+    // mean level (in dry elevation, so that the water load stays right).
+    let end_elevation = if sample.is_empty() {
+        seabed.elevation.clone()
+    } else {
+        sample_means(&seabed.elevation, sample)
+    };
+    let end_ocean = sea::ocean_from(mesh, &end_elevation, ocean_seeds.iter().copied());
+    let end = water_state(mesh, &end_elevation, &end_ocean, surface, params, cell_area);
     let mut water = end.surface_water;
     water.depression_at_start = lakes.lake.iter().map(|&lake| lake != NO_LAKE).collect();
     let hydrology = Hydrology {
@@ -913,6 +932,25 @@ pub fn erode(
         sea_level_change: SurfaceSeaLevel { fluvial, coastal },
         wave,
     }
+}
+
+/// `elevation` (m, relative to sea level) with the cells of each `sample` id at their mean dry
+/// elevation (see [`isostasy::to_dry`]); ids are below the cell count.
+fn sample_means(elevation: &[f64], sample: &[u32]) -> Vec<f64> {
+    let mut sums = vec![(0.0, 0u32); elevation.len()];
+    for (&e, &id) in elevation.iter().zip(sample) {
+        let sum = &mut sums[id as usize];
+        sum.0 += isostasy::to_dry(e);
+        sum.1 += 1;
+    }
+    elevation
+        .iter()
+        .zip(sample)
+        .map(|(&e, &id)| match sums[id as usize] {
+            (_, 1) => e,
+            (dry, count) => isostasy::to_surface(dry / f64::from(count)),
+        })
+        .collect()
 }
 
 /// The water of the land on a topography: drainage, closed depressions, discharge and the
@@ -2265,6 +2303,7 @@ mod tests {
                     sea::MIN_SEA_FRACTION,
                 ),
                 previous_lakes: &[],
+                sample: &[],
             },
             params,
             1e6,
@@ -2598,6 +2637,7 @@ mod tests {
                     sea::MIN_SEA_FRACTION,
                 ),
                 previous_lakes: &[],
+                sample: &[],
             },
             &params,
             1e6,
@@ -2699,6 +2739,7 @@ mod tests {
                     sea::MIN_SEA_FRACTION,
                 ),
                 previous_lakes: &[],
+                sample: &[],
             },
             params,
             1e6,
@@ -2935,6 +2976,7 @@ mod tests {
                     sea::MIN_SEA_FRACTION,
                 ),
                 previous_lakes,
+                sample: &[],
             },
             &params,
             1e6,
@@ -3615,5 +3657,80 @@ mod tests {
             .sum();
         let eroded: f64 = result.bedrock_delta.iter().map(|d| -d * 2800.0).sum();
         assert!(change.abs() < 1e-9 * eroded, "{change} {eroded}");
+    }
+
+    /// A cell on the island's flank and its lowest neighbour, its twin (#112 b).
+    fn twins(mesh: &SphereMesh, elevation: &[f64]) -> (usize, usize) {
+        let pit = mesh.nearest(glam::DVec3::new(0.15, 0.0, 1.0).normalize()) as usize;
+        let twin = mesh
+            .neighbors(pit as u32)
+            .iter()
+            .map(|&n| n as usize)
+            .min_by(|&a, &b| elevation[a].total_cmp(&elevation[b]))
+            .unwrap();
+        (pit, twin)
+    }
+
+    #[test]
+    fn cells_of_one_sample_end_at_their_mean_dry_level() {
+        // One sample at a land cell and a submerged cell, one at a single cell.
+        let elevation = [10.0, -20.0, 5.0];
+        let means = sample_means(&elevation, &[0, 0, 1]);
+        let dry = 0.5 * (isostasy::to_dry(10.0) + isostasy::to_dry(-20.0));
+        assert_eq!(means[0], means[1]);
+        assert!((means[0] - isostasy::to_surface(dry)).abs() < 1e-12);
+        assert_eq!(means[2].to_bits(), 5.0f64.to_bits());
+    }
+
+    #[test]
+    fn twins_at_one_level_are_no_pit() {
+        // Twins show one crust sample and differ only by dynamic topography: the lower one is
+        // a 6 m pit of its own. Seen at the sample's level (both at the mean), it is part of
+        // the river network and its water reaches the ocean.
+        let mesh = SphereMesh::icosphere(4);
+        let mut elevation = island(&mesh);
+        let (pit, twin) = twins(&mesh, &elevation);
+        elevation[pit] = elevation[twin] - 6.0;
+        let plate = vec![0; mesh.len()];
+        let class = classes(&elevation, -1000.0);
+        let per_cell = run(&mesh, &elevation, 1.0, &plate, &class);
+        assert!(per_cell.water.depression_at_start[pit]);
+        let mean = 0.5 * (elevation[pit] + elevation[twin]);
+        elevation[pit] = mean;
+        elevation[twin] = mean;
+        let merged = run(&mesh, &elevation, 1.0, &plate, &class);
+        assert!(!merged.water.depression_at_start.iter().any(|&d| d));
+        let mut cell = pit;
+        while let Some(next) = merged.water.receiver[cell] {
+            cell = next as usize;
+        }
+        assert!(merged.water.ocean[cell]);
+    }
+
+    #[test]
+    fn a_depression_of_twins_fills_evenly() {
+        // A real depression of a sample shown at two cells: one lake, whose sediment raises both
+        // cells by the same amount, so the sample's mean change is each cell's change.
+        let mesh = SphereMesh::icosphere(4);
+        let mut elevation = island(&mesh);
+        let (pit, twin) = twins(&mesh, &elevation);
+        let rim = [pit, twin]
+            .iter()
+            .flat_map(|&c| mesh.neighbors(c as u32).iter().map(|&n| n as usize))
+            .filter(|&n| n != pit && n != twin)
+            .map(|n| elevation[n])
+            .fold(f64::INFINITY, f64::min);
+        elevation[pit] = rim - 200.0;
+        elevation[twin] = rim - 200.0;
+        let result = run(
+            &mesh,
+            &elevation,
+            1.0,
+            &vec![0; mesh.len()],
+            &classes(&elevation, -1000.0),
+        );
+        assert!(result.water.depression_at_start[pit] && result.water.depression_at_start[twin]);
+        assert!(result.sediment_delta[pit] > 0.0);
+        assert!((result.sediment_delta[pit] - result.sediment_delta[twin]).abs() < 1e-6);
     }
 }

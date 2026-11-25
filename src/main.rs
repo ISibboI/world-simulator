@@ -1203,10 +1203,13 @@ fn snapshot(
     );
     let hydrology = &planet_statistics.hydrology;
     let land_cells = hydrology.land_cells.max(1.0);
+    let single_sample = planet.endorheic_single_sample_drainage();
     info!(
         "    hydrology: runoff {:.0} km³/yr, to the ocean {:.0} km³/yr, lake evaporation {:.0} \
-         km³/yr (into the air {:.0}) | endorheic {:.1}% of land ({:.1}% into single-cell pits), \
-         lakes {:.1}% of land, lake potential evaporation {:.2} m/yr | depressions {}, endorheic {}, with inner sills \
+         km³/yr (into the air {:.0}) | endorheic {:.1}% of land ({:.1}% into single-cell pits, \
+         {:.1}% into single-sample depressions; ocean differs from the per-cell surface at {} \
+         cells), lakes {:.1}% of land, lake potential evaporation {:.2} m/yr | depressions {}, \
+         endorheic {}, with inner sills \
          {} | sediment trapped in lakes {:.2} km³/yr | all closed depressions {} ({:.1}% of \
          land), playas {} ({:.1}% of land)",
         hydrology.runoff / 1e9,
@@ -1215,6 +1218,8 @@ fn snapshot(
         planet_statistics.lake_evaporation_to_air / 1e9,
         100.0 * hydrology.endorheic_cells / land_cells,
         100.0 * hydrology.endorheic_pit_cells / land_cells,
+        100.0 * single_sample / land_cells,
+        planet.ocean_mismatch(),
         100.0 * hydrology.lake_cells / land_cells,
         hydrology.lake_potential_evaporation / hydrology.lake_cells.max(1e-9),
         hydrology.lakes,
@@ -1408,7 +1413,10 @@ struct PreviousSnapshot {
 /// thickness (m), crust class (0 continental origin, 1 transitional, 2 oceanic), plate, age (Myr),
 /// number of cells showing the same sample, whether the cell is at a coast, precipitation (m/yr),
 /// discharge (m³/yr), longitude (°), the annual mean, January and July surface temperatures
-/// (°C), evaporation or evapotranspiration (m/yr), and January and July precipitation (m/yr).
+/// (°C), evaporation or evapotranspiration (m/yr), and January and July precipitation (m/yr),
+/// …, the lake depth (m, relative to the surface the erosion saw), the plate-local index of the
+/// crust sample shown and the sample surface (m; what the erosion sees with
+/// `erosion.sample_surface`, written whether or not it is on).
 #[cfg(not(target_arch = "wasm32"))]
 fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Write;
@@ -1416,6 +1424,8 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     let mesh = simulation.mesh();
     let cell_count = mesh.len() as u32;
     let elevation = simulation.surface_elevations();
+    // The surface as the erosion sees it (cells showing one sample at one level, #112 b).
+    let drain = simulation.sample_surface_elevations();
     let ocean = sea::ocean_mask(mesh, &elevation, simulation.min_sea_fraction());
     // With the load of the water that actually stands on each cell (#127).
     let elevation = planet.surface_elevations();
@@ -1438,7 +1448,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -1465,7 +1475,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
              {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
-             {:.3},{:.3},{:.1},{:.4},{:.4}",
+             {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -1518,6 +1528,8 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
                 .get(cell as usize)
                 .copied()
                 .unwrap_or(0.0),
+            simulation.owner(cell).local,
+            drain[cell as usize],
         )?;
     }
     file.flush()?;
