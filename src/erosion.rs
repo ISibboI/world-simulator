@@ -433,8 +433,9 @@ pub struct SurfaceWater {
     /// or under a lake.
     pub depression: Vec<bool>,
     /// Depth of lake water over the cell's floor (m), zero where there is no lake. The floor is
-    /// the surface the erosion saw: with [`ErosionParams::sample_surface`], cells showing one
-    /// crust sample share one floor, so on the per-cell surface their water surfaces differ by
+    /// the surface at the end of the step as the erosion sees it: with
+    /// [`ErosionParams::sample_surface`], cells showing one crust sample share one floor (their
+    /// mean), so on the per-cell surface their water surfaces differ by
     /// the dynamic topography between them (a few metres; #112 b).
     pub lake_depth: Vec<f64>,
     /// Depth of the cell's floor below the spill level of its depression (m), zero outside
@@ -905,6 +906,7 @@ pub fn erode(
 /// `elevation` (m, relative to sea level) with the cells of each `sample` id at their mean dry
 /// elevation (see [`isostasy::to_dry`]); ids are below the cell count.
 fn sample_means(elevation: &[f64], sample: &[u32]) -> Vec<f64> {
+    debug_assert_eq!(sample.len(), elevation.len());
     let mut sums = vec![(0.0, 0u32); elevation.len()];
     for (&e, &id) in elevation.iter().zip(sample) {
         let sum = &mut sums[id as usize];
