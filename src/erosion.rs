@@ -311,7 +311,8 @@ pub struct Surface<'a> {
     /// Runoff of land (m/yr): the precipitation that is not evapotranspired, which feeds the
     /// rivers.
     pub runoff: &'a [f64],
-    /// Potential evaporation of land (m/yr), the evaporation of lakes.
+    /// Potential evaporation of open lake water (m/yr; see
+    /// [`crate::climate::WaterCycle::lake_potential_evaporation`]).
     pub potential_evaporation: &'a [f64],
     /// The plate the cell belongs to.
     pub plate: &'a [u32],
@@ -391,7 +392,8 @@ pub struct Hydrology {
     pub lakes: usize,
     pub endorheic_lakes: usize,
     pub nested_lakes: usize,
-    /// Potential evaporation of lake water summed over the covered cells (m/yr · cells).
+    /// Potential evaporation of lake water summed over the covered cells (m/yr · cells); of the
+    /// ice-free months only (#126).
     pub lake_potential_evaporation: f64,
     /// Endorheic land draining into single-cell depressions (cells).
     pub endorheic_pit_cells: f64,
@@ -432,6 +434,11 @@ pub struct SurfaceWater {
     pub load_correction: Vec<f64>,
     /// The depressions at the start of the erosion step, before its deposition (for analysis).
     pub depression_at_start: Vec<bool>,
+    /// Evaporation of lake water in excess of the land's evapotranspiration (m/yr, averaged over
+    /// the cell), as the water balance removes it from the runoff; it sums to
+    /// [`Hydrology::lake_evaporation`]. The climate returns it to the air in the next step
+    /// (#126).
+    pub lake_evaporation: Vec<f64>,
 }
 
 impl SurfaceWater {
@@ -446,6 +453,7 @@ impl SurfaceWater {
             spill_depth: vec![0.0; cells],
             depression_at_start: vec![false; cells],
             load_correction: vec![0.0; cells],
+            lake_evaporation: vec![0.0; cells],
         }
     }
 }
@@ -994,6 +1002,8 @@ fn water_state(
     }
     // Water surface of the cells covered by lakes (negative infinity elsewhere).
     let mut water_level = vec![f64::NEG_INFINITY; cell_count];
+    // Excess evaporation of the lake water over each cell (m³/yr).
+    let mut lake_evaporation = vec![0.0; cell_count];
     let mut endorheic = vec![false; lakes.cells.len()];
     for &cell in order.iter().rev() {
         let cell = cell as usize;
@@ -1010,18 +1020,23 @@ fn water_state(
             hydrology.depression_cells += lakes.cells[lake].len();
         }
         if let Some(lake) = lakes.exit_of(cell).filter(holds_water) {
+            // Open water evaporates at the potential rate instead of the land's
+            // evapotranspiration.
+            let excess = |c: usize| {
+                let evapotranspiration = (precipitation[c] - runoff[c]).max(0.0);
+                (potential_evaporation[c] - evapotranspiration).max(0.0) * cell_area
+            };
             let balance = lake_balance(
                 &lakes.cells[lake],
                 elevation,
                 filled[cell],
                 discharge[cell],
-                |c| {
-                    // Open water evaporates at the potential rate instead of the land's
-                    // evapotranspiration.
-                    let evapotranspiration = (precipitation[c] - runoff[c]).max(0.0);
-                    (potential_evaporation[c] - evapotranspiration).max(0.0) * cell_area
-                },
+                excess,
             );
+            for (i, &member) in lakes.cells[lake].iter().enumerate() {
+                let covered = (balance.covered - i as f64).clamp(0.0, 1.0);
+                lake_evaporation[member as usize] = covered * excess(member as usize);
+            }
             for &member in &lakes.cells[lake][..balance.covered.ceil() as usize] {
                 water_level[member as usize] = balance.level;
             }
@@ -1124,6 +1139,7 @@ fn water_state(
             })
             .collect(),
         depression_at_start: Vec::new(),
+        lake_evaporation: lake_evaporation.iter().map(|e| e / cell_area).collect(),
         load_correction: (0..cell_count)
             .map(|cell| {
                 // The floor as the water presses it (or unloaded where dry) minus the
@@ -2626,6 +2642,21 @@ mod tests {
         // All the sediment its catchment produced stays in the basin.
         assert!(arid.sediment_delta[pit] > 0.0);
         assert!(arid.hydrology.lake_sediment > 0.0);
+
+        // The lake evaporation per cell, which the climate returns to the air (#126), adds up
+        // to the evaporation the balance removed, spilling or endorheic.
+        for result in [&humid, &arid] {
+            let per_cell: f64 = result.water.lake_evaporation.iter().sum::<f64>() * cell_area;
+            let removed = result.hydrology.lake_evaporation;
+            assert!(
+                (per_cell - removed).abs() <= 1e-9 * removed,
+                "{per_cell} {removed}"
+            );
+            assert!(
+                (0..mesh.len())
+                    .all(|c| result.water.lake_evaporation[c] == 0.0 || !result.water.ocean[c])
+            );
+        }
     }
 
     /// The island with a closed depression below sea level near its top (#58), and the

@@ -83,6 +83,9 @@ pub struct PlanetStatistics {
     /// Global mean precipitation and evaporation in m/yr (equal when the water cycle is closed).
     pub global_precipitation: f64,
     pub global_evaporation: f64,
+    /// Lake evaporation that the climate returned to the air (m³/yr): the evaporation of the
+    /// lakes of the previous steps, as the solved months saw it.
+    pub lake_evaporation_to_air: f64,
     /// Mean runoff (precipitation minus evapotranspiration, which feeds the rivers) of land in
     /// m/yr.
     pub land_runoff: f64,
@@ -371,7 +374,7 @@ impl Planet {
                     dense_crust: &self.tectonics.dense_crust_thicknesses(),
                     precipitation: &self.precipitation,
                     runoff: &self.climate.water_cycle().runoff,
-                    potential_evaporation: &self.climate.water_cycle().potential_evaporation,
+                    potential_evaporation: &self.climate.water_cycle().lake_potential_evaporation,
                     plate: &plate,
                     class: &class,
                     ocean_volume: self.tectonics.ocean_volume(),
@@ -462,10 +465,16 @@ impl Planet {
         4.0 * std::f64::consts::PI * self.planet_radius.powi(2) / self.tectonics.mesh().len() as f64
     }
 
+    /// Solves the water cycle on the climate's `elevation`, with the evaporation of the lakes of
+    /// the last erosion step as a moisture source (#126).
     fn update_water_cycle(&mut self, elevation: &[f64]) {
         let fields = self.temperature.fields();
-        self.climate
-            .update(elevation, &fields.monthly, &fields.thermal_equator);
+        self.climate.update(
+            elevation,
+            &self.water.lake_evaporation,
+            &fields.monthly,
+            &fields.thermal_equator,
+        );
         let cycle = self.climate.water_cycle();
         debug!(iterations = ?cycle.iterations, clipped = cycle.clipped, "Water cycle solved");
         self.precipitation = cycle.precipitation.clone();
@@ -561,6 +570,7 @@ impl Planet {
             arid_land_fraction,
             global_precipitation,
             global_evaporation,
+            lake_evaporation_to_air: cycle.total_lake_evaporation,
             land_runoff,
             itcz: cycle.itcz.clone(),
             clipped_precipitation: cycle.clipped,

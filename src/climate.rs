@@ -27,7 +27,10 @@
 //!   the actual evapotranspiration follows the Budyko curve in Fu's form (Fu, 1981; Zhang et al.,
 //!   2004) from the annual precipitation and potential evaporation (the same bulk formula at the
 //!   land surface temperature, with the humidity of the air above). Evapotranspiration returns to
-//!   the air column (moisture recycling); the rest of the precipitation runs off.
+//!   the air column (moisture recycling); the rest of the precipitation runs off. Lakes evaporate
+//!   at the potential rate where they are free of ice: the water balance of the lakes (see
+//!   [`crate::erosion`]) removes this evaporation, beyond the land's evapotranspiration, from the
+//!   runoff, and it returns to the air column here, one time step later (#126).
 //! - **Precipitation** grows steeply with the column relative humidity `r = W / W_sat`, as
 //!   observed by Bretherton et al. (2004): `P = W / τ · exp(a (r − r₀))`. The saturation column
 //!   `W_sat = ρ_vs(T) H_v(T) exp(−z / H_v)` depends on the temperature of the free troposphere
@@ -208,8 +211,16 @@ pub struct WaterCycle {
     /// Annual evaporation from the ocean and evapotranspiration from land.
     pub evaporation: Vec<f64>,
     /// Annual potential evaporation of land (zero over the ocean): the evaporation of open water
-    /// or a wet surface at the land temperature, which is also the evaporation of lakes.
+    /// or a wet surface at the land temperature.
     pub potential_evaporation: Vec<f64>,
+    /// Annual potential evaporation of lake water (zero over the ocean): the potential
+    /// evaporation of the months in which a lake is free of ice (see [`ice_free`]). The water
+    /// balance of the lakes evaporates at this rate.
+    pub lake_potential_evaporation: Vec<f64>,
+    /// Annual evaporation of lake water that the climate received as a moisture source, in
+    /// excess of the land's evapotranspiration (part of [`Self::evaporation`]); the lake
+    /// evaporation of the previous water balance, spread over the months.
+    pub lake_evaporation: Vec<f64>,
     /// Annual runoff of land, `P − ET` from the Budyko curve with the current annual
     /// precipitation and potential evaporation (zero over the ocean). It feeds rivers.
     pub runoff: Vec<f64>,
@@ -234,6 +245,8 @@ pub struct WaterCycle {
     /// Area-weighted global means of precipitation and evaporation in m/yr.
     pub global_precipitation: f64,
     pub global_evaporation: f64,
+    /// [`Self::lake_evaporation`] summed over the planet, in m³/yr.
+    pub total_lake_evaporation: f64,
 }
 
 /// An edge between two neighbouring Voronoi cells.
@@ -282,6 +295,10 @@ struct SolvedMonth {
     evaporation: Vec<f64>,
     /// Potential evaporation of land.
     potential: Vec<f64>,
+    /// Potential evaporation of ice-free lake water.
+    lake_potential: Vec<f64>,
+    /// Evaporation of lake water beyond the land's evapotranspiration.
+    lake_evaporation: Vec<f64>,
     /// Latitude of the ITCZ in degrees.
     itcz: f64,
     /// Negative precipitation set to zero, in kg/s.
@@ -294,6 +311,8 @@ struct Month {
     evaporation: Vec<f64>,
     /// Potential evaporation of land in kg/m²/s (zero over the ocean).
     potential: Vec<f64>,
+    /// Potential evaporation of ice-free lake water in kg/m²/s (zero over the ocean).
+    lake_potential: Vec<f64>,
     /// Saturation column water vapour in kg/m².
     saturation: Vec<f64>,
     /// Column water vapour per unit of surface specific humidity in kg/m².
@@ -355,11 +374,14 @@ impl Climate {
         &self.cycle
     }
 
-    /// Solves the water cycle for the given surface elevation (m, sea level 0), monthly surface
-    /// temperatures (°C; month 0 is January) and the thermal equator of each month (degrees).
+    /// Solves the water cycle for the given surface elevation (m, sea level 0; land at or above
+    /// 0), the evaporation of lakes beyond the land's evapotranspiration (m/yr, averaged over the
+    /// cell; empty for none), monthly surface temperatures (°C; month 0 is January) and the
+    /// thermal equator of each month (degrees).
     pub fn update(
         &mut self,
         elevation: &[f64],
+        lake_evaporation: &[f64],
         monthly_temperature: &[Vec<f64>],
         itcz: &[Vec<f64>],
     ) {
@@ -389,6 +411,10 @@ impl Climate {
             (self.params.update_iterations, 1, slots)
         };
 
+        let lake_temperature: Vec<&[f64]> = months
+            .iter()
+            .map(|&month| &monthly_temperature[month][..])
+            .collect();
         let mut iterations = vec![0; month_count];
         for _ in 0..rounds {
             for &slot in &slots {
@@ -400,6 +426,7 @@ impl Climate {
                     slot,
                 );
                 self.solved[slot].potential = input.potential.clone();
+                self.solved[slot].lake_potential = input.lake_potential.clone();
                 self.solved[slot].itcz = input.itcz;
                 self.solved[slot].wind = self
                     .position
@@ -408,6 +435,13 @@ impl Climate {
                     .map(|(&position, &wind)| east_north(position, wind))
                     .collect();
                 self.set_evapotranspiration(elevation, slot, &mut input);
+                let lake = Self::add_lake_evaporation(
+                    lake_evaporation,
+                    &lake_temperature,
+                    slot,
+                    &mut input,
+                );
+                self.solved[slot].lake_evaporation = lake;
                 let (precipitation, used, clipped) = self.solve_month(&input, slot, max_newton);
                 iterations[slot] = used;
                 let solved = &mut self.solved[slot];
@@ -462,6 +496,26 @@ impl Climate {
                     * to_metres_per_year
             })
             .collect();
+        let annual_mean = |field: &dyn Fn(&SolvedMonth) -> &Vec<f64>| -> Vec<f64> {
+            (0..cell_count)
+                .map(|cell| {
+                    self.solved
+                        .iter()
+                        .map(|m| field(m).get(cell).copied().unwrap_or(0.0))
+                        .sum::<f64>()
+                        / month_count as f64
+                        * to_metres_per_year
+                })
+                .collect()
+        };
+        cycle.lake_potential_evaporation = annual_mean(&|m| &m.lake_potential);
+        cycle.lake_evaporation = annual_mean(&|m| &m.lake_evaporation);
+        cycle.total_lake_evaporation = cycle
+            .lake_evaporation
+            .iter()
+            .zip(&self.area)
+            .map(|(e, a)| e * a)
+            .sum();
         cycle.runoff = (0..cell_count)
             .map(|cell| {
                 if elevation[cell] < 0.0 {
@@ -585,6 +639,7 @@ impl Climate {
 
         let mut evaporation = vec![0.0; cell_count];
         let mut potential = vec![0.0; cell_count];
+        let mut lake_potential = vec![0.0; cell_count];
         for cell in 0..cell_count {
             let speed = (wind[cell].length_squared() + params.wind_variability.powi(2)).sqrt();
             let transfer = params.air_density * params.moisture_exchange * speed;
@@ -601,6 +656,7 @@ impl Climate {
                 let air = (vapour[cell] / vapour_per_humidity[cell])
                     .min(params.surface_humidity * saturated);
                 potential[cell] = transfer * (saturated - air);
+                lake_potential[cell] = potential[cell] * ice_free(temperature[cell]);
             }
         }
 
@@ -623,6 +679,7 @@ impl Climate {
         Month {
             evaporation,
             potential,
+            lake_potential,
             saturation,
             vapour_per_humidity,
             diffusivity,
@@ -658,6 +715,41 @@ impl Climate {
                 precipitation - budyko_runoff(precipitation, potential, self.params.budyko_omega);
             month.evaporation[cell] = actual * self.solved[slot].potential[cell] / potential;
         }
+    }
+
+    /// Adds the evaporation of lake water beyond the land's evapotranspiration (`lake`, annual
+    /// m/yr per cell, from the lakes' water balance) to the evaporation of the month in `slot`.
+    /// It is spread over the solved months (surface temperatures `temperature`, °C, one field
+    /// per month) in proportion to [`lake_season`], which depends on the temperatures alone, so
+    /// that the months' weights average to exactly one and the annual mean returns what the
+    /// balance removed. Returns the added evaporation in kg/m²/s.
+    fn add_lake_evaporation(
+        lake: &[f64],
+        temperature: &[&[f64]],
+        slot: usize,
+        month: &mut Month,
+    ) -> Vec<f64> {
+        let mut added = vec![0.0; month.evaporation.len()];
+        for (cell, &rate) in lake.iter().enumerate() {
+            if rate <= 0.0 {
+                continue;
+            }
+            let mean = temperature
+                .iter()
+                .map(|t| lake_season(t[cell]))
+                .sum::<f64>()
+                / temperature.len() as f64;
+            // A lake frozen all year (or a cell that has become ocean since the water balance)
+            // returns the water evenly over the year.
+            let weight = if mean > 0.0 {
+                lake_season(temperature[slot][cell]) / mean
+            } else {
+                1.0
+            };
+            added[cell] = rate * WATER_DENSITY / SECONDS_PER_YEAR * weight;
+            month.evaporation[cell] += added[cell];
+        }
+        added
     }
 
     /// Thermally driven boundary-layer winds (m/s) after Lindzen & Nigam (1987): air warmer than
@@ -1031,6 +1123,21 @@ fn budyko_runoff(precipitation: f64, potential: f64, omega: f64) -> f64 {
     ((root - e) * scale).max(0.0)
 }
 
+/// The fraction of a month in which a lake is free of ice, at the monthly mean temperature `t`
+/// (°C): lakes freeze over when the air stays below freezing, and ice cuts their evaporation
+/// (sublimation is neglected). A linear ramp between −2 °C and +2 °C stands in for the
+/// freezing and thawing within a month.
+fn ice_free(t: f64) -> f64 {
+    ((t + 2.0) / 4.0).clamp(0.0, 1.0)
+}
+
+/// The seasonal weight of lake evaporation at the monthly mean surface temperature `t` (°C):
+/// the saturation specific humidity of the ice-free water surface, which sets how much it can
+/// evaporate.
+fn lake_season(t: f64) -> f64 {
+    ice_free(t) * saturation_specific_humidity(t)
+}
+
 /// Saturation vapour pressure over water in Pa at `t` °C (Magnus formula, Alduchov & Eskridge,
 /// 1996).
 fn saturation_vapour_pressure(t: f64) -> f64 {
@@ -1249,7 +1356,7 @@ mod tests {
     fn solve(mesh: &SphereMesh, elevation: &[f64]) -> (Climate, Vec<f64>, Vec<f64>) {
         let mut climate = Climate::new(mesh, RADIUS, ClimateParams::default());
         let monthly = vec![temperatures(mesh, elevation); 12];
-        climate.update(elevation, &monthly, &vec![vec![0.0]; 12]);
+        climate.update(elevation, &[], &monthly, &vec![vec![0.0]; 12]);
         let precipitation = climate.water_cycle().precipitation.clone();
         let evaporation = climate.water_cycle().evaporation.clone();
         (climate, precipitation, evaporation)
@@ -1342,7 +1449,7 @@ mod tests {
         let warm: Vec<f64> = (0..mesh.len() as u32)
             .map(|c| -25.0 + 52.0 * math::cos(math::asin(mesh.vertex(c).z) - 10f64.to_radians()))
             .collect();
-        climate.update(&ocean, &vec![warm; 12], &vec![vec![10.0]; 12]);
+        climate.update(&ocean, &[], &vec![warm; 12], &vec![vec![10.0]; 12]);
         let precipitation = &climate.water_cycle().precipitation;
         let mean_at = |from: f64, to: f64| {
             let cells: Vec<f64> = (0..mesh.len())
@@ -1352,6 +1459,93 @@ mod tests {
             cells.iter().sum::<f64>() / cells.len() as f64
         };
         assert!(mean_at(5.0, 15.0) > 1.5 * mean_at(-15.0, -5.0));
+    }
+
+    /// The continent of [`continents_conserve_water_rain_shadow_and_fetch`] without mountains,
+    /// longitudes (degrees) and latitudes of the cells.
+    fn plain_continent(mesh: &SphereMesh) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let longitude: Vec<f64> = (0..mesh.len() as u32)
+            .map(|c| math::atan2(mesh.vertex(c).y, mesh.vertex(c).x).to_degrees())
+            .collect();
+        let latitude: Vec<f64> = (0..mesh.len() as u32)
+            .map(|c| math::asin(mesh.vertex(c).z).to_degrees())
+            .collect();
+        let elevation = (0..mesh.len())
+            .map(|c| {
+                if (35.0..55.0).contains(&latitude[c]) && (-40.0..40.0).contains(&longitude[c]) {
+                    200.0
+                } else {
+                    -4000.0
+                }
+            })
+            .collect();
+        (elevation, longitude, latitude)
+    }
+
+    #[test]
+    fn lakes_are_a_moisture_source() {
+        let mesh = SphereMesh::icosphere(5);
+        let (elevation, longitude, latitude) = plain_continent(&mesh);
+        let monthly = vec![temperatures(&mesh, &elevation); 12];
+        let solve = |lake: &[f64]| {
+            let mut climate = Climate::new(&mesh, RADIUS, ClimateParams::default());
+            climate.update(&elevation, lake, &monthly, &vec![vec![0.0]; 12]);
+            climate
+        };
+        // A large lake in the westerlies, evaporating 1 m/yr beyond the land's
+        // evapotranspiration.
+        let lake: Vec<f64> = (0..mesh.len())
+            .map(|c| {
+                let inside =
+                    (43.0..47.0).contains(&latitude[c]) && (-24.0..-16.0).contains(&longitude[c]);
+                if inside { 1.0 } else { 0.0 }
+            })
+            .collect();
+        let dry = solve(&[]);
+        let wet = solve(&lake);
+        let total = |climate: &Climate, field: &[f64]| -> f64 {
+            field.iter().zip(&climate.area).map(|(v, a)| v * a).sum()
+        };
+        // The climate returns exactly the lake evaporation it was given.
+        let cycle = wet.water_cycle();
+        let given = total(&wet, &lake);
+        assert!((cycle.total_lake_evaporation / given - 1.0).abs() < 1e-9);
+        // Water is conserved with the extra source.
+        let (p, e) = (
+            total(&wet, &cycle.precipitation),
+            total(&wet, &cycle.evaporation),
+        );
+        assert!((p / e - 1.0).abs() < 0.01, "ΣP {p:e} vs ΣE {e:e}");
+        // More rain downwind (east) of the lake.
+        let downwind = |climate: &Climate| {
+            let cells: Vec<f64> = (0..mesh.len())
+                .filter(|&c| {
+                    (42.0..48.0).contains(&latitude[c]) && (-14.0..0.0).contains(&longitude[c])
+                })
+                .map(|c| climate.water_cycle().precipitation[c])
+                .collect();
+            cells.iter().sum::<f64>() / cells.len() as f64
+        };
+        assert!(
+            downwind(&wet) > 1.05 * downwind(&dry),
+            "{} vs {}",
+            downwind(&wet),
+            downwind(&dry)
+        );
+        // A frozen lake: no potential evaporation, but the climate still returns the water.
+        let frozen = vec![vec![-20.0; mesh.len()]; 12];
+        let mut climate = Climate::new(&mesh, RADIUS, ClimateParams::default());
+        climate.update(&elevation, &lake, &frozen, &vec![vec![0.0]; 12]);
+        let cycle = climate.water_cycle();
+        assert!(cycle.lake_potential_evaporation.iter().all(|&e| e == 0.0));
+        assert!((cycle.total_lake_evaporation / given - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn lake_ice_stops_evaporation() {
+        assert_eq!(ice_free(-5.0), 0.0);
+        assert_eq!(ice_free(0.0), 0.5);
+        assert_eq!(ice_free(5.0), 1.0);
     }
 
     #[test]
