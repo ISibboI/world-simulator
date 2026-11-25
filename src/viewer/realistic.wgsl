@@ -59,7 +59,9 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) normal: vec3<f32>,
-    @location(1) position: vec3<f32>,
+    // The position (xyz) and the vertex's distance from the centre (w), which, interpolated,
+    // follows the surface instead of the flat triangle's chord.
+    @location(1) position: vec4<f32>,
     @location(2) bare: vec4<f32>,
     @location(3) plants: vec4<f32>,
     @location(4) snow: vec4<f32>,
@@ -74,7 +76,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
     output.clip_position = uniforms.view_projection * vec4<f32>(input.position, 1.0);
     output.normal = input.normal;
-    output.position = input.position;
+    output.position = vec4<f32>(input.position, length(input.position));
     output.bare = input.bare;
     output.plants = input.plants;
     output.snow = input.snow;
@@ -93,8 +95,6 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 const PI: f32 = 3.14159265;
 // Reflectance of water at normal incidence (refractive index 1.33).
 const WATER_F0: f32 = 0.02;
-// Colour of the haze at the limb (Rayleigh scattering of a thin atmosphere), in linear light.
-const HAZE: vec3<f32> = vec3<f32>(0.11, 0.2, 0.42);
 // Most octaves of the noise.
 const MAX_OCTAVES: i32 = 6;
 // Scale of the fractal sum (see `fbm`).
@@ -196,7 +196,7 @@ fn fbm(x: vec3<f32>, octaves: f32) -> vec4<f32> {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let up = normalize(input.position);
+    let up = normalize(input.position.xyz);
     // Derivatives first, while the control flow is uniform: the size of a pixel on the
     // surface in planet radii (its longer side), and how fast the coast value changes across it.
     let footprint = max(length(dpdx(up)), length(dpdy(up)));
@@ -281,7 +281,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Lighting in linear light: the light's colour carries the exposure's gain as a factor on
     // sRGB values (2^(stops/2.2), see `sky::Adaptation`).
     let l = uniforms.light_direction.xyz;
-    let v = normalize(uniforms.eye.xyz - input.position);
+    let v = normalize(uniforms.eye.xyz - input.position.xyz);
     let sun = pow(max(uniforms.light_color.rgb, vec3<f32>(0.0)), vec3<f32>(2.2));
     let ambient = pow(uniforms.light_color.w, 2.2);
     // The exposure's gain in linear light (`stars.z` is its factor on sRGB values). No lit
@@ -305,14 +305,36 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // The water body is seen through the surface, which reflects the Fresnel share of the view.
     let reflected = WATER_F0 + (1.0 - WATER_F0) * pow5(1.0 - nv);
     let body = albedo * (1.0 - reflected * water);
-    var color = body * (ambient + sun * nl) + sun * glint;
-    // A thin haze towards the limb of the day side (the atmosphere seen at a slant).
-    let slant = 1.0 - max(dot(up, v), 0.0);
-    let day = smoothstep(-0.1, 0.3, dot(up, l));
-    let haze = slant * slant * slant * day;
-    // The haze keeps its daylight brightness at any exposure (it also lights the twilight band,
-    // which the exposure's cap does not see).
-    let luminance = dot(sun, vec3<f32>(0.2126, 0.7152, 0.0722)) / gain;
-    color = color * (1.0 - 0.4 * haze) + HAZE * haze * luminance;
+    // The atmosphere (`atmosphere.wgsl`; `viewport.w` is the number of points along a ray, 0
+    // without an atmosphere): the sunlight reaching the ground reddens towards the terminator,
+    // and the air between the ground and the eye dims the surface and adds its own light.
+    // The flat triangles between the cell centres sag up to a few km below the surface, a scale
+    // height of the aerosols: the air is measured from the interpolated radius of the corners
+    // (at least the sea surface), or the mesh would show through the haze at grazing views.
+    let samples = i32(uniforms.viewport.w);
+    let surface_point = up * max(input.position.w, 1.0);
+    var direct = sun;
+    var air: SurfaceAir;
+    if samples > 0 {
+        air = surface_air(
+            surface_point,
+            uniforms.eye.xyz,
+            l,
+            uniforms.sun_direction.w,
+            atmosphere_top(gain),
+            samples,
+        );
+        direct = sun * air.sunlight;
+    }
+    var color = body * (ambient + direct * nl);
+    var mirrored = direct * glint;
+    if samples > 0 {
+        // Nothing but the sun's glint may reach white, and the atmosphere can be far brighter
+        // than the exposure allows (the twilight band, a crescent's haze): a hue-preserving
+        // shoulder on everything but the glint.
+        color = shoulder(color * air.transmittance + sun * ATMOSPHERE_PI * air.inscattered);
+        mirrored *= air.transmittance;
+    }
+    color += mirrored;
     return vec4<f32>(linear_to_srgb(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
 }

@@ -14,9 +14,10 @@
 //! surface may be over-exposed** (#159): the exposure is at most the one that shows the
 //! brightest sunlit point in view as it looks in daylight under the sun at the zenith
 //! ([`Exposure::headroom`]), however small the lit part of the frame is, so a thin crescent
-//! keeps its colours (the shader caps the incidence of bump-tilted normals and keeps the limb
-//! haze at its daylight brightness to match). Only the sun itself (and its glint on water) may
-//! clip, as it does for the eye. The ambient fill light of `SunAmbient` is a visual aid, not light: it is not metered
+//! keeps its colours (the shader caps the incidence of bump-tilted normals to match). The
+//! atmosphere ([`super::atmosphere`]) caps it too where its limb is brighter, and otherwise
+//! passes through a shoulder that never reaches white. Only the sun itself (and its glint on
+//! water) may clip, as it does for the eye. The ambient fill light of `SunAmbient` is a visual aid, not light: it is not metered
 //! and not brightened by the exposure. With the camera light the whole visible side is lit, so
 //! there are no stars (and no sun) in that mode.
 //!
@@ -40,7 +41,12 @@
 
 use glam::{Mat4, Vec3, Vec4};
 
+use super::atmosphere::{Model, SHOULDER_KNEE};
 use crate::sun;
+
+/// How far the brightest point of the atmosphere's limb may rise above the shoulder's knee
+/// while a lit surface is in view, in stops (see [`Exposure::headroom`]).
+const LIMB_OVER_KNEE: f32 = 0.0;
 
 /// Share of the view the sunlit planet (cosine-weighted) may cover before the metered exposure
 /// starts to drop from [`DARK_ADAPTED`], and where it reaches the daylight exposure.
@@ -102,14 +108,23 @@ pub struct Exposure {
     /// The largest cosine of the sun's incidence on the visible surface (1 when the subsolar
     /// point is in view, 0 when only the night side is): the brightest lit point.
     pub brightest: f32,
+    /// The brightness of the brightest point of the atmosphere's limb at the daylight exposure
+    /// (a white surface under the zenith sun is 1), 0 without an atmosphere.
+    pub limb: f32,
 }
 
 impl Exposure {
     /// The exposure of a view with `view_projection` from `eye` (planet radii from the centre),
     /// with the sun in `sun` (unit vector) of `sun_radius` (radians). The planet is metered as
     /// a sphere of radius 1 (the sea surface; the exaggerated relief adds a few per cent at the
-    /// limb).
-    pub fn new(view_projection: Mat4, eye: Vec3, sun: Vec3, sun_radius: f32) -> Self {
+    /// limb), with the brightest point of its limb when it has an `atmosphere`.
+    pub fn new(
+        view_projection: Mat4,
+        eye: Vec3,
+        sun: Vec3,
+        sun_radius: f32,
+        atmosphere: bool,
+    ) -> Self {
         let sun_visible = sun_visibility(eye, sun, sun_radius);
         let clip = view_projection * sun.extend(0.0);
         let sun_in_view =
@@ -131,6 +146,12 @@ impl Exposure {
             sunlit,
             darkness,
             brightest: brightest_incidence(eye, sun),
+            limb: if atmosphere {
+                Model::new(f64::from(sun_radius)).brightest_limb(eye.as_dvec3(), sun.as_dvec3())
+                    as f32
+            } else {
+                0.0
+            },
         }
     }
 
@@ -138,12 +159,22 @@ impl Exposure {
     /// point in view from over-exposing: a reflectance `a` lit at incidence cosine `c` shows as
     /// `a c 2^stops`, at most `a` (its brightness under the zenith sun in daylight) for
     /// `stops = log₂(1/c)`. Unlimited ([`DARK_ADAPTED`]) when no lit surface is in view.
+    ///
+    /// With a lit surface in view, the atmosphere's limb also caps it: its brightest point may
+    /// reach [`LIMB_OVER_KNEE`] stops above the shoulder's knee, where the shoulder still shows
+    /// its gradation. Without one (an eclipse, only the night side in view) the view adapts
+    /// fully and the ring around the planet sits in the shoulder, saturated but not white.
     pub fn headroom(&self) -> f32 {
         if self.brightest <= 0.0 {
-            DARK_ADAPTED
-        } else {
-            (1.0 / self.brightest).log2().clamp(0.0, DARK_ADAPTED)
+            return DARK_ADAPTED;
         }
+        let surface = (1.0 / self.brightest).log2();
+        let limb = if self.limb > 0.0 {
+            (SHOULDER_KNEE as f32 / self.limb).log2() + LIMB_OVER_KNEE
+        } else {
+            DARK_ADAPTED
+        };
+        surface.min(limb).clamp(0.0, DARK_ADAPTED)
     }
 
     /// The exposure the scene asks for, in stops above the daylight exposure (0 to
@@ -322,7 +353,7 @@ mod tests {
     fn day_side_hides_the_stars() {
         let eye = Vec3::new(4.5, 0.0, 0.0);
         // The sun behind the camera: a full disc in daylight.
-        let exposure = Exposure::new(view_projection(eye), eye, Vec3::X, 0.0047);
+        let exposure = Exposure::new(view_projection(eye), eye, Vec3::X, 0.0047, false);
         assert!(!exposure.sun_in_view);
         // The disc covers about a fifth of a 16:10 view, its mean cosine is 2/3.
         assert!(exposure.sunlit > 0.05, "{exposure:?}");
@@ -333,7 +364,7 @@ mod tests {
     fn eclipse_shows_the_stars() {
         // The sun exactly behind the planet: only the night side in view, the sun hidden.
         let eye = Vec3::new(4.5, 0.0, 0.0);
-        let exposure = Exposure::new(view_projection(eye), eye, -Vec3::X, 0.0047);
+        let exposure = Exposure::new(view_projection(eye), eye, -Vec3::X, 0.0047, false);
         assert_eq!(exposure.sun_visible, 0.0);
         assert!(!exposure.sun_in_view);
         assert_eq!(exposure.sunlit, 0.0);
@@ -347,14 +378,14 @@ mod tests {
         let eye = Vec3::new(4.5, 0.0, 0.0);
         let angle = 18f32.to_radians();
         let sun = Vec3::new(-angle.cos(), angle.sin(), 0.0);
-        let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047);
+        let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047, false);
         assert_eq!(exposure.sun_visible, 1.0);
         assert!(exposure.sun_in_view);
         assert_eq!(exposure.darkness, 0.0);
         // Just out of view (30° beside it; the view reaches ~26°): its glare still dims them.
         let angle = 30f32.to_radians();
         let sun = Vec3::new(-angle.cos(), angle.sin(), 0.0);
-        let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047);
+        let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047, false);
         assert!(!exposure.sun_in_view);
         assert!(exposure.darkness < 0.5, "{exposure:?}");
     }
@@ -368,7 +399,7 @@ mod tests {
         for degrees in 0..=180 {
             let angle = (degrees as f32).to_radians();
             let eye = Vec3::new(angle.cos(), angle.sin(), 0.0) * 4.5;
-            let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047);
+            let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047, false);
             let target = exposure.target();
             assert!(
                 exposure.brightest * target.exp2() <= 1.0 + 1e-4,
@@ -380,10 +411,44 @@ mod tests {
         // brighter than daylight.
         let angle = 40f32.to_radians();
         let eye = Vec3::new(angle.cos(), angle.sin(), 0.0) * 4.5;
-        let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047);
+        let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047, false);
         assert!(exposure.darkness > 0.9, "{exposure:?}");
         assert!(exposure.target() < 1.2, "{exposure:?}");
         assert!(exposure.target() > 1.0, "{exposure:?}");
+    }
+
+    #[test]
+    fn the_atmosphere_does_not_saturate_beside_a_crescent() {
+        let sun = -Vec3::X;
+        for degrees in [0, 10, 20, 30, 40, 50, 60, 90, 180] {
+            let angle = (degrees as f32).to_radians();
+            let eye = Vec3::new(angle.cos(), angle.sin(), 0.0) * 4.5;
+            let without = Exposure::new(view_projection(eye), eye, sun, 0.0047, false);
+            let with = Exposure::new(view_projection(eye), eye, sun, 0.0047, true);
+            assert!(with.target() <= without.target(), "{degrees}°");
+            if with.brightest > 0.0 && with.target() > 0.0 {
+                // (At the daylight exposure the limb may be brighter than the knee only beside
+                // the sun, where it may clip.)
+                let peak = with.limb * with.target().exp2();
+                assert!(
+                    peak <= SHOULDER_KNEE as f32 * LIMB_OVER_KNEE.exp2() * 1.001,
+                    "{degrees}° {with:?}"
+                );
+            } else if with.brightest == 0.0 {
+                // The eclipse still adapts fully, with the ring in the shoulder.
+                assert_eq!(with.target(), DARK_ADAPTED, "{degrees}°");
+            }
+        }
+        // #159's view (40° from the eclipse): the limb beside the sun is left out of the meter,
+        // so the crescent keeps most of its brightening (1.1 stops without the atmosphere).
+        let angle = 40f32.to_radians();
+        let eye = Vec3::new(angle.cos(), angle.sin(), 0.0) * 4.5;
+        let crescent = Exposure::new(view_projection(eye), eye, sun, 0.0047, true);
+        assert!(crescent.target() > 0.8, "{crescent:?}");
+        // The day side is unaffected.
+        let eye = Vec3::new(4.5, 0.0, 0.0);
+        let day = Exposure::new(view_projection(eye), eye, Vec3::X, 0.0047, true);
+        assert_eq!(day.target(), 0.0);
     }
 
     #[test]
@@ -419,11 +484,11 @@ mod tests {
     fn eclipse_and_daylight_targets() {
         let eye = Vec3::new(4.5, 0.0, 0.0);
         // Only the night side in view: fully dark-adapted, all stars.
-        let eclipse = Exposure::new(view_projection(eye), eye, -Vec3::X, 0.0047);
+        let eclipse = Exposure::new(view_projection(eye), eye, -Vec3::X, 0.0047, false);
         assert_eq!(eclipse.brightest, 0.0);
         assert_eq!(eclipse.target(), DARK_ADAPTED);
         // The full day side: daylight.
-        let day = Exposure::new(view_projection(eye), eye, Vec3::X, 0.0047);
+        let day = Exposure::new(view_projection(eye), eye, Vec3::X, 0.0047, false);
         assert_eq!(day.brightest, 1.0);
         assert_eq!(day.target(), 0.0);
     }
@@ -438,7 +503,7 @@ mod tests {
         for degrees in 0..=60 {
             let angle = (degrees as f32).to_radians();
             let eye = Vec3::new(angle.cos(), angle.sin(), 0.0) * 4.5;
-            let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047);
+            let exposure = Exposure::new(view_projection(eye), eye, sun, 0.0047, false);
             assert!(exposure.sunlit >= previous, "{degrees}° {exposure:?}");
             previous = exposure.sunlit;
             // The glare of the sun in or near the view may hide them further.
