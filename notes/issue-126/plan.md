@@ -92,3 +92,18 @@ determinism fine. Findings and what was done:
 5. Optional, done: unit tests for the exact annual return with uniform months and for the
    frozen-all-year fallback (weight 1); evaluation adds Newton iterations/clipped share where
    logged and lake/endorheic shares by latitude band where the dumps allow.
+
+## Changes after the plan review (during implementation and code review)
+
+- **Monthly weights from temperature alone**: `w_m = s(T_m) / mean_m s(T_m)` with
+  `s(T) = ice_free(T) · q_sat(T)` (`climate::lake_season`), instead of the months' lake PET.
+  The PET depends on the vapour of the month being solved, so a PET-based normalisation was not
+  exact even within one update; with temperature-only weights the months average to exactly 1
+  in every update, and the only remaining mismatch is the lag (each month keeps the lake source
+  of the update that last solved it: up to 4 steps with the defaults).
+- **Areas** (code review): the water balance works with the mean cell area `4πR²/N`, the
+  climate with Voronoi areas; the lake source is converted (`mean_area / area[cell]`), so the
+  volumes match exactly.
+- **Cold lakes** (code review, no change): the excess is the ice-reduced lake PET minus the
+  Budyko ET (with the land's unreduced PET); where the ET exceeds it, the lake evaporates no
+  more than land would and adds nothing — plausible, no water lost.

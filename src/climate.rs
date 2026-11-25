@@ -218,8 +218,9 @@ pub struct WaterCycle {
     /// balance of the lakes evaporates at this rate.
     pub lake_potential_evaporation: Vec<f64>,
     /// Annual evaporation of lake water that the climate received as a moisture source, in
-    /// excess of the land's evapotranspiration (part of [`Self::evaporation`]); the lake
-    /// evaporation of the previous water balance, spread over the months.
+    /// excess of the land's evapotranspiration (part of [`Self::evaporation`]). Each solved
+    /// month keeps the lake evaporation of the update that last solved it, so after the first
+    /// update this is the mean of the last `months / months_per_update` water balances.
     pub lake_evaporation: Vec<f64>,
     /// Annual runoff of land, `P − ET` from the Budyko curve with the current annual
     /// precipitation and potential evaporation (zero over the ocean). It feeds rivers.
@@ -375,8 +376,8 @@ impl Climate {
     }
 
     /// Solves the water cycle for the given surface elevation (m, sea level 0; land at or above
-    /// 0), the evaporation of lakes beyond the land's evapotranspiration (m/yr, averaged over the
-    /// cell; empty for none), monthly surface temperatures (°C; month 0 is January) and the
+    /// 0), the evaporation of lakes beyond the land's evapotranspiration (m/yr over the mean cell
+    /// area `4πR²/N`, as the water balance computes it; empty for none), monthly surface temperatures (°C; month 0 is January) and the
     /// thermal equator of each month (degrees).
     pub fn update(
         &mut self,
@@ -435,7 +436,7 @@ impl Climate {
                     .map(|(&position, &wind)| east_north(position, wind))
                     .collect();
                 self.set_evapotranspiration(elevation, slot, &mut input);
-                let lake = Self::add_lake_evaporation(
+                let lake = self.add_lake_evaporation(
                     lake_evaporation,
                     &lake_temperature,
                     slot,
@@ -721,15 +722,19 @@ impl Climate {
     /// m/yr per cell, from the lakes' water balance) to the evaporation of the month in `slot`.
     /// It is spread over the solved months (surface temperatures `temperature`, °C, one field
     /// per month) in proportion to [`lake_season`], which depends on the temperatures alone, so
-    /// that the months' weights average to exactly one and the annual mean returns what the
-    /// balance removed. Returns the added evaporation in kg/m²/s.
+    /// that the months' weights average to exactly one: once every month has been solved with
+    /// the same `lake`, the annual mean returns what the balance removed. `lake` is in m/yr over
+    /// the mean cell area; it is converted to the cell's own Voronoi area, so that the volumes
+    /// match. Returns the added evaporation in kg/m²/s.
     fn add_lake_evaporation(
+        &self,
         lake: &[f64],
         temperature: &[&[f64]],
         slot: usize,
         month: &mut Month,
     ) -> Vec<f64> {
         let mut added = vec![0.0; month.evaporation.len()];
+        let mean_area = self.area.iter().sum::<f64>() / self.area.len() as f64;
         for (cell, &rate) in lake.iter().enumerate() {
             if rate <= 0.0 {
                 continue;
@@ -746,7 +751,8 @@ impl Climate {
             } else {
                 1.0
             };
-            added[cell] = rate * WATER_DENSITY / SECONDS_PER_YEAR * weight;
+            added[cell] =
+                rate * mean_area / self.area[cell] * WATER_DENSITY / SECONDS_PER_YEAR * weight;
             month.evaporation[cell] += added[cell];
         }
         added
@@ -1506,9 +1512,11 @@ mod tests {
         let total = |climate: &Climate, field: &[f64]| -> f64 {
             field.iter().zip(&climate.area).map(|(v, a)| v * a).sum()
         };
-        // The climate returns exactly the lake evaporation it was given.
+        // The climate returns exactly the lake evaporation it was given (m/yr over the mean
+        // cell area).
         let cycle = wet.water_cycle();
-        let given = total(&wet, &lake);
+        let given = lake.iter().sum::<f64>() * 4.0 * std::f64::consts::PI * RADIUS * RADIUS
+            / mesh.len() as f64;
         assert!((cycle.total_lake_evaporation / given - 1.0).abs() < 1e-9);
         // Water is conserved with the extra source.
         let (p, e) = (
@@ -1532,6 +1540,19 @@ mod tests {
             downwind(&wet),
             downwind(&dry)
         );
+        // Later updates refresh one month each: twice the lake evaporation reaches the air in
+        // full once all four months have been solved again.
+        let mut climate = wet;
+        let double: Vec<f64> = lake.iter().map(|e| 2.0 * e).collect();
+        climate.update(&elevation, &double, &monthly, &vec![vec![0.0]; 12]);
+        let partial = climate.water_cycle().total_lake_evaporation / given;
+        assert!(partial > 1.0 && partial < 2.0, "{partial}");
+        for _ in 0..3 {
+            climate.update(&elevation, &double, &monthly, &vec![vec![0.0]; 12]);
+        }
+        let full = climate.water_cycle().total_lake_evaporation / given;
+        assert!((full - 2.0).abs() < 1e-9, "{full}");
+
         // A frozen lake: no potential evaporation, but the climate still returns the water.
         let frozen = vec![vec![-20.0; mesh.len()]; 12];
         let mut climate = Climate::new(&mesh, RADIUS, ClimateParams::default());

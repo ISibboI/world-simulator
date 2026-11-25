@@ -434,10 +434,10 @@ pub struct SurfaceWater {
     pub load_correction: Vec<f64>,
     /// The depressions at the start of the erosion step, before its deposition (for analysis).
     pub depression_at_start: Vec<bool>,
-    /// Evaporation of lake water in excess of the land's evapotranspiration (m/yr, averaged over
-    /// the cell), as the water balance removes it from the runoff; it sums to
-    /// [`Hydrology::lake_evaporation`]. The climate returns it to the air in the next step
-    /// (#126).
+    /// Evaporation of lake water in excess of the land's evapotranspiration (m/yr over the mean
+    /// cell area), as the water balance removes it from the runoff; times the cell area it sums
+    /// to [`Hydrology::lake_evaporation`]. The climate returns it to the air in the following
+    /// steps, as it refreshes its months in turn (#126).
     pub lake_evaporation: Vec<f64>,
 }
 
