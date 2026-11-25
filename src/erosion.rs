@@ -385,7 +385,8 @@ pub struct Hydrology {
     /// Depressions filled up to their spill level by sediment in this step, and their cells.
     pub filled_depressions: usize,
     pub filled_depression_cells: usize,
-    /// Depressions (lakes or dry basins), those that do not spill, and those with more than one
+    /// Depressions holding water (lakes, also nearly dry endorheic basins; see
+    /// [`Self::depressions`] for all), those that do not spill, and those with more than one
     /// local minimum (inner sills; their water is treated as one lake, a known simplification).
     pub lakes: usize,
     pub endorheic_lakes: usize,
@@ -598,8 +599,8 @@ pub fn erode(
             let spill = receiver[cell].map_or(filled[cell], |pass| {
                 filled[cell].min(seabed.elevation[pass as usize])
             });
-            let trapped = fill_lake(&mut seabed, &lakes.cells[lake], spill, flux[cell]);
-            if trapped < flux[cell] {
+            let (trapped, full) = fill_lake(&mut seabed, &lakes.cells[lake], spill, flux[cell]);
+            if full {
                 hydrology.filled_depressions += 1;
                 hydrology.filled_depression_cells += lakes.cells[lake].len();
             }
@@ -930,7 +931,7 @@ fn water_state(
         filled,
         order,
     } = drainage(mesh, elevation, ocean);
-    let lakes = Lakes::new(&order, &receiver, &filled, elevation, &ocean);
+    let lakes = Lakes::new(&order, &receiver, &filled, elevation, ocean);
 
     // Discharge of the runoff, accumulated from the sources downstream. Lakes evaporate water:
     // a lake whose evaporation at its spill level exceeds its inflow does not spill
@@ -957,7 +958,9 @@ fn water_state(
     let mut endorheic = vec![false; lakes.cells.len()];
     for &cell in order.iter().rev() {
         let cell = cell as usize;
-        // Shallow new depressions hold no water (see `ErosionParams::lake_onset_depth`).
+        // Shallow new depressions hold no water (see `ErosionParams::lake_onset_depth`). Any
+        // member on or next to last step's lake continues it (also a shallow basin just across
+        // a sill from it: at ~110 km cells, accepted).
         let holds_water = |lake: &usize| {
             let members = &lakes.cells[*lake];
             filled[cell] - elevation[members[0] as usize] >= params.lake_onset_depth
@@ -1316,10 +1319,10 @@ fn lake_balance(
 /// Deposits up to `amount` m (rock-equivalent thickness over one cell) of sediment in a lake:
 /// it settles on the lowest floors first and levels the lake floor up, at most to the spill
 /// level `spill` (lakes trap nearly all of their sediment; Brune 1953). Returns the amount
-/// deposited; the rest passes the outlet.
-fn fill_lake(seabed: &mut Seabed, cells: &[u32], spill: f64, amount: f64) -> f64 {
+/// deposited (the rest passes the outlet) and whether the lake is filled up to the spill.
+fn fill_lake(seabed: &mut Seabed, cells: &[u32], spill: f64, amount: f64) -> (f64, bool) {
     if amount <= 0.0 {
-        return 0.0;
+        return (0.0, false);
     }
     let room = |seabed: &Seabed, level: f64| {
         cells
@@ -1327,7 +1330,8 @@ fn fill_lake(seabed: &mut Seabed, cells: &[u32], spill: f64, amount: f64) -> f64
             .map(|&c| seabed.room(c as usize, level, f64::INFINITY))
             .sum::<f64>()
     };
-    let level = if room(seabed, spill) <= amount {
+    let full = room(seabed, spill) <= amount;
+    let level = if full {
         spill
     } else {
         let mut low = cells
@@ -1353,7 +1357,7 @@ fn fill_lake(seabed: &mut Seabed, cells: &[u32], spill: f64, amount: f64) -> f64
             deposited += thickness;
         }
     }
-    deposited
+    (deposited, full)
 }
 
 /// Wave erosion of coasts (Sunamura 1992; Trenhaile 2000) at the sea level after the step's
@@ -2790,7 +2794,7 @@ mod tests {
     /// The island with a pit `depth` m below its lowest neighbour on the flank, and the pit.
     fn island_with_pit(mesh: &SphereMesh, depth: f64, angle: f64) -> (Vec<f64>, usize) {
         let mut elevation = island(mesh);
-        let (s, c) = (angle.to_radians().sin(), angle.to_radians().cos());
+        let (s, c) = math::sin_cos(angle.to_radians());
         let pit = mesh.nearest(glam::DVec3::new(s, 0.0, c)) as usize;
         let lowest = mesh
             .neighbors(pit as u32)

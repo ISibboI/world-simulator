@@ -32,10 +32,10 @@ step to step (overlap, else adjacency, because lakes move with their plates).
 A diagnostic build (seed 0, 5 subdivisions, steps 220–320) located where depressions appear and
 vanish:
 
-- **The step's sediment fills them.** ~90% of the depression cells at the start of a step are
-  in depressions that the step's sediment fills to the spill (a one-cell basin 15 m deep holds
-  ~200 km³; a few eroding cells deliver that in a fraction of a Myr). Only about half of the
-  depression cells at the start are still depressions after the deposition.
+- **The step's sediment fills them.** About half of the depression cells at the start of a step
+  are no depressions any more after the step's deposition in lakes (90 → 44 cells per step;
+  52 at the end of the step after the coastal processes and diffusion): a one-cell basin 15 m
+  deep holds ~200 km³, and a few eroding cells deliver that in a fraction of a Myr.
 - **Each step makes new ones.** ~60% of the depression cells at the start of a step are new.
   52% of the new ones show a different crust sample than at the end of the previous step
   (17% of all land cells do), 82% are next to such a cell. A land cell that shows another sample
