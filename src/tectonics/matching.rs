@@ -49,6 +49,9 @@ pub struct MatchingParams {
     pub distinct_radius: f64,
     /// Longest chain of cells that pass their samples on to give a cell its own sample.
     pub distinct_depth: usize,
+    /// Largest difference (m) between the dry elevation of the sample a cell shows instead of
+    /// its nearest one and that of the nearest one.
+    pub distinct_tolerance: f64,
 }
 
 impl Default for MatchingParams {
@@ -59,6 +62,7 @@ impl Default for MatchingParams {
             distinct: true,
             distinct_radius: 1.6,
             distinct_depth: 12,
+            distinct_tolerance: 30.0,
         }
     }
 }
@@ -107,6 +111,8 @@ pub(super) struct MatchingScratch {
     /// reached by in the search.
     holder: Vec<u32>,
     reached: Vec<(u32, u32)>,
+    /// Per cell, the dry elevation of the sample it showed before the pass.
+    height: Vec<f64>,
 }
 
 /// The crust samples at each cell: for every cell, the (plate, local vertex) pairs of the plates
@@ -337,7 +343,12 @@ pub(super) fn update_crust_cells(
 /// sample no cell shows, within [`MatchingParams::distinct_radius`] cell spacings, through a
 /// chain of cells within that distance that pass their samples on (an augmenting path, found by
 /// breadth-first search with at most [`MatchingParams::distinct_depth`] steps; the shortest
-/// chain wins, nearer samples first). A cell for which no chain exists (where the plate
+/// chain wins, nearer samples first). Every cell on the chain must show a sample whose dry
+/// elevation differs by at most [`MatchingParams::distinct_tolerance`] from that of its
+/// nearest sample: on slopes a sample from further away would make pits and peaks of up to the
+/// slope times the distance, while same-sample twins make pits only where the relief is smaller
+/// than the dynamic topography between them (a few tens of metres; #57). A cell for which no
+/// chain exists (where the plate
 /// covers more cells than it has samples nearby) keeps showing the shared sample. Only which
 /// sample of its plate a cell shows changes, never which plate owns it; a sample shown in place
 /// of the nearest one lies within a cell or two of the cell.
@@ -345,11 +356,18 @@ pub(super) fn show_distinct_samples(
     mesh: &SphereMesh,
     plates: &mut [Plate],
     owners: &mut [Ownership],
+    time: f64,
     params: &MatchingParams,
     scratch: &mut MatchingScratch,
     statistics: &mut MatchingStatistics,
 ) {
     let cell_count = mesh.len();
+    scratch.height.clear();
+    scratch.height.extend(owners.iter().map(|owner| {
+        plates[owner.plate as usize].crust[owner.local as usize]
+            .expect("owners point to crust")
+            .dry_elevation(time)
+    }));
     if scratch.local_stamp.len() != cell_count {
         scratch.local_stamp = vec![0; cell_count];
         scratch.local_generation = 0;
@@ -451,14 +469,18 @@ pub(super) fn show_distinct_samples(
                 let target = inverse * mesh.vertex(cell);
                 let nearest = mesh.nearest_from(target, plate.lookup_cache[cell as usize]);
                 candidates.clear();
+                let height = scratch.height[cell as usize];
                 let consider = |local: u32, candidates: &mut Vec<(f64, u32)>| {
-                    if plate.crust[local as usize].is_none()
-                        || candidates.iter().any(|&(_, l)| l == local)
-                    {
+                    let Some(crust) = plate.crust[local as usize] else {
+                        return;
+                    };
+                    if candidates.iter().any(|&(_, l)| l == local) {
                         return;
                     }
                     let dot = mesh.vertex(local).dot(target);
-                    if dot >= min_dot {
+                    if dot >= min_dot
+                        && (crust.dry_elevation(time) - height).abs() <= params.distinct_tolerance
+                    {
                         candidates.push((dot, local));
                     }
                 };
@@ -628,6 +650,100 @@ mod tests {
                 incremental.event_counts.births() + incremental.event_counts.deaths();
         }
         assert!(births_and_deaths > 5, "{births_and_deaths} plate events");
+    }
+
+    /// Cells showing a sample that another cell also shows.
+    fn shared_cells(simulation: &Simulation, owners: &[Ownership]) -> usize {
+        let cell_count = simulation.mesh.len();
+        let mut shown = vec![0u32; simulation.plates.len() * cell_count];
+        for &owner in owners {
+            shown[sample_index(owner, cell_count)] += 1;
+        }
+        owners
+            .iter()
+            .filter(|&&owner| shown[sample_index(owner, cell_count)] > 1)
+            .count()
+    }
+
+    #[test]
+    fn distinct_samples_remove_most_shared_cells_and_keep_the_plates() {
+        for seed in 0..3 {
+            let mut params = TectonicParams::default();
+            params.matching.distinct = false;
+            let mut simulation = simulation(seed, params);
+            for _ in 0..30 {
+                simulation.step(1.0);
+            }
+            let before = simulation.owners.clone();
+            let shared_before = shared_cells(&simulation, &before);
+            let mut owners = before.clone();
+            // Without the elevation tolerance (young sea floor has slopes everywhere).
+            let params = MatchingParams {
+                distinct_tolerance: f64::INFINITY,
+                ..MatchingParams::default()
+            };
+            let mut statistics = MatchingStatistics::default();
+            let Simulation {
+                mesh,
+                plates,
+                matching_scratch,
+                time,
+                ..
+            } = &mut simulation;
+            let time = *time;
+            show_distinct_samples(
+                mesh,
+                plates,
+                &mut owners,
+                time,
+                &params,
+                matching_scratch,
+                &mut statistics,
+            );
+            let shared_after = shared_cells(&simulation, &owners);
+            assert!(shared_before > 0);
+            assert!(
+                2 * shared_after < shared_before,
+                "seed {seed}: {shared_before} → {shared_after} {statistics:?}"
+            );
+            let max_angle = params.distinct_radius * simulation.mesh.mean_edge_angle();
+            for (cell, (old, new)) in before.iter().zip(&owners).enumerate() {
+                // Same plate, a sample with crust, near the cell.
+                assert_eq!(old.plate, new.plate);
+                let plate = &simulation.plates[new.plate as usize];
+                assert!(plate.crust[new.local as usize].is_some());
+                if old != new {
+                    let position = plate.rotation * simulation.mesh.vertex(new.local);
+                    let angle =
+                        math::acos(position.dot(simulation.mesh.vertex(cell as u32)).min(1.0));
+                    assert!(angle <= max_angle * (1.0 + 1e-9), "{angle} > {max_angle}");
+                }
+            }
+
+            // With the elevation tolerance, every cell shows a sample as high as its nearest one
+            // within the tolerance.
+            let mut owners = before.clone();
+            let params = MatchingParams::default();
+            show_distinct_samples(
+                &simulation.mesh,
+                &mut simulation.plates,
+                &mut owners,
+                time,
+                &params,
+                &mut simulation.matching_scratch,
+                &mut statistics,
+            );
+            assert!(shared_cells(&simulation, &owners) < shared_before);
+            let height = |owner: Ownership| {
+                simulation.plates[owner.plate as usize].crust[owner.local as usize]
+                    .unwrap()
+                    .dry_elevation(time)
+            };
+            for (old, new) in before.iter().zip(&owners) {
+                let difference = (height(*new) - height(*old)).abs();
+                assert!(difference <= params.distinct_tolerance, "{difference}");
+            }
+        }
     }
 
     #[test]

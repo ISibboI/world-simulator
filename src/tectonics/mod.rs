@@ -164,6 +164,12 @@ pub struct TectonicParams {
     pub crustal_flow_threshold: f64,
     /// Thickness range above the threshold over which crustal flow reaches full strength.
     pub crustal_flow_range: f64,
+    /// A cell whose dry elevation is more than this (m) below all its neighbours and whose crust
+    /// is thinner than all of theirs is a one-cell hole: the crust of the neighbours of its
+    /// plate flows into it at full mobility, whatever its thickness (0 disables; #129). Airy
+    /// isostasy per cell lets a single thin column sink, which the lithosphere's flexural
+    /// strength and lower-crustal flow would not allow over one ~110 km cell.
+    pub hole_flow_depth: f64,
     /// Diffusivity (km²/Myr) of orogenic collapse at full mobility: lower-crustal channel flow
     /// `ρ g h³ / (12 η)` times the isostatic response, ~3.7·10³ km²/Myr for a 15 km channel at
     /// η = 10¹⁹ Pa·s and ~3.7·10⁴ at 10¹⁸ (Clark & Royden 2000).
@@ -322,6 +328,7 @@ impl Default for TectonicParams {
             max_crust_thickness: 75_000.0,
             crustal_flow_threshold: 40_000.0,
             crustal_flow_range: 20_000.0,
+            hole_flow_depth: 300.0,
             collapse_diffusivity: 1e4,
             planet_radius: 6.371e6,
             slab_pull: 2e13,
@@ -384,6 +391,7 @@ impl TectonicParams {
                 return Ok(());
             }
             "matching.distinct_radius" => &mut self.matching.distinct_radius,
+            "matching.distinct_tolerance" => &mut self.matching.distinct_tolerance,
             "initial_sediment.enabled" => {
                 sediment.enabled = value != 0.0;
                 return Ok(());
@@ -425,6 +433,7 @@ impl TectonicParams {
             "min_trench_obliquity" => &mut self.min_trench_obliquity,
             "diffuse_convergence" => &mut self.diffuse_convergence,
             "collapse_diffusivity" => &mut self.collapse_diffusivity,
+            "hole_flow_depth" => &mut self.hole_flow_depth,
             "boundary_coupling_width" => &mut self.boundary_coupling_width,
             "slab_pull" => &mut self.slab_pull,
             "slab_sinking_speed" => &mut self.slab_sinking_speed,
