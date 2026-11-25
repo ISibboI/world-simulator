@@ -263,6 +263,11 @@ impl Planet {
         &self.discharge
     }
 
+    /// The hydrology of the last erosion step.
+    pub fn hydrology(&self) -> &Hydrology {
+        &self.hydrology
+    }
+
     /// Where the water of every cell goes, the ocean and the lakes, as the last erosion step
     /// saw them (only the ocean while erosion is disabled); for the view.
     pub fn surface_water(&self) -> &SurfaceWater {

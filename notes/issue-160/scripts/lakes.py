@@ -6,12 +6,24 @@ import sys, os, glob
 import numpy as np
 from pits import mesh
 
+filled = []
+starts = []
+
 def read(path):
     steps = []
+    filled.clear()
+    starts.clear()
     for line in open(path):
         parts = line.strip().split(',')
+        starts.append(set())
         d = {}
         for p in parts[1:]:
+            if p.startswith('s'):
+                starts[-1].add(int(p[1:]))
+                continue
+            if p.startswith('f:'):
+                filled.append(tuple(int(x) for x in p.split(':')[1:]))
+                continue
             c, lake, spill = p.split(':')
             d[int(c)] = (float(lake), float(spill))
         steps.append((float(parts[0]), d))
@@ -51,7 +63,19 @@ def seed(d):
     r['lost lake cells: depression stays, dry (%)'] = 100 * dried / max(lost, 1)
     r['spill depth of lake cells, median (m)'] = np.median(sp_all) if sp_all else 0
     r['spill depth where depression vanished, median (m)'] = np.median(sp_v) if sp_v else 0
+    if any(starts):
+        # end of step t -> start of t+1 (tectonics etc.), start -> end (erosion, deposition)
+        tect = [len(a & b) / max(len(a), 1) for a, b in zip(dep, starts[1:])]
+        ero = [len(a & b) / max(len(a), 1) for a, b in zip(starts, dep)]
+        r['end-of-step depression cells still depression at the next start (%)'] = 100 * np.mean(tect)
+        r['start depression cells still depression at the end (%)'] = 100 * np.mean(ero)
+        r['depression cells at step start'] = np.mean([len(x) for x in starts])
+        r['depression cells new at step start (% of start)'] = 100 * np.mean([len(b - a) / max(len(b), 1) for a, b in zip(dep, starts[1:])])
+        r['depression cells new at step end (% of end)'] = 100 * np.mean([len(b - a) / max(len(b), 1) for a, b in zip(starts, dep)])
     r['lake cells per step'] = np.mean([len(l) for l in lakes])
+    if filled:
+        r['depression cells filled by sediment per step'] = np.mean([f[1] for f in filled])
+        r['lake cells lost per step'] = lost / max(len(steps) - 1, 1)
     r['depression cells per step'] = np.mean([len(x) for x in dep])
     # lake objects and lifetimes
     comps = [components(l, nb) for l in lakes]

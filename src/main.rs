@@ -1516,6 +1516,19 @@ fn append_lake_log(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             write!(line, ",{cell}:{:.1}:{spill:.1}", water.lake_depth[cell])?;
         }
     }
+    // Cells that were in a depression at the start of the step (before its deposition).
+    for (cell, &start) in water.depression_at_start.iter().enumerate() {
+        if start {
+            write!(line, ",s{cell}")?;
+        }
+    }
+    // Depressions filled to their spill level by sediment in the step, and their cells.
+    let hydrology = planet.hydrology();
+    write!(
+        line,
+        ",f:{}:{}",
+        hydrology.filled_depressions, hydrology.filled_depression_cells
+    )?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
