@@ -1369,6 +1369,63 @@ impl Simulation {
             .collect()
     }
 
+    /// An id per world cell that the cells showing the same crust sample share (dense, below the
+    /// cell count, in order of first appearance).
+    pub fn sample_ids(&self) -> Vec<u32> {
+        let cell_count = self.mesh.len();
+        let mut slot = vec![u32::MAX; self.plates.len() * cell_count];
+        let mut next = 0;
+        (0..cell_count)
+            .map(|cell| {
+                let index = &mut slot[sample_index(self.owners[cell], cell_count)];
+                if *index == u32::MAX {
+                    *index = next;
+                    next += 1;
+                }
+                *index
+            })
+            .collect()
+    }
+
+    /// Surface elevation of every world cell as the surface processes see it (#112, option b):
+    /// cells showing the same crust sample get the elevation of that sample at the mean dynamic
+    /// topography of those cells, so they are one column at one level (they differ otherwise
+    /// only by the dynamic topography of their cells, and the sample takes the mean of their
+    /// changes, see [`Self::apply_surface_changes`]). A sample shown at one cell gives exactly
+    /// [`Self::surface_elevation`].
+    pub fn sample_surface_elevations(&self) -> Vec<f64> {
+        let cell_count = self.mesh.len();
+        // Per shown sample (dense index as in `apply_surface_changes`): the summed dynamic
+        // topography of its cells and their number, summed in cell order.
+        let mut slot = vec![u32::MAX; self.plates.len() * cell_count];
+        let mut sums: Vec<(f64, u32)> = Vec::new();
+        for cell in 0..cell_count {
+            let index = &mut slot[sample_index(self.owners[cell], cell_count)];
+            if *index == u32::MAX {
+                *index = sums.len() as u32;
+                sums.push((0.0, 0));
+            }
+            let sum = &mut sums[*index as usize];
+            sum.0 += self.dynamic_topography[cell];
+            sum.1 += 1;
+        }
+        (0..cell_count as u32)
+            .map(|cell| {
+                let owner = self.owners[cell as usize];
+                let (dynamic, count) = sums[slot[sample_index(owner, cell_count)] as usize];
+                if count == 1 {
+                    self.surface_elevation(cell)
+                } else {
+                    let crust = self.surface_crust(cell);
+                    crate::isostasy::to_surface(
+                        crust.dry_elevation(self.time) + dynamic / f64::from(count)
+                            - self.sea_level,
+                    )
+                }
+            })
+            .collect()
+    }
+
     /// Density of the crystalline crust of every world cell in kg/m³.
     pub fn bedrock_densities(&self) -> Vec<f64> {
         (0..self.mesh.len() as u32)
@@ -2243,6 +2300,43 @@ mod tests {
         assert!((change - expected).abs() < 1e-3, "{change} vs {expected}");
         let after = simulation.ledger.checked(simulation.total_mass()).residual;
         assert!((after - residual).abs() < 1e-6, "{after} vs {residual}");
+    }
+
+    #[test]
+    fn cells_showing_one_sample_are_one_column_for_the_surface() {
+        let mut simulation = simulation(4);
+        let (neighbor, _) = same_plate_neighbors(&simulation);
+        simulation.owners[neighbor as usize] = simulation.owners[0];
+        // Different dynamic topography under the two cells, on land.
+        simulation.dynamic_topography[0] = 40.0;
+        simulation.dynamic_topography[neighbor as usize] = -20.0;
+        simulation.sea_level = simulation.surface_crust(0).dry_elevation(simulation.time) - 500.0;
+        let per_cell = simulation.surface_elevations();
+        let merged = simulation.sample_surface_elevations();
+        assert!((per_cell[0] - per_cell[neighbor as usize] - 60.0).abs() < 1e-9);
+        // Both at the sample's elevation at the mean dynamic topography of its cells (+10 m if
+        // no other cell shows it).
+        let cells: Vec<usize> = (0..simulation.mesh.len())
+            .filter(|&c| simulation.owners[c] == simulation.owners[0])
+            .collect();
+        let mean = cells
+            .iter()
+            .map(|&c| simulation.dynamic_topography[c])
+            .sum::<f64>()
+            / cells.len() as f64;
+        let expected = 500.0 + mean;
+        assert!((merged[0] - expected).abs() < 1e-9, "{}", merged[0]);
+        assert_eq!(merged[0], merged[neighbor as usize]);
+        // Every sample shown at one cell keeps its surface bit for bit.
+        let mut shown = vec![0u32; simulation.plates.len() * simulation.mesh.len()];
+        for cell in 0..simulation.mesh.len() {
+            shown[sample_index(simulation.owners[cell], simulation.mesh.len())] += 1;
+        }
+        for cell in 0..simulation.mesh.len() {
+            if shown[sample_index(simulation.owners[cell], simulation.mesh.len())] == 1 {
+                assert_eq!(merged[cell].to_bits(), per_cell[cell].to_bits());
+            }
+        }
     }
 
     #[test]
