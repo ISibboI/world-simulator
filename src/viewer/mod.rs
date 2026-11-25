@@ -505,6 +505,8 @@ struct Viewer {
     /// The colour of every plate of the run, for the plate mode.
     plate_colors: PlateColors,
     cell_panel: CellInfoPanel,
+    /// The time bar along the bottom edge, collapsed or expanded.
+    time_bar: timeline::TimeBar,
     pace: Pace,
     /// Whether the main pointer is coarse (touch): cells are tapped rather than pointed at.
     touch: bool,
@@ -662,6 +664,7 @@ impl Viewer {
             parameters,
             plate_colors: PlateColors::default(),
             cell_panel: CellInfoPanel::default(),
+            time_bar: timeline::TimeBar::default(),
             pace,
             touch: ui_options.touch,
             picking: None,
@@ -1114,7 +1117,7 @@ impl Viewer {
             about,
         };
         let key = timeline::keys(ctx);
-        let (clicked, rect) = timeline::show(ctx, &view);
+        let (clicked, rect) = self.time_bar.show(ctx, &view);
         if let Some(action) = clicked.or(key) {
             self.time_action(action);
             ctx.request_repaint();

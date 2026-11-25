@@ -9,15 +9,22 @@
 //! writes the snapshot of its paused step only on resume.
 //!
 //! On wide screens the bar is one row; on narrow ones (phones) the slider gets a row of its own
-//! below the buttons, and the time too if it does not fit beside them (see [`rows`]). On touch screens the buttons and the slider are touch-sized (see
-//! `UiOptions`).
+//! below the buttons, and the time too if it does not fit beside them (see [`rows`]). On touch
+//! screens the buttons and the slider are touch-sized (see `UiOptions`).
+//!
+//! The bar collapses (its ⌄ button) into a flat strip with only the expand button, pause/resume
+//! and the time; the keys keep working. Like the other panels it starts collapsed on narrow
+//! screens and keeps its state for the session.
 
 use eframe::egui;
 
 /// Distance of the bar from the edges of the window, in points.
 const MARGIN: f32 = 8.0;
-/// Screens narrower than this (in points) get the two-row layout.
+/// Screens narrower than this (in points) get the two-row layout, and the bar starts collapsed.
 const NARROW_SCREEN: f32 = 600.0;
+/// Margin inside the frame of the collapsed strip, in points: less than a window's, so that the
+/// strip is as flat as its buttons allow.
+const STRIP_MARGIN: f32 = 3.0;
 
 /// What the bar shows.
 pub struct TimelineView<'a> {
@@ -126,7 +133,7 @@ fn rows(inner: f32, buttons: f32, text: f32, spacing: f32, narrow: bool) -> Rows
     }
 }
 
-/// The width of the buttons of [`buttons`], with the spacing between them.
+/// The width of the buttons of [`buttons`] (with the collapse button), with the spacing between them.
 fn buttons_width(ui: &egui::Ui) -> f32 {
     let spacing = ui.spacing();
     let side = spacing.interact_size.y;
@@ -140,7 +147,7 @@ fn buttons_width(ui: &egui::Ui) -> f32 {
         .size()
         .x
         + 2.0 * spacing.button_padding.x;
-    3.0 * side + live.max(side) + 3.0 * spacing.item_spacing.x
+    4.0 * side + live.max(side) + 4.0 * spacing.item_spacing.x
 }
 
 /// The width of the time label showing `text`.
@@ -156,12 +163,85 @@ fn text_width(ui: &egui::Ui, text: &str) -> f32 {
         .x
 }
 
-/// Shows the bar and returns what the user asked for, with the area the bar covers.
-pub fn show(ctx: &egui::Context, view: &TimelineView) -> (Option<TimeAction>, egui::Rect) {
+/// The time bar and whether it is expanded.
+#[derive(Default)]
+pub struct TimeBar {
+    /// Whether the full bar is shown rather than the flat strip; decided by the screen width
+    /// on the first frame.
+    open: Option<bool>,
+}
+
+impl TimeBar {
+    /// Shows the bar (or the collapsed strip) and returns what the user asked for, with the
+    /// area the bar covers.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        view: &TimelineView,
+    ) -> (Option<TimeAction>, egui::Rect) {
+        let screen = ctx.content_rect();
+        let open = *self.open.get_or_insert(screen.width() >= NARROW_SCREEN);
+        let mut action = None;
+        let mut toggle = false;
+        let rect = if open {
+            show_bar(ctx, view, &mut action, &mut toggle)
+        } else {
+            show_strip(ctx, view, &mut action, &mut toggle)
+        };
+        if toggle {
+            self.open = Some(!open);
+            ctx.request_repaint();
+        }
+        (action, rect)
+    }
+}
+
+/// The collapsed bar: the expand button, pause/resume and the time in one flat row, as wide as
+/// they are.
+fn show_strip(
+    ctx: &egui::Context,
+    view: &TimelineView,
+    action: &mut Option<TimeAction>,
+    toggle: &mut bool,
+) -> egui::Rect {
+    egui::Area::new(egui::Id::unique("time strip"))
+        .anchor(egui::Align2::LEFT_BOTTOM, [MARGIN, -MARGIN])
+        .show(ctx, |ui| {
+            egui::Frame::window(ui.style())
+                .inner_margin(STRIP_MARGIN)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if icon_button(ui, Icon::Expand, true)
+                            .on_hover_text("Show the time bar")
+                            .clicked()
+                        {
+                            *toggle = true;
+                        }
+                        pause_button(ui, view, action);
+                        time_label(ui, view, time_text(view));
+                        if view.error.is_some() {
+                            ui.colored_label(ui.visuals().error_fg_color, "⚠")
+                                .on_hover_text(view.error.unwrap_or_default());
+                        }
+                        // A little room after the text, as the frame margin is small.
+                        ui.add_space(STRIP_MARGIN);
+                    });
+                });
+        })
+        .response
+        .rect
+}
+
+/// The expanded bar across the bottom edge.
+fn show_bar(
+    ctx: &egui::Context,
+    view: &TimelineView,
+    action: &mut Option<TimeAction>,
+    toggle: &mut bool,
+) -> egui::Rect {
     let screen = ctx.content_rect();
     let width = (screen.width() - 2.0 * MARGIN).max(100.0);
     let narrow = screen.width() < NARROW_SCREEN;
-    let mut action = None;
     let response = egui::Area::new(egui::Id::unique("time bar"))
         .anchor(egui::Align2::LEFT_BOTTOM, [MARGIN, -MARGIN])
         .show(ctx, |ui| {
@@ -179,31 +259,31 @@ pub fn show(ctx: &egui::Context, view: &TimelineView) -> (Option<TimeAction>, eg
                 match rows {
                     Rows::One => {
                         ui.horizontal(|ui| {
-                            buttons(ui, view, &mut action);
+                            buttons(ui, view, action, toggle);
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     time_label(ui, view, text);
                                     let room = ui.available_width();
-                                    slider(ui, view, &mut action, room);
+                                    slider(ui, view, action, room);
                                 },
                             );
                         });
                     }
                     Rows::Two => {
                         ui.horizontal(|ui| {
-                            buttons(ui, view, &mut action);
+                            buttons(ui, view, action, toggle);
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| time_label(ui, view, text),
                             );
                         });
-                        slider(ui, view, &mut action, inner);
+                        slider(ui, view, action, inner);
                     }
                     Rows::Three => {
-                        ui.horizontal(|ui| buttons(ui, view, &mut action));
+                        ui.horizontal(|ui| buttons(ui, view, action, toggle));
                         time_label(ui, view, text);
-                        slider(ui, view, &mut action, inner);
+                        slider(ui, view, action, inner);
                     }
                 }
                 if let Some(error) = view.error {
@@ -211,7 +291,7 @@ pub fn show(ctx: &egui::Context, view: &TimelineView) -> (Option<TimeAction>, eg
                 }
             });
         });
-    (action, response.response.rect)
+    response.response.rect
 }
 
 /// The symbols of the buttons, drawn rather than taken from a font (egui's fonts lack them).
@@ -221,6 +301,10 @@ enum Icon {
     Pause,
     Back,
     Forward,
+    /// A chevron pointing up: show the bar.
+    Expand,
+    /// A chevron pointing down: collapse the bar.
+    Collapse,
 }
 
 /// A square button with an icon.
@@ -278,11 +362,26 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, enabled: bool) -> egui::Response {
             painter.add(triangle(rect.left(), rect.right() - 0.25 * width, true));
             painter.add(bar(rect.right() - 0.2 * width, 0.2 * width));
         }
+        Icon::Expand | Icon::Collapse => {
+            let (tip, ends) = if matches!(icon, Icon::Expand) {
+                (rect.top() + 0.2 * width, rect.bottom() - 0.2 * width)
+            } else {
+                (rect.bottom() - 0.2 * width, rect.top() + 0.2 * width)
+            };
+            painter.add(egui::Shape::line(
+                vec![
+                    egui::pos2(rect.left(), ends),
+                    egui::pos2(rect.center().x, tip),
+                    egui::pos2(rect.right(), ends),
+                ],
+                egui::Stroke::new((0.12 * width).max(1.5), color),
+            ));
+        }
     }
     response
 }
 
-fn buttons(ui: &mut egui::Ui, view: &TimelineView, action: &mut Option<TimeAction>) {
+fn pause_button(ui: &mut egui::Ui, view: &TimelineView, action: &mut Option<TimeAction>) {
     let (icon, tip) = if view.paused {
         (Icon::Play, "Resume the simulation (space)")
     } else {
@@ -295,6 +394,21 @@ fn buttons(ui: &mut egui::Ui, view: &TimelineView, action: &mut Option<TimeActio
     {
         *action = Some(TimeAction::TogglePause);
     }
+}
+
+fn buttons(
+    ui: &mut egui::Ui,
+    view: &TimelineView,
+    action: &mut Option<TimeAction>,
+    toggle: &mut bool,
+) {
+    if icon_button(ui, Icon::Collapse, true)
+        .on_hover_text("Collapse the time bar")
+        .clicked()
+    {
+        *toggle = true;
+    }
+    pause_button(ui, view, action);
     if icon_button(ui, Icon::Back, view.position > 0)
         .on_hover_text("One frame back (←)")
         .clicked()
