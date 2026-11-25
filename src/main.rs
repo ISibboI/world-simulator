@@ -1201,12 +1201,11 @@ fn snapshot(
     );
     let hydrology = &planet_statistics.hydrology;
     let land_cells = hydrology.land_cells.max(1.0);
-    let pit_drainage = planet.endorheic_pit_drainage();
+    let single_sample = planet.endorheic_single_sample_drainage();
     info!(
         "    hydrology: runoff {:.0} km³/yr, to the ocean {:.0} km³/yr, lake evaporation {:.0} \
-         km³/yr | endorheic {:.1}% of land ({:.1}% into single-cell pits; {:.1}% into single-cell \
-         and {:.1}% into single-sample depressions as seen by the water; ocean differs from the \
-         per-cell surface at {} cells), lakes {:.1}% of land, \
+         km³/yr | endorheic {:.1}% of land ({:.1}% into single-cell pits, {:.1}% into \
+         single-sample depressions; ocean differs from the per-cell surface at {} cells), lakes {:.1}% of land, \
          lake potential evaporation {:.2} m/yr | depressions {}, endorheic {}, with inner sills \
          {} | sediment trapped in lakes {:.2} km³/yr",
         hydrology.runoff / 1e9,
@@ -1214,8 +1213,7 @@ fn snapshot(
         hydrology.lake_evaporation / 1e9,
         100.0 * hydrology.endorheic_cells / land_cells,
         100.0 * hydrology.endorheic_pit_cells / land_cells,
-        100.0 * pit_drainage.0 / land_cells,
-        100.0 * pit_drainage.1 / land_cells,
+        100.0 * single_sample / land_cells,
         planet.ocean_mismatch(),
         100.0 * hydrology.lake_cells / land_cells,
         hydrology.lake_potential_evaporation / hydrology.lake_cells.max(1e-9),
@@ -1407,8 +1405,9 @@ struct PreviousSnapshot {
 /// number of cells showing the same sample, whether the cell is at a coast, precipitation (m/yr),
 /// discharge (m³/yr), longitude (°), the annual mean, January and July surface temperatures
 /// (°C), evaporation or evapotranspiration (m/yr), and January and July precipitation (m/yr),
-/// …, the lake depth (m), the plate-local index of the crust sample shown and the surface as the
-/// erosion sees it with `erosion.sample_surface` (m).
+/// …, the lake depth (m, relative to the surface the erosion saw), the plate-local index of the
+/// crust sample shown and the sample surface (m; what the erosion sees with
+/// `erosion.sample_surface`, written whether or not it is on).
 #[cfg(not(target_arch = "wasm32"))]
 fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Write;

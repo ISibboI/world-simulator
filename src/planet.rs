@@ -279,11 +279,11 @@ impl Planet {
         self.ocean_mismatch
     }
 
-    /// Land cells whose water ends in an endorheic depression of a single cell and in one whose
-    /// cells all show a single crust sample (#112), from the last erosion step's
-    /// [`SurfaceWater`]. A depression is a tree of depression cells along the receivers; its
-    /// root is the cell whose receiver leaves it (none for an endorheic one).
-    pub fn endorheic_pit_drainage(&self) -> (f64, f64) {
+    /// Land cells whose water ends in an endorheic depression all of whose cells show a single
+    /// crust sample (#112; the sample may also be shown outside it), from the last erosion
+    /// step's [`SurfaceWater`]. A depression is a tree of depression cells along the receivers;
+    /// its root is the cell whose receiver leaves it (none for an endorheic one).
+    pub fn endorheic_single_sample_drainage(&self) -> f64 {
         let water = &self.water;
         let cells = water.receiver.len();
         const UNKNOWN: u32 = u32::MAX;
@@ -326,13 +326,11 @@ impl Planet {
                 .map(|r| r as usize)
                 .filter(|&r| water.depression[r])
         };
-        // Per depression root: its cells and whether they all show one sample.
-        let mut size = vec![0u32; cells];
+        // Per depression root: whether its cells all show one sample.
         let mut sample = vec![None; cells];
         let mut single_sample = vec![true; cells];
         for (cell, _) in water.depression.iter().enumerate().filter(|(_, d)| **d) {
             let r = follow(&mut root, cell, &within) as usize;
-            size[r] += 1;
             let owner = self.tectonics.owner(cell as u32);
             match sample[r] {
                 None => sample[r] = Some(owner),
@@ -342,7 +340,7 @@ impl Planet {
                 Some(_) => {}
             }
         }
-        let (mut into_cell, mut into_sample) = (0.0, 0.0);
+        let mut into_sample = 0.0;
         for cell in 0..cells {
             if water.ocean[cell] {
                 continue;
@@ -351,15 +349,11 @@ impl Planet {
             if end == OCEAN || !water.depression[end as usize] {
                 continue;
             }
-            let r = end as usize;
-            if size[r] == 1 {
-                into_cell += 1.0;
-            }
-            if single_sample[r] {
+            if single_sample[end as usize] {
                 into_sample += 1.0;
             }
         }
-        (into_cell, into_sample)
+        into_sample
     }
 
     /// A fingerprint of the state, the same on every platform for the same state: the time and,

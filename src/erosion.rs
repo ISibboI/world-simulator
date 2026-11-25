@@ -405,7 +405,10 @@ pub struct SurfaceWater {
     /// Land in a closed depression (at least [`LAKE_MIN_DEPTH`] below its spill level), dry
     /// or under a lake.
     pub depression: Vec<bool>,
-    /// Depth of lake water over the cell's floor (m), zero where there is no lake.
+    /// Depth of lake water over the cell's floor (m), zero where there is no lake. The floor is
+    /// the surface the erosion saw: with [`ErosionParams::sample_surface`], cells showing one
+    /// crust sample share one floor, so on the per-cell surface their water surfaces differ by
+    /// the dynamic topography between them (a few metres; #112 b).
     pub lake_depth: Vec<f64>,
 }
 
