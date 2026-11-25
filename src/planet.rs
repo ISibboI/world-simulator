@@ -412,6 +412,13 @@ impl Planet {
                 self.inland_change +=
                     (result.hydrology.inland_cells - self.hydrology.inland_cells).abs();
             }
+            // The lake evaporation the balance removed in this step, and what the climate
+            // returned to the air in it (from the lakes of earlier steps; #126).
+            debug!(
+                removed = result.hydrology.lake_evaporation / 1e9,
+                into_air = self.climate.water_cycle().total_lake_evaporation / 1e9,
+                "Lake evaporation (km³/yr)"
+            );
             debug!(
                 inland_cells = result.hydrology.inland_cells,
                 inland_depressions = result.hydrology.inland_depressions,
