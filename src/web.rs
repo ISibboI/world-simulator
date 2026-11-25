@@ -264,6 +264,23 @@ fn remember_render_mode(mode: RenderModeId) {
     }
 }
 
+/// The view's settings (see `viewer::Settings`) in the local storage.
+struct LocalStorageSettings;
+
+impl viewer::Settings for LocalStorageSettings {
+    fn get(&self, key: &str) -> Option<String> {
+        local_storage()?.get_item(key).ok().flatten()
+    }
+
+    fn set(&mut self, key: &str, value: &str) {
+        if let Some(storage) = local_storage()
+            && let Err(error) = storage.set_item(key, value)
+        {
+            error!("Could not remember {key}: {error:?}");
+        }
+    }
+}
+
 /// Sends requests of the page to the running simulation worker.
 struct WorkerControl(web_sys::Worker);
 
@@ -391,6 +408,7 @@ async fn run_page() -> anyhow::Result<()> {
         }),
         Box::new(|wake| Box::new(frames::IdbStore::open(wake)) as Box<dyn FrameStore>),
         Box::new(remember_render_mode),
+        Box::new(LocalStorageSettings),
         // The view shows the state in its banner from its first frame on.
         Box::new(|| {
             show_status("");
