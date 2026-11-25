@@ -288,7 +288,10 @@ impl Basins {
     /// Number of sub-basins (local minima).
     #[cfg(test)]
     pub fn leaves(&self) -> usize {
-        self.nodes.iter().filter(|n| n.children.is_empty()).count()
+        self.nodes
+            .iter()
+            .filter(|n| n.children.is_empty() && n.absorbed == NONE)
+            .count()
     }
 
     /// Solves the lakes for the water `inflow` (m³/yr) arriving at every member (runoff and
@@ -670,5 +673,45 @@ mod tests {
         assert_eq!(lake.balance.level, 100.0);
         let poured = lake.sea_water / WATER_LOADING;
         assert!((poured - (room + 60.0)).abs() < 1e-6, "{poured}");
+    }
+
+    #[test]
+    fn merging_keeps_the_water_of_the_sub_basins() {
+        // Next to b, behind a sill t (20 m), a pit c 0.5 m below t is no sub-basin of its own;
+        // when the sub-basins merge, it takes its share of their water.
+        let (mesh, members, mut elevation) = row();
+        let (a, b, s) = (members[0], members[1], members[2]);
+        let near = |x: u32, y: u32| x == y || mesh.neighbors(x).contains(&y);
+        let t = *mesh
+            .neighbors(b)
+            .iter()
+            .find(|&&n| ![a, s].iter().any(|&m| near(n, m)))
+            .unwrap();
+        let c = *mesh
+            .neighbors(t)
+            .iter()
+            .find(|&&n| ![a, b, s].iter().any(|&m| near(n, m)))
+            .unwrap();
+        elevation[t as usize] = 20.0;
+        elevation[c as usize] = 19.5;
+        let members = vec![a, b, c, t, s];
+        let mut local = vec![NONE; mesh.len()];
+        let mut basins = Basins::new(&mesh, &members, &elevation, 100.0, &mut local, true);
+        assert_eq!(basins.leaves(), 2);
+        basins.solve(&[0.0; 5], 0.0, &|_| 1.0, &elevation);
+        let mut poured = 0.0;
+        for volume in [30.0, 40.0, 25.0, 60.0, 100.0] {
+            let volume = volume * WATER_LOADING;
+            assert_eq!(basins.pour(4, volume, &elevation), 0.0);
+            poured += volume;
+            let held: f64 = basins
+                .lakes()
+                .map(|l| lake_volume(&l.cells, &elevation, l.balance.level, l.sill))
+                .sum();
+            assert!((held / poured - 1.0).abs() < 1e-9, "{held} {poured}");
+            let sea: f64 = basins.lakes().map(|l| l.sea_water).sum();
+            assert!((sea / poured - 1.0).abs() < 1e-12);
+        }
+        assert_eq!(basins.lakes().count(), 1);
     }
 }

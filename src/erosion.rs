@@ -447,8 +447,8 @@ pub struct Hydrology {
     /// Water in lakes (m³; by the surface elevations, without the load of the water), sea
     /// water poured into basins below their sill included.
     pub lake_volume: f64,
-    /// Separate water bodies in the depressions holding water (#168: sub-basins below inner
-    /// sills hold their own lakes), and the depressions holding more than one.
+    /// Separate water bodies (not empty) in the depressions holding water (#168: sub-basins
+    /// below inner sills hold their own lakes), and the depressions holding more than one.
     pub lake_bodies: usize,
     pub split_lakes: usize,
     /// Lakes fed by the sea over their sill (#168, see [`ErosionParams::sea_spill`]), the cells
@@ -461,7 +461,8 @@ pub struct Hydrology {
     /// Endorheic land draining into lakes fed by the sea (cells).
     pub endorheic_sea_fed_cells: f64,
     /// The water (m³) the ocean held above the sill of a basin it could not fill at the end of
-    /// the step, before it was poured into the basin (the sea-level solve's deficit).
+    /// the step and poured into that basin (the sea-level solve's deficit); zero if none, or if
+    /// the basin joined the ocean.
     pub sea_spill_deficit: f64,
 }
 
@@ -1039,7 +1040,6 @@ fn spill_sea(
         .iter()
         .map(|&s| isostasy::sediment_pores(s))
         .collect();
-    let mut deficit = 0.0;
     // At most: basins the sea reaches join it, a basin on whose sill the sea stands leaves the
     // ocean (rounding at the sill), then it takes the sea water.
     for _ in 0..4 {
@@ -1115,7 +1115,7 @@ fn spill_sea(
                 targets.push(c);
             }
         }
-        deficit = solved.deficit;
+        let deficit = solved.deficit;
         let mut pours: Vec<(usize, f64)> = Vec::new();
         let mut left = deficit;
         let mut poured = None;
@@ -1164,10 +1164,10 @@ fn spill_sea(
             state = poured;
             state.hydrology.lake_volume += left;
             state.hydrology.sea_water += left;
+            state.hydrology.sea_spill_deficit = deficit;
         }
         break;
     }
-    state.hydrology.sea_spill_deficit = deficit;
     state
 }
 
@@ -1393,7 +1393,7 @@ fn water_state(
                 }
                 covered_total += balance.covered;
                 flux_evaporation += balance.evaporation;
-                bodies += 1;
+                bodies += usize::from(balance.covered > 0.0);
             }
             // Depressions below sea level outside the ocean.
             let below = members
@@ -3198,6 +3198,95 @@ mod tests {
         assert!(state.surface_water.ocean[pit]);
         assert_eq!(state.hydrology.sea_fed_lakes, 0);
         assert_eq!(state.hydrology.lake_volume, 0.0);
+    }
+
+    #[test]
+    fn the_sea_pours_over_a_sill_below_the_sea_level_of_the_frame() {
+        // As above, but the channel lies 3 m below the sea level the elevations refer to (the
+        // sea fell in the step): in this frame the basin is ocean, but the sea stands on the
+        // channel. The basin's sediment holds pores, which the lakes do not count.
+        let mesh = SphereMesh::icosphere(4);
+        let (mut elevation, pit) = island_with_depression(&mesh);
+        let towards = mesh.vertex(pit as u32);
+        let mut channel = Vec::new();
+        for (cell, e) in elevation.iter_mut().enumerate() {
+            let v = mesh.vertex(cell as u32);
+            if cell != pit && *e > 0.0 && v.y.abs() < 0.06 && v.x > towards.x {
+                *e = -3.0;
+                channel.push(cell);
+            }
+        }
+        let n = mesh.len();
+        let mut sediment = vec![0.0; n];
+        sediment[pit] = 2000.0;
+        let params = ErosionParams::default();
+        let cell_area = 4.0 * std::f64::consts::PI * params.planet_radius.powi(2) / n as f64;
+        let dry: Vec<f64> = elevation.iter().map(|&e| isostasy::to_dry(e)).collect();
+        let pores: Vec<f64> = sediment
+            .iter()
+            .map(|&s| isostasy::sediment_pores(s))
+            .collect();
+        let sill = dry[channel[0]];
+        let seeds = sea::ocean_seeds(&mesh, &elevation, -sea::SILL_TOLERANCE, 1.0);
+        // The ocean up to the sill, and the basin below it.
+        let below_sill: f64 = (0..n)
+            .filter(|&c| c != pit && dry[c] < sill)
+            .map(|c| sill - dry[c])
+            .sum::<f64>()
+            * isostasy::WATER_LOADING
+            * cell_area;
+        let capacity = (sill - dry[pit]) * isostasy::WATER_LOADING * cell_area;
+        let water_volume = below_sill + 0.3 * capacity;
+        let class = classes(&elevation, -1000.0);
+        let surface = Surface {
+            elevation: &elevation,
+            sediment: &sediment,
+            bedrock_density: &vec![2800.0; n],
+            bedrock_isostatic_density: &vec![2800.0; n],
+            dense_crust: &vec![0.0; n],
+            precipitation: &vec![0.2; n],
+            runoff: &vec![0.0; n],
+            potential_evaporation: &vec![2.0; n],
+            plate: &vec![0; n],
+            class: &class,
+            ocean_volume: water_volume,
+            water_volume,
+            ocean_seeds: &seeds,
+            previous_lakes: &[],
+            sample: &[],
+        };
+        let ocean = sea::ocean_from(&mesh, &elevation, seeds.iter().copied(), false);
+        assert!(ocean[pit]);
+        let state = water_state(&mesh, &elevation, &ocean, &surface, &params, cell_area, &[]);
+        let state = spill_sea(
+            (&mesh, &elevation, &sediment),
+            ocean,
+            state,
+            &surface,
+            &params,
+            cell_area,
+        );
+        let hydrology = state.hydrology;
+        assert!(!state.surface_water.ocean[pit]);
+        assert_eq!(hydrology.sea_fed_lakes, 1);
+        // The lake stands below the sill and holds the water the ocean has above it.
+        assert!((hydrology.lake_volume / (0.3 * capacity) - 1.0).abs() < 1e-6);
+        let level = isostasy::to_dry(elevation[pit])
+            + state.surface_water.lake_depth[pit] / isostasy::WATER_LOADING;
+        assert!(level < sill, "{level} {sill}");
+        // The ocean, holding the rest, stands on the sill without a deficit.
+        let solved = sea::sea_level_from(
+            &mesh,
+            &dry,
+            &pores,
+            cell_area,
+            water_volume - hydrology.lake_volume,
+            &seeds,
+        );
+        assert!(
+            (solved.level - sill).abs() < 1e-9 && solved.deficit < 1e-6 * capacity,
+            "{solved:?} {sill}"
+        );
     }
 
     #[test]
