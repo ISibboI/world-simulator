@@ -136,6 +136,14 @@ pub struct ErosionParams {
     /// otherwise it assumes the surface drops by the removed thickness (the model before #7, for
     /// attribution).
     pub isostatic_incision: bool,
+    /// A closed depression that held no lake in the previous step holds water only if its
+    /// deepest floor lies at least this deep (m) below its spill level (#160). Shallower new
+    /// depressions are within the elevation noise of one step on the grid (plates resampled
+    /// onto the cells, uplift, isostasy) and fill with sediment within the step; their water
+    /// passes the spill like that of a filled basin (their sediment is still trapped). A
+    /// depression continuing a lake of the previous step holds water down to
+    /// [`LAKE_MIN_DEPTH`].
+    pub lake_onset_depth: f64,
 }
 
 impl Default for ErosionParams {
@@ -177,6 +185,7 @@ impl Default for ErosionParams {
             alluvial_slope: 2e-4,
             runoff_discharge: true,
             isostatic_incision: true,
+            lake_onset_depth: 30.0,
         }
     }
 }
@@ -186,6 +195,7 @@ impl ErosionParams {
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
         let field = match name {
             "erodibility" => &mut self.erodibility,
+            "lake_onset_depth" => &mut self.lake_onset_depth,
             "shelf_depth" => &mut self.shelf_depth,
             "slope_depth" => &mut self.slope_depth,
             "rise_depth" => &mut self.rise_depth,
@@ -313,6 +323,9 @@ pub struct Surface<'a> {
     /// The seeds of the ocean for this topography (see [`sea::ocean_seeds`]): the ocean is the
     /// water below sea level connected to them.
     pub ocean_seeds: &'a [usize],
+    /// The cells covered by lakes at the end of the previous step (empty if unknown): a
+    /// depression on or next to them continues a lake (see [`ErosionParams::lake_onset_depth`]).
+    pub previous_lakes: &'a [bool],
 }
 
 /// Changes caused by one erosion step, and diagnostic fields.
@@ -321,7 +334,7 @@ pub struct ErosionResult {
     pub bedrock_delta: Vec<f64>,
     /// Change of the sediment thickness of each cell in metres.
     pub sediment_delta: Vec<f64>,
-    /// Water discharge through each cell in m³/yr.
+    /// Water discharge through each cell in m³/yr, on the topography at the end of the step.
     pub discharge: Vec<f64>,
     /// Lakes and endorheic basins.
     pub hydrology: Hydrology,
@@ -362,6 +375,13 @@ pub struct Hydrology {
     pub land_cells: f64,
     /// Sediment trapped in lakes (m³/yr, rock equivalent).
     pub lake_sediment: f64,
+    /// Closed depressions (with or without water) and their cells.
+    pub depressions: usize,
+    pub depression_cells: usize,
+    /// Endorheic depressions whose water covers less than a tenth of their area (salt flats,
+    /// playas), and their cells.
+    pub playas: usize,
+    pub playa_cells: usize,
     /// Depressions filled up to their spill level by sediment in this step, and their cells.
     pub filled_depressions: usize,
     pub filled_depression_cells: usize,
@@ -849,7 +869,8 @@ pub fn erode(
     ErosionResult {
         bedrock_delta,
         sediment_delta: seabed.delta,
-        discharge,
+        // For the view and statistics, consistent with the lakes and receivers at the end.
+        discharge: end.discharge,
         hydrology,
         water,
         sediment_to_ocean,
@@ -890,10 +911,20 @@ fn water_state(
         precipitation,
         runoff,
         potential_evaporation,
+        previous_lakes,
         ..
     } = *surface;
     let cell_count = mesh.len();
     let is_ocean = |cell: usize| ocean[cell];
+    // Cells on or next to last step's lakes: lakes move with their plates by up to about half a
+    // cell per step.
+    let mut continuing = vec![false; cell_count];
+    for (cell, _) in previous_lakes.iter().enumerate().filter(|&(_, &lake)| lake) {
+        continuing[cell] = true;
+        for &neighbor in mesh.neighbors(cell as u32) {
+            continuing[neighbor as usize] = true;
+        }
+    }
     let Drainage {
         receiver,
         filled,
@@ -926,7 +957,17 @@ fn water_state(
     let mut endorheic = vec![false; lakes.cells.len()];
     for &cell in order.iter().rev() {
         let cell = cell as usize;
+        // Shallow new depressions hold no water (see `ErosionParams::lake_onset_depth`).
+        let holds_water = |lake: &usize| {
+            let members = &lakes.cells[*lake];
+            filled[cell] - elevation[members[0] as usize] >= params.lake_onset_depth
+                || members.iter().any(|&m| continuing[m as usize])
+        };
         if let Some(lake) = lakes.exit_of(cell) {
+            hydrology.depressions += 1;
+            hydrology.depression_cells += lakes.cells[lake].len();
+        }
+        if let Some(lake) = lakes.exit_of(cell).filter(holds_water) {
             let balance = lake_balance(
                 &lakes.cells[lake],
                 elevation,
@@ -961,6 +1002,11 @@ fn water_state(
                 }
             }
             endorheic[lake] = balance.endorheic;
+            if balance.endorheic && balance.covered < 0.1 * lakes.cells[lake].len() as f64 {
+                // A salt flat or playa: the water covers less than a tenth of the basin.
+                hydrology.playas += 1;
+                hydrology.playa_cells += lakes.cells[lake].len();
+            }
             hydrology.lakes += 1;
             hydrology.endorheic_lakes += usize::from(balance.endorheic);
             let members = &lakes.cells[lake];
@@ -2135,6 +2181,7 @@ mod tests {
                     -sea::SILL_TOLERANCE,
                     sea::MIN_SEA_FRACTION,
                 ),
+                previous_lakes: &[],
             },
             params,
             1e6,
@@ -2467,6 +2514,7 @@ mod tests {
                     -sea::SILL_TOLERANCE,
                     sea::MIN_SEA_FRACTION,
                 ),
+                previous_lakes: &[],
             },
             &params,
             1e6,
@@ -2552,6 +2600,7 @@ mod tests {
                     -sea::SILL_TOLERANCE,
                     sea::MIN_SEA_FRACTION,
                 ),
+                previous_lakes: &[],
             },
             params,
             1e6,
@@ -2736,6 +2785,110 @@ mod tests {
                 assert!(result.sediment_delta[cell] <= params.max_slope_sediment + 1e-6);
             }
         }
+    }
+
+    /// The island with a pit `depth` m below its lowest neighbour on the flank, and the pit.
+    fn island_with_pit(mesh: &SphereMesh, depth: f64, angle: f64) -> (Vec<f64>, usize) {
+        let mut elevation = island(mesh);
+        let (s, c) = (angle.to_radians().sin(), angle.to_radians().cos());
+        let pit = mesh.nearest(glam::DVec3::new(s, 0.0, c)) as usize;
+        let lowest = mesh
+            .neighbors(pit as u32)
+            .iter()
+            .map(|&n| elevation[n as usize])
+            .fold(f64::INFINITY, f64::min);
+        elevation[pit] = lowest - depth;
+        (elevation, pit)
+    }
+
+    /// One erosion step of the island without any sediment (no incision, diffusion or waves),
+    /// humid, with the lakes of the previous step.
+    fn run_without_sediment(
+        mesh: &SphereMesh,
+        elevation: &[f64],
+        previous_lakes: &[bool],
+    ) -> ErosionResult {
+        let n = mesh.len();
+        let params = ErosionParams {
+            erodibility: 0.0,
+            sediment_diffusivity: 0.0,
+            waves: false,
+            ..ErosionParams::default()
+        };
+        let sediment = vec![0.0; n];
+        erode(
+            mesh,
+            &Surface {
+                elevation,
+                sediment: &sediment,
+                bedrock_density: &vec![2800.0; n],
+                bedrock_isostatic_density: &vec![2800.0; n],
+                dense_crust: &vec![0.0; n],
+                precipitation: &vec![1.0; n],
+                runoff: &vec![0.6; n],
+                potential_evaporation: &vec![0.5; n],
+                plate: &vec![0; n],
+                class: &classes(elevation, -1000.0),
+                ocean_volume: ocean_volume(mesh, elevation, &sediment, params.planet_radius),
+                ocean_seeds: &sea::ocean_seeds(
+                    mesh,
+                    elevation,
+                    -sea::SILL_TOLERANCE,
+                    sea::MIN_SEA_FRACTION,
+                ),
+                previous_lakes,
+            },
+            &params,
+            1e6,
+        )
+    }
+
+    #[test]
+    fn shallow_new_depressions_hold_no_lake_but_lakes_persist() {
+        let mesh = SphereMesh::icosphere(4);
+        let n = mesh.len();
+        let onset = ErosionParams::default().lake_onset_depth;
+        // A new shallow depression: its water passes the spill, nothing is endorheic.
+        let (shallow, pit) = island_with_pit(&mesh, 0.5 * onset, 10.0);
+        let result = run_without_sediment(&mesh, &shallow, &[]);
+        assert!(result.water.depression[pit]);
+        assert_eq!(result.water.lake_depth[pit], 0.0);
+        assert_eq!(result.hydrology.lakes, 0);
+        assert_eq!(result.hydrology.depressions, 1);
+        // The same depression where a lake was last step (on it or next to it, as a lake moves
+        // with its plate): the lake persists.
+        let mut previous = vec![false; n];
+        previous[mesh.neighbors(pit as u32)[0] as usize] = true;
+        let result = run_without_sediment(&mesh, &shallow, &previous);
+        assert!(
+            (result.water.lake_depth[pit] - 0.5 * onset).abs() < 0.01,
+            "{} {:?}",
+            result.water.lake_depth[pit],
+            result.hydrology
+        );
+        assert_eq!(result.hydrology.lakes, 1);
+        // A new deep depression holds a lake.
+        let (deep, pit) = island_with_pit(&mesh, 2.0 * onset, 10.0);
+        let result = run_without_sediment(&mesh, &deep, &[]);
+        assert!((result.water.lake_depth[pit] - 2.0 * onset).abs() < 0.01);
+    }
+
+    #[test]
+    fn lakes_filled_by_the_steps_sediment_are_dry_at_its_end() {
+        let mesh = SphereMesh::icosphere(4);
+        let params = ErosionParams::default();
+        // A depression on the lower flank, below the island's rivers.
+        let (elevation, pit) = island_with_pit(&mesh, 2.0 * params.lake_onset_depth, 12.0);
+        let sediment = vec![0.0; mesh.len()];
+        let result = run_all(&mesh, &elevation, &sediment, (1.0, 0.6, 0.5), &params);
+        assert!(
+            result.hydrology.filled_depressions >= 1,
+            "{:?}",
+            result.hydrology
+        );
+        assert!(result.sediment_delta[pit] > 0.0);
+        assert_eq!(result.water.lake_depth[pit], 0.0);
+        assert_eq!(result.hydrology.lake_volume, 0.0);
     }
 
     #[test]

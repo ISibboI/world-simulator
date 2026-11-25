@@ -1,7 +1,8 @@
 """Lake persistence and flicker causes from the per-step depression log (`--lake-log-from`).
 usage: lakes.py DIR [DIR...]   (DIR/seed-S/{lakes.csv,mesh.csv}); prints per seed and the mean.
 Lake cells: lake depth > 0. Lakes: connected groups of lake cells. A lake continues into the
-next step if it overlaps a lake there; lifetimes follow the largest overlap."""
+next step if it overlaps a lake there (else if it is next to one: lakes move with the plates);
+lifetimes follow the largest overlap."""
 import sys, os, glob
 import numpy as np
 from pits import mesh
@@ -91,8 +92,14 @@ def seed(d):
             if i > 0:
                 prev_comp, prev_ids = comps[i - 1][0], ids[i - 1]
                 cnt = {}
+                # Overlap with the previous lakes, or else adjacency (lakes move with plates).
                 for c in m:
-                    if c in prev_comp: cnt[prev_comp[c]] = cnt.get(prev_comp[c], 0) + 1
+                    if c in prev_comp: cnt[prev_comp[c]] = cnt.get(prev_comp[c], 0) + 2
+                if not cnt:
+                    for c in m:
+                        for n in nb[c]:
+                            if n >= 0 and n in prev_comp:
+                                cnt[prev_comp[n]] = cnt.get(prev_comp[n], 0) + 1
                 if cnt:
                     best = prev_ids[max(cnt, key=lambda x: (cnt[x], -x))]
             if best is None or best in cur:

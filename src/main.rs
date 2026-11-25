@@ -1205,7 +1205,8 @@ fn snapshot(
         "    hydrology: runoff {:.0} km³/yr, to the ocean {:.0} km³/yr, lake evaporation {:.0} \
          km³/yr | endorheic {:.1}% of land ({:.1}% into single-cell pits), lakes {:.1}% of land, \
          lake potential evaporation {:.2} m/yr | depressions {}, endorheic {}, with inner sills \
-         {} | sediment trapped in lakes {:.2} km³/yr",
+         {} | sediment trapped in lakes {:.2} km³/yr | all closed depressions {} ({:.1}% of \
+         land), playas {} ({:.1}% of land)",
         hydrology.runoff / 1e9,
         hydrology.to_ocean / 1e9,
         hydrology.lake_evaporation / 1e9,
@@ -1217,6 +1218,10 @@ fn snapshot(
         hydrology.endorheic_lakes,
         hydrology.nested_lakes,
         hydrology.lake_sediment / 1e9,
+        hydrology.depressions,
+        100.0 * hydrology.depression_cells as f64 / land_cells,
+        hydrology.playas,
+        100.0 * hydrology.playa_cells as f64 / land_cells,
     );
     // Metres of sea level per m³ of water over the ocean.
     let per_ocean_area = 1.0

@@ -353,6 +353,12 @@ impl Planet {
                     class: &class,
                     ocean_volume: self.tectonics.ocean_volume(),
                     ocean_seeds: &seeds,
+                    previous_lakes: &self
+                        .water
+                        .lake_depth
+                        .iter()
+                        .map(|&depth| depth > 0.0)
+                        .collect::<Vec<_>>(),
                 },
                 params,
                 dt_years,
