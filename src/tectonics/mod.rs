@@ -366,14 +366,24 @@ impl Default for TectonicParams {
 impl TectonicParams {
     /// Sets the tunable parameter `name` (the field name, with `events.` for
     /// [`PlateEventParams`] fields and `initial_sediment.` for [`InitialSedimentParams`]
-    /// fields; `initial_sediment.enabled` and `initial_sediment.biogenic_pelagic` are off for 0 and
-    /// on otherwise) to `value`.
+    /// fields, `matching.` for [`MatchingParams`] fields; `initial_sediment.enabled`,
+    /// `initial_sediment.biogenic_pelagic` and `matching.distinct` are off for 0 and on
+    /// otherwise) to `value`.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
         if let Some(name) = name.strip_prefix("sheet.") {
             return self.sheet.set(name, value);
         }
         let sediment = &mut self.initial_sediment;
         let field = match name {
+            "matching.distinct" => {
+                self.matching.distinct = value != 0.0;
+                return Ok(());
+            }
+            "matching.distinct_depth" => {
+                self.matching.distinct_depth = value.max(0.0) as usize;
+                return Ok(());
+            }
+            "matching.distinct_radius" => &mut self.matching.distinct_radius,
             "initial_sediment.enabled" => {
                 sediment.enabled = value != 0.0;
                 return Ok(());

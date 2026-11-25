@@ -686,6 +686,16 @@ impl Simulation {
             }
         }
         matching::update_crust_cells(mesh, plates, found, &filled, matching_scratch);
+        if params.matching.distinct {
+            matching::show_distinct_samples(
+                mesh,
+                plates,
+                owners,
+                &params.matching,
+                matching_scratch,
+                matching_statistics,
+            );
+        }
         ResolvedBoundaries {
             additions,
             collisions,

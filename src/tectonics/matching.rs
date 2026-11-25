@@ -30,6 +30,10 @@ use super::*;
 /// from a crust cell; three rings reach at least ~2.6 spacings.
 const RINGS: usize = 3;
 
+/// Most cells one search of [`show_distinct_samples`] visits: where a plate covers more cells
+/// than it has samples nearby, no chain exists, and the search would grow over the whole region.
+const MAX_SEARCHED_CELLS: usize = 64;
+
 /// How plates are matched to cells.
 #[derive(Clone, Debug)]
 pub struct MatchingParams {
@@ -38,6 +42,13 @@ pub struct MatchingParams {
     /// Additionally run the full scan for incrementally matched plates and count crust found
     /// outside the searched cells (should be zero). Slow; for verification.
     pub verify: bool,
+    /// Show every crust sample at one cell at most (see [`show_distinct_samples`]).
+    pub distinct: bool,
+    /// How far (in mean cell spacings) from a cell a sample it shows instead of its nearest one
+    /// may lie.
+    pub distinct_radius: f64,
+    /// Longest chain of cells that pass their samples on to give a cell its own sample.
+    pub distinct_depth: usize,
 }
 
 impl Default for MatchingParams {
@@ -45,6 +56,9 @@ impl Default for MatchingParams {
         Self {
             incremental: true,
             verify: false,
+            distinct: true,
+            distinct_radius: 1.6,
+            distinct_depth: 12,
         }
     }
 }
@@ -61,6 +75,12 @@ pub struct MatchingStatistics {
     /// Cells with crust of a plate that the incremental search did not visit (verification
     /// only; must be zero).
     pub mismatches: u64,
+    /// Cells that showed a sample also shown at a cell nearer to it (see
+    /// [`show_distinct_samples`]), those given a sample of their own, and the chain steps
+    /// (cells passing their sample on) that took.
+    pub shared: u64,
+    pub separated: u64,
+    pub chain_steps: u64,
 }
 
 /// What a plate knows about where its crust was after the last matching.
@@ -82,6 +102,11 @@ pub(super) struct MatchingScratch {
     /// Marks local vertices matched to a cell with `local_generation`.
     local_stamp: Vec<u32>,
     local_generation: u32,
+    /// For [`show_distinct_samples`]: per local vertex of the current plate, the cell showing it
+    /// (valid where `local_stamp` is the current generation), and per cell the step it was
+    /// reached by in the search.
+    holder: Vec<u32>,
+    reached: Vec<(u32, u32)>,
 }
 
 /// The crust samples at each cell: for every cell, the (plate, local vertex) pairs of the plates
@@ -297,6 +322,187 @@ pub(super) fn update_crust_cells(
         cells.sort_unstable();
         cells.dedup();
         plate.tracked = Some(TrackedCrust { cells, samples });
+    }
+}
+
+/// Gives every cell a crust sample of its own where possible (#112): nearest-vertex resampling
+/// of a rotated plate shows some samples at two or more cells, because the plate's local mesh
+/// and the world mesh differ in density by up to ±20% (icosphere cells range from 0.77× to 1.21×
+/// the mean area) and are offset from each other; elsewhere the same mismatch leaves samples
+/// hidden. Cells showing one sample would share one crust column and every change to it, so
+/// the lower of two such neighbours (lower by the dynamic topography only) could never fill and
+/// stayed a pit.
+///
+/// Of the cells showing one sample, the one nearest to it keeps it. Every other cell gets a
+/// sample no cell shows, within [`MatchingParams::distinct_radius`] cell spacings, through a
+/// chain of cells within that distance that pass their samples on (an augmenting path, found by
+/// breadth-first search with at most [`MatchingParams::distinct_depth`] steps; the shortest
+/// chain wins, nearer samples first). A cell for which no chain exists (where the plate
+/// covers more cells than it has samples nearby) keeps showing the shared sample. Only which
+/// sample of its plate a cell shows changes, never which plate owns it; a sample shown in place
+/// of the nearest one lies within a cell or two of the cell.
+pub(super) fn show_distinct_samples(
+    mesh: &SphereMesh,
+    plates: &mut [Plate],
+    owners: &mut [Ownership],
+    params: &MatchingParams,
+    scratch: &mut MatchingScratch,
+    statistics: &mut MatchingStatistics,
+) {
+    let cell_count = mesh.len();
+    if scratch.local_stamp.len() != cell_count {
+        scratch.local_stamp = vec![0; cell_count];
+        scratch.local_generation = 0;
+    }
+    if scratch.stamp.len() != cell_count {
+        scratch.stamp = vec![0; cell_count];
+        scratch.generation = 0;
+    }
+    scratch.holder.resize(cell_count, u32::MAX);
+    scratch.reached.resize(cell_count, (u32::MAX, u32::MAX));
+    let min_dot = math::cos(params.distinct_radius * mesh.mean_edge_angle());
+
+    // Cells per plate, in cell order.
+    let mut offsets = vec![0u32; plates.len() + 1];
+    for owner in owners.iter() {
+        offsets[owner.plate as usize + 1] += 1;
+    }
+    for plate in 0..plates.len() {
+        offsets[plate + 1] += offsets[plate];
+    }
+    let mut position = offsets.clone();
+    let mut cells_by_plate = vec![0u32; cell_count];
+    for (cell, owner) in owners.iter().enumerate() {
+        cells_by_plate[position[owner.plate as usize] as usize] = cell as u32;
+        position[owner.plate as usize] += 1;
+    }
+
+    let mut orphans: Vec<u32> = Vec::new();
+    let mut queue: Vec<u32> = Vec::new();
+    let mut candidates: Vec<(f64, u32)> = Vec::new();
+    for (index, plate) in plates.iter_mut().enumerate() {
+        let cells = &cells_by_plate[offsets[index] as usize..offsets[index + 1] as usize];
+        if cells.is_empty() {
+            continue;
+        }
+        scratch.local_generation = scratch.local_generation.wrapping_add(1);
+        if scratch.local_generation == 0 {
+            scratch.local_stamp.fill(0);
+            scratch.local_generation = 1;
+        }
+        let generation = scratch.local_generation;
+        let rotation = plate.rotation;
+        let inverse = rotation.inverse();
+        // Closeness of a cell to a sample of this plate (cosine of the angle).
+        let closeness =
+            |cell: u32, local: u32| -> f64 { mesh.vertex(cell).dot(rotation * mesh.vertex(local)) };
+        orphans.clear();
+        for &cell in cells {
+            let local = owners[cell as usize].local;
+            let l = local as usize;
+            if scratch.local_stamp[l] != generation {
+                scratch.local_stamp[l] = generation;
+                scratch.holder[l] = cell;
+                continue;
+            }
+            let holder = scratch.holder[l];
+            // The nearer cell keeps the sample (ties: the lower index, which came first).
+            if closeness(cell, local) > closeness(holder, local) {
+                scratch.holder[l] = cell;
+                orphans.push(holder);
+            } else {
+                orphans.push(cell);
+            }
+        }
+        if orphans.is_empty() {
+            continue;
+        }
+        orphans.sort_unstable();
+        statistics.shared += orphans.len() as u64;
+        for &orphan in &orphans {
+            // Breadth-first search for a chain ending at a sample no cell shows.
+            scratch.generation = scratch.generation.wrapping_add(1);
+            if scratch.generation == 0 {
+                scratch.stamp.fill(0);
+                scratch.generation = 1;
+            }
+            let search = scratch.generation;
+            scratch.stamp[orphan as usize] = search;
+            scratch.reached[orphan as usize] = (u32::MAX, u32::MAX);
+            queue.clear();
+            queue.push(orphan);
+            let mut head = 0;
+            let mut level_end = 1;
+            let mut depth = 0;
+            let mut found: Option<(u32, u32)> = None;
+            'search: while head < queue.len() {
+                if head == level_end {
+                    depth += 1;
+                    level_end = queue.len();
+                    if depth >= params.distinct_depth {
+                        break;
+                    }
+                }
+                if queue.len() > MAX_SEARCHED_CELLS {
+                    break;
+                }
+                let cell = queue[head];
+                head += 1;
+                let target = inverse * mesh.vertex(cell);
+                let nearest = mesh.nearest_from(target, plate.lookup_cache[cell as usize]);
+                candidates.clear();
+                let consider = |local: u32, candidates: &mut Vec<(f64, u32)>| {
+                    if plate.crust[local as usize].is_none()
+                        || candidates.iter().any(|&(_, l)| l == local)
+                    {
+                        return;
+                    }
+                    let dot = mesh.vertex(local).dot(target);
+                    if dot >= min_dot {
+                        candidates.push((dot, local));
+                    }
+                };
+                consider(nearest, &mut candidates);
+                for &first in mesh.neighbors(nearest) {
+                    consider(first, &mut candidates);
+                    for &second in mesh.neighbors(first) {
+                        consider(second, &mut candidates);
+                    }
+                }
+                // Nearest first; ties by index (deterministic).
+                candidates.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+                for &(_, local) in &candidates {
+                    let l = local as usize;
+                    if scratch.local_stamp[l] != generation {
+                        found = Some((cell, local));
+                        break 'search;
+                    }
+                    let holder = scratch.holder[l];
+                    if holder == cell || scratch.stamp[holder as usize] == search {
+                        continue;
+                    }
+                    scratch.stamp[holder as usize] = search;
+                    scratch.reached[holder as usize] = (cell, local);
+                    queue.push(holder);
+                }
+            }
+            let Some((mut cell, mut local)) = found else {
+                continue;
+            };
+            // Pass the samples along the chain: each cell takes the sample of the next one.
+            statistics.separated += 1;
+            loop {
+                scratch.local_stamp[local as usize] = generation;
+                scratch.holder[local as usize] = cell;
+                owners[cell as usize].local = local;
+                let (previous, sample) = scratch.reached[cell as usize];
+                if previous == u32::MAX {
+                    break;
+                }
+                statistics.chain_steps += 1;
+                (cell, local) = (previous, sample);
+            }
+        }
     }
 }
 
