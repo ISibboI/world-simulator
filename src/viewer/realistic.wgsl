@@ -284,7 +284,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let v = normalize(uniforms.eye.xyz - input.position);
     let sun = pow(max(uniforms.light_color.rgb, vec3<f32>(0.0)), vec3<f32>(2.2));
     let ambient = pow(uniforms.light_color.w, 2.2);
-    let nl = max(dot(n, l), 0.0);
+    // The exposure's gain in linear light (`stars.z` is its factor on sRGB values). No lit
+    // surface may over-expose (#159): the view caps the exposure at the brightest incidence on
+    // the smooth sphere, and this caps the incidence of the bump-tilted normals the same way,
+    // so that a reflectance never shows brighter than under the zenith sun in daylight.
+    let gain = pow(max(uniforms.stars.z, 1e-6), 2.2);
+    let nl = min(max(dot(n, l), 0.0), 1.0 / gain);
     let nv = max(dot(n, v), 1e-3);
     // Sun glint: GGX distribution, Schlick's Fresnel, Smith–Schlick shadowing.
     let roughness = clamp(input.snow.a * 0.5, 0.03, 0.45);
@@ -305,7 +310,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let slant = 1.0 - max(dot(up, v), 0.0);
     let day = smoothstep(-0.1, 0.3, dot(up, l));
     let haze = slant * slant * slant * day;
-    let luminance = dot(sun, vec3<f32>(0.2126, 0.7152, 0.0722));
+    // The haze keeps its daylight brightness at any exposure (it also lights the twilight band,
+    // which the exposure's cap does not see).
+    let luminance = dot(sun, vec3<f32>(0.2126, 0.7152, 0.0722)) / gain;
     color = color * (1.0 - 0.4 * haze) + HAZE * haze * luminance;
     return vec4<f32>(linear_to_srgb(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
 }
