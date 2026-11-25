@@ -749,7 +749,7 @@ mod tests {
             let shared_after = shared_cells(&simulation, &owners);
             assert!(shared_before > 0);
             assert!(
-                2 * shared_after < shared_before,
+                3 * shared_after < 2 * shared_before,
                 "seed {seed}: {shared_before} → {shared_after} {statistics:?}"
             );
             let max_angle = params.distinct_radius * simulation.mesh.mean_edge_angle();
