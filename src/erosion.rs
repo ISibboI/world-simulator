@@ -433,14 +433,20 @@ pub struct SurfaceWater {
     /// or under a lake.
     pub depression: Vec<bool>,
     /// Depth of lake water over the cell's floor (m), zero where there is no lake. The floor is
-    /// the surface at the end of the step as the erosion sees it: with
+    /// pressed down by the water's own load (see [`lake_water_depth`]). It is the floor of the
+    /// surface at the end of the step as the erosion sees it: with
     /// [`ErosionParams::sample_surface`], cells showing one crust sample share one floor (their
-    /// mean), so on the per-cell surface their water surfaces differ by
-    /// the dynamic topography between them (a few metres; #112 b).
+    /// mean), so on the per-cell surface their water surfaces differ by the dynamic topography
+    /// between them (a few metres; #112 b).
     pub lake_depth: Vec<f64>,
     /// Depth of the cell's floor below the spill level of its depression (m), zero outside
-    /// depressions.
+    /// depressions; of the floor without the load of lake water.
     pub spill_depth: Vec<f64>,
+    /// Correction of the surface elevation (m) for the water that actually stands on the cell
+    /// (#127): the elevations of the processes load every cell below sea level with the ocean
+    /// and none above it; a lake presses its floor down by its own water, a dry closed
+    /// depression below sea level carries no load. Zero elsewhere (and where unknown).
+    pub load_correction: Vec<f64>,
     /// The depressions at the start of the erosion step, before its deposition (for analysis).
     pub depression_at_start: Vec<bool>,
 }
@@ -456,6 +462,7 @@ impl SurfaceWater {
             lake_depth: vec![0.0; cells],
             spill_depth: vec![0.0; cells],
             depression_at_start: vec![false; cells],
+            load_correction: vec![0.0; cells],
         }
     }
 }
@@ -510,6 +517,23 @@ pub fn erode(
         mut hydrology,
         ..
     } = water_state(mesh, elevation, &ocean, surface, params, cell_area);
+    // The routing and deposition below work on the processes' elevations, which load closed
+    // depressions below sea level with the ocean: spill and water levels in that frame.
+    let to_process = |levels: Vec<f64>| -> Vec<f64> {
+        levels
+            .into_iter()
+            .enumerate()
+            .map(|(cell, level)| {
+                if ocean[cell] {
+                    level
+                } else {
+                    isostasy::to_surface(level)
+                }
+            })
+            .collect()
+    };
+    let filled = to_process(filled);
+    let water_level = to_process(water_level);
 
     // Implicit stream-power incision, from the ocean upstream so receivers are updated first.
     let mut new_elevation = elevation.to_vec();
@@ -957,6 +981,21 @@ fn water_state(
     } = *surface;
     let cell_count = mesh.len();
     let is_ocean = |cell: usize| ocean[cell];
+    // The water of the land stands on the unloaded floors (#127): the processes' elevations load
+    // every cell below sea level with the ocean (see `isostasy::to_surface`), also closed
+    // depressions that the ocean does not reach. The conversion keeps the order of the
+    // elevations, so the drainage and the depressions are the same.
+    let process = elevation;
+    let unloaded: Vec<f64> = (0..cell_count)
+        .map(|cell| {
+            if is_ocean(cell) {
+                process[cell]
+            } else {
+                isostasy::to_dry(process[cell])
+            }
+        })
+        .collect();
+    let elevation = &unloaded[..];
     // Cells on or next to last step's lakes: lakes move with their plates by up to about half a
     // cell per step.
     let mut continuing = vec![false; cell_count];
@@ -1038,7 +1077,7 @@ fn water_state(
             }
             for (i, &member) in members.iter().enumerate() {
                 let covered = (balance.covered - i as f64).clamp(0.0, 1.0);
-                let depth = (balance.level - elevation[member as usize]).max(0.0);
+                let depth = lake_water_depth(balance.level, elevation[member as usize]);
                 hydrology.lake_volume += covered * depth * cell_area;
                 if elevation[member as usize] < 0.0 {
                     hydrology.inland_water_cells += covered;
@@ -1113,7 +1152,7 @@ fn water_state(
         ocean: ocean.to_vec(),
         depression: lakes.lake.iter().map(|&lake| lake != NO_LAKE).collect(),
         lake_depth: (0..cell_count)
-            .map(|cell| (water_level[cell] - elevation[cell]).max(0.0))
+            .map(|cell| lake_water_depth(water_level[cell], elevation[cell]))
             .collect(),
         spill_depth: (0..cell_count)
             .map(|cell| {
@@ -1125,6 +1164,18 @@ fn water_state(
             })
             .collect(),
         depression_at_start: Vec::new(),
+        load_correction: (0..cell_count)
+            .map(|cell| {
+                // The floor as the water presses it (or unloaded where dry) minus the
+                // processes' elevation.
+                let depth = lake_water_depth(water_level[cell], elevation[cell]);
+                if depth > 0.0 {
+                    water_level[cell] - depth - process[cell]
+                } else {
+                    elevation[cell] - process[cell]
+                }
+            })
+            .collect(),
     };
 
     WaterState {
@@ -1296,6 +1347,18 @@ impl Lakes {
     fn exit_of(&self, cell: usize) -> Option<usize> {
         let lake = self.lake[cell];
         (lake != NO_LAKE && self.exit[lake as usize] as usize == cell).then_some(lake as usize)
+    }
+}
+
+/// Depth (m) of lake water standing at `level` over a cell whose unloaded floor is at `floor`,
+/// zero if the water does not reach it. The water presses the floor down by its own weight
+/// (Airy): it stands `WATER_LOADING · (level − floor)` deep. The lake covers the same cells at
+/// the same level, so the water balance on the unloaded floors is unchanged (#127).
+fn lake_water_depth(level: f64, floor: f64) -> f64 {
+    if level > floor {
+        isostasy::WATER_LOADING * (level - floor)
+    } else {
+        0.0
     }
 }
 
@@ -2909,7 +2972,7 @@ mod tests {
         previous[mesh.neighbors(pit as u32)[0] as usize] = true;
         let result = run_without_sediment(&mesh, &shallow, &previous);
         assert!(
-            (result.water.lake_depth[pit] - 0.5 * onset).abs() < 0.01,
+            (result.water.lake_depth[pit] - isostasy::WATER_LOADING * 0.5 * onset).abs() < 0.02,
             "{} {:?}",
             result.water.lake_depth[pit],
             result.hydrology
@@ -2918,7 +2981,77 @@ mod tests {
         // A new deep depression holds a lake.
         let (deep, pit) = island_with_pit(&mesh, 2.0 * onset, 10.0);
         let result = run_without_sediment(&mesh, &deep, &[]);
-        assert!((result.water.lake_depth[pit] - 2.0 * onset).abs() < 0.01);
+        assert!(
+            (result.water.lake_depth[pit] - isostasy::WATER_LOADING * 2.0 * onset).abs() < 0.02
+        );
+        // Its water presses the floor down: the lake is 1.45× deeper than the dry basin, its
+        // surface stays at the spill.
+        let correction = result.water.load_correction[pit];
+        assert!(
+            (correction + (isostasy::WATER_LOADING - 1.0) * 2.0 * onset).abs() < 0.02,
+            "{correction}"
+        );
+        assert!(
+            result
+                .water
+                .load_correction
+                .iter()
+                .filter(|&&c| c != 0.0)
+                .count()
+                == 1
+        );
+    }
+
+    #[test]
+    fn lakes_below_sea_level_stand_on_their_unloaded_floor() {
+        let mesh = SphereMesh::icosphere(4);
+        let (elevation, pit) = island_with_depression(&mesh);
+        // Humid, no sediment: the lake fills the depression to its rim.
+        let result = run_without_sediment(&mesh, &elevation, &[]);
+        let rim = mesh
+            .neighbors(pit as u32)
+            .iter()
+            .map(|&n| elevation[n as usize])
+            .fold(f64::INFINITY, f64::min);
+        let floor = isostasy::to_dry(elevation[pit]);
+        let depth = result.water.lake_depth[pit];
+        assert!(
+            (depth - isostasy::WATER_LOADING * (rim - floor)).abs() < 0.1,
+            "{depth} {rim} {floor}"
+        );
+        // The pressed floor lies the lake's depth below its surface.
+        let shown = elevation[pit] + result.water.load_correction[pit];
+        assert!((rim - depth - shown).abs() < 0.1, "{shown}");
+        assert!(result.hydrology.lake_volume > 0.0);
+    }
+
+    #[test]
+    fn dry_depressions_below_sea_level_carry_no_water_load() {
+        let mesh = SphereMesh::icosphere(4);
+        let (elevation, pit) = island_with_depression(&mesh);
+        let sediment = vec![0.0; mesh.len()];
+        // Hyper-arid and without runoff: the basin stays dry.
+        let params = ErosionParams {
+            erodibility: 0.0,
+            sediment_diffusivity: 0.0,
+            waves: false,
+            ..ErosionParams::default()
+        };
+        let result = run_all(&mesh, &elevation, &sediment, (0.0, 0.0, 2.0), &params);
+        assert_eq!(result.water.lake_depth[pit], 0.0);
+        assert!(!result.water.ocean[pit]);
+        // The processes see it loaded by the ocean (−400 m); unloaded it is 31% shallower.
+        let shown = elevation[pit] + result.water.load_correction[pit];
+        assert!(
+            (shown - isostasy::to_dry(elevation[pit])).abs() < 1e-9,
+            "{shown}"
+        );
+        // The ocean keeps its load.
+        for cell in 0..mesh.len() {
+            if result.water.ocean[cell] {
+                assert_eq!(result.water.load_correction[cell], 0.0);
+            }
+        }
     }
 
     #[test]

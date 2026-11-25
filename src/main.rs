@@ -1425,6 +1425,8 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     // The surface as the erosion sees it (cells showing one sample at one level, #112 b).
     let drain = simulation.sample_surface_elevations();
     let ocean = sea::ocean_mask(mesh, &elevation, simulation.min_sea_fraction());
+    // With the load of the water that actually stands on each cell (#127).
+    let elevation = planet.surface_elevations();
     let temperature = planet.temperature();
     // Precipitation of the solved month nearest to `month` (0 = January).
     let cycle = planet.water_cycle();
