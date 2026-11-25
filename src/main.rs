@@ -1110,7 +1110,7 @@ fn snapshot(
     info!(
         "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
          cell, {} mismatches | distinct samples: {} cells shared a sample, {:.1}% of them got \
-         their own ({:.2} chain steps each)",
+         their own ({:.2} chain steps each), {:.1} s",
         statistics.matching.incremental,
         statistics.matching.full_scans,
         statistics.matching.searched_cells as f64
@@ -1120,6 +1120,7 @@ fn snapshot(
         statistics.matching.shared,
         100.0 * statistics.matching.separated as f64 / statistics.matching.shared.max(1) as f64,
         statistics.matching.chain_steps as f64 / statistics.matching.separated.max(1) as f64,
+        statistics.matching.distinct_seconds,
     );
     info!(
         "    gaps filled: {} new sea floor, {} stretched, {} revealed, {} filled holes, {} shared ({} inside \

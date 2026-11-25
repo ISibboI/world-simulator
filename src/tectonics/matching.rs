@@ -32,7 +32,7 @@ const RINGS: usize = 3;
 
 /// Most cells one search of [`show_distinct_samples`] visits: where a plate covers more cells
 /// than it has samples nearby, no chain exists, and the search would grow over the whole region.
-const MAX_SEARCHED_CELLS: usize = 64;
+const MAX_SEARCHED_CELLS: usize = 32;
 
 /// How plates are matched to cells.
 #[derive(Clone, Debug)]
@@ -61,7 +61,7 @@ impl Default for MatchingParams {
             verify: false,
             distinct: true,
             distinct_radius: 1.6,
-            distinct_depth: 12,
+            distinct_depth: 6,
             distinct_tolerance: 30.0,
         }
     }
@@ -85,6 +85,8 @@ pub struct MatchingStatistics {
     pub shared: u64,
     pub separated: u64,
     pub chain_steps: u64,
+    /// Wall time spent in [`show_distinct_samples`] (s).
+    pub distinct_seconds: f64,
 }
 
 /// What a plate knows about where its crust was after the last matching.
@@ -111,8 +113,19 @@ pub(super) struct MatchingScratch {
     /// reached by in the search.
     holder: Vec<u32>,
     reached: Vec<(u32, u32)>,
-    /// Per cell, the dry elevation of the sample it showed before the pass.
+    /// Per cell, the dry elevation of the sample it showed before the pass (valid where
+    /// `cell_height_stamp` is `pass`; filled when the search first reaches the cell, before
+    /// any chain changes its sample).
     height: Vec<f64>,
+    cell_height_stamp: Vec<u32>,
+    pass: u32,
+    /// Per local vertex of the current plate, its dry elevation (valid where `height_stamp` is
+    /// the current generation).
+    sample_height: Vec<f64>,
+    height_stamp: Vec<u32>,
+    /// Per local vertex, the search step that last considered it (`visit`).
+    seen: Vec<u32>,
+    visit: u32,
 }
 
 /// The crust samples at each cell: for every cell, the (plate, local vertex) pairs of the plates
@@ -361,13 +374,16 @@ pub(super) fn show_distinct_samples(
     scratch: &mut MatchingScratch,
     statistics: &mut MatchingStatistics,
 ) {
+    let start = web_time::Instant::now();
     let cell_count = mesh.len();
-    scratch.height.clear();
-    scratch.height.extend(owners.iter().map(|owner| {
-        plates[owner.plate as usize].crust[owner.local as usize]
-            .expect("owners point to crust")
-            .dry_elevation(time)
-    }));
+    scratch.height.resize(cell_count, 0.0);
+    scratch.cell_height_stamp.resize(cell_count, 0);
+    scratch.pass = scratch.pass.wrapping_add(1);
+    if scratch.pass == 0 {
+        scratch.cell_height_stamp.fill(0);
+        scratch.pass = 1;
+    }
+    let pass = scratch.pass;
     if scratch.local_stamp.len() != cell_count {
         scratch.local_stamp = vec![0; cell_count];
         scratch.local_generation = 0;
@@ -377,6 +393,9 @@ pub(super) fn show_distinct_samples(
         scratch.generation = 0;
     }
     scratch.holder.resize(cell_count, u32::MAX);
+    scratch.sample_height.resize(cell_count, 0.0);
+    scratch.height_stamp.resize(cell_count, 0);
+    scratch.seen.resize(cell_count, 0);
     scratch.reached.resize(cell_count, (u32::MAX, u32::MAX));
     let min_dot = math::cos(params.distinct_radius * mesh.mean_edge_angle());
 
@@ -406,6 +425,7 @@ pub(super) fn show_distinct_samples(
         scratch.local_generation = scratch.local_generation.wrapping_add(1);
         if scratch.local_generation == 0 {
             scratch.local_stamp.fill(0);
+            scratch.height_stamp.fill(0);
             scratch.local_generation = 1;
         }
         let generation = scratch.local_generation;
@@ -469,18 +489,43 @@ pub(super) fn show_distinct_samples(
                 let target = inverse * mesh.vertex(cell);
                 let nearest = mesh.nearest_from(target, plate.lookup_cache[cell as usize]);
                 candidates.clear();
-                let height = scratch.height[cell as usize];
-                let consider = |local: u32, candidates: &mut Vec<(f64, u32)>| {
-                    let Some(crust) = plate.crust[local as usize] else {
-                        return;
-                    };
-                    if candidates.iter().any(|&(_, l)| l == local) {
+                let c = cell as usize;
+                if scratch.cell_height_stamp[c] != pass {
+                    scratch.cell_height_stamp[c] = pass;
+                    scratch.height[c] = plate.crust[owners[c].local as usize]
+                        .expect("owners point to crust")
+                        .dry_elevation(time);
+                }
+                let height = scratch.height[c];
+                scratch.visit = scratch.visit.wrapping_add(1);
+                if scratch.visit == 0 {
+                    scratch.seen.fill(0);
+                    scratch.visit = 1;
+                }
+                let visit = scratch.visit;
+                let (sample_height, height_stamp, seen) = (
+                    &mut scratch.sample_height,
+                    &mut scratch.height_stamp,
+                    &mut scratch.seen,
+                );
+                let mut consider = |local: u32, candidates: &mut Vec<(f64, u32)>| {
+                    let l = local as usize;
+                    if seen[l] == visit {
                         return;
                     }
+                    seen[l] = visit;
+                    let Some(crust) = &plate.crust[l] else {
+                        return;
+                    };
                     let dot = mesh.vertex(local).dot(target);
-                    if dot >= min_dot
-                        && (crust.dry_elevation(time) - height).abs() <= params.distinct_tolerance
-                    {
+                    if dot < min_dot {
+                        return;
+                    }
+                    if height_stamp[l] != generation {
+                        height_stamp[l] = generation;
+                        sample_height[l] = crust.dry_elevation(time);
+                    }
+                    if (sample_height[l] - height).abs() <= params.distinct_tolerance {
                         candidates.push((dot, local));
                     }
                 };
@@ -526,6 +571,7 @@ pub(super) fn show_distinct_samples(
             }
         }
     }
+    statistics.distinct_seconds += start.elapsed().as_secs_f64();
 }
 
 #[cfg(test)]
