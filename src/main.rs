@@ -147,9 +147,9 @@ struct Cli {
     #[arg(long)]
     cell_dump: bool,
 
-    /// From this time (Myr) on, append the lakes after every step to `lakes.csv` in `--output`
-    /// (time, then `cell:depth` of every cell covered by a lake), for analysing how long lakes
-    /// persist.
+    /// From this time (Myr) on, append the closed depressions after every step to `lakes.csv`
+    /// in `--output` (time, then `cell:lake:spill` of every cell in a depression: lake depth and
+    /// depth below the spill level in m), for analysing how long lakes persist.
     #[arg(long)]
     lake_log_from: Option<f64>,
 
@@ -1502,16 +1502,18 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     Ok(())
 }
 
-/// Appends the lakes of the current step to `path`: the time, then `cell:depth` (m) of every
-/// cell covered by a lake.
+/// Appends the closed depressions of the current step to `path`: the time, then
+/// `cell:lake:spill` of every cell in a depression, with the depth (m) of lake water over its
+/// floor (zero if dry) and the depth of its floor below the spill level.
 #[cfg(not(target_arch = "wasm32"))]
 fn append_lake_log(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
     use std::fmt::Write as _;
     use std::io::Write as _;
     let mut line = format!("{:.1}", planet.tectonics().time());
-    for (cell, &depth) in planet.surface_water().lake_depth.iter().enumerate() {
-        if depth > 0.0 {
-            write!(line, ",{cell}:{depth:.1}")?;
+    let water = planet.surface_water();
+    for (cell, &spill) in water.spill_depth.iter().enumerate() {
+        if water.depression[cell] {
+            write!(line, ",{cell}:{:.1}:{spill:.1}", water.lake_depth[cell])?;
         }
     }
     let mut file = std::fs::OpenOptions::new()

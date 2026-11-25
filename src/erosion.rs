@@ -397,6 +397,9 @@ pub struct SurfaceWater {
     pub depression: Vec<bool>,
     /// Depth of lake water over the cell's floor (m), zero where there is no lake.
     pub lake_depth: Vec<f64>,
+    /// Depth of the cell's floor below the spill level of its depression (m), zero outside
+    /// depressions.
+    pub spill_depth: Vec<f64>,
 }
 
 impl SurfaceWater {
@@ -408,6 +411,7 @@ impl SurfaceWater {
             ocean,
             depression: vec![false; cells],
             lake_depth: vec![0.0; cells],
+            spill_depth: vec![0.0; cells],
         }
     }
 }
@@ -584,6 +588,15 @@ pub fn erode(
         depression: lakes.lake.iter().map(|&lake| lake != NO_LAKE).collect(),
         lake_depth: (0..cell_count)
             .map(|cell| (water_level[cell] - elevation[cell]).max(0.0))
+            .collect(),
+        spill_depth: (0..cell_count)
+            .map(|cell| {
+                if lakes.lake[cell] == NO_LAKE {
+                    0.0
+                } else {
+                    filled[cell] - elevation[cell]
+                }
+            })
             .collect(),
     };
 
