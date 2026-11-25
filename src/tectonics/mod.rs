@@ -1337,6 +1337,7 @@ impl Simulation {
             &self.mesh,
             &self.surface_elevations(),
             self.params.min_sea_fraction,
+            true,
         )
     }
 

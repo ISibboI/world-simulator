@@ -1253,7 +1253,7 @@ fn snapshot(
     );
     info!(
         "    spill: {} lakes in {} depressions holding water, {} of them with several \
-         (inner sills) | sea-fed basins {} ({:.1} cells covered, sea water {:.0} km³ = {:.2} m \
+         (inner sills) | sea-fed lakes {} ({:.1} cells covered, sea water {:.0} km³ = {:.2} m \
          of sea level, evaporation beyond their own inflow {:.0} km³/yr, endorheic land into \
          them {:.1}% of land) | poured over sills at the end of the step {:.0} km³ ({:.2} m)",
         hydrology.lake_bodies,
@@ -1443,7 +1443,12 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     let elevation = simulation.surface_elevations();
     // The surface as the erosion sees it (cells showing one sample at one level, #112 b).
     let drain = simulation.sample_surface_elevations();
-    let ocean = sea::ocean_mask(mesh, &elevation, simulation.min_sea_fraction());
+    let ocean = sea::ocean_mask(
+        mesh,
+        &elevation,
+        simulation.min_sea_fraction(),
+        planet.open_sills(),
+    );
     // With the load of the water that actually stands on each cell (#127).
     let elevation = planet.surface_elevations();
     let temperature = planet.temperature();

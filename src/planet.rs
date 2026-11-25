@@ -615,12 +615,19 @@ impl Planet {
         self.climate.water_cycle()
     }
 
+    /// Whether a sill on which the sea stands connects the basin behind it to the ocean (see
+    /// [`crate::sea::ocean_from`]).
+    pub fn open_sills(&self) -> bool {
+        open_sills(&self.erosion)
+    }
+
     pub fn statistics(&self) -> PlanetStatistics {
         let elevation = self.tectonics.surface_elevations();
         let ocean = crate::sea::ocean_mask(
             self.tectonics.mesh(),
             &elevation,
             self.tectonics.min_sea_fraction(),
+            self.open_sills(),
         );
         // Land includes closed depressions below sea level (dry or holding lakes).
         let land: Vec<usize> = (0..elevation.len()).filter(|&cell| !ocean[cell]).collect();

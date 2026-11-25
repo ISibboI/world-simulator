@@ -56,6 +56,7 @@ def dumps(d):
         add('dry land below sea level (cells)', dry_inland.sum())
         add('dry land below sea level, mean elevation (m)', e[dry_inland].mean() if dry_inland.any() else np.nan)
         lake = land & (c['lake'] > 0)
+        add('lake cells without evaporation excess (% of lake cells)', 100 * (lake & (c['lake_evap'] <= 0)).sum() / max(lake.sum(), 1))
         add('lake depth, median (m)', np.median(c['lake'][lake]) if lake.any() else np.nan)
         add('lake floor, median (m)', np.median(e[lake]) if lake.any() else np.nan)
         # Precipitation on and around lakes (rings of neighbours), land elsewhere, aridity.
@@ -110,7 +111,18 @@ PAT = [
     ('lake water (m of sea level)', r'lake water \d+ km³ \(([\d.]+) m of sea level'),
     ('closed depressions below sea level (cells)', r'closed depressions\s+below sea level (\d+) cells'),
     ('… of them under lake water (cells)', r'below sea level \d+ cells \(lake water on ([\d.]+)\)'),
+    ('deficit at a pass after the solve (m of sea level)', r'deficit \d+ km³ \(([\d.]+) m\)'),
+    ('lakes (water bodies, #168)', r'spill: (\d+) lakes in'),
+    ('depressions holding water', r'lakes in (\d+) depressions'),
+    ('… holding several lakes (inner sills)', r'(\d+) of them with several'),
+    ('sea-fed lakes', r'sea-fed (?:basins|lakes) (\d+) \('),
+    ('sea-fed lakes, cells covered', r'sea-fed (?:basins|lakes) \d+ \(([\d.]+) cells covered'),
+    ('sea water in basins (m of sea level)', r'sea water \d+ km³ = ([\d.]+) m'),
+    ('sea-fed evaporation beyond own inflow (km³/yr)', r'beyond their own inflow (\d+) km'),
+    ('endorheic into sea-fed basins (% of land)', r'endorheic land into them ([\d.]+)%'),
+    ('poured over sills at step end (m of sea level)', r'end of the step \d+ km³ \(([\d.]+) m\)'),
 ]
+MAX = {'lake water (m of sea level)', 'deficit at a pass after the solve (m of sea level)', 'sea water in basins (m of sea level)'}
 
 def logs(d):
     f = os.path.join(d, 'log.txt')
@@ -126,7 +138,12 @@ def logs(d):
             m = re.search(p, line)
             if m:
                 acc.setdefault(name, []).append(float(m.group(1)))
-    return {k: np.mean(v) for k, v in acc.items()}
+    out = {k: np.mean(v) for k, v in acc.items()}
+    for k in MAX:
+        if k in acc:
+            out[k + ', largest snapshot'] = max(acc[k])
+            out[k + ', snapshots > 10 m'] = sum(v > 10 for v in acc[k])
+    return out
 
 def lakes(d):
     return {}
@@ -175,15 +192,21 @@ for arg in sys.argv[1:]:
     seeds = sorted(glob.glob(os.path.join(d, 'seed-*')), key=lambda p: int(p.rsplit('-', 1)[1]))
     res = [seed(s) for s in seeds if os.path.exists(os.path.join(s, f'cells_{T1:05d}.csv'))]
     sets.append((label, res))
-keys = list(sets[0][1][0].keys())
+keys = []
+for _, res in sets:
+    for r in res:
+        for k in r:
+            if k not in keys:
+                keys.append(k)
 print(f'snapshots {T0}-{T1} Myr; seeds: ' + ', '.join(f'{l}: {len(r)}' for l, r in sets))
 print('| metric | ' + ' | '.join(f'{l} | t' if i else l for i, (l, _) in enumerate(sets)) + ' |')
 print('|---|' + '---|' * (2 * len(sets) - 1))
 for k in keys:
     base = [r.get(k, np.nan) for r in sets[0][1]]
-    row = [f'{np.nanmean(base):.3g} ({np.nanmin(base):.3g}…{np.nanmax(base):.3g})']
+    fmt = lambda v: f'{np.nanmean(v):.3g} ({np.nanmin(v):.3g}…{np.nanmax(v):.3g})' if not np.all(np.isnan(v)) else '–'
+    row = [fmt(base)]
     for l, res in sets[1:]:
         v = [r.get(k, np.nan) for r in res]
-        row.append(f'{np.nanmean(v):.3g} ({np.nanmin(v):.3g}…{np.nanmax(v):.3g})')
+        row.append(fmt(v))
         row.append(f'{welch(base, v):+.1f}')
     print(f'| {k} | ' + ' | '.join(row) + ' |')

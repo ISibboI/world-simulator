@@ -326,7 +326,7 @@ impl Basins {
         while let Some((node, input, extra)) = stack.pop() {
             let n = &self.nodes[node as usize];
             let below: f64 = n.children.iter().map(|&c| full[c as usize]).sum();
-            if n.children.is_empty() || input >= below {
+            if n.children.is_empty() || input > below || (below > 0.0 && input >= below) {
                 let cells = self.subtree_cells(node);
                 let balance = lake_balance(&cells, elevation, n.sill, input, excess);
                 self.lakes[node as usize] = Some(Lake {
@@ -394,17 +394,7 @@ impl Basins {
                 lake.sea_water += room;
                 return volume - room;
             }
-            let target = before + volume;
-            let (mut low, mut high) = (lake.balance.level, lake.sill);
-            for _ in 0..60 {
-                let mid = 0.5 * (low + high);
-                if lake_volume(&lake.cells, elevation, mid, lake.sill) < target {
-                    low = mid;
-                } else {
-                    high = mid;
-                }
-            }
-            set_level(lake, elevation, high);
+            hold(lake, elevation, before + volume);
             lake.sea_water += volume;
             return 0.0;
         }
@@ -419,34 +409,35 @@ impl Basins {
                 !self.is_full(c)
             });
             let Some((k, entry)) = next else {
-                // All sub-basins full: one lake from the inner sill up.
+                // All sub-basins full: one lake from the inner sill up, holding their water
+                // (cells of absorbed shallow sub-basins, dry so far, take their share).
                 let cells = self.subtree_cells(node);
-                let mut sea_water = 0.0;
-                let mut evaporation = 0.0;
+                let (mut sea_water, mut evaporation, mut volume) = (0.0, 0.0, 0.0);
                 let mut stack = self.nodes[node as usize].children.clone();
                 while let Some(n) = stack.pop() {
                     if let Some(lake) = self.lakes[n as usize].take() {
                         sea_water += lake.sea_water;
                         evaporation += lake.balance.evaporation;
+                        volume +=
+                            lake_volume(&lake.cells, elevation, lake.balance.level, lake.sill);
                     } else {
                         stack.extend(self.nodes[n as usize].children.iter().copied());
                     }
                 }
-                let merge =
-                    elevation[self.members[self.nodes[node as usize].merge as usize] as usize];
                 let sill = self.nodes[node as usize].sill;
+                let lowest = elevation[cells[0] as usize];
                 let mut lake = Lake {
                     cells,
                     sill,
                     balance: LakeBalance {
-                        level: merge,
+                        level: lowest,
                         covered: 0.0,
                         evaporation,
                         endorheic: true,
                     },
                     sea_water,
                 };
-                set_level(&mut lake, elevation, merge);
+                hold(&mut lake, elevation, volume);
                 self.lakes[node as usize] = Some(lake);
                 return self.pour_into(node, leaf, left, elevation);
             };
@@ -559,6 +550,21 @@ fn lake_volume(cells: &[u32], elevation: &[f64], level: f64, sill: f64) -> f64 {
             (covered - i as f64).clamp(0.0, 1.0) * lake_water_depth(level, elevation[cell as usize])
         })
         .sum()
+}
+
+/// Sets the water surface of a lake to hold `volume` (m per cell area, at most its volume when
+/// full).
+fn hold(lake: &mut Lake, elevation: &[f64], volume: f64) {
+    let (mut low, mut high) = (elevation[lake.cells[0] as usize], lake.sill);
+    for _ in 0..60 {
+        let mid = 0.5 * (low + high);
+        if lake_volume(&lake.cells, elevation, mid, lake.sill) < volume {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    set_level(lake, elevation, high);
 }
 
 /// Sets the water surface of a lake.

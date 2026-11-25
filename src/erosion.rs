@@ -1051,12 +1051,28 @@ fn spill_sea(
         }
         let pass = sea::pass_levels(mesh, &dry, seeds);
         // Closed depressions below the solved sea level behind lower sills: the sea floods them
-        // (their lakes become sea).
-        let flooded: Vec<usize> = (0..dry.len())
-            .filter(|&c| {
-                !ocean[c] && state.lakes.lake[c] != NO_LAKE && pass[c] < level && dry[c] < level
-            })
+        // (their lakes become sea), with the cells between them and the sea below that level
+        // (sills, rims too shallow to count as depression).
+        let below = |c: usize| !ocean[c] && pass[c] < level && dry[c] < level;
+        let mut flooded: Vec<usize> = (0..dry.len())
+            .filter(|&c| state.lakes.lake[c] != NO_LAKE && below(c))
             .collect();
+        let mut marked = vec![false; dry.len()];
+        for &c in &flooded {
+            marked[c] = true;
+        }
+        let mut next = 0;
+        while next < flooded.len() {
+            let cell = flooded[next];
+            next += 1;
+            for &neighbor in mesh.neighbors(cell as u32) {
+                let n = neighbor as usize;
+                if !marked[n] && below(n) {
+                    marked[n] = true;
+                    flooded.push(n);
+                }
+            }
+        }
         if !flooded.is_empty() {
             for &c in &flooded {
                 ocean[c] = true;
@@ -1075,12 +1091,12 @@ fn spill_sea(
         if basin.is_empty() {
             break;
         }
-        deficit = solved.deficit;
         if basin.iter().any(|&c| ocean[c]) {
-            // The sill lies just below sea level in this frame (rounding, or the sample
-            // surface's means; #112 b): the sea stands at it, so the basin is not ocean.
+            // The sill lies just below sea level in this frame (rounding, the sea-level change
+            // of the step, or the sample surface's means; #112 b): the sea stands at it, so the
+            // basin behind it is not ocean.
             for (c, ocean) in ocean.iter_mut().enumerate() {
-                if pass[c] >= level {
+                if pass[c] == level {
                     *ocean = false;
                 }
             }
@@ -1098,6 +1114,7 @@ fn spill_sea(
                 targets.push(c);
             }
         }
+        deficit = solved.deficit;
         let mut pours: Vec<(usize, f64)> = Vec::new();
         let mut left = deficit;
         let mut poured = None;
@@ -1922,7 +1939,7 @@ pub fn wave_bases(
     wave_bases_in(
         mesh,
         elevation,
-        &sea::ocean_mask(mesh, elevation, min_sea_fraction),
+        &sea::ocean_mask(mesh, elevation, min_sea_fraction, !params.sea_spill),
         params,
     )
 }
@@ -2631,7 +2648,7 @@ mod tests {
     /// depressions below sea level.
     fn ocean_volume(mesh: &SphereMesh, elevation: &[f64], sediment: &[f64], radius: f64) -> f64 {
         let cell_area = 4.0 * std::f64::consts::PI * radius * radius / elevation.len() as f64;
-        let ocean = sea::ocean_mask(mesh, elevation, sea::MIN_SEA_FRACTION);
+        let ocean = sea::ocean_mask(mesh, elevation, sea::MIN_SEA_FRACTION, true);
         elevation
             .iter()
             .zip(sediment)
@@ -3031,7 +3048,7 @@ mod tests {
     fn closed_depressions_below_sea_level_are_lakes_not_sea() {
         let mesh = SphereMesh::icosphere(4);
         let (elevation, pit) = island_with_depression(&mesh);
-        assert!(!sea::ocean_mask(&mesh, &elevation, sea::MIN_SEA_FRACTION)[pit]);
+        assert!(!sea::ocean_mask(&mesh, &elevation, sea::MIN_SEA_FRACTION, true)[pit]);
         let sediment = vec![0.0; mesh.len()];
         let params = ErosionParams::default();
 
@@ -3175,7 +3192,7 @@ mod tests {
         let mut deep = elevation.clone();
         deep[pit] = -3000.0;
         let bases = wave_bases(&mesh, &deep, sea::MIN_SEA_FRACTION, &params);
-        let ocean = sea::ocean_mask(&mesh, &deep, sea::MIN_SEA_FRACTION);
+        let ocean = sea::ocean_mask(&mesh, &deep, sea::MIN_SEA_FRACTION, true);
         let mut open = deep.clone();
         open[pit] = 0.0;
         assert!(!ocean[pit]);
@@ -3202,7 +3219,7 @@ mod tests {
             diffuse_sediment(&mesh, &mut seabed, ocean, &params, 1e6);
             seabed.delta[pit]
         };
-        let ocean = sea::ocean_mask(&mesh, &elevation, sea::MIN_SEA_FRACTION);
+        let ocean = sea::ocean_mask(&mesh, &elevation, sea::MIN_SEA_FRACTION, true);
         let dry = spread(&ocean);
         // As sea (the old treatment), land would be lowered at most to sea level.
         let mut as_sea = ocean.clone();
