@@ -147,9 +147,11 @@ struct Cli {
     #[arg(long)]
     cell_dump: bool,
 
-    /// From this time (Myr) on, append the lakes after every step to `lakes.csv` in `--output`
-    /// (time, then `cell:depth` of every cell covered by a lake), for analysing how long lakes
-    /// persist.
+    /// From this time (Myr) on, append the closed depressions after every step to `lakes.csv`
+    /// in `--output` (time, then `cell:lake:spill` of every cell in a depression at the end of
+    /// the step: lake depth and depth below the spill level in m; `sCELL` for the cells in a
+    /// depression at the start of the step; `f:N:M` for the N depressions with M cells that the
+    /// step's sediment filled), for analysing how long lakes persist.
     #[arg(long)]
     lake_log_from: Option<f64>,
 
@@ -1207,7 +1209,8 @@ fn snapshot(
          km³/yr | endorheic {:.1}% of land ({:.1}% into single-cell pits, {:.1}% into \
          single-sample depressions; ocean differs from the per-cell surface at {} cells), lakes {:.1}% of land, \
          lake potential evaporation {:.2} m/yr | depressions {}, endorheic {}, with inner sills \
-         {} | sediment trapped in lakes {:.2} km³/yr",
+         {} | sediment trapped in lakes {:.2} km³/yr | all closed depressions {} ({:.1}% of \
+         land), playas {} ({:.1}% of land)",
         hydrology.runoff / 1e9,
         hydrology.to_ocean / 1e9,
         hydrology.lake_evaporation / 1e9,
@@ -1221,6 +1224,10 @@ fn snapshot(
         hydrology.endorheic_lakes,
         hydrology.nested_lakes,
         hydrology.lake_sediment / 1e9,
+        hydrology.depressions,
+        100.0 * hydrology.depression_cells as f64 / land_cells,
+        hydrology.playas,
+        100.0 * hydrology.playa_cells as f64 / land_cells,
     );
     // Metres of sea level per m³ of water over the ocean.
     let per_ocean_area = 1.0
@@ -1405,7 +1412,7 @@ struct PreviousSnapshot {
 /// number of cells showing the same sample, whether the cell is at a coast, precipitation (m/yr),
 /// discharge (m³/yr), longitude (°), the annual mean, January and July surface temperatures
 /// (°C), evaporation or evapotranspiration (m/yr), and January and July precipitation (m/yr),
-/// …, the lake depth (m, relative to the surface the erosion saw), the plate-local index of the
+/// …, the lake depth (m, relative to the end-of-step surface as the erosion sees it), the plate-local index of the
 /// crust sample shown and the sample surface (m; what the erosion sees with
 /// `erosion.sample_surface`, written whether or not it is on).
 #[cfg(not(target_arch = "wasm32"))]
@@ -1513,18 +1520,33 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     Ok(())
 }
 
-/// Appends the lakes of the current step to `path`: the time, then `cell:depth` (m) of every
-/// cell covered by a lake.
+/// Appends the closed depressions of the current step to `path`: the time, then
+/// `cell:lake:spill` of every cell in a depression, with the depth (m) of lake water over its
+/// floor (zero if dry) and the depth of its floor below the spill level.
 #[cfg(not(target_arch = "wasm32"))]
 fn append_lake_log(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
     use std::fmt::Write as _;
     use std::io::Write as _;
     let mut line = format!("{:.1}", planet.tectonics().time());
-    for (cell, &depth) in planet.surface_water().lake_depth.iter().enumerate() {
-        if depth > 0.0 {
-            write!(line, ",{cell}:{depth:.1}")?;
+    let water = planet.surface_water();
+    for (cell, &spill) in water.spill_depth.iter().enumerate() {
+        if water.depression[cell] {
+            write!(line, ",{cell}:{:.1}:{spill:.1}", water.lake_depth[cell])?;
         }
     }
+    // Cells that were in a depression at the start of the step (before its deposition).
+    for (cell, &start) in water.depression_at_start.iter().enumerate() {
+        if start {
+            write!(line, ",s{cell}")?;
+        }
+    }
+    // Depressions filled to their spill level by sediment in the step, and their cells.
+    let hydrology = planet.hydrology();
+    write!(
+        line,
+        ",f:{}:{}",
+        hydrology.filled_depressions, hydrology.filled_depression_cells
+    )?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

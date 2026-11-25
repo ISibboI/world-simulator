@@ -1369,6 +1369,24 @@ impl Simulation {
             .collect()
     }
 
+    /// An id per world cell that the cells showing the same crust sample share (dense, below the
+    /// cell count, in order of first appearance).
+    pub fn sample_ids(&self) -> Vec<u32> {
+        let cell_count = self.mesh.len();
+        let mut slot = vec![u32::MAX; self.plates.len() * cell_count];
+        let mut next = 0;
+        (0..cell_count)
+            .map(|cell| {
+                let index = &mut slot[sample_index(self.owners[cell], cell_count)];
+                if *index == u32::MAX {
+                    *index = next;
+                    next += 1;
+                }
+                *index
+            })
+            .collect()
+    }
+
     /// Surface elevation of every world cell as the surface processes see it (#112, option b):
     /// cells showing the same crust sample get the elevation of that sample at the mean dynamic
     /// topography of those cells, so they are one column at one level (they differ otherwise

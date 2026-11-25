@@ -267,6 +267,11 @@ impl Planet {
         &self.discharge
     }
 
+    /// The hydrology of the last erosion step.
+    pub fn hydrology(&self) -> &Hydrology {
+        &self.hydrology
+    }
+
     /// Where the water of every cell goes, the ocean and the lakes, as the last erosion step
     /// saw them (only the ocean while erosion is disabled); for the view.
     pub fn surface_water(&self) -> &SurfaceWater {
@@ -443,6 +448,17 @@ impl Planet {
                     class: &class,
                     ocean_volume: self.tectonics.ocean_volume(),
                     ocean_seeds: &seeds,
+                    previous_lakes: &self
+                        .water
+                        .lake_depth
+                        .iter()
+                        .map(|&depth| depth > 0.0)
+                        .collect::<Vec<_>>(),
+                    sample: &if params.sample_surface {
+                        self.tectonics.sample_ids()
+                    } else {
+                        Vec::new()
+                    },
                 },
                 params,
                 dt_years,
@@ -462,11 +478,11 @@ impl Planet {
                     &elevation,
                     seeds.iter().copied(),
                 );
-                per_cell
-                    .iter()
-                    .zip(&result.water.ocean)
-                    .filter(|(a, b)| a != b)
-                    .count()
+                // The erosion's ocean at the start of the step (its result has the one at the
+                // end).
+                let sample =
+                    crate::sea::ocean_from(self.tectonics.mesh(), surface, seeds.iter().copied());
+                per_cell.iter().zip(&sample).filter(|(a, b)| a != b).count()
             } else {
                 0
             };
