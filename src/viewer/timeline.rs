@@ -14,7 +14,8 @@
 //!
 //! The bar collapses (its ⌄ button) into a flat strip with only the expand button, pause/resume
 //! and the time; the keys keep working. Like the other panels it starts collapsed on narrow
-//! screens and keeps its state for the session.
+//! screens, unless the user collapsed or expanded it before: that choice is remembered across
+//! restarts and reloads (see [`super::settings`]).
 
 use eframe::egui;
 
@@ -163,15 +164,33 @@ fn text_width(ui: &egui::Ui, text: &str) -> f32 {
         .x
 }
 
+/// Key of the remembered state of the bar (expanded or collapsed) in the settings.
+pub const STORAGE_KEY: &str = "world-simulator.time-bar-open";
+
 /// The time bar and whether it is expanded.
 #[derive(Default)]
 pub struct TimeBar {
-    /// Whether the full bar is shown rather than the flat strip; decided by the screen width
-    /// on the first frame.
+    /// Whether the full bar is shown rather than the flat strip: the remembered choice, else
+    /// decided by the screen width on the first frame.
     open: Option<bool>,
+    /// A choice of the user (the collapse or expand button) not yet remembered.
+    chosen: Option<bool>,
 }
 
 impl TimeBar {
+    /// The bar, expanded or collapsed as the user left it (`stored`), else as fits the screen.
+    pub fn new(stored: Option<bool>) -> Self {
+        Self {
+            open: stored,
+            chosen: None,
+        }
+    }
+
+    /// The state the user last chose with the buttons, if not taken yet: to remember it.
+    pub fn take_choice(&mut self) -> Option<bool> {
+        self.chosen.take()
+    }
+
     /// Shows the bar (or the collapsed strip) and returns what the user asked for, with the
     /// area the bar covers.
     pub fn show(
@@ -190,6 +209,7 @@ impl TimeBar {
         };
         if toggle {
             self.open = Some(!open);
+            self.chosen = Some(!open);
             ctx.request_repaint();
         }
         (action, rect)
@@ -510,6 +530,35 @@ mod tests {
         view.live = true;
         view.position = 9;
         assert_eq!(time_text(&view), "9 Myr");
+    }
+
+    #[test]
+    fn the_remembered_state_wins_over_the_screen_width() {
+        let time_of = |index: usize| Some(index as f64);
+        let view = view(&time_of);
+        let ctx = egui::Context::default();
+        let input = |width: f32| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 800.0),
+            )),
+            ..Default::default()
+        };
+        for (stored, width, open) in [
+            (None, 390.0, false),
+            (None, 1280.0, true),
+            (Some(true), 390.0, true),
+            (Some(false), 1280.0, false),
+        ] {
+            let mut bar = TimeBar::new(stored);
+            ctx.run_ui(input(width), |ui| {
+                bar.show(ui.ctx(), &view);
+            })
+            .textures_delta
+            .clear();
+            assert_eq!(bar.open, Some(open), "{stored:?} at {width}");
+            assert_eq!(bar.take_choice(), None);
+        }
     }
 
     #[test]

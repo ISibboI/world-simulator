@@ -37,6 +37,7 @@ mod parameters;
 mod picking;
 mod plate_colors;
 mod renderer;
+mod settings;
 mod sky;
 mod timeline;
 
@@ -76,6 +77,7 @@ pub use parameters::{has_option, with_default};
 use plate_colors::PlateColors;
 use renderer::Vertex;
 use renderer::{Detail, LineSegment, Overlay, PlanetCallback, Surface, Uniforms};
+pub use settings::Settings;
 
 /// Bits of the depth buffer requested from eframe; must match [`renderer::DEPTH_FORMAT`].
 const DEPTH_BUFFER_BITS: u8 = 32;
@@ -312,6 +314,7 @@ fn open_file_store() -> OpenFrameStore {
 pub type RememberRenderMode = Box<dyn FnMut(RenderModeId)>;
 
 /// Creates the viewer app; shared by the desktop window and the web page.
+#[allow(clippy::too_many_arguments)]
 fn app_creator(
     initial: Launch,
     msaa_samples: u16,
@@ -319,6 +322,7 @@ fn app_creator(
     start_simulation: StartSimulation,
     open_store: OpenFrameStore,
     remember_render_mode: Option<RememberRenderMode>,
+    settings: Box<dyn Settings>,
     on_first_frame: Option<Box<dyn FnOnce()>>,
 ) -> eframe::AppCreator<'static> {
     Box::new(move |creation_context| {
@@ -335,6 +339,7 @@ fn app_creator(
             start_simulation,
             open_store,
             remember_render_mode,
+            settings,
             on_first_frame,
         )))
     })
@@ -380,6 +385,7 @@ pub fn run(initial: Launch, start_simulation: StartSimulation) -> anyhow::Result
             start_simulation,
             open_file_store(),
             None,
+            Box::new(settings::FileSettings::open()),
             None,
         ),
     )
@@ -393,6 +399,7 @@ pub fn run(initial: Launch, start_simulation: StartSimulation) -> anyhow::Result
 /// loading banner, which the view's banner replaces in the same place). eframe's web painter
 /// does not multisample.
 #[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_web(
     canvas: web_sys::HtmlCanvasElement,
     initial: Launch,
@@ -400,6 +407,7 @@ pub async fn run_web(
     start_simulation: StartSimulation,
     open_store: OpenFrameStore,
     remember_render_mode: RememberRenderMode,
+    settings: Box<dyn Settings>,
     on_first_frame: Box<dyn FnOnce()>,
 ) -> anyhow::Result<()> {
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
@@ -422,6 +430,7 @@ pub async fn run_web(
                 start_simulation,
                 open_store,
                 Some(remember_render_mode),
+                settings,
                 Some(on_first_frame),
             ),
         )
@@ -507,6 +516,8 @@ struct Viewer {
     cell_panel: CellInfoPanel,
     /// The time bar along the bottom edge, collapsed or expanded.
     time_bar: timeline::TimeBar,
+    /// Where choices of the user are remembered across restarts.
+    settings: Box<dyn Settings>,
     pace: Pace,
     /// Whether the main pointer is coarse (touch): cells are tapped rather than pointed at.
     touch: bool,
@@ -612,6 +623,7 @@ struct Picking {
 }
 
 impl Viewer {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         ctx: &egui::Context,
         initial: Launch,
@@ -619,6 +631,7 @@ impl Viewer {
         start_simulation: StartSimulation,
         open_store: OpenFrameStore,
         remember_render_mode: Option<RememberRenderMode>,
+        settings: Box<dyn Settings>,
         on_first_frame: Option<Box<dyn FnOnce()>>,
     ) -> Self {
         let parameters = ParameterPanel::new(&initial.args, ui_options.default_subdivisions);
@@ -664,7 +677,11 @@ impl Viewer {
             parameters,
             plate_colors: PlateColors::default(),
             cell_panel: CellInfoPanel::default(),
-            time_bar: timeline::TimeBar::default(),
+            time_bar: timeline::TimeBar::new(settings::get_bool(
+                settings.as_ref(),
+                timeline::STORAGE_KEY,
+            )),
+            settings,
             pace,
             touch: ui_options.touch,
             picking: None,
@@ -1118,6 +1135,9 @@ impl Viewer {
         };
         let key = timeline::keys(ctx);
         let (clicked, rect) = self.time_bar.show(ctx, &view);
+        if let Some(open) = self.time_bar.take_choice() {
+            settings::set_bool(self.settings.as_mut(), timeline::STORAGE_KEY, open);
+        }
         if let Some(action) = clicked.or(key) {
             self.time_action(action);
             ctx.request_repaint();

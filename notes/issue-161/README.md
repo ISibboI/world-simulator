@@ -23,7 +23,8 @@ The bar has a collapse button (chevron, first button). Collapsed, it is a flat s
 left corner with only the expand chevron, pause/resume and the time (and a ⚠ with the message as
 tooltip if a frame could not be read). Keys (space, ←, →, End) still work. Like the parameter
 panel and the cell widget it starts collapsed on screens narrower than 600 points (phones) and
-expanded otherwise, and keeps the user's choice for the session (not across reloads).
+expanded otherwise, unless the user chose before: the last collapse/expand click is remembered
+across reloads and restarts (Sebastian, PR #164).
 
 Height: on touch screens the strip is one 44-point button row plus a 3-point margin (≈ 50 CSS px,
 vs ≈ 140 for the expanded three-row bar on a 390-px phone); on desktop ≈ 30 px, vs ≈ 42 px for
@@ -31,3 +32,18 @@ the one-row bar — and only as wide as its contents.
 
 - `collapse-phone.png`: 390 × 844 touch emulation, collapsed (default) and expanded.
 - `collapse-desktop.png`: 1280 px desktop, the bottom of the window expanded (top) and collapsed.
+
+## Remembering the choice
+
+`src/viewer/settings.rs`: a small `Settings` key-value interface. The web page keeps the values in
+the browser's local storage (key `world-simulator.time-bar-open`, like the remembered render mode
+and subdivisions); the desktop in `world-simulator/settings.txt` (`key=value` lines) in the user's
+configuration directory (`$XDG_CONFIG_HOME` or `~/.config`, `~/Library/Application Support`,
+`%APPDATA%`). No new dependencies; eframe's `persistence` feature was not used because it would
+also restore window positions/sizes and saves only periodically. Missing or blocked storage only
+loses the memory. Only explicit clicks are stored; without one the screen-width default applies.
+
+Checked: web (Chromium) collapse → reload → collapsed; expand → reload → expanded; the stored
+"expanded" wins on a 390-px phone, a fresh profile on the phone starts collapsed
+(`persist-phone.png`: left stored expanded, right fresh profile). Desktop binary: collapse →
+`settings.txt` holds `world-simulator.time-bar-open=false` → restart → collapsed.
