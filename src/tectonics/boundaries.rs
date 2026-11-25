@@ -114,6 +114,8 @@ impl Simulation {
                     }
                     let equalising =
                         drop / (response + crate::isostasy::dry_response(receiver.density));
+                    // Into a hole, a source gives down to half its thickness, also below the
+                    // flow threshold (its other transfers are scaled with the same outflow).
                     let (mobility, floor) = if hole {
                         (1.0, 0.5 * source.thickness)
                     } else {

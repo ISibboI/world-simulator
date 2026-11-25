@@ -295,6 +295,7 @@ pub(super) fn update_crust_cells(
         scratch.local_generation = scratch.local_generation.wrapping_add(1);
         if scratch.local_generation == 0 {
             scratch.local_stamp.fill(0);
+            scratch.height_stamp.fill(0);
             scratch.local_generation = 1;
         }
         let generation = scratch.local_generation;
@@ -748,6 +749,17 @@ mod tests {
             );
             let shared_after = shared_cells(&simulation, &owners);
             assert!(shared_before > 0);
+            // Every chain shows one more distinct sample and creates no new sharing.
+            let distinct = |owners: &[Ownership]| {
+                let mut samples: Vec<Ownership> = owners.to_vec();
+                samples.sort_unstable_by_key(|o| (o.plate, o.local));
+                samples.dedup();
+                samples.len()
+            };
+            assert_eq!(
+                distinct(&owners),
+                distinct(&before) + statistics.separated as usize
+            );
             assert!(
                 3 * shared_after < 2 * shared_before,
                 "seed {seed}: {shared_before} → {shared_after} {statistics:?}"

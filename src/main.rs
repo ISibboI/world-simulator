@@ -588,6 +588,15 @@ impl Run {
     fn new(planet: Planet, cli: &Cli) -> anyhow::Result<Self> {
         let start = Instant::now();
         let mut previous_ledger: Option<PreviousSnapshot> = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        if cli.lake_log_from.is_some() {
+            // A new run starts a new log.
+            let path = cli.output.join("lakes.csv");
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
         snapshot(&planet, cli, &mut previous_ledger)?;
         Ok(Self {
             planet,
