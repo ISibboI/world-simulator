@@ -164,6 +164,12 @@ pub struct TectonicParams {
     pub crustal_flow_threshold: f64,
     /// Thickness range above the threshold over which crustal flow reaches full strength.
     pub crustal_flow_range: f64,
+    /// A cell whose dry elevation is more than this (m) below all its neighbours and whose crust
+    /// is thinner than all of theirs is a one-cell hole: the crust of the neighbours of its
+    /// plate flows into it at full mobility, whatever its thickness (0 disables; #129). Airy
+    /// isostasy per cell lets a single thin column sink, which the lithosphere's flexural
+    /// strength and lower-crustal flow would not allow over one ~110 km cell.
+    pub hole_flow_depth: f64,
     /// Diffusivity (km²/Myr) of orogenic collapse at full mobility: lower-crustal channel flow
     /// `ρ g h³ / (12 η)` times the isostatic response, ~3.7·10³ km²/Myr for a 15 km channel at
     /// η = 10¹⁹ Pa·s and ~3.7·10⁴ at 10¹⁸ (Clark & Royden 2000).
@@ -322,6 +328,7 @@ impl Default for TectonicParams {
             max_crust_thickness: 75_000.0,
             crustal_flow_threshold: 40_000.0,
             crustal_flow_range: 20_000.0,
+            hole_flow_depth: 300.0,
             collapse_diffusivity: 1e4,
             planet_radius: 6.371e6,
             slab_pull: 2e13,
@@ -366,14 +373,25 @@ impl Default for TectonicParams {
 impl TectonicParams {
     /// Sets the tunable parameter `name` (the field name, with `events.` for
     /// [`PlateEventParams`] fields and `initial_sediment.` for [`InitialSedimentParams`]
-    /// fields; `initial_sediment.enabled` and `initial_sediment.biogenic_pelagic` are off for 0 and
-    /// on otherwise) to `value`.
+    /// fields, `matching.` for [`MatchingParams`] fields; `initial_sediment.enabled`,
+    /// `initial_sediment.biogenic_pelagic` and `matching.distinct` are off for 0 and on
+    /// otherwise) to `value`.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
         if let Some(name) = name.strip_prefix("sheet.") {
             return self.sheet.set(name, value);
         }
         let sediment = &mut self.initial_sediment;
         let field = match name {
+            "matching.distinct" => {
+                self.matching.distinct = value != 0.0;
+                return Ok(());
+            }
+            "matching.distinct_depth" => {
+                self.matching.distinct_depth = value.max(0.0) as usize;
+                return Ok(());
+            }
+            "matching.distinct_radius" => &mut self.matching.distinct_radius,
+            "matching.distinct_tolerance" => &mut self.matching.distinct_tolerance,
             "initial_sediment.enabled" => {
                 sediment.enabled = value != 0.0;
                 return Ok(());
@@ -415,6 +433,7 @@ impl TectonicParams {
             "min_trench_obliquity" => &mut self.min_trench_obliquity,
             "diffuse_convergence" => &mut self.diffuse_convergence,
             "collapse_diffusivity" => &mut self.collapse_diffusivity,
+            "hole_flow_depth" => &mut self.hole_flow_depth,
             "boundary_coupling_width" => &mut self.boundary_coupling_width,
             "slab_pull" => &mut self.slab_pull,
             "slab_sinking_speed" => &mut self.slab_sinking_speed,
@@ -1350,6 +1369,45 @@ impl Simulation {
             .collect()
     }
 
+    /// Surface elevation of every world cell as the surface processes see it (#112, option b):
+    /// cells showing the same crust sample get the elevation of that sample at the mean dynamic
+    /// topography of those cells, so they are one column at one level (they differ otherwise
+    /// only by the dynamic topography of their cells, and the sample takes the mean of their
+    /// changes, see [`Self::apply_surface_changes`]). A sample shown at one cell gives exactly
+    /// [`Self::surface_elevation`].
+    pub fn sample_surface_elevations(&self) -> Vec<f64> {
+        let cell_count = self.mesh.len();
+        // Per shown sample (dense index as in `apply_surface_changes`): the summed dynamic
+        // topography of its cells and their number, summed in cell order.
+        let mut slot = vec![u32::MAX; self.plates.len() * cell_count];
+        let mut sums: Vec<(f64, u32)> = Vec::new();
+        for cell in 0..cell_count {
+            let index = &mut slot[sample_index(self.owners[cell], cell_count)];
+            if *index == u32::MAX {
+                *index = sums.len() as u32;
+                sums.push((0.0, 0));
+            }
+            let sum = &mut sums[*index as usize];
+            sum.0 += self.dynamic_topography[cell];
+            sum.1 += 1;
+        }
+        (0..cell_count as u32)
+            .map(|cell| {
+                let owner = self.owners[cell as usize];
+                let (dynamic, count) = sums[slot[sample_index(owner, cell_count)] as usize];
+                if count == 1 {
+                    self.surface_elevation(cell)
+                } else {
+                    let crust = self.surface_crust(cell);
+                    crate::isostasy::to_surface(
+                        crust.dry_elevation(self.time) + dynamic / f64::from(count)
+                            - self.sea_level,
+                    )
+                }
+            })
+            .collect()
+    }
+
     /// Density of the crystalline crust of every world cell in kg/m³.
     pub fn bedrock_densities(&self) -> Vec<f64> {
         (0..self.mesh.len() as u32)
@@ -2224,6 +2282,43 @@ mod tests {
         assert!((change - expected).abs() < 1e-3, "{change} vs {expected}");
         let after = simulation.ledger.checked(simulation.total_mass()).residual;
         assert!((after - residual).abs() < 1e-6, "{after} vs {residual}");
+    }
+
+    #[test]
+    fn cells_showing_one_sample_are_one_column_for_the_surface() {
+        let mut simulation = simulation(4);
+        let (neighbor, _) = same_plate_neighbors(&simulation);
+        simulation.owners[neighbor as usize] = simulation.owners[0];
+        // Different dynamic topography under the two cells, on land.
+        simulation.dynamic_topography[0] = 40.0;
+        simulation.dynamic_topography[neighbor as usize] = -20.0;
+        simulation.sea_level = simulation.surface_crust(0).dry_elevation(simulation.time) - 500.0;
+        let per_cell = simulation.surface_elevations();
+        let merged = simulation.sample_surface_elevations();
+        assert!((per_cell[0] - per_cell[neighbor as usize] - 60.0).abs() < 1e-9);
+        // Both at the sample's elevation at the mean dynamic topography of its cells (+10 m if
+        // no other cell shows it).
+        let cells: Vec<usize> = (0..simulation.mesh.len())
+            .filter(|&c| simulation.owners[c] == simulation.owners[0])
+            .collect();
+        let mean = cells
+            .iter()
+            .map(|&c| simulation.dynamic_topography[c])
+            .sum::<f64>()
+            / cells.len() as f64;
+        let expected = 500.0 + mean;
+        assert!((merged[0] - expected).abs() < 1e-9, "{}", merged[0]);
+        assert_eq!(merged[0], merged[neighbor as usize]);
+        // Every sample shown at one cell keeps its surface bit for bit.
+        let mut shown = vec![0u32; simulation.plates.len() * simulation.mesh.len()];
+        for cell in 0..simulation.mesh.len() {
+            shown[sample_index(simulation.owners[cell], simulation.mesh.len())] += 1;
+        }
+        for cell in 0..simulation.mesh.len() {
+            if shown[sample_index(simulation.owners[cell], simulation.mesh.len())] == 1 {
+                assert_eq!(merged[cell].to_bits(), per_cell[cell].to_bits());
+            }
+        }
     }
 
     #[test]

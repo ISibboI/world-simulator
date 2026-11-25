@@ -35,6 +35,9 @@ impl Simulation {
     /// sample (a sample may show at several cells) and each pair moves at most what equalises
     /// it. A receiver takes at most its room below [`TectonicParams::max_crust_thickness`]
     /// (its incoming transfers are scaled down together), so no crust is lost at the cap.
+    /// One-cell holes (see [`TectonicParams::hole_flow_depth`]) take crust from every neighbour
+    /// of their plate with crust of continental origin at full mobility, down to half of the
+    /// neighbour's thickness per step, until they are no longer holes (decided once per step).
     /// Returns the change of mass (zero up to rounding).
     fn crustal_flow_inner(&mut self, dt: f64) -> f64 {
         let params = &self.params;
@@ -55,16 +58,25 @@ impl Simulation {
         // Per crust sample: (outgoing thickness, incoming thickness, incoming mass, incoming
         // felsic mass).
         let mut flows = vec![(0.0, 0.0, 0.0, 0.0, 0.0); self.plates.len() * cell_count];
-        // (source sample, receiver sample, thickness, density, felsic fraction)
+        // (source sample, receiver sample, thickness, density, (felsic and metasediment
+        // fractions, the source's thickness it keeps))
         #[allow(clippy::type_complexity)]
-        let mut transfers: Vec<(usize, usize, f64, f64, (f64, f64))> = Vec::new();
+        let mut transfers: Vec<(usize, usize, f64, f64, (f64, f64, f64))> = Vec::new();
         let mut touched: Vec<usize> = Vec::new();
+        let holes = self.one_cell_holes();
         for _ in 0..cycles {
             for cell in 0..cell_count as u32 {
                 let owner = self.owners[cell as usize];
                 let source = self.surface_crust(cell);
+                if !source.is_continental_origin_column() {
+                    continue;
+                }
                 let excess = (source.thickness - params.crustal_flow_threshold).max(0.0);
-                if excess <= 0.0 || !source.is_continental_origin_column() {
+                let feeds_hole =
+                    self.mesh.neighbors(cell).iter().any(|&n| {
+                        holes[n as usize] && self.owners[n as usize].plate == owner.plate
+                    });
+                if excess <= 0.0 && !feeds_hole {
                     continue;
                 }
                 let mobility = (excess / params.crustal_flow_range).min(1.0).powi(3);
@@ -76,8 +88,12 @@ impl Simulation {
                     if neighbor_owner == owner {
                         continue;
                     }
+                    let hole = holes[neighbor as usize] && neighbor_owner.plate == owner.plate;
+                    if !hole && excess <= 0.0 {
+                        continue;
+                    }
                     let receiver = self.surface_crust(neighbor);
-                    if !receiver.is_continental_origin_column() {
+                    if !hole && !receiver.is_continental_origin_column() {
                         continue;
                     }
                     let drop = source_elevation - receiver.dry_elevation(self.time);
@@ -98,6 +114,13 @@ impl Simulation {
                     }
                     let equalising =
                         drop / (response + crate::isostasy::dry_response(receiver.density));
+                    // Into a hole, a source gives down to half its thickness, also below the
+                    // flow threshold (its other transfers are scaled with the same outflow).
+                    let (mobility, floor) = if hole {
+                        (1.0, 0.5 * source.thickness)
+                    } else {
+                        (mobility, params.crustal_flow_threshold)
+                    };
                     let amount = (weight * mobility * drop / response).min(0.5 * equalising);
                     let from = sample_index(owner, cell_count);
                     let to = sample_index(neighbor_owner, cell_count);
@@ -108,7 +131,7 @@ impl Simulation {
                         to,
                         amount,
                         source.density,
-                        (source.felsic, source.metasediment),
+                        (source.felsic, source.metasediment, floor),
                     ));
                 }
             }
@@ -119,8 +142,8 @@ impl Simulation {
                 self.plates[index / cell_count].crust[index % cell_count]
                     .map_or(0.0, |c| c.thickness)
             };
-            for &(from, to, amount, density, (felsic, metasediment)) in &transfers {
-                let available = (thickness(from) - params.crustal_flow_threshold).max(0.0);
+            for &(from, to, amount, density, (felsic, metasediment, floor)) in &transfers {
+                let available = (thickness(from) - floor).max(0.0);
                 let room = (params.max_crust_thickness - thickness(to)).max(0.0);
                 let scaled =
                     amount * (available / outflow[from]).min(1.0) * (room / inflow[to]).min(1.0);
@@ -641,8 +664,22 @@ impl Simulation {
                         // Show the adjacent sample.
                         gap_statistics.shared_cells += 1;
                         new_owners[neighbor as usize] = Some(parent);
+                    } else if plate.crust[local as usize].is_none()
+                        && mesh
+                            .neighbors(local)
+                            .iter()
+                            .filter(|&&n| plate.crust[n as usize].is_some())
+                            .count()
+                            >= MIN_FILL_NEIGHBOURS
+                    {
+                        // Away from other plates, a spot inside the plate's crust is a
+                        // resampling gap like any other and is healed from its neighbours (new
+                        // sea floor there made one-cell holes in continents, #129).
+                        new_owners[neighbor as usize] =
+                            Some(heal_gap(mesh, plate, parent, local, true, gap_statistics));
                     } else {
-                        // Away from other plates, the uncovered area is open sea floor.
+                        // Away from other plates, uncovered area without crust around it in the
+                        // plate is open sea floor.
                         gap_statistics.new_crust_cells += 1;
                         let replaced = plate.crust[local as usize].map_or(0.0, |c| c.mass());
                         ledger.record(Term::NewSeaFloor, new_oceanic_crust(time).mass() - replaced);
@@ -686,10 +723,49 @@ impl Simulation {
             }
         }
         matching::update_crust_cells(mesh, plates, found, &filled, matching_scratch);
+        if params.matching.distinct {
+            matching::show_distinct_samples(
+                mesh,
+                plates,
+                owners,
+                time,
+                &params.matching,
+                matching_scratch,
+                matching_statistics,
+            );
+        }
         ResolvedBoundaries {
             additions,
             collisions,
         }
+    }
+
+    /// The one-cell holes (see [`TectonicParams::hole_flow_depth`]): per cell, whether its dry
+    /// elevation is more than the hole depth below all its neighbours' and its crust thinner
+    /// than all of theirs.
+    pub(super) fn one_cell_holes(&self) -> Vec<bool> {
+        let cell_count = self.mesh.len();
+        let depth = self.params.hole_flow_depth;
+        if depth <= 0.0 {
+            return vec![false; cell_count];
+        }
+        let crusts: Vec<Crust> = (0..cell_count as u32)
+            .map(|cell| self.surface_crust(cell))
+            .collect();
+        let elevations: Vec<f64> = crusts
+            .iter()
+            .map(|crust| crust.dry_elevation(self.time))
+            .collect();
+        (0..cell_count as u32)
+            .map(|cell| {
+                let (elevation, thickness) =
+                    (elevations[cell as usize], crusts[cell as usize].thickness);
+                self.mesh.neighbors(cell).iter().all(|&n| {
+                    elevations[n as usize] > elevation + depth
+                        && crusts[n as usize].thickness > thickness
+                })
+            })
+            .collect()
     }
 
     /// Distributes new crust over the cells of the receiving plate around each addition,
@@ -2144,6 +2220,49 @@ mod tests {
         simulation.apply_additions(&[addition]);
         assert!((simulation.total_mass() - mass - added).abs() < 1e-9 * added);
         assert!(simulation.surface_crust(100).thickness > new_oceanic_crust(0.0).thickness);
+    }
+
+    #[test]
+    fn one_cell_holes_fill_from_their_neighbours() {
+        let mut simulation = single_continent();
+        let cell = 100u32;
+        let local = simulation.owners[cell as usize].local as usize;
+        simulation.plates[0].crust[local]
+            .as_mut()
+            .unwrap()
+            .thickness = 20_000.0;
+        assert!(simulation.one_cell_holes()[cell as usize]);
+        let mass = simulation.total_mass();
+        let depth = |simulation: &Simulation| {
+            let elevation = |c: u32| simulation.surface_crust(c).dry_elevation(0.0);
+            simulation
+                .mesh
+                .neighbors(cell)
+                .iter()
+                .map(|&n| elevation(n))
+                .fold(f64::INFINITY, f64::min)
+                - elevation(cell)
+        };
+        assert!(depth(&simulation) > 1000.0);
+        for _ in 0..20 {
+            simulation.crustal_flow(1.0);
+        }
+        assert!((simulation.total_mass() / mass - 1.0).abs() < 1e-12);
+        let left = depth(&simulation);
+        assert!(left < simulation.params.hole_flow_depth + 1.0, "{left}");
+        assert!(left > 0.0, "{left}: filled to a peak");
+        // Without holes (and below the crustal flow threshold) nothing moves.
+        let mut flat = single_continent();
+        let mass = flat.total_mass();
+        flat.crustal_flow(1.0);
+        assert_eq!(flat.total_mass(), mass);
+        assert!(
+            flat.plates[0]
+                .crust
+                .iter()
+                .flatten()
+                .all(|c| c.thickness == 35_000.0)
+        );
     }
 
     #[test]

@@ -147,6 +147,12 @@ struct Cli {
     #[arg(long)]
     cell_dump: bool,
 
+    /// From this time (Myr) on, append the lakes after every step to `lakes.csv` in `--output`
+    /// (time, then `cell:depth` of every cell covered by a lake), for analysing how long lakes
+    /// persist.
+    #[arg(long)]
+    lake_log_from: Option<f64>,
+
     /// Life on the planet, as far as the parameters see it: `modern` is today's vegetated Earth
     /// with a biogenic ocean, `abiotic` a planet without life (bare land, no transpiration,
     /// braided rivers, no biogenic pelagic sediment). See `presets::Biosphere`.
@@ -582,6 +588,15 @@ impl Run {
     fn new(planet: Planet, cli: &Cli) -> anyhow::Result<Self> {
         let start = Instant::now();
         let mut previous_ledger: Option<PreviousSnapshot> = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        if cli.lake_log_from.is_some() {
+            // A new run starts a new log.
+            let path = cli.output.join("lakes.csv");
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
         snapshot(&planet, cli, &mut previous_ledger)?;
         Ok(Self {
             planet,
@@ -610,6 +625,14 @@ impl Run {
     fn finish_step(&mut self, cli: &Cli) -> anyhow::Result<()> {
         if self.step.is_multiple_of(self.snapshot_every) || self.step == self.steps {
             snapshot(&self.planet, cli, &mut self.previous_ledger)?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(from) = cli.lake_log_from
+            && self.planet.tectonics().time() >= from - 1e-9
+        {
+            let path = cli.output.join("lakes.csv");
+            append_lake_log(&self.planet, &path)
+                .with_context(|| format!("writing {}", path.display()))?;
         }
         Ok(())
     }
@@ -1095,13 +1118,18 @@ fn snapshot(
     );
     info!(
         "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
-         cell, {} mismatches",
+         cell, {} mismatches | distinct samples: {} cells shared a sample, {:.1}% of them got \
+         their own ({:.2} chain steps each), {:.1} s",
         statistics.matching.incremental,
         statistics.matching.full_scans,
         statistics.matching.searched_cells as f64
             / ((statistics.matching.incremental + statistics.matching.full_scans).max(1) as f64
                 * simulation.mesh().len() as f64),
         statistics.matching.mismatches,
+        statistics.matching.shared,
+        100.0 * statistics.matching.separated as f64 / statistics.matching.shared.max(1) as f64,
+        statistics.matching.chain_steps as f64 / statistics.matching.separated.max(1) as f64,
+        statistics.matching.distinct_seconds,
     );
     info!(
         "    gaps filled: {} new sea floor, {} stretched, {} revealed, {} filled holes, {} shared ({} inside \
@@ -1173,9 +1201,11 @@ fn snapshot(
     );
     let hydrology = &planet_statistics.hydrology;
     let land_cells = hydrology.land_cells.max(1.0);
+    let single_sample = planet.endorheic_single_sample_drainage();
     info!(
         "    hydrology: runoff {:.0} km³/yr, to the ocean {:.0} km³/yr, lake evaporation {:.0} \
-         km³/yr | endorheic {:.1}% of land ({:.1}% into single-cell pits), lakes {:.1}% of land, \
+         km³/yr | endorheic {:.1}% of land ({:.1}% into single-cell pits, {:.1}% into \
+         single-sample depressions; ocean differs from the per-cell surface at {} cells), lakes {:.1}% of land, \
          lake potential evaporation {:.2} m/yr | depressions {}, endorheic {}, with inner sills \
          {} | sediment trapped in lakes {:.2} km³/yr",
         hydrology.runoff / 1e9,
@@ -1183,6 +1213,8 @@ fn snapshot(
         hydrology.lake_evaporation / 1e9,
         100.0 * hydrology.endorheic_cells / land_cells,
         100.0 * hydrology.endorheic_pit_cells / land_cells,
+        100.0 * single_sample / land_cells,
+        planet.ocean_mismatch(),
         100.0 * hydrology.lake_cells / land_cells,
         hydrology.lake_potential_evaporation / hydrology.lake_cells.max(1e-9),
         hydrology.lakes,
@@ -1372,7 +1404,10 @@ struct PreviousSnapshot {
 /// thickness (m), crust class (0 continental origin, 1 transitional, 2 oceanic), plate, age (Myr),
 /// number of cells showing the same sample, whether the cell is at a coast, precipitation (m/yr),
 /// discharge (m³/yr), longitude (°), the annual mean, January and July surface temperatures
-/// (°C), evaporation or evapotranspiration (m/yr), and January and July precipitation (m/yr).
+/// (°C), evaporation or evapotranspiration (m/yr), and January and July precipitation (m/yr),
+/// …, the lake depth (m, relative to the surface the erosion saw), the plate-local index of the
+/// crust sample shown and the sample surface (m; what the erosion sees with
+/// `erosion.sample_surface`, written whether or not it is on).
 #[cfg(not(target_arch = "wasm32"))]
 fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Write;
@@ -1380,6 +1415,8 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     let mesh = simulation.mesh();
     let cell_count = mesh.len() as u32;
     let elevation = simulation.surface_elevations();
+    // The surface as the erosion sees it (cells showing one sample at one level, #112 b).
+    let drain = simulation.sample_surface_elevations();
     let ocean = sea::ocean_mask(mesh, &elevation, simulation.min_sea_fraction());
     let temperature = planet.temperature();
     // Precipitation of the solved month nearest to `month` (0 = January).
@@ -1400,7 +1437,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,sample,drain"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -1427,7 +1464,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
              {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
-             {:.3},{:.3}",
+             {:.3},{:.3},{:.1},{},{:.1}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -1462,9 +1499,37 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             dilatation,
             u.dot(east),
             u.dot(north),
+            planet
+                .surface_water()
+                .lake_depth
+                .get(cell as usize)
+                .copied()
+                .unwrap_or(0.0),
+            simulation.owner(cell).local,
+            drain[cell as usize],
         )?;
     }
     file.flush()?;
+    Ok(())
+}
+
+/// Appends the lakes of the current step to `path`: the time, then `cell:depth` (m) of every
+/// cell covered by a lake.
+#[cfg(not(target_arch = "wasm32"))]
+fn append_lake_log(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
+    use std::fmt::Write as _;
+    use std::io::Write as _;
+    let mut line = format!("{:.1}", planet.tectonics().time());
+    for (cell, &depth) in planet.surface_water().lake_depth.iter().enumerate() {
+        if depth > 0.0 {
+            write!(line, ",{cell}:{depth:.1}")?;
+        }
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{line}")?;
     Ok(())
 }
 

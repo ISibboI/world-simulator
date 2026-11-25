@@ -13,6 +13,7 @@ pub const WEB_UNAVAILABLE: &[&str] = &[
     "output",
     "width",
     "cell-dump",
+    "lake-log-from",
     "help",
     "version",
 ];

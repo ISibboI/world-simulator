@@ -50,6 +50,9 @@ pub struct Planet {
     cover_cohort: Option<(f64, f64)>,
     /// Changes of the area of closed depressions below sea level between steps, summed (cells).
     inland_change: f64,
+    /// Cells that the last erosion step saw as ocean on the sample surface but not on the
+    /// per-cell surface, or the other way round (#112 b; zero without it).
+    ocean_mismatch: usize,
 }
 
 /// The continental cover of [`CoverCohort::start`] and how much of it is left (Gt).
@@ -236,6 +239,7 @@ impl Planet {
             cover_cohort_time: f64::INFINITY,
             cover_cohort: None,
             inland_change: 0.0,
+            ocean_mismatch: 0,
         };
         planet.update_water_cycle(&view);
         planet
@@ -267,6 +271,89 @@ impl Planet {
     /// saw them (only the ocean while erosion is disabled); for the view.
     pub fn surface_water(&self) -> &SurfaceWater {
         &self.water
+    }
+
+    /// Cells that the last erosion step saw as ocean on the sample surface but not on the
+    /// per-cell surface, or the other way round (#112 b).
+    pub fn ocean_mismatch(&self) -> usize {
+        self.ocean_mismatch
+    }
+
+    /// Land cells whose water ends in an endorheic depression all of whose cells show a single
+    /// crust sample (#112; the sample may also be shown outside it), from the last erosion
+    /// step's [`SurfaceWater`]. A depression is a tree of depression cells along the receivers;
+    /// its root is the cell whose receiver leaves it (none for an endorheic one).
+    pub fn endorheic_single_sample_drainage(&self) -> f64 {
+        let water = &self.water;
+        let cells = water.receiver.len();
+        const UNKNOWN: u32 = u32::MAX;
+        const OCEAN: u32 = u32::MAX - 1;
+        // Follows the receivers from `cell` to the end of its path (`OCEAN` or an endorheic
+        // exit), or within depressions to the root of its depression.
+        let follow = |memo: &mut Vec<u32>, cell: usize, step: &dyn Fn(usize) -> Option<usize>| {
+            let mut path = Vec::new();
+            let mut current = cell;
+            let end = loop {
+                if memo[current] != UNKNOWN {
+                    break memo[current];
+                }
+                match step(current) {
+                    Some(next) => {
+                        path.push(current);
+                        current = next;
+                    }
+                    None => {
+                        let end = if water.ocean[current] {
+                            OCEAN
+                        } else {
+                            current as u32
+                        };
+                        memo[current] = end;
+                        break end;
+                    }
+                }
+            };
+            for c in path {
+                memo[c] = end;
+            }
+            end
+        };
+        let mut terminal = vec![UNKNOWN; cells];
+        let downstream = |c: usize| water.receiver[c].map(|r| r as usize);
+        let mut root = vec![UNKNOWN; cells];
+        let within = |c: usize| {
+            water.receiver[c]
+                .map(|r| r as usize)
+                .filter(|&r| water.depression[r])
+        };
+        // Per depression root: whether its cells all show one sample.
+        let mut sample = vec![None; cells];
+        let mut single_sample = vec![true; cells];
+        for (cell, _) in water.depression.iter().enumerate().filter(|(_, d)| **d) {
+            let r = follow(&mut root, cell, &within) as usize;
+            let owner = self.tectonics.owner(cell as u32);
+            match sample[r] {
+                None => sample[r] = Some(owner),
+                Some(o) if o.plate != owner.plate || o.local != owner.local => {
+                    single_sample[r] = false;
+                }
+                Some(_) => {}
+            }
+        }
+        let mut into_sample = 0.0;
+        for cell in 0..cells {
+            if water.ocean[cell] {
+                continue;
+            }
+            let end = follow(&mut terminal, cell, &downstream);
+            if end == OCEAN || !water.depression[end as usize] {
+                continue;
+            }
+            if single_sample[end as usize] {
+                into_sample += 1.0;
+            }
+        }
+        into_sample
     }
 
     /// A fingerprint of the state, the same on every platform for the same state: the time and,
@@ -333,10 +420,18 @@ impl Planet {
         if let Some(params) = &self.erosion {
             let dt_years = dt * 1e6;
             let (plate, class) = self.plates_and_classes();
+            // Cells showing one crust sample are one column for the surface processes (#112 b).
+            let sample_surface;
+            let surface: &[f64] = if params.sample_surface {
+                sample_surface = self.tectonics.sample_surface_elevations();
+                &sample_surface
+            } else {
+                &elevation
+            };
             let result = erode(
                 self.tectonics.mesh(),
                 &Surface {
-                    elevation: &elevation,
+                    elevation: surface,
                     sediment: &self.tectonics.sediment_thicknesses(),
                     bedrock_density: &self.tectonics.bedrock_densities(),
                     bedrock_isostatic_density: &self.tectonics.bedrock_isostatic_densities(),
@@ -361,6 +456,20 @@ impl Planet {
                     }
                 }
             }
+            self.ocean_mismatch = if params.sample_surface {
+                let per_cell = crate::sea::ocean_from(
+                    self.tectonics.mesh(),
+                    &elevation,
+                    seeds.iter().copied(),
+                );
+                per_cell
+                    .iter()
+                    .zip(&result.water.ocean)
+                    .filter(|(a, b)| a != b)
+                    .count()
+            } else {
+                0
+            };
             self.tectonics.apply_surface_changes(
                 &result.bedrock_delta,
                 &result.sediment_delta,
