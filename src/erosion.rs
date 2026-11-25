@@ -581,7 +581,8 @@ pub fn erode(
             .enumerate()
             .map(|(cell, level)| {
                 if ocean[cell] {
-                    level
+                    // The drainage starts from the ocean cells at their own elevation.
+                    elevation[cell]
                 } else {
                     isostasy::to_surface(level)
                 }
@@ -1128,19 +1129,41 @@ fn spill_sea(
                 break;
             }
         }
+        tracing::debug!(
+            deficit,
+            level,
+            basin = basin.len(),
+            in_lakes = basin
+                .iter()
+                .filter(|&&c| state.lakes.lake[c] != NO_LAKE)
+                .count(),
+            targets = targets.len(),
+            left,
+            lowest = basin.iter().map(|&c| dry[c]).fold(f64::INFINITY, f64::min),
+            "Sea poured over a sill"
+        );
         let Some(poured) = poured else {
             break;
         };
-        // Water that found no room: up to a metre per basin cell is the cells left out of the
-        // depressions (less than LAKE_MIN_DEPTH below the spill level); more means the basin is
-        // full: it joins the ocean, which then rises above the sill.
-        if left > LAKE_MIN_DEPTH * basin.len() as f64 * cell_area {
+        // Water that found no room: the sea-level solve also fills the pores of the basin's
+        // sediment, which the lakes do not count, and the cells less than LAKE_MIN_DEPTH below
+        // the spill level are left out of the depressions; that water stays in the basin
+        // (counted with the lakes' water). More means the basin is full: it joins the ocean,
+        // which then rises above the sill.
+        let unseen: f64 = basin
+            .iter()
+            .map(|&c| pores[c] + LAKE_MIN_DEPTH * isostasy::WATER_LOADING)
+            .sum::<f64>()
+            * cell_area;
+        if left > unseen {
             for &c in &basin {
                 ocean[c] = true;
             }
             state = water_state(mesh, elevation, &ocean, surface, params, cell_area, &[]);
         } else {
             state = poured;
+            state.hydrology.lake_volume += left;
+            state.hydrology.sea_water += left;
         }
         break;
     }
@@ -1212,11 +1235,15 @@ fn water_state(
     // The water of the land stands on the unloaded floors (#127): the processes' elevations load
     // every cell below sea level with the ocean (see `isostasy::to_surface`), also closed
     // depressions that the ocean does not reach. The conversion keeps the order of the
-    // elevations, so the drainage and the depressions are the same.
+    // elevations, so the drainage and the depressions are the same. With
+    // [`ErosionParams::sea_spill`] the ocean cells are unloaded too: a basin on whose sill the
+    // sea stands is land even where that sill lies below the sea level of this frame (the sea
+    // level of the step's end, see `spill_sea`), and its spill level is the sill, not the
+    // loaded floor of the sea next to it.
     let process = elevation;
     let unloaded: Vec<f64> = (0..cell_count)
         .map(|cell| {
-            if is_ocean(cell) {
+            if is_ocean(cell) && !params.sea_spill {
                 process[cell]
             } else {
                 isostasy::to_dry(process[cell])
@@ -1321,7 +1348,8 @@ fn water_state(
                     .iter()
                     .position(|&m| m as usize == cell)
                     .expect("the exit is a member") as u32;
-                sea_leftover += basins.pour(entry, poured / cell_area, elevation) * cell_area;
+                let left = basins.pour(entry, poured / cell_area, elevation) * cell_area;
+                sea_leftover += left;
             }
             let spills = basins.spills();
             let (mut covered_total, mut flux_evaporation, mut bodies) = (0.0, 0.0, 0);
@@ -1472,7 +1500,9 @@ fn water_state(
                 // The floor as the water presses it (or unloaded where dry) minus the
                 // processes' elevation.
                 let depth = lake_water_depth(water_level[cell], elevation[cell]);
-                if depth > 0.0 {
+                if is_ocean(cell) {
+                    0.0
+                } else if depth > 0.0 {
                     water_level[cell] - depth - process[cell]
                 } else {
                     elevation[cell] - process[cell]
