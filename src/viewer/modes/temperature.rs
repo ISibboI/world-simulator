@@ -163,7 +163,7 @@ impl RenderMode for Temperature {
         }
         if data.options.is_on(ICE_LINE) {
             let land = |cell: &CellInfo| {
-                if cell.elevation >= 0.0 {
+                if !cell.is_sea() {
                     cell.temperature
                 } else {
                     f32::NAN

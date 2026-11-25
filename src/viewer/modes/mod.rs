@@ -41,6 +41,7 @@ use clap::ValueEnum;
 use glam::Vec3;
 
 use super::arrows::{ArrowStyle, Sample, base_point, tangent_vector};
+use super::cell_info::WaterBody;
 use super::fields::{Fields, Layer, Layers};
 use super::overlay::{LineStyle, OverlayBuilder, category_boundaries};
 use super::plate_colors::PlateColors;
@@ -564,9 +565,9 @@ impl ColorScale {
     }
 }
 
-/// Draws the coastlines (between cells above and below sea level) as lines of `width` (planet
-/// radii) in `color`, without border, lifted by `lift`: for modes that colour the
-/// planet unlit, where the relief no longer shows land and sea.
+/// Draws the coastlines (between the ocean, lakes and land, see [`shore_category`]) as lines of
+/// `width` (planet radii) in `color`, without border, lifted by `lift`: for modes that colour
+/// the planet unlit, where the relief no longer shows land and water.
 pub fn coastlines(
     data: &ModeData,
     overlay: &mut OverlayBuilder,
@@ -579,7 +580,7 @@ pub fn coastlines(
     }
     let pieces = category_boundaries(
         data.mesh.faces(),
-        |cell| u32::from(data.cells[cell as usize].elevation >= 0.0),
+        |cell| shore_category(&data.cells[cell as usize]),
         |cell| data.position(cell).as_dvec3(),
     );
     let style = LineStyle {
@@ -591,6 +592,16 @@ pub fn coastlines(
     };
     for piece in pieces {
         overlay.line(piece.from, piece.to, &style);
+    }
+}
+
+/// The category of a cell whose boundaries are coastlines and lake shores: 0 ocean, 1 land
+/// (closed depressions without a lake included), 2 lake (see [`CellInfo::water_body`]).
+pub fn shore_category(cell: &CellInfo) -> u32 {
+    match cell.water_body() {
+        WaterBody::Ocean => 0,
+        WaterBody::Lake(_) => 2,
+        WaterBody::DryDepression | WaterBody::Land => 1,
     }
 }
 
@@ -663,6 +674,36 @@ pub fn with_render_mode(args: &[String], mode: RenderModeId) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shores_part_the_ocean_lakes_and_land() {
+        let cell = |elevation: f32, drainage: u32, lake_depth: f32| CellInfo {
+            elevation,
+            drainage,
+            lake_depth,
+            ..bytemuck::Zeroable::zeroed()
+        };
+        let ocean = cell(-50.0, CellInfo::drainage_bits(None, true, false, 0.0), 0.0);
+        let lake = cell(
+            -50.0,
+            CellInfo::drainage_bits(Some(0), false, true, 5.0),
+            5.0,
+        );
+        let dry = cell(
+            -50.0,
+            CellInfo::drainage_bits(Some(0), false, true, 0.2),
+            0.2,
+        );
+        let land = cell(
+            50.0,
+            CellInfo::drainage_bits(Some(0), false, false, 0.0),
+            0.0,
+        );
+        assert_eq!(shore_category(&ocean), 0);
+        assert_eq!(shore_category(&lake), 2);
+        assert_eq!(shore_category(&dry), 1);
+        assert_eq!(shore_category(&land), 1);
+    }
 
     #[test]
     fn names_round_trip_and_match_clap() {

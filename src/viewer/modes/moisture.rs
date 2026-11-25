@@ -88,7 +88,8 @@ const DESERT_EDGE: f32 = 0.2;
 /// What a cell is in the aridity view.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Ground {
-    Ocean,
+    /// The ocean and lakes (#128).
+    Water,
     /// Land mostly under an ice sheet, where the index means little: the ice is colder than
     /// the air above, so it hardly evaporates and would count as humid however little snow falls.
     Ice,
@@ -102,8 +103,8 @@ enum Ground {
 const ICE_SHARE: f32 = 0.5;
 
 fn ground(cell: &CellInfo) -> Ground {
-    if cell.elevation < 0.0 {
-        Ground::Ocean
+    if cell.is_water() {
+        Ground::Water
     } else if cell.ice >= ICE_SHARE {
         Ground::Ice
     } else {
@@ -116,7 +117,7 @@ fn ground(cell: &CellInfo) -> Ground {
 fn land_aridity(cell: &CellInfo) -> f32 {
     match ground(cell) {
         Ground::Land(index) => index,
-        Ground::Ocean | Ground::Ice => f32::NAN,
+        Ground::Water | Ground::Ice => f32::NAN,
     }
 }
 
@@ -342,7 +343,7 @@ pub(super) fn axis(value: f32, scale_unit: f32) -> f32 {
 /// The colour of a cell in the aridity view.
 fn aridity_color(scale: &ColorScale, cell: &CellInfo) -> [u8; 3] {
     match ground(cell) {
-        Ground::Ocean => OCEAN,
+        Ground::Water => OCEAN,
         Ground::Ice => ICE,
         Ground::Land(index) => scale.color(f64::from(axis(index, 1.0))).unwrap_or(MISSING),
     }
@@ -437,7 +438,7 @@ impl RenderMode for Moisture {
             })
         });
         if view == View::Aridity {
-            swatches.push(Swatch::fill(OCEAN, "Ocean"));
+            swatches.push(Swatch::fill(OCEAN, "Ocean and lakes"));
             swatches.push(Swatch::fill(ICE, "Ice sheet"));
         }
         if missing {
@@ -633,7 +634,7 @@ mod tests {
         assert!(land_aridity(&cell).is_nan());
         cell.ice = 0.0;
         cell.elevation = -10.0;
-        assert_eq!(ground(&cell), Ground::Ocean);
+        assert_eq!(ground(&cell), Ground::Water);
         assert!(land_aridity(&cell).is_nan());
     }
 
@@ -769,7 +770,7 @@ mod tests {
         let select = |land: bool, value: &dyn Fn(&CellInfo) -> f32| -> Vec<f32> {
             cells
                 .iter()
-                .filter(|cell| (cell.elevation >= 0.0) == land)
+                .filter(|cell| !cell.is_sea() == land)
                 .map(value)
                 .collect()
         };

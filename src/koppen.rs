@@ -378,7 +378,8 @@ pub fn classes(planet: &Planet) -> Vec<Option<KoppenClass>> {
     let mut solved_values = vec![0.0; solved.len()];
     (0..simulation.mesh().len())
         .map(|cell| {
-            if simulation.surface_elevation(cell as u32) < 0.0 {
+            // Land of the climate: closed depressions below sea level and lakes included (#128).
+            if crate::render::Water::of_cell(planet, cell as u32).is_ocean() {
                 return None;
             }
             if temperature
@@ -682,9 +683,8 @@ mod tests {
         let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "3"]);
         let planet = crate::build_planet(&cli).unwrap();
         let classes = classes(&planet);
-        let elevation = planet.tectonics().surface_elevations();
-        for (class, &elevation) in classes.iter().zip(&elevation) {
-            if elevation < 0.0 {
+        for (cell, class) in classes.iter().enumerate() {
+            if crate::render::Water::of_cell(&planet, cell as u32).is_ocean() {
                 assert_eq!(*class, None);
             } else {
                 assert!(class.is_some());

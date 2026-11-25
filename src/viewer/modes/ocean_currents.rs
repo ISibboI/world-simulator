@@ -78,7 +78,7 @@ const REFERENCE: f64 = 1.0;
 
 /// The transport vector of an ocean cell in m²/s (east, north), if the model has one there.
 fn current(cell: &CellInfo) -> Option<[f32; 2]> {
-    (cell.elevation < 0.0 && cell.current_east.is_finite() && cell.current_north.is_finite())
+    (cell.is_sea() && cell.current_east.is_finite() && cell.current_north.is_finite())
         .then_some([cell.current_east, cell.current_north])
 }
 
@@ -91,7 +91,7 @@ fn transport(cell: &CellInfo) -> f32 {
 
 /// The streamfunction of an ocean cell in Sv, NaN elsewhere.
 fn streamfunction(cell: &CellInfo) -> f32 {
-    if cell.elevation < 0.0 {
+    if cell.is_sea() {
         cell.streamfunction
     } else {
         f32::NAN
@@ -275,7 +275,7 @@ fn gyre_scale() -> ColorScale {
 
 /// The colour of a cell for a background scale of `value`: land, or ocean outside the model.
 fn color(cell: &CellInfo, scale: &ColorScale, value: f32) -> [u8; 3] {
-    if cell.elevation >= 0.0 {
+    if !cell.is_sea() {
         LAND
     } else {
         scale.color(f64::from(value)).unwrap_or(OUTSIDE)

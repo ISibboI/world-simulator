@@ -203,8 +203,10 @@ impl UiOptions {
 
 /// Builds the surface mesh vertices of a state from the attributes of its cells.
 ///
-/// Land is raised above the sphere by its elevation times `exaggeration`; the ocean surface is at
-/// radius 1. The colours are the topographic ones (`render::surface_color`).
+/// The drawn surface ([`CellInfo::surface_height`]: the ground of land, also of dry closed
+/// depressions below sea level, the water level of lakes) is raised above the sphere by its
+/// height times `exaggeration`; the ocean surface is at radius 1. The colours are the
+/// topographic ones (`render::surface_color`).
 fn surface_vertices(
     mesh: &SphereMesh,
     cells: &[CellInfo],
@@ -216,7 +218,7 @@ fn surface_vertices(
         .iter()
         .enumerate()
         .map(|(cell, info)| {
-            let height = f64::from(info.elevation).max(0.0) * exaggeration / radius;
+            let height = info.surface_height() * exaggeration / radius;
             mesh.vertex(cell as u32) * (1.0 + height)
         })
         .collect();
@@ -241,6 +243,7 @@ fn surface_vertices(
         .map(|(info, (position, normal))| {
             let image::Rgb(color) = render::surface_color(
                 f64::from(info.elevation),
+                info.water(),
                 f64::from(info.ice),
                 f64::from(info.discharge),
                 river_threshold,
@@ -1541,6 +1544,53 @@ impl eframe::App for Viewer {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn lakes_stand_at_their_water_level_and_dry_depressions_below_the_sea() {
+        let mesh = SphereMesh::icosphere(1);
+        let mut cells = vec![<CellInfo as bytemuck::Zeroable>::zeroed(); mesh.len()];
+        let base = |elevation: f32, drainage: u32, lake_depth: f32| CellInfo {
+            elevation,
+            drainage,
+            lake_depth,
+            ..<CellInfo as bytemuck::Zeroable>::zeroed()
+        };
+        cells[0] = base(
+            -4000.0,
+            CellInfo::drainage_bits(None, true, false, 0.0),
+            0.0,
+        );
+        cells[1] = base(
+            -120.0,
+            CellInfo::drainage_bits(Some(0), false, true, 50.0),
+            50.0,
+        );
+        cells[2] = base(
+            -120.0,
+            CellInfo::drainage_bits(Some(0), false, true, 0.5),
+            0.5,
+        );
+        cells[3] = base(
+            300.0,
+            CellInfo::drainage_bits(Some(0), false, false, 0.0),
+            0.0,
+        );
+        let vertices = surface_vertices(&mesh, &cells, 40.0, 1e30);
+        let radius = |cell: usize| f64::from(glam::Vec3::from(vertices[cell].position).length());
+        let scale = 40.0 / crate::EARTH_RADIUS;
+        assert!((radius(0) - 1.0).abs() < 1e-6);
+        assert!((radius(1) - (1.0 - 70.0 * scale)).abs() < 1e-6);
+        assert!((radius(2) - (1.0 - 120.0 * scale)).abs() < 1e-6);
+        assert!((radius(3) - (1.0 + 300.0 * scale)).abs() < 1e-6);
+        let color = |cell: usize| {
+            let [r, g, b, _] = vertices[cell].color.map(|c| (c * 255.0).round() as u8);
+            [r, g, b]
+        };
+        assert_eq!(color(1), render::lake_color(50.0).0);
+        assert_eq!(color(2), render::BELOW_SEA_LEVEL_COLOR);
+    }
+
     #[test]
     fn window_icon_decodes() {
         let icon = super::window_icon();

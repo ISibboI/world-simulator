@@ -15,7 +15,7 @@ use glam::DVec3;
 use super::super::overlay::{LineStyle, OverlayBuilder, category_boundaries, isolines};
 use super::{
     ColorScale, Legend, ModeData, ModeOption, OptionKind, OptionValues, RenderMode, Shading,
-    Swatch, SwatchShape, rgba,
+    Swatch, SwatchShape, rgba, shore_category,
 };
 use crate::viewer::CellInfo;
 
@@ -195,7 +195,7 @@ impl RenderMode for Sediment {
         };
         for piece in category_boundaries(
             data.mesh.faces(),
-            |cell| u32::from(data.cells[cell as usize].elevation >= 0.0),
+            |cell| shore_category(&data.cells[cell as usize]),
             position,
         ) {
             overlay.line(piece.from, piece.to, &coast);

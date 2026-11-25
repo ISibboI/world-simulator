@@ -693,8 +693,10 @@ mod tests {
         assert_eq!(original.flags, decoded.flags);
         assert_eq!(original.climate_class, decoded.climate_class);
         assert_eq!(original.drainage, decoded.drainage);
-        // Land stays land and sea stays sea.
+        // Land stays land and sea stays sea, lakes stay lakes (#128).
         assert_eq!(original.elevation >= 0.0, decoded.elevation >= 0.0);
+        assert_eq!(original.is_sea(), decoded.is_sea());
+        assert_eq!(original.is_water(), decoded.is_water());
     }
 
     #[test]
