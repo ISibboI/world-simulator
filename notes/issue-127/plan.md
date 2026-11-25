@@ -62,3 +62,27 @@ Before = agent/issue-160 tip (10df505), after = branch, 8 seeds × 1000 Myr, `--
 script of #160), lake volume, hypsometry, sea level and its budget, runtime at 6 subdivisions
 (paired runs). Tests: a dry inland basin below sea level sits at its unloaded elevation; a lake
 floor sinks by r·h; ocean cells unchanged; without surface water the old elevations.
+
+## Revision after the plan review
+
+An independent review of this plan (agent, 2026-11-25) found a blocker: the erosion converts
+surface ↔ dry elevations by the sign alone (`to_dry`/`to_surface` in `Seabed`, `add_layer`,
+the relative sea-level solve). Feeding it per-cell-loaded elevations would mis-size lake fills
+(a filled lake would end ~0.3 h above its spill), leak into the sea-level budget's "sharing"
+term, and a mask stale by one step would leave newly flooded or newly closed basins with the
+wrong load. It proposed the analytic version, adopted here:
+
+- **The processes keep their elevations** (`Simulation::surface_elevation`, unchanged): routing,
+  sediment fills (to the spill in dry terms, which is physically right: filling replaces the
+  water, and a filled basin carries no water load), the ocean and the sea level.
+- **Airy loading is local**, so a lake whose surface stands at `L` over an unloaded floor `x`
+  is `W·(L − x)` deep (W = 1.45), and it covers the same cells at the same level: the water
+  balance is unchanged. The erosion reports lake depths and the lake volume (water taken from
+  the ocean) with this depth (`erosion::lake_water_depth`).
+- **The displayed relief** (`Planet::surface_elevation`, used by the maps, the viewer and the
+  cell dump) adds a per-cell correction from the end of the last erosion step
+  (`SurfaceWater::load_correction`): lake floors `L − W·(L − x)`, dry closed depressions below
+  sea level at their unloaded elevation, everything else unchanged. No stored state feeds back
+  into the processes, no convergence argument is needed.
+- Not changed: statistics built in `tectonics` (hypsometry in the snapshot log) still use the
+  process elevations; `spill_depth` stays unloaded (comparable with #160).
