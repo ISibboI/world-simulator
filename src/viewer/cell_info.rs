@@ -83,7 +83,7 @@ pub struct CellInfo {
     pub wind_july_east: f32,
     pub wind_july_north: f32,
     /// The Köppen–Geiger climate class of land ([`crate::koppen::KoppenClass::id`]), 0 for the
-    /// ocean and land without data (see [`crate::koppen::classes`]).
+    /// ocean, lakes and land without data (see [`crate::koppen::classes`]).
     pub climate_class: u32,
     /// The plate covering the cell.
     pub plate: u32,
@@ -718,7 +718,7 @@ pub fn format_rows(
     latitude: f64,
     longitude: f64,
 ) -> Vec<Row> {
-    let land = !info.is_ocean();
+    let land = !info.is_sea();
     let values: [Option<String>; 21] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
@@ -1326,7 +1326,7 @@ mod tests {
         assert!(below(35.0).is_water() && !below(35.0).is_sea());
         assert_eq!(below(0.4).surface_height(), -120.0);
         assert!(!below(0.4).is_water() && !below(0.4).is_sea());
-        assert_eq!(ocean_cell().surface_height(), 0.0);
+        assert_eq!(super::tests::ocean().surface_height(), 0.0);
         // Outside closed depressions the elevation's sign decides: the drainage is from before
         // the step's surface changes (a delta built above sea level, a coast eroded below it).
         let delta = CellInfo {
@@ -1351,13 +1351,6 @@ mod tests {
             .aridity_index()
                 > 0.0
         );
-    }
-
-    fn ocean_cell() -> CellInfo {
-        CellInfo {
-            drainage: CellInfo::drainage_bits(None, true, false, 0.0),
-            ..ocean()
-        }
     }
 
     #[test]

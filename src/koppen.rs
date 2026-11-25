@@ -369,7 +369,7 @@ pub fn monthly_precipitation(solved: &[f64]) -> Option<[f64; 12]> {
 /// ice sheets.
 pub const ICE_SHEET: f64 = 0.5;
 
-/// The class of every cell of the planet (ocean and cells without data: `None`), from the
+/// The class of every cell of the planet (ocean, lakes and cells without data: `None`), from the
 /// twelve monthly temperatures and the solved months of the water cycle.
 pub fn classes(planet: &Planet) -> Vec<Option<KoppenClass>> {
     let simulation = planet.tectonics();
@@ -378,8 +378,9 @@ pub fn classes(planet: &Planet) -> Vec<Option<KoppenClass>> {
     let mut solved_values = vec![0.0; solved.len()];
     (0..simulation.mesh().len())
         .map(|cell| {
-            // Land of the climate: closed depressions below sea level and lakes included (#128).
-            if crate::render::Water::of_cell(planet, cell as u32).is_ocean() {
+            // Land without lakes: dry closed depressions below sea level included, lakes (at least
+            // 1 m deep) are water like the ocean (#128).
+            if crate::render::Water::of_cell(planet, cell as u32) != crate::render::Water::Land {
                 return None;
             }
             if temperature
@@ -684,7 +685,7 @@ mod tests {
         let planet = crate::build_planet(&cli).unwrap();
         let classes = classes(&planet);
         for (cell, class) in classes.iter().enumerate() {
-            if crate::render::Water::of_cell(&planet, cell as u32).is_ocean() {
+            if crate::render::Water::of_cell(&planet, cell as u32) != crate::render::Water::Land {
                 assert_eq!(*class, None);
             } else {
                 assert!(class.is_some());

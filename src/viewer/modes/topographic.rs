@@ -1,5 +1,5 @@
 //! The topographic mode, the default: the colours the view builds the vertices with
-//! (`render::surface_color`: elevation, lakes, rivers, permanent ice), unchanged.
+//! (`render::surface_color`: elevation, lakes, rivers, permanent ice).
 
 use super::{ColorScale, Legend, ModeData, OptionValues, RenderMode, Swatch};
 use crate::render;

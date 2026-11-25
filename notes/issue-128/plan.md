@@ -72,3 +72,14 @@ green, so dry depressions stand out from the sea).
 - Checked OK: frame history sufficient (drainage low 8 bits, lake depth at 0.1%), state hash
   untouched (Köppen only in the log), no separate ocean sphere (dry depressions below radius 1
   are safe).
+
+## Code review (independent agent)
+
+No blocking bugs; planet side (`Water::of_cell`) and viewer side (`CellInfo::water_body`)
+agree, the state hash is untouched. Fixed: the cell widget's land rows used the drainage ocean
+bit (now `is_sea`); the Köppen log counted lakes while the mode's legend left them out — now
+`koppen::classes` gives lakes no class (water, like the ocean), so log, legend, mode and widget
+agree. Accepted edge cases of the sign rule (rare, a cell at most): a rim cell less than 1 m
+below its depression's spill level carries no depression flag, so if it is also just below
+sea level it is drawn as ocean; a cell flagged as a depression in the last step that the step
+opened to the sea is drawn as land or lake beside the ocean until the next step.
