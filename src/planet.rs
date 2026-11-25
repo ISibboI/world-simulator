@@ -268,6 +268,28 @@ impl Planet {
         &self.hydrology
     }
 
+    /// Surface elevation of a cell relative to sea level (m) with the load of the water that
+    /// stands on it (#127): lake floors pressed down by their water, dry closed depressions
+    /// below sea level without the ocean's load (see `SurfaceWater::load_correction`). For the
+    /// view, maps and statistics of the relief; the processes use
+    /// [`Simulation::surface_elevation`], which loads every cell below sea level with the ocean.
+    pub fn surface_elevation(&self, cell: u32) -> f64 {
+        self.tectonics.surface_elevation(cell)
+            + self
+                .water
+                .load_correction
+                .get(cell as usize)
+                .copied()
+                .unwrap_or(0.0)
+    }
+
+    /// [`Self::surface_elevation`] of every cell.
+    pub fn surface_elevations(&self) -> Vec<f64> {
+        (0..self.tectonics.mesh().len() as u32)
+            .map(|cell| self.surface_elevation(cell))
+            .collect()
+    }
+
     /// Where the water of every cell goes, the ocean and the lakes, as the last erosion step
     /// saw them (only the ocean while erosion is disabled); for the view.
     pub fn surface_water(&self) -> &SurfaceWater {

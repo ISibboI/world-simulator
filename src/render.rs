@@ -40,7 +40,7 @@ fn render(simulation: &Simulation, width: u32, color: impl Fn(u32) -> Rgb<u8>) -
 pub fn render_elevation(planet: &Planet, width: u32, river_threshold: f64) -> RgbImage {
     let simulation = planet.tectonics();
     render(simulation, width, |cell| {
-        let elevation = simulation.surface_elevation(cell);
+        let elevation = planet.surface_elevation(cell);
         if elevation >= 0.0 && planet.discharge()[cell as usize] >= river_threshold {
             Rgb(RIVER_COLOR)
         } else {

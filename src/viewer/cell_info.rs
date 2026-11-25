@@ -513,7 +513,7 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
             let crust = simulation.surface_crust(cell);
             let strength = simulation.lithosphere_strength_terms(cell);
             CellInfo {
-                elevation: simulation.surface_elevation(cell) as f32,
+                elevation: planet.surface_elevation(cell) as f32,
                 crust_thickness: crust.thickness as f32,
                 age: crust.age(time) as f32,
                 sediment: crust.sediment as f32,
@@ -1458,7 +1458,7 @@ mod tests {
             assert_eq!(info.plate, simulation.owner(cell).plate);
             assert_eq!(
                 f64::from(info.elevation),
-                simulation.surface_elevation(cell) as f32 as f64
+                planet.surface_elevation(cell) as f32 as f64
             );
             assert_eq!(
                 info.is_continental(),
