@@ -157,3 +157,21 @@ runs at 6 subdivisions).
   holds exactly the deficit (water conserved: ocean + lakes = planet's water), the sea stands at
   the sill; with enough water the basin becomes ocean.
 - Existing lake/sea tests keep passing.
+
+## Changes after the plan review ([spill-plan-review.md](spill-plan-review.md))
+
+- Finding 1 (lake cells the climate sees as ocean had no lake evaporation, the main cause of the
+  huge inland seas) fixed: `climate.ocean_lake_evaporation`; measured alone as `evap-nosea`.
+- Finding 2: a sill on which the sea stands closes the basin everywhere (climate, erosion start
+  and end, statistics; `sea::ocean_from` / `ocean_mask` with `open_sills`). The deficit is placed
+  in the erosion's end frame; the drainage there sees ocean and land unloaded (one frame), and
+  the residual deficit of the tectonic solve is logged per snapshot.
+- Findings 4–6: the basin is taken from the sea flood (all depressions among its cells, lowest
+  first); sub-basins less than 1 m deep are absorbed; the steepest descent is computed inside the
+  depression; the inflow is split per cell (runoff plus arrivals from outside).
+- Not done: sediment per sub-basin (finding 7), a sub-grid strait rule (finding 8, discussed in
+  the results).
+- Code reviews: [spill-code-review.md](spill-code-review.md) and
+  [spill-code-review-2.md](spill-code-review-2.md); fixed: volume-preserving merge, zero-evaporation
+  node, flooding of sills and rims, sill branch restricted to the basin, statistics with closed
+  sills, frame of the drainage, sediment pores of the basin, tests.
