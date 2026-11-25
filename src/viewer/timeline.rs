@@ -9,7 +9,7 @@
 //! writes the snapshot of its paused step only on resume.
 //!
 //! On wide screens the bar is one row; on narrow ones (phones) the slider gets a row of its own
-//! below the buttons. On touch screens the buttons and the slider are touch-sized (see
+//! below the buttons, and the time too if it does not fit beside them (see [`rows`]). On touch screens the buttons and the slider are touch-sized (see
 //! `UiOptions`).
 
 use eframe::egui;
@@ -98,6 +98,64 @@ pub fn time_text(view: &TimelineView) -> String {
     }
 }
 
+/// The narrowest slider worth showing next to the buttons, in points.
+const MIN_SLIDER: f32 = 120.0;
+
+/// How the bar is laid out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rows {
+    /// Buttons, slider and time in one row (wide screens).
+    One,
+    /// Buttons and time, then the slider below.
+    Two,
+    /// Buttons, then the time, then the slider: when the time does not fit beside the buttons
+    /// (phones with a long text such as "275 Myr · live 317", issue #161).
+    Three,
+}
+
+/// The layout for a bar with `inner` points of width, buttons and time text of the given widths
+/// and `spacing` points between widgets.
+fn rows(inner: f32, buttons: f32, text: f32, spacing: f32, narrow: bool) -> Rows {
+    let beside = buttons + spacing + text;
+    if !narrow && beside + spacing + MIN_SLIDER <= inner {
+        Rows::One
+    } else if beside <= inner {
+        Rows::Two
+    } else {
+        Rows::Three
+    }
+}
+
+/// The width of the buttons of [`buttons`], with the spacing between them.
+fn buttons_width(ui: &egui::Ui) -> f32 {
+    let spacing = ui.spacing();
+    let side = spacing.interact_size.y;
+    let live = egui::WidgetText::from("Live")
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Button,
+        )
+        .size()
+        .x
+        + 2.0 * spacing.button_padding.x;
+    3.0 * side + live.max(side) + 3.0 * spacing.item_spacing.x
+}
+
+/// The width of the time label showing `text`.
+fn text_width(ui: &egui::Ui, text: &str) -> f32 {
+    egui::WidgetText::from(egui::RichText::new(text).monospace())
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        )
+        .size()
+        .x
+}
+
 /// Shows the bar and returns what the user asked for, with the area the bar covers.
 pub fn show(ctx: &egui::Context, view: &TimelineView) -> (Option<TimeAction>, egui::Rect) {
     let screen = ctx.content_rect();
@@ -110,23 +168,43 @@ pub fn show(ctx: &egui::Context, view: &TimelineView) -> (Option<TimeAction>, eg
             egui::Frame::window(ui.style()).show(ui, |ui| {
                 let inner = width - 2.0 * ui.spacing().window_margin.leftf();
                 ui.set_width(inner);
-                if narrow {
-                    ui.horizontal(|ui| {
-                        buttons(ui, view, &mut action);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            time_label(ui, view);
+                let text = time_text(view);
+                let rows = rows(
+                    inner,
+                    buttons_width(ui),
+                    text_width(ui, &text),
+                    ui.spacing().item_spacing.x,
+                    narrow,
+                );
+                match rows {
+                    Rows::One => {
+                        ui.horizontal(|ui| {
+                            buttons(ui, view, &mut action);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    time_label(ui, view, text);
+                                    let room = ui.available_width();
+                                    slider(ui, view, &mut action, room);
+                                },
+                            );
                         });
-                    });
-                    slider(ui, view, &mut action, inner);
-                } else {
-                    ui.horizontal(|ui| {
-                        buttons(ui, view, &mut action);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            time_label(ui, view);
-                            let room = ui.available_width();
-                            slider(ui, view, &mut action, room);
+                    }
+                    Rows::Two => {
+                        ui.horizontal(|ui| {
+                            buttons(ui, view, &mut action);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| time_label(ui, view, text),
+                            );
                         });
-                    });
+                        slider(ui, view, &mut action, inner);
+                    }
+                    Rows::Three => {
+                        ui.horizontal(|ui| buttons(ui, view, &mut action));
+                        time_label(ui, view, text);
+                        slider(ui, view, &mut action, inner);
+                    }
                 }
                 if let Some(error) = view.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
@@ -248,8 +326,8 @@ fn buttons(ui: &mut egui::Ui, view: &TimelineView, action: &mut Option<TimeActio
     }
 }
 
-fn time_label(ui: &mut egui::Ui, view: &TimelineView) {
-    let mut text = egui::RichText::new(time_text(view)).monospace();
+fn time_label(ui: &mut egui::Ui, view: &TimelineView, text: String) {
+    let mut text = egui::RichText::new(text).monospace();
     if view.loading {
         text = text.weak();
     }
@@ -318,5 +396,17 @@ mod tests {
         view.live = true;
         view.position = 9;
         assert_eq!(time_text(&view), "9 Myr");
+    }
+
+    #[test]
+    fn time_text_moves_below_the_buttons_when_it_does_not_fit() {
+        // Touch buttons (4 × 48 points with spacing) leave a 412-point phone too little room for
+        // "275 Myr · live 317", but enough for "275 Myr".
+        let inner = 412.0 - 2.0 * MARGIN - 2.0 * 6.0;
+        assert_eq!(rows(inner, 216.0, 170.0, 8.0, true), Rows::Three);
+        assert_eq!(rows(inner, 216.0, 60.0, 8.0, true), Rows::Two);
+        assert_eq!(rows(1200.0, 216.0, 170.0, 8.0, false), Rows::One);
+        // A wide window too narrow for a useful slider beside buttons and time.
+        assert_eq!(rows(450.0, 216.0, 170.0, 8.0, false), Rows::Two);
     }
 }
