@@ -32,7 +32,7 @@ fill it. So (a) cannot remove them; their sources must be found (below).
 A plate's crust samples sit at the vertices of its own copy of the icosphere, rotated with the
 plate. The icosphere's cells range from 0.77× to 1.21× the mean area, and the two meshes are
 offset, so nearest-vertex resampling shows some samples at 2–4 cells and leaves others hidden.
-A rotated sphere in Python ([`../../agent-scratch` experiment, summarised here]): 13–16% of
+A rotated sphere in Python (scratch experiment): 13–16% of
 cells show a duplicated sample, 7–8% of the samples are hidden, and a duplicate cell is a median
 2.4 cell spacings (p90 7) from the nearest hidden sample. A maximum bipartite matching between a
 plate's cells and its samples, with edges up to 1.6 spacings, leaves only the plate-level
@@ -96,3 +96,23 @@ hypsometry, the #70 guard rails (`notes/realism-batch-4/scripts/compare.py`), an
 persistence between snapshots (needs a lake column in the cell dump and short snapshot
 intervals over a window; relevant to #160). Runtime at 6 subdivisions: paired 200 Myr
 single-core runs, base vs branch.
+
+## Revisions after the screening runs
+
+See [screening.md](screening.md) and [results.md](results.md).
+
+1. Chains without an elevation limit (v1) halved the duplicates and the twin pits, but the
+   samples shown up to 1.6 spacings away made new, deeper pits on slopes: more depressions
+   (309 → 411), more endorheic land (19 → 22%). Long chains (mean 4 steps without a cap) were
+   worst. **Added `distinct_tolerance` = 30 m**: every cell on a chain must show a sample whose
+   dry elevation is within 30 m of its nearest sample's. Twins make pits only where the relief
+   is below their dynamic-topography offset (tens of metres), so the tolerance keeps the pass
+   where it helps and stops it where it adds noise.
+2. Search shortened for run time (chains ≤ 6 steps, ≤ 32 cells per search, heights cached).
+3. #129: the diagnostic (one seed, 300 Myr) found the deep pits come from several sources:
+   reopened consumed slots inside plates (new 7 km sea floor; ~27%), the sheet's advancing fronts
+   (outer sample gets a third of the column; ~33%), merges (~33%) and rift stretching. Fix at the
+   one clear source (consumed slots away from other plates are healed from their neighbours like
+   any resampling gap) plus **hole flow** (`hole_flow_depth` = 300 m): crust of continental
+   origin of the same plate flows into a cell lying > 300 m below all neighbours with thinner
+   crust than all of them, at full mobility, until it is no longer such a hole.
