@@ -1972,7 +1972,10 @@ mod tests {
         for _ in 0..10 {
             simulation.transport_crust(1.0);
         }
-        assert!(marks(&simulation) <= before, "advection marked crust as orogenic");
+        assert!(
+            marks(&simulation) <= before,
+            "advection marked crust as orogenic"
+        );
     }
 
     #[test]
