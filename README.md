@@ -9,6 +9,13 @@ new planet with a random seed; the parameter panel shows it, and the web page pu
 URL, so a reload or a shared link makes the same planet. `--headless` runs use seed 0 unless
 given one.
 
+`--epoch` (URL `epoch=`) sets the time of the planet's history at the start of a run, in Gyr
+counted forwards: `0` is the earliest start (4.0 Ga, once the planet has cooled enough for plates
+and oceans), `0.5` the Archean (3.5 Ga), `4` today (the default) and up to `9.43` the future,
+before the sun leaves the main sequence. It sets the brightness of the sun and the default
+greenhouse forcing. Until #150 it counted backwards (Gyr before present); old values `x` are now
+`4 − x`.
+
 ## Supported browsers
 
 The web version supports these platforms and browsers (current versions):

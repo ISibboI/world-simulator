@@ -8,9 +8,10 @@
 //! - [`Biosphere`]: `modern` (the defaults) or `abiotic`, a planet without life: bare land, no
 //!   transpiration or root-zone soil water, rivers without root-bound banks (braided), and no
 //!   biogenic pelagic sediment.
-//! - [`Epoch`]: the time before present, which sets the brightness of the young Sun (Gough, 1981)
-//!   and the greenhouse forcing that kept the young Earth from freezing (the faint-young-Sun
-//!   problem; Feulner, 2012).
+//! - [`Epoch`]: the time of the planet's history at the start of the run, counted forwards in
+//!   Gyr from the earliest start (0; today is [`PRESENT_EPOCH`], 4.0). It sets the brightness of
+//!   the Sun (Gough, 1981) and the greenhouse forcing that kept the young Earth from freezing
+//!   (the faint-young-Sun problem; Feulner, 2012).
 //!
 //! Not covered: dynamic vegetation, weathering and soils, a carbon cycle (the forcing is
 //! prescribed), ocean chemistry, the shorter day and the hotter mantle of a young planet.
@@ -18,7 +19,7 @@
 use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
 use crate::math;
-use crate::sun::{self, PRESENT_SOLAR_CONSTANT, SOLAR_AGE};
+use crate::sun::{self, MAX_EPOCH, PRESENT_EPOCH, PRESENT_SOLAR_CONSTANT};
 use crate::tectonics::TectonicParams;
 use crate::temperature::TemperatureParams;
 
@@ -27,6 +28,11 @@ use crate::temperature::TemperatureParams;
 pub const BOND_ALBEDO: f64 = 0.3;
 /// Radiative forcing per e-fold of CO₂ in W/m² (Myhre et al., 1998: `F = 5.35 ln(C/C₀)`).
 pub const CO2_FORCING_PER_E_FOLD: f64 = 5.35;
+/// The lowest CO₂, relative to the pre-industrial 280 ppm, to which the weathering feedback
+/// draws the atmosphere down under a brighter future Sun: 10 ppm, the limit of C4
+/// photosynthesis (Caldeira & Kasting, 1992). Bounds the default greenhouse forcing of future
+/// epochs (see [`Epoch::greenhouse_forcing`]).
+pub const MIN_CO2: f64 = 10.0 / 280.0;
 
 /// Which life the planet carries, as far as the physical parameters see it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -98,11 +104,14 @@ impl Biosphere {
     }
 }
 
-/// The time of the planet's history to simulate, as the time before present in Gyr (Ga).
+/// The time of the planet's history at the start of the run, counted forwards in Gyr from the
+/// earliest start of a simulation (see [`crate::sun`]): 0 is 4.0 Ga, when the planet has cooled
+/// enough for plates and oceans, 0.5 the Palaeoarchean (3.5 Ga), [`PRESENT_EPOCH`] (4.0)
+/// today, and up to [`MAX_EPOCH`] (9.43) the future, before the Sun leaves the main sequence.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Epoch {
-    /// Time before present in Gyr: 0 is today, 3.5 the Palaeoarchean.
-    pub before_present: f64,
+    /// Gyr after epoch 0, within `0..=MAX_EPOCH`.
+    pub gyr: f64,
     /// CO₂ relative to the pre-industrial 280 ppm, if given; otherwise the greenhouse forcing
     /// offsets the faint Sun (see [`Epoch::greenhouse_forcing`]).
     pub co2: Option<f64>,
@@ -111,27 +120,26 @@ pub struct Epoch {
 impl Epoch {
     /// Today, with today's (pre-industrial) atmosphere.
     pub const PRESENT: Epoch = Epoch {
-        before_present: 0.0,
+        gyr: PRESENT_EPOCH,
         co2: None,
     };
 
-    pub fn new(before_present: f64, co2: Option<f64>) -> anyhow::Result<Self> {
+    pub fn new(gyr: f64, co2: Option<f64>) -> anyhow::Result<Self> {
         anyhow::ensure!(
-            (0.0..SOLAR_AGE).contains(&before_present),
-            "the epoch must be between 0 and {SOLAR_AGE} Ga"
+            (0.0..=MAX_EPOCH).contains(&gyr),
+            "the epoch must be between 0 (the earliest start) and {MAX_EPOCH:.2} Gyr; today is \
+             {PRESENT_EPOCH}"
         );
         if let Some(co2) = co2 {
             anyhow::ensure!(co2 > 0.0, "the CO₂ ratio must be positive");
         }
-        Ok(Self {
-            before_present,
-            co2,
-        })
+        Ok(Self { gyr, co2 })
     }
 
     /// The solar constant (W/m²) of the epoch, from the brightening of the Sun on the main
     /// sequence (Gough, 1981): `S(t) = S₀ / (1 + 0.4 (1 − t/t₀))` for the age `t` of the Sun and
-    /// its present age `t₀`. 0.77 S₀ at 3.5 Ga, 0.92 S₀ at 1 Ga.
+    /// its present age `t₀`. 0.77 S₀ at epoch 0.5 (3.5 Ga), 0.92 S₀ at epoch 3 (1 Ga), 1.10 S₀
+    /// at epoch 5 (1 Gyr from today).
     /// The sun model of the view ([`crate::sun::Sun`]) uses the same formula.
     pub fn solar_constant(&self) -> f64 {
         sun::solar_constant(self.sun_age())
@@ -139,7 +147,7 @@ impl Epoch {
 
     /// The age of the sun in Gyr at the start of a run of this epoch.
     pub fn sun_age(&self) -> f64 {
-        sun::age_of_run(self.before_present, 0.0)
+        sun::age_of_run(self.gyr, 0.0)
     }
 
     /// Greenhouse forcing (W/m²) of the epoch relative to today's atmosphere.
@@ -166,10 +174,17 @@ impl Epoch {
     /// The forcing offsets the sun of the run's start and stays fixed while the sun brightens
     /// during the run (#149), so long runs warm: there is no carbon cycle that would draw the
     /// greenhouse down.
+    ///
+    /// After today the Sun is brighter and the forcing negative: the weathering feedback draws
+    /// CO₂ down, but not below [`MIN_CO2`] (`5.35 ln(10/280)` = −17.8 W/m², reached at about
+    /// epoch 4.8, 0.8 Gyr from today), so later epochs are warmer than today. The model has no
+    /// loss of water: beyond ~1.1 S₀ a real ocean planet enters a moist greenhouse (Kasting,
+    /// 1988; Kopparapu et al., 2013).
     pub fn greenhouse_forcing(&self) -> f64 {
         match self.co2 {
             Some(co2) => CO2_FORCING_PER_E_FOLD * math::ln(co2),
-            None => (PRESENT_SOLAR_CONSTANT - self.solar_constant()) * (1.0 - BOND_ALBEDO) / 4.0,
+            None => ((PRESENT_SOLAR_CONSTANT - self.solar_constant()) * (1.0 - BOND_ALBEDO) / 4.0)
+                .max(CO2_FORCING_PER_E_FOLD * math::ln(MIN_CO2)),
         }
     }
 
@@ -180,7 +195,7 @@ impl Epoch {
         if *self == Self::PRESENT {
             return;
         }
-        temperature.epoch = self.before_present;
+        temperature.epoch = self.gyr;
         temperature.orbit.solar_constant = self.solar_constant();
         temperature.greenhouse_forcing = self.greenhouse_forcing();
     }
@@ -271,25 +286,35 @@ mod tests {
         );
         assert_eq!(parameters.temperature.greenhouse_forcing.to_bits(), 0);
         // Today's CO₂ is no forcing either.
-        let today = Epoch::new(0.0, Some(1.0)).unwrap();
+        let today = Epoch::new(PRESENT_EPOCH, Some(1.0)).unwrap();
         assert_eq!(today.greenhouse_forcing().to_bits(), 0);
+        assert_eq!(Epoch::new(PRESENT_EPOCH, None).unwrap(), Epoch::PRESENT);
     }
 
     #[test]
     fn the_young_sun_is_fainter() {
-        let at = |ga: f64| Epoch::new(ga, None).unwrap().solar_constant() / PRESENT_SOLAR_CONSTANT;
-        assert_eq!(at(0.0), 1.0);
-        assert!((at(0.5) - 0.958).abs() < 1e-3, "{}", at(0.5));
-        assert!((at(3.5) - 0.766).abs() < 1e-3, "{}", at(3.5));
-        assert!((at(4.5699) - 1.0 / 1.4).abs() < 1e-4);
-        assert!(Epoch::new(4.6, None).is_err());
+        let at =
+            |gyr: f64| Epoch::new(gyr, None).unwrap().solar_constant() / PRESENT_SOLAR_CONSTANT;
+        assert_eq!(at(PRESENT_EPOCH), 1.0);
+        assert!((at(3.5) - 0.958).abs() < 1e-3, "{}", at(3.5));
+        assert!((at(0.5) - 0.766).abs() < 1e-3, "{}", at(0.5));
+        // Epoch 0: 4.0 Ga, 0.57 Gyr after the zero age of the Sun.
+        assert!((at(0.0) - 0.741).abs() < 1e-3, "{}", at(0.0));
+        assert!((at(5.0) - 1.096).abs() < 1e-3, "{}", at(5.0));
+        assert!((at(MAX_EPOCH) - 1.91).abs() < 0.01, "{}", at(MAX_EPOCH));
+        assert!(Epoch::new(MAX_EPOCH + 0.01, None).is_err());
         assert!(Epoch::new(-0.1, None).is_err());
         assert!(Epoch::new(1.0, Some(0.0)).is_err());
     }
 
     #[test]
     fn the_climate_follows_the_brightening_sun() {
-        for (epoch, time) in [(0.0, 500.0), (3.5, 1000.0), (2.0, 37.5)] {
+        for (epoch, time) in [
+            (PRESENT_EPOCH, 500.0),
+            (0.5, 1000.0),
+            (2.0, 37.5),
+            (6.0, 80.0),
+        ] {
             let parameters =
                 Parameters::new(RADIUS, Biosphere::Modern, Epoch::new(epoch, None).unwrap());
             let temperature = &parameters.temperature;
@@ -303,12 +328,12 @@ mod tests {
             let climate = temperature.solar_constant(time);
             assert!(
                 (climate - sun.luminosity * PRESENT_SOLAR_CONSTANT).abs() < 1e-9,
-                "{epoch} Ga + {time} Myr: {climate} vs {}",
+                "epoch {epoch} + {time} Myr: {climate} vs {}",
                 sun.luminosity * PRESENT_SOLAR_CONSTANT
             );
-            // About 1% brighter per 100 Myr (0.7% at 3.5 Ga, 0.9% today).
+            // About 1% brighter per 100 Myr (0.7% at 3.5 Ga, 0.9% today, 1.1% at epoch 6).
             let per_100_myr = temperature.solar_constant(100.0) / temperature.solar_constant(0.0);
-            assert!((1.006..1.012).contains(&per_100_myr), "{per_100_myr}");
+            assert!((1.006..1.013).contains(&per_100_myr), "{per_100_myr}");
         }
         // An override of the solar constant is scaled by the brightening; `solar_brightening`
         // 0 keeps it.
@@ -317,7 +342,7 @@ mod tests {
             .set("temperature.solar_constant", 1300.0)
             .unwrap();
         let scaled = parameters.temperature.solar_constant(500.0);
-        let expected = 1300.0 * crate::sun::Sun::of_run(0.0, 500.0).luminosity;
+        let expected = 1300.0 * crate::sun::Sun::of_run(PRESENT_EPOCH, 500.0).luminosity;
         assert!((scaled - expected).abs() < 1e-9, "{scaled} vs {expected}");
         parameters
             .set("temperature.solar_brightening", 0.0)
@@ -327,7 +352,7 @@ mod tests {
 
     #[test]
     fn greenhouse_forcing_offsets_the_faint_sun_or_follows_co2() {
-        let archean = Epoch::new(3.5, None).unwrap();
+        let archean = Epoch::new(0.5, None).unwrap();
         let forcing = archean.greenhouse_forcing();
         assert!((54.0..58.0).contains(&forcing), "{forcing}");
         // Absorbed sunlight plus forcing equals today's absorbed sunlight.
@@ -337,12 +362,30 @@ mod tests {
                 < 1e-9
         );
         // A doubling of CO₂: 3.7 W/m².
-        let doubled = Epoch::new(0.0, Some(2.0)).unwrap().greenhouse_forcing();
+        let doubled = Epoch::new(PRESENT_EPOCH, Some(2.0))
+            .unwrap()
+            .greenhouse_forcing();
         assert!((doubled - 3.708).abs() < 1e-3, "{doubled}");
         let mut temperature = TemperatureParams::default();
         archean.apply(&mut temperature);
         assert_eq!(temperature.greenhouse_forcing, forcing);
         assert_eq!(temperature.orbit.solar_constant, archean.solar_constant());
+        assert_eq!(temperature.epoch, 0.5);
+        // A brighter future Sun: the forcing offsets it down to the CO₂ floor, then stays there.
+        let floor = CO2_FORCING_PER_E_FOLD * math::ln(MIN_CO2);
+        assert!((floor + 17.83).abs() < 0.01, "{floor}");
+        let soon = Epoch::new(4.5, None).unwrap();
+        assert!(
+            (absorbed(soon.solar_constant()) + soon.greenhouse_forcing()
+                - absorbed(PRESENT_SOLAR_CONSTANT))
+            .abs()
+                < 1e-9
+        );
+        assert_eq!(Epoch::new(5.0, None).unwrap().greenhouse_forcing(), floor);
+        assert_eq!(
+            Epoch::new(MAX_EPOCH, None).unwrap().greenhouse_forcing(),
+            floor
+        );
     }
 
     #[test]
@@ -372,7 +415,7 @@ mod tests {
         let mut parameters = Parameters::new(
             RADIUS,
             Biosphere::Abiotic,
-            Epoch::new(3.5, Some(10.0)).unwrap(),
+            Epoch::new(0.5, Some(10.0)).unwrap(),
         );
         assert!((parameters.temperature.greenhouse_forcing - 5.35 * math::ln(10f64)).abs() < 1e-12);
         parameters.set("climate.budyko_omega", 2.0).unwrap();
@@ -437,12 +480,12 @@ mod tests {
     /// sunlight is largest in the tropics, so the poles end up warmer than today's.
     #[test]
     fn the_greenhouse_forcing_resolves_the_faint_young_sun() {
-        let archean = Epoch::new(3.5, None).unwrap();
+        let archean = Epoch::new(0.5, None).unwrap();
         let today = climate(Epoch::PRESENT, Biosphere::Modern);
         let compensated = climate(archean, Biosphere::Modern);
         let unforced = {
             // The faint Sun alone, with today's atmosphere.
-            let epoch = Epoch::new(3.5, Some(1.0)).unwrap();
+            let epoch = Epoch::new(0.5, Some(1.0)).unwrap();
             climate(epoch, Biosphere::Modern)
         };
         let abiotic = climate(archean, Biosphere::Abiotic);

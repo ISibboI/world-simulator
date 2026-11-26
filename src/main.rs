@@ -178,12 +178,14 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Biosphere::Modern)]
     biosphere: Biosphere,
 
-    /// Time of the planet's history in Ga before present (0 is today, 3.5 the Archean) at the
-    /// start of the run: sets the solar constant of the fainter young Sun, which then brightens
-    /// during the run (~1% per 100 Myr; `--set temperature.solar_brightening=0` keeps it), and,
-    /// unless `--co2` is given, a greenhouse forcing that offsets it at the start and then stays
-    /// fixed. See `presets::Epoch`.
-    #[arg(long, default_value_t = 0.0)]
+    /// Time of the planet's history at the start of the run, in Gyr counted forwards: 0 is the
+    /// earliest start (4.0 Ga, when the planet has cooled enough for plates and oceans), 0.5 the
+    /// Archean (3.5 Ga), 4 today, up to 9.43 (the Sun before it leaves the main sequence). Sets
+    /// the solar constant of the Sun, which then brightens during the run (~1% per 100 Myr;
+    /// `--set temperature.solar_brightening=0` keeps it), and, unless `--co2` is given, a
+    /// greenhouse forcing that offsets the difference to today's Sun at the start (in the future
+    /// down to a CO₂ floor) and then stays fixed. See `presets::Epoch`.
+    #[arg(long, default_value_t = sun::PRESENT_EPOCH)]
     epoch: f64,
 
     /// CO₂ relative to the pre-industrial 280 ppm; the greenhouse forcing becomes
@@ -528,6 +530,12 @@ impl Cli {
     }
 }
 
+/// The luminosity of the Sun relative to today's above which an Earth-like planet enters a moist
+/// greenhouse and loses its ocean to space within ~1 Gyr (Kasting, 1988; Kopparapu et al., 2013:
+/// 1.01–1.1), reached at about epoch 5.0, 1 Gyr from today. The run's
+/// end is checked: the sun brightens during the run.
+const MOIST_GREENHOUSE: f64 = 1.1;
+
 /// Checks the parameters and creates the initial planet.
 fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
     cli.check()?;
@@ -546,12 +554,21 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
              pre-industrial CO₂; above that it underestimates the forcing (Byrne & Goldblatt, 2014)"
         );
     }
+    if sun::Sun::of_run(cli.epoch, cli.duration).luminosity > MOIST_GREENHOUSE {
+        warn!(
+            "the Sun of this run (epoch {}, {} Myr) becomes more than {MOIST_GREENHOUSE} times as \
+             bright as today's; a real ocean planet would lose its water in a moist greenhouse \
+             (Kasting, 1988), which the model does not simulate",
+            cli.epoch, cli.duration
+        );
+    }
     for (name, value) in overrides {
         info!(name, value, "Overrode parameter");
     }
     info!(
         biosphere = ?cli.biosphere,
-        epoch_ga = cli.epoch,
+        epoch = cli.epoch,
+        ga = sun::PRESENT_EPOCH - cli.epoch,
         solar_constant_at_start = parameters.temperature.orbit.solar_constant,
         greenhouse_forcing = parameters.temperature.greenhouse_forcing,
         "Planet presets (after the overrides; `--set temperature.solar_constant` does not \

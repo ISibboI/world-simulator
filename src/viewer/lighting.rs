@@ -101,7 +101,7 @@ pub struct SunView {
 }
 
 impl SunView {
-    /// The sun of a run that started `epoch` Gyr before present, `time` Myr into it, at
+    /// The sun of a run that started at `epoch` (`--epoch`), `time` Myr into it, at
     /// `season` (the fraction of the year after perihelion; `None` for the annual view, an
     /// equinox at the mean distance).
     pub fn new(epoch: f64, time: f64, season: Option<f64>) -> Self {
@@ -180,7 +180,7 @@ mod tests {
     use super::*;
 
     fn present() -> SunView {
-        SunView::new(0.0, 0.0, None)
+        SunView::new(crate::sun::PRESENT_EPOCH, 0.0, None)
     }
 
     #[test]
@@ -212,8 +212,16 @@ mod tests {
     #[test]
     fn the_season_moves_the_sun() {
         use crate::viewer::modes::Period;
-        let january = SunView::new(0.0, 0.0, season_fraction(Period::January));
-        let july = SunView::new(0.0, 0.0, season_fraction(Period::July));
+        let january = SunView::new(
+            crate::sun::PRESENT_EPOCH,
+            0.0,
+            season_fraction(Period::January),
+        );
+        let july = SunView::new(
+            crate::sun::PRESENT_EPOCH,
+            0.0,
+            season_fraction(Period::July),
+        );
         // About 21° south and north; nearer to the sun in January (perihelion).
         assert!(january.direction.z < -0.3 && july.direction.z > 0.3);
         assert!(january.angular_radius > july.angular_radius);
@@ -232,8 +240,8 @@ mod tests {
             sun.light_color
         );
         assert!((sun.disc_color[0] - 1.0).abs() < 1e-6);
-        // The young sun of the Archean is smaller and redder.
-        let young = SunView::new(3.5, 0.0, None);
+        // The young sun of the Archean (epoch 0.5, 3.5 Ga) is smaller and redder.
+        let young = SunView::new(0.5, 0.0, None);
         assert!(young.angular_radius < sun.angular_radius);
         assert!(young.disc_color[2] < sun.disc_color[2]);
         assert!(young.describe().contains("77%"), "{}", young.describe());
