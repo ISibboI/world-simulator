@@ -1,5 +1,5 @@
 //! The topographic mode, the default: the colours the view builds the vertices with
-//! (`render::surface_color`: elevation, rivers, permanent ice), unchanged.
+//! (`render::surface_color`: elevation, lakes, rivers, permanent ice).
 
 use super::{ColorScale, Legend, ModeData, OptionValues, RenderMode, Swatch};
 use crate::render;
@@ -13,11 +13,14 @@ impl RenderMode for Topographic {
 
     fn legend(&self, _options: &OptionValues, _data: Option<&ModeData>) -> Legend {
         Legend {
-            description: "Elevation above and depth below sea level, with rivers and permanent \
-                          ice. The relief is exaggerated."
+            description: "Elevation above and depth below sea level, with lakes, rivers and \
+                          permanent ice. Lakes are drawn at their water level, closed \
+                          depressions without a lake as land. The relief is exaggerated."
                 .into(),
             scale: Some(elevation_scale()),
             swatches: vec![
+                Swatch::fill(render::lake_color(100.0).0, "Lake"),
+                Swatch::fill(render::BELOW_SEA_LEVEL_COLOR, "Land below sea level"),
                 Swatch::fill(render::RIVER_COLOR, "River"),
                 Swatch::fill(render::ICE_SHEET_COLOR, "Ice sheet"),
                 Swatch::fill(render::SEA_ICE_COLOR, "Sea ice"),

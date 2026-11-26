@@ -63,7 +63,9 @@ pub fn ray_sphere(ray: &Ray, radius: f64) -> Option<(f64, f64)> {
 const REFINEMENT_STEPS: usize = 6;
 
 /// The cell whose displayed surface the ray meets first, if any. `radius(cell)` is the
-/// displayed radius of a cell (at least about 1, the ocean), and `max_radius` the largest one.
+/// displayed radius of a cell (about 1 or more: the ocean surface, land, lakes; a dry closed
+/// depression below sea level dips a little below 1, and a ray that reaches the sphere of radius
+/// 1 there picks the cell under that point, see #128), and `max_radius` the largest one.
 /// The nearest-vertex walk starts at `hint` (e.g. the previous pick) if given.
 pub fn pick(
     mesh: &SphereMesh,

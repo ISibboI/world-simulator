@@ -25,6 +25,7 @@
 
 use super::{Legend, ModeData, ModeOption, OptionKind, OptionValues, Period, RenderMode, Swatch};
 use crate::viewer::CellInfo;
+use crate::viewer::cell_info::WaterBody;
 use crate::viewer::lighting::Light;
 use crate::viewer::renderer::{DetailUniforms, DetailVertex, MAX_PLATES};
 
@@ -239,9 +240,13 @@ fn layers(cell: &CellInfo, season: Period, abiotic: bool) -> Layers {
         Period::Annual => 0.0,
         _ => smoothstep(-1.0, -6.0, temperature),
     };
-    let land = cell.elevation >= 0.0;
-    let water_cell = !land || cell.lake_depth > 0.0;
-    let water = if !land {
+    // Ocean, lakes (at least `LAKE_DEPTH` deep) and land, also dry closed depressions below sea
+    // level (#128).
+    let body = cell.water_body();
+    let ocean = body == WaterBody::Ocean;
+    let water_cell = cell.is_water();
+    let land = !water_cell;
+    let water = if ocean {
         let depth = (-cell.elevation).max(1.0);
         let t = ((depth / SHELF_DEPTH).ln() / (DEEP_DEPTH / SHELF_DEPTH).ln()).clamp(0.0, 1.0);
         mix(SHELF, DEEP_OCEAN, t)
@@ -305,7 +310,7 @@ fn layers(cell: &CellInfo, season: Period, abiotic: bool) -> Layers {
 
     let (snow, snow_cover) = if cell.ice > 0.5 {
         (if land { ICE_SHEET } else { SEA_ICE }, 1.0)
-    } else if !land {
+    } else if ocean {
         (SEA_ICE, freezing)
     } else if water_cell {
         // Frozen lakes look like snow-covered land.
@@ -395,7 +400,10 @@ pub fn detail_vertices(data: &ModeData, faces: &[[u32; 3]]) -> Vec<DetailVertex>
             let vertex = &data.vertices[cell as usize];
             // The coast lies where this crosses zero between a land and a water corner: about
             // in the middle of the edge, nearer to low land and shallow water.
-            let height = if layers.water_cell {
+            let height = if let WaterBody::Lake(depth) = info.water_body() {
+                // At least 0.5, so that the noise (±0.5) does not erase small lakes.
+                -(0.5 + 0.5 * smoothstep(0.0, 200.0, depth))
+            } else if layers.water_cell {
                 -(0.4 + 0.6 * smoothstep(0.0, 2000.0, -info.elevation))
             } else {
                 0.4 + 0.6 * smoothstep(0.0, 2000.0, info.elevation)
@@ -481,6 +489,29 @@ mod tests {
             wind_july_east: 5.0,
             ..bytemuck::Zeroable::zeroed()
         }
+    }
+
+    #[test]
+    fn closed_depressions_are_lakes_or_land() {
+        // A dry depression below sea level is land (#128), a lake of at least 1 m is water.
+        let dry = CellInfo {
+            drainage: CellInfo::drainage_bits(Some(0), false, true, 0.5),
+            lake_depth: 0.5,
+            ..cell(-150.0, 20.0, 0.6, 1.2)
+        };
+        let layers_dry = layers(&dry, Period::Annual, false);
+        assert!(!layers_dry.water_cell);
+        let lake = CellInfo {
+            drainage: CellInfo::drainage_bits(Some(0), false, true, 40.0),
+            lake_depth: 40.0,
+            ..cell(-150.0, 20.0, 0.6, 1.2)
+        };
+        let layers_lake = layers(&lake, Period::Annual, false);
+        assert!(layers_lake.water_cell);
+        assert!(close(layers_lake.water, LAKE));
+        assert_eq!(layers_lake.relief, 0.0);
+        // Below sea level outside depressions: the ocean.
+        assert!(layers(&cell(-150.0, 20.0, 0.0, 0.0), Period::Annual, false).water_cell);
     }
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {

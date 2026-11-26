@@ -83,7 +83,7 @@ pub struct CellInfo {
     pub wind_july_east: f32,
     pub wind_july_north: f32,
     /// The Köppen–Geiger climate class of land ([`crate::koppen::KoppenClass::id`]), 0 for the
-    /// ocean and land without data (see [`crate::koppen::classes`]).
+    /// ocean, lakes and land without data (see [`crate::koppen::classes`]).
     pub climate_class: u32,
     /// The plate covering the cell.
     pub plate: u32,
@@ -111,9 +111,7 @@ pub enum WaterBody {
     Land,
 }
 
-/// Closed depressions with at least this much water (m) are lakes, shallower ones land
-/// (Sebastian's rule on #128).
-pub const LAKE_DEPTH: f64 = 1.0;
+pub use crate::render::LAKE_DEPTH;
 
 impl CellInfo {
     /// [`CellInfo::flags`]: the crust is continental (see
@@ -191,17 +189,46 @@ impl CellInfo {
 
     /// What water the cell holds: ocean, a lake (closed depressions with at least
     /// [`LAKE_DEPTH`] of water), a dry depression or other land. Closed depressions below sea
-    /// level are land (#58), drawn as lakes only with water in them (#128).
+    /// level are land (#58), drawn as lakes only with water in them (#128). Outside closed
+    /// depressions, the ocean is the cell below sea level (see [`crate::render::Water::of`]:
+    /// the drainage is from before the last erosion step's surface changes, the elevation
+    /// after them; [`CellInfo::is_ocean`] is the drainage's ocean).
     pub fn water_body(&self) -> WaterBody {
-        if self.is_ocean() {
-            WaterBody::Ocean
-        } else if self.drainage & Self::LAKE != 0 {
+        if self.drainage & Self::LAKE != 0 {
             WaterBody::Lake(self.lake_depth)
         } else if self.in_depression() {
             WaterBody::DryDepression
+        } else if self.elevation < 0.0 {
+            WaterBody::Ocean
         } else {
             WaterBody::Land
         }
+    }
+
+    /// The surface the views draw (see [`crate::render::Water`]).
+    pub fn water(&self) -> crate::render::Water {
+        match self.water_body() {
+            WaterBody::Ocean => crate::render::Water::Ocean,
+            WaterBody::Lake(depth) => crate::render::Water::Lake(f64::from(depth)),
+            WaterBody::DryDepression | WaterBody::Land => crate::render::Water::Land,
+        }
+    }
+
+    /// Whether the cell is open water as drawn: the ocean or a lake.
+    pub fn is_water(&self) -> bool {
+        matches!(self.water_body(), WaterBody::Ocean | WaterBody::Lake(_))
+    }
+
+    /// Whether the cell is the ocean as drawn ([`CellInfo::water_body`]); land of the climate
+    /// otherwise, lakes and closed depressions included.
+    pub fn is_sea(&self) -> bool {
+        self.water_body() == WaterBody::Ocean
+    }
+
+    /// The height (m, relative to sea level) of the drawn surface: the sea surface, a lake's
+    /// water level or the ground (see [`crate::render::Water::surface_height`]).
+    pub fn surface_height(&self) -> f64 {
+        self.water().surface_height(f64::from(self.elevation))
     }
 
     pub fn is_continental(&self) -> bool {
@@ -219,7 +246,7 @@ impl CellInfo {
     /// any scale, so that it stays finite.
     pub fn aridity_index(&self) -> f32 {
         let (p, pet) = (self.precipitation, self.potential_evaporation);
-        if self.elevation >= 0.0 && pet >= 0.0005 && p >= 0.0 {
+        if !self.is_sea() && pet >= 0.0005 && p >= 0.0 {
             (p / pet).min(1e4)
         } else {
             f32::NAN
@@ -691,7 +718,7 @@ pub fn format_rows(
     latitude: f64,
     longitude: f64,
 ) -> Vec<Row> {
-    let land = !info.is_ocean();
+    let land = !info.is_sea();
     let values: [Option<String>; 21] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
@@ -1292,6 +1319,38 @@ mod tests {
             None
         );
         assert_eq!(info().water_body(), WaterBody::Land);
+
+        // The drawn surface (#128): a lake at its water level, a dry depression at its ground,
+        // the ocean at sea level.
+        assert_eq!(below(35.0).surface_height(), -85.0);
+        assert!(below(35.0).is_water() && !below(35.0).is_sea());
+        assert_eq!(below(0.4).surface_height(), -120.0);
+        assert!(!below(0.4).is_water() && !below(0.4).is_sea());
+        assert_eq!(super::tests::ocean().surface_height(), 0.0);
+        // Outside closed depressions the elevation's sign decides: the drainage is from before
+        // the step's surface changes (a delta built above sea level, a coast eroded below it).
+        let delta = CellInfo {
+            elevation: 2.0,
+            drainage: CellInfo::drainage_bits(None, true, false, 0.0),
+            ..info()
+        };
+        assert_eq!(delta.water_body(), WaterBody::Land);
+        let eroded = CellInfo {
+            elevation: -3.0,
+            drainage: CellInfo::drainage_bits(Some(1), false, false, 0.0),
+            ..info()
+        };
+        assert_eq!(eroded.water_body(), WaterBody::Ocean);
+        // The aridity index is of land, dry depressions included.
+        assert!(
+            CellInfo {
+                potential_evaporation: 1.0,
+                precipitation: 0.2,
+                ..below(0.4)
+            }
+            .aridity_index()
+                > 0.0
+        );
     }
 
     #[test]
@@ -1455,6 +1514,13 @@ mod tests {
             // The frame history keeps 16 bits of the flags.
             assert_eq!(info.flags & !0xFFFF, 0);
             let cell = cell as u32;
+            // The views and the PNG maps draw the same water (#128).
+            let water = crate::render::Water::of_cell(&planet, cell);
+            assert_eq!(info.is_sea(), water.is_ocean());
+            assert_eq!(
+                matches!(info.water_body(), WaterBody::Lake(_)),
+                matches!(water, crate::render::Water::Lake(_))
+            );
             assert_eq!(info.plate, simulation.owner(cell).plate);
             assert_eq!(
                 f64::from(info.elevation),

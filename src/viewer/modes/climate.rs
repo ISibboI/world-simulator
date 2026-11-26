@@ -117,11 +117,20 @@ impl Detail {
 
     /// The category of a cell: the class or main group, 0 for the ocean and land without data.
     fn category(self, cell: &CellInfo) -> u32 {
-        match (self, climate_class(cell)) {
+        match (self, land_class(cell)) {
             (_, None) => 0,
             (Detail::Classes, Some(class)) => u32::from(class.id()),
             (Detail::Groups, Some(class)) => class.group() as u32 + 1,
         }
+    }
+}
+
+/// The class of land outside lakes: the ocean and lakes (#128) are drawn as water.
+fn land_class(cell: &CellInfo) -> Option<KoppenClass> {
+    if cell.is_water() {
+        None
+    } else {
+        climate_class(cell)
     }
 }
 
@@ -135,12 +144,12 @@ fn group_color(group: Group) -> [u8; 3] {
 
 /// The colour of a cell.
 fn color(detail: Detail, cell: &CellInfo) -> [u8; 3] {
-    match climate_class(cell) {
+    match land_class(cell) {
         Some(class) => match detail {
             Detail::Classes => class_color(class),
             Detail::Groups => group_color(class.group()),
         },
-        None if cell.elevation < 0.0 => OCEAN,
+        None if cell.is_water() => OCEAN,
         None => MISSING,
     }
 }
@@ -218,9 +227,9 @@ impl RenderMode for Climate {
         let mut counts = [0usize; 30];
         let mut missing = 0;
         for cell in data.map_or(&[][..], |data| data.cells) {
-            match climate_class(cell) {
+            match land_class(cell) {
                 Some(class) => counts[usize::from(class.id()) - 1] += 1,
-                None if cell.elevation >= 0.0 => missing += 1,
+                None if !cell.is_water() => missing += 1,
                 None => {}
             }
         }
@@ -264,7 +273,7 @@ impl RenderMode for Climate {
                 }
             }
         }
-        swatches.push(Swatch::fill(OCEAN, "Ocean"));
+        swatches.push(Swatch::fill(OCEAN, "Ocean and lakes"));
         if missing > 0 {
             swatches.push(Swatch::fill(MISSING, "No data"));
         }
@@ -333,6 +342,19 @@ mod tests {
         assert_eq!(Detail::Classes.category(&cfb), 15);
         assert_eq!(Detail::Groups.category(&cfb), 3);
         assert_eq!(Detail::Groups.category(&cell(None, 5.0)), 0);
+        // Closed depressions below sea level are land of their class; lakes are water (#128).
+        let dry = CellInfo {
+            drainage: CellInfo::drainage_bits(Some(0), false, true, 0.0),
+            ..cell(Some(KoppenClass::BWh), -100.0)
+        };
+        assert_eq!(color(Detail::Classes, &dry), class_color(KoppenClass::BWh));
+        let lake = CellInfo {
+            drainage: CellInfo::drainage_bits(Some(0), false, true, 20.0),
+            lake_depth: 20.0,
+            ..cell(Some(KoppenClass::BWh), 300.0)
+        };
+        assert_eq!(color(Detail::Classes, &lake), OCEAN);
+        assert_eq!(Detail::Classes.category(&lake), 0);
         // Ids beyond the classes are no class.
         let mut odd = cfb;
         odd.climate_class = 77;
