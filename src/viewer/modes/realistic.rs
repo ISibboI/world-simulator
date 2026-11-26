@@ -52,7 +52,7 @@ const OPTIONS: &[ModeOption] = &[
         label: "Season",
         hover: "The annual state, or January (northern winter) or July (northern summer): the \
                 sun's position, seasonal snow, lake and sea ice, and the greenness of the \
-                vegetation",
+                vegetation (if the planet has any)",
         kind: OptionKind::Choice(Period::CHOICES),
     },
     ModeOption {

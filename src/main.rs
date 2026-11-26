@@ -182,9 +182,9 @@ struct Cli {
 
     /// Time of the planet's history at the start of the run, in Gyr counted forwards: 0 is the
     /// earliest start (4.0 Ga, when the planet has cooled enough for plates and oceans; the
-    /// default), 0.5 the Archean (3.5 Ga), 4 today, up to 9.43 (the Sun before it leaves the main sequence). Sets
-    /// the solar constant of the Sun, which then brightens during the run (~1% per 100 Myr;
-    /// `--set temperature.solar_brightening=0` keeps it), and, unless `--co2` is given, a
+    /// default), 0.5 the Archean (3.5 Ga), 4 today, up to 9.43 (the Sun before it leaves the main
+    /// sequence). Sets the solar constant of the Sun, which then brightens during the run (~1% per
+    /// 100 Myr; `--set temperature.solar_brightening=0` keeps it), and, unless `--co2` is given, a
     /// greenhouse forcing that offsets the difference to today's Sun at the start (in the future
     /// down to a CO₂ floor) and then stays fixed. See `presets::Epoch`.
     #[arg(long, default_value_t = sun::EARLIEST_EPOCH)]

@@ -89,9 +89,9 @@ impl Biosphere {
                 // falls (Vanacker et al., 2007). Bedrock incision depends on vegetation only
                 // indirectly, so K doubles (the low end of ×2–5). It applies to sediment as well
                 // (its erodibility relative to bedrock is a lithological contrast and stays).
-                // Since the discharge follows the precipitation rather than the runoff (#7), the
-                // drier interiors of an abiotic planet erode less here, where on Earth the larger
-                // runoff fraction would erode more: the model understates abiotic erosion.
+                // Rivers carry the runoff (`erosion.runoff_discharge`, #7), so the lower ω above
+                // (less evapotranspiration, a larger runoff fraction) raises the discharge as
+                // well: both effects make an abiotic planet erode more.
                 erosion.erodibility *= 2.0;
                 // Pre-vegetation rivers were braided and sheet-braided (Davies & Gibling, 2010;
                 // Gibling & Davies, 2012), without the bank strength of roots and mud that makes
@@ -164,19 +164,20 @@ impl Epoch {
     /// more (Byrne & Goldblatt, 2014).
     ///
     /// Otherwise the forcing offsets the sunlight that the faint Sun does not deliver,
-    /// `(S₀ − S)(1 − α)/4` with Earth's Bond albedo α. The model has no carbon cycle; this
-    /// assumes that the carbonate–silicate weathering feedback (Walker et al., 1981; Kasting,
-    /// 1993) kept the climate close to today's, as the geological record suggests for most of
-    /// the Archean and Proterozoic: liquid water and sediments since 3.8–4.4 Ga, and no lasting
-    /// global glaciation except the Palaeoproterozoic and Neoproterozoic episodes (Feulner,
-    /// 2012). At 3.5 Ga this is ~56 W/m², in radiative–convective models of the order of 0.1
-    /// bar of CO₂, or 0.01–0.03 bar with ~0.1–0.5% of methane (Haqq-Misra et al., 2008; Wolf &
-    /// Toon, 2013; Charnay et al., 2013). The default is a prescribed, climate-compensated
+    /// `(S₀ − S)(1 − α)/4` with Earth's Bond albedo α. The model has no carbon cycle; this assumes that the
+    /// carbonate–silicate weathering feedback (Walker et al., 1981; Kasting, 1993) kept the climate
+    /// close to today's, as the geological record suggests for most of the Archean and Proterozoic:
+    /// liquid water and sediments since 3.8–4.4 Ga, and no lasting global glaciation except the
+    /// Palaeoproterozoic and Neoproterozoic episodes (Feulner, 2012). At 3.5 Ga this is ~56 W/m²,
+    /// in radiative–convective models of the order of 0.1 bar of CO₂, or 0.01–0.03 bar with
+    /// ~0.1–0.5% of methane (Haqq-Misra et al., 2008; Wolf & Toon, 2013; Charnay et al., 2013).
+    /// Methane on that scale is biogenic; for a barren planet (the default run, #190) read the
+    /// forcing as CO₂ alone, ~0.1–0.3 bar. The default is a prescribed, climate-compensated
     /// forcing, not a prediction. It is uniform, while the missing sunlight is largest in the
     /// tropics, so the gradient flattens: at 3.5 Ga (4 seeds, 1000 Myr) the global mean was
-    /// 0.8–1.9 K warmer than today's, the poles 8–10 K warmer, the equator ~2 K cooler, and the
-    /// permanent ice covered 7–10% less of the surface. Without it the planet is a snowball
-    /// (−36 °C, 95% frozen).
+    /// 0.8–1.9 K warmer than today's, the poles 8–10 K warmer, the equator ~2 K cooler, and the permanent
+    /// ice covered 7–10% less of the surface. Without it the planet is a snowball (−36 °C, 95%
+    /// frozen).
     ///
     /// The forcing offsets the sun of the run's start and stays fixed while the sun brightens
     /// during the run (#149), so long runs warm: there is no carbon cycle that would draw the

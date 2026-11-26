@@ -135,7 +135,7 @@ pub struct TemperatureParams {
     pub orbit: OrbitParams,
     /// The epoch of the run's start (`--epoch`, see [`crate::presets::Epoch`]), from which
     /// [`crate::sun::age_of_run`] gives the age of the sun; today ([`crate::sun::PRESENT_EPOCH`])
-    /// by default.
+    /// in the struct default; a run starts at epoch 0 unless `--epoch` says otherwise (#190).
     pub epoch: f64,
     /// Scales the ageing of the sun during the run (the simulated time it sees): 1 follows the
     /// sun model ([`crate::sun::brightening`], ~1% per 100 Myr), 0 keeps the solar constant of

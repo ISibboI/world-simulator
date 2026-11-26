@@ -26,8 +26,16 @@ So the barren treatment is complete for every process the model has, and switcha
 life-driven is "deeply built in" without a switch. Things the model does not represent at all
 (so neither barren nor living): soils and chemical weathering, a carbon cycle (#154), biogenic
 gases (O₂/ozone, methane; the stratosphere and the Archean methane greenhouse), biogenic cloud
-condensation nuclei (DMS) in `ocean_albedo`/`radiation_a`, dynamic vegetation. These are
-listed in the PR as not covered.
+condensation nuclei (DMS) in `ocean_albedo`/`radiation_a`, dynamic vegetation. Also outside
+the presets (review 1): coastal vegetation that slows shore retreat and stabilises deltas
+(`cliff_retreat_*`, delta parameters stay), and seasonal snow under forests (the land has no
+seasonal snow albedo at all). `carbonate_rate`/`ccd_depth` are simply unused once
+`biogenic_pelagic` is off. These are listed in the PR as not covered.
+
+**Epoch 0 changes only the sun and the greenhouse forcing.** The initial planet is still
+present-day-like: ~40% continental crust with its platform cover, today's ocean volume and
+sea-floor ages, a 24 h day (`EARTH_ROTATION`) and today's mantle. Epoch-dependent initial
+conditions would be a separate issue (suggested as a follow-up in the PR).
 
 The Köppen classes (render mode and statistics) are a *climate* classification; names like
 "tropical rainforest" describe the climate, not vegetation. They stay.
@@ -51,7 +59,10 @@ At epoch 0 the default greenhouse forcing is +61.8 W/m², which offsets the fain
 (`(S₀ − S)(1 − 0.3)/4`), and then stays fixed. Over 1000 Myr the sun goes from 0.741 to 0.792 S₀:
 +12 W/m² absorbed, against +23 W/m² for the old default (1.0 → 1.096 S₀). Both warm until the
 carbon cycle (#154); the new default warms about half as much. The uniform forcing flattens the
-gradient (warm poles, cooler tropics; #148), and bright bare land cools.
+gradient (warm poles, cooler tropics; #148), and bright bare land cools. The
+compensation uses the Bond albedo 0.3 and does not include the brighter bare land (land albedo
++0.05: ~−13 W/m² of absorbed sunlight over land at epoch 0, ~−4 W/m² globally): the barren default starts a little colder than a
+fully compensated planet would. The runs check permanent ice per seed for a snowball.
 
 ## 4. Runs
 
@@ -65,3 +76,11 @@ gradient (warm poles, cooler tropics; #148), and bright bare land cools.
 Compared: global mean temperature, permanent ice, land precipitation, Köppen and aridity
 shares, sea level / land fraction, mean land elevation, sediment flux, over 200–1000 Myr and at
 the start/end. Snapshots of the new default go to this folder.
+
+## Review
+
+An independent review ([`review-1.md`](review-1.md)) found no bugs. Fixed: a stale erosion
+comment in the abiotic preset (rivers carry the runoff since #7, so the lower ω raises erosion),
+the methane caveat for a barren planet in `Epoch::greenhouse_forcing`, help-text wrapping, the
+Season hover text, the `TemperatureParams::epoch` doc, and the panel round-trip test now uses a
+non-default epoch. Its suggestions on the inventory and the caveats are in the sections above.

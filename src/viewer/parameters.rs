@@ -682,7 +682,7 @@ mod tests {
             "--set",
             "basal_drag=8e14",
             "--set=climate.x=-1",
-            "--epoch=-0",
+            "--epoch=0.5",
             "--co2",
             "2",
         ]);
@@ -702,7 +702,7 @@ mod tests {
                 "--seed=3",
                 "--no-erosion",
                 "--biosphere=modern",
-                "--epoch=-0",
+                "--epoch=0.5",
                 "--co2=2",
                 "--set=basal_drag=8e14",
                 "--set=climate.x=-1",
