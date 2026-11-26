@@ -190,6 +190,12 @@ pub(super) struct PlateSheet {
     pub(super) split_timer: f64,
     /// The local vertices of the part to split off, once due.
     pub(super) pending_split: Option<Vec<u32>>,
+    /// How long (Myr) the plate has had a section loaded beyond its strength, and the local
+    /// vertices of the part to break off there, once due (see [`super::breakup`]).
+    pub(super) breakup_timer: f64,
+    pub(super) pending_breakup: Option<Vec<u32>>,
+    /// How the plate's most overloaded section fails (see `breakup::SectionRecord::opening`).
+    pub(super) breakup_opening: f64,
 }
 
 impl PlateSheet {
@@ -206,6 +212,9 @@ impl PlateSheet {
             frame: DVec3::ZERO,
             split_timer: 0.0,
             pending_split: None,
+            breakup_timer: 0.0,
+            pending_breakup: None,
+            breakup_opening: 0.0,
         }
     }
 
@@ -225,9 +234,9 @@ impl PlateSheet {
 #[derive(Clone, Debug, Default)]
 pub(super) struct SheetGeometry {
     offsets: Vec<u32>,
-    neighbor: Vec<u32>,
+    pub(super) neighbor: Vec<u32>,
     direction: Vec<DVec3>,
-    face: Vec<f64>,
+    pub(super) face: Vec<f64>,
     basis: Vec<(DVec3, DVec3)>,
     /// Area of a cell on the unit sphere (uniform, as everywhere in the model).
     area: f64,
@@ -305,7 +314,7 @@ impl SheetGeometry {
     }
 
     /// The edge slots of `vertex` (indices into the per-edge arrays).
-    fn edges(&self, vertex: u32) -> std::ops::Range<usize> {
+    pub(super) fn edges(&self, vertex: u32) -> std::ops::Range<usize> {
         self.offsets[vertex as usize] as usize..self.offsets[vertex as usize + 1] as usize
     }
 }
@@ -756,12 +765,23 @@ impl Simulation {
                 w.weak[i] = w.viscosity[i] < sheet.rigid_viscosity && neighbours >= 3;
             }
         }
-        // Forces only for plates that can deform (a plate without weak samples is rigid).
+        // Forces only for plates that can deform (a plate without weak samples is rigid), and
+        // for all plates when their sections are analysed (see `breakup`).
         let deforming: Vec<bool> = work
             .iter()
             .map(|w| w.weak.iter().any(|&weak| weak))
             .collect();
-        let forces = self.cell_forces(&deforming);
+        let analyse = self.section_analysis_due();
+        let forces = if analyse {
+            self.cell_forces(&vec![true; plate_count])
+        } else {
+            self.cell_forces(&deforming)
+        };
+        let rotations: Vec<DVec3> = if analyse {
+            self.plates.iter().map(|p| p.angular_velocity).collect()
+        } else {
+            Vec::new()
+        };
         for (cell, owner) in self.owners.iter().enumerate() {
             if deforming[owner.plate as usize] {
                 let w = &mut work[owner.plate as usize];
@@ -1405,6 +1425,12 @@ impl Simulation {
         statistics.solve_seconds += start.elapsed().as_secs_f64();
         self.sheet_statistics = statistics;
         self.update_sheet_statistics();
+        if analyse {
+            self.analyse_sections(&forces, &rotations, dt);
+        } else {
+            // The records are those of this step's analysis only.
+            self.section_records.clear();
+        }
     }
 
     /// Area statistics of the strain rate (see [`SheetStatistics`]).
@@ -1891,6 +1917,8 @@ mod tests {
         rigid.sheet.enabled = false;
         let mut stiff = TectonicParams::default();
         stiff.sheet.rigid_viscosity = 0.0;
+        // Without the breakup by stress, which needs the sheet's forces.
+        stiff.breakup.enabled = false;
         assert!(
             run(rigid) == run(stiff),
             "stiff deforming plates differ from rigid plates"

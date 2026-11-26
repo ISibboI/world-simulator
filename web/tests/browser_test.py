@@ -501,7 +501,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--browser", required=True)
     parser.add_argument("--dist", type=Path, default=Path("dist"))
-    parser.add_argument("--query", default="subdivisions=3&duration=50", help="URL parameters of the page")
+    parser.add_argument("--query", default="seed=0&subdivisions=3&duration=50", help="URL parameters of the page")
     parser.add_argument("--min-updates", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=180, help="seconds for the page to pass")
     parser.add_argument("--port", type=int, default=8117)

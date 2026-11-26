@@ -11,6 +11,11 @@
 //! (see `crate::device`): the fields show it, "Defaults" returns to it, and the arguments leave
 //! it out like any default, so that the page URL only names subdivisions the user chose. The
 //! simulation itself always gets them ([`launch_from`]).
+//!
+//! The seed has no default in the panel: the 3D view starts with a random seed where none is
+//! given ([`with_random_seed`]), and the panel always shows the seed of the running simulation so
+//! that its planet can be made again. An empty seed field (the hint says "random", "Defaults"
+//! empties it) restarts with a new random seed.
 
 use clap::{ArgAction, CommandFactory, Parser};
 use eframe::egui;
@@ -20,6 +25,12 @@ use crate::Cli;
 
 /// The long name of the subdivisions option.
 const SUBDIVISIONS: &str = "subdivisions";
+
+/// The long name of the seed option.
+const SEED: &str = "seed";
+
+/// Random seeds are below this, so that they stay short in the page URL (at most six digits).
+const RANDOM_SEEDS: u64 = 1_000_000;
 
 /// Whether the panel hides an option: the 3D view is never headless, and on the web there are no
 /// files either, and `web-math` is always on there. The render mode is chosen in the mode
@@ -178,6 +189,8 @@ impl ParameterPanel {
                     .unwrap_or_default();
                 let default = match default_subdivisions {
                     Some(subdivisions) if name == SUBDIVISIONS => Some(subdivisions.to_string()),
+                    // Not clap's 0: an empty field means a random seed.
+                    _ if name == SEED => None,
                     _ => (kind != Kind::Flag)
                         .then(|| arg.get_default_values().first())
                         .flatten()
@@ -424,7 +437,11 @@ impl ParameterPanel {
                 .on_hover_text("Restart the simulation with these parameters");
             if restart.clicked() {
                 match launch_from(self.checked.clone(), self.default_subdivisions) {
-                    Ok(new) => launch = Some(new),
+                    Ok(new) => {
+                        // Shows the seed chosen for an empty field.
+                        self.set_values(&new.args);
+                        launch = Some(new);
+                    }
                     Err(error) => self.error = Some(error),
                 }
             }
@@ -497,7 +514,13 @@ fn field_grid(ui: &mut egui::Ui, id: &str, fields: Vec<&mut Field>) {
                         ui.add(
                             egui::TextEdit::singleline(&mut field.text)
                                 .desired_width(150.0)
-                                .hint_text(field.default.as_deref().unwrap_or("not set")),
+                                .hint_text(field.default.as_deref().unwrap_or(
+                                    if field.name == SEED {
+                                        "random"
+                                    } else {
+                                        "not set"
+                                    },
+                                )),
                         );
                     }
                     Kind::Lines => {
@@ -534,10 +557,43 @@ pub fn with_default(args: &[String], name: &str, value: &str) -> Vec<String> {
     args
 }
 
+/// `args` with a random `--seed` added after the program name, unless they give one: the 3D
+/// view starts a new planet each time it is opened without a seed. The arguments name the seed,
+/// so the panel and the page URL show it and the planet can be made again. Headless runs keep
+/// clap's default seed 0 and stay reproducible.
+pub fn with_random_seed(args: &[String]) -> Vec<String> {
+    if has_option(args, SEED) {
+        return args.to_vec();
+    }
+    with_default(args, SEED, &random_seed().to_string())
+}
+
+/// A random seed below [`RANDOM_SEEDS`], from the random keys of the standard library's hash
+/// maps (the operating system's entropy).
+#[cfg(not(target_arch = "wasm32"))]
+#[expect(
+    clippy::disallowed_types,
+    reason = "the seed is meant to be random; the simulation itself stays deterministic"
+)]
+fn random_seed() -> u64 {
+    use std::hash::BuildHasher;
+    std::collections::hash_map::RandomState::new().hash_one(0_u8) % RANDOM_SEEDS
+}
+
+/// A random seed below [`RANDOM_SEEDS`] from the browser (the standard library has no entropy
+/// on the web).
+#[cfg(target_arch = "wasm32")]
+fn random_seed() -> u64 {
+    // `Math.random` is in [0, 1), so the product is below `RANDOM_SEEDS`.
+    (js_sys::Math::random() * RANDOM_SEEDS as f64) as u64
+}
+
 /// Parses and checks command-line arguments (starting with the program name), with
-/// `default_subdivisions` where they give none. The arguments of the launch stay as given (the
-/// page URL), its options have the subdivisions.
+/// `default_subdivisions` where they give none and a random seed if they give none. The
+/// arguments of the launch are the given ones (the page URL) with that seed; its options also
+/// have the subdivisions.
 fn launch_from(args: Vec<String>, default_subdivisions: Option<u32>) -> Result<Launch, String> {
+    let args = with_random_seed(&args);
     let complete = match default_subdivisions {
         Some(subdivisions) => with_default(&args, SUBDIVISIONS, &subdivisions.to_string()),
         None => args.clone(),
@@ -677,6 +733,46 @@ mod tests {
         assert_eq!(launch.cli.duration, 10.0);
         panel.fields.iter_mut().for_each(Field::reset);
         assert_eq!(panel.args(), strings(&["world-simulator"]));
+    }
+
+    #[test]
+    fn a_missing_seed_is_random_and_named_in_the_arguments() {
+        let given = strings(&["world-simulator", "--seed", "5", "--plates=8"]);
+        assert_eq!(with_random_seed(&given), given);
+        let seeds: Vec<u64> = (0..20)
+            .map(|_| {
+                let args = with_random_seed(&strings(&["world-simulator", "--plates=8"]));
+                assert_eq!(args.len(), 3, "{args:?}");
+                assert_eq!(args[2], "--plates=8");
+                let seed = args[1].strip_prefix("--seed=").unwrap().parse().unwrap();
+                assert!(seed < RANDOM_SEEDS);
+                seed
+            })
+            .collect();
+        assert!(seeds.iter().any(|&seed| seed != seeds[0]), "{seeds:?}");
+        // A launch from the panel without a seed gets one too.
+        let launch = launch_from(strings(&["world-simulator"]), None).unwrap();
+        assert!(has_option(&launch.args, SEED));
+        assert_eq!(
+            launch.args,
+            strings(&["world-simulator", &format!("--seed={}", launch.cli.seed)])
+        );
+    }
+
+    #[test]
+    fn the_seed_field_has_no_default() {
+        let mut panel = ParameterPanel::new(&strings(&["world-simulator", "--seed=0"]), None);
+        // Seed 0 is a seed like any other, not the default.
+        assert_eq!(field(&mut panel, "seed").text, "0");
+        assert_eq!(panel.args(), strings(&["world-simulator", "--seed=0"]));
+        panel.fields.iter_mut().for_each(Field::reset);
+        assert_eq!(field(&mut panel, "seed").text, "");
+        assert_eq!(panel.args(), strings(&["world-simulator"]));
+        // The fields show the seed chosen at a restart, as the arguments of the panel.
+        let launch = launch_from(panel.args(), None).unwrap();
+        panel.set_values(&launch.args);
+        assert_eq!(field(&mut panel, "seed").text, launch.cli.seed.to_string());
+        assert_eq!(panel.args(), launch.args);
     }
 
     #[test]

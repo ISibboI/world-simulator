@@ -64,7 +64,8 @@ const EARTH_RADIUS: f64 = 6.371e6;
 #[derive(Parser, Debug, Clone)]
 #[command(version, about)]
 struct Cli {
-    /// Seed for the random number generator.
+    /// Seed for the random number generator. The 3D view (desktop and web) picks a random one
+    /// if none is given; headless runs use 0.
     #[arg(long, default_value_t = 0)]
     seed: u64,
 
@@ -155,6 +156,19 @@ struct Cli {
     #[arg(long)]
     lake_log_from: Option<f64>,
 
+    /// Log the plates for analysis (#123): every this many Myr, append the plate id of every
+    /// cell to `plate_maps.csv` in `--output` (time, then the ids in cell order), and after every
+    /// analysis of the sections (`breakup.interval`) append the most overloaded section of every
+    /// plate to `plate_sections.csv` (see
+    /// `tectonics::SectionRecord`). Changes nothing in the simulation.
+    #[arg(long, value_name = "MYR")]
+    plate_log: Option<f64>,
+
+    /// At every snapshot, run the temperature model again on the same state with lakes as open
+    /// water and as land, and log the difference on the lakes and the land around them (#173).
+    #[arg(long)]
+    lake_climate_contrast: bool,
+
     /// Life on the planet, as far as the parameters see it: `modern` is today's vegetated Earth
     /// with a biogenic ocean, `abiotic` a planet without life (bare land, no transpiration,
     /// braided rivers, no biogenic pelagic sediment). See `presets::Biosphere`.
@@ -230,10 +244,14 @@ fn main() -> anyhow::Result<()> {
     // Wrong options end the program before the window opens; the window then shows the status
     // banner while the simulation thread builds the initial planet.
     cli.validate()?;
-    // The parameter panel starts from the command line as given.
-    let args = std::env::args_os()
+    // The parameter panel starts from the command line as given, with the random seed chosen
+    // if it gives none.
+    let args: Vec<String> = std::env::args_os()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
+    let args = viewer::with_random_seed(&args);
+    let cli = Cli::try_parse_from(&args)?;
+    info!(seed = cli.seed, "Seed");
     viewer::run(viewer::Launch { cli, args }, simulation_thread_launcher())
 }
 
@@ -484,6 +502,7 @@ impl Cli {
         params.matching.verify = self.verify_matching;
         params.initial_sediment.enabled = !self.no_initial_sediment;
         params.track_material_budget = self.material_budget;
+        params.breakup.diagnose = self.plate_log.is_some();
         let mut overrides = Vec::with_capacity(self.overrides.len());
         for assignment in &self.overrides {
             let (name, value) = assignment
@@ -599,6 +618,17 @@ impl Run {
         let start = Instant::now();
         let mut previous_ledger: Option<PreviousSnapshot> = None;
         #[cfg(not(target_arch = "wasm32"))]
+        if cli.plate_log.is_some() {
+            for name in ["plate_maps.csv", "plate_sections.csv"] {
+                let path = cli.output.join(name);
+                if path.exists() {
+                    std::fs::remove_file(&path)
+                        .with_context(|| format!("removing {}", path.display()))?;
+                }
+            }
+            append_plate_map(&planet, &cli.output.join("plate_maps.csv"))?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         if cli.lake_log_from.is_some() {
             // A new run starts a new log.
             let path = cli.output.join("lakes.csv");
@@ -635,6 +665,18 @@ impl Run {
     fn finish_step(&mut self, cli: &Cli) -> anyhow::Result<()> {
         if self.step.is_multiple_of(self.snapshot_every) || self.step == self.steps {
             snapshot(&self.planet, cli, &mut self.previous_ledger)?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(interval) = cli.plate_log {
+            let path = cli.output.join("plate_sections.csv");
+            append_plate_sections(&self.planet, &path)
+                .with_context(|| format!("writing {}", path.display()))?;
+            let every = ((interval / cli.dt).round() as u64).max(1);
+            if self.step.is_multiple_of(every) || self.step == self.steps {
+                let path = cli.output.join("plate_maps.csv");
+                append_plate_map(&self.planet, &path)
+                    .with_context(|| format!("writing {}", path.display()))?;
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(from) = cli.lake_log_from
@@ -1126,6 +1168,18 @@ fn snapshot(
         sheet.collision_convergence.0,
         sheet.collision_convergence.1,
     );
+    let breakup = simulation.breakup_statistics();
+    info!(
+        "    breakup by stress: {} plates broken ({} cells; {} opening, {} closing, the others \
+         sliding), {} plates overloaded at the last analysis (largest overload {:.2}), {:.1} s",
+        breakup.splits,
+        breakup.split_cells,
+        breakup.opening_splits,
+        breakup.closing_splits,
+        breakup.overloaded,
+        breakup.max_overload,
+        breakup.seconds,
+    );
     info!(
         "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
          cell, {} mismatches | distinct samples: {} cells shared a sample, {:.1}% of them got \
@@ -1317,6 +1371,27 @@ fn snapshot(
             .join(", "),
     );
 
+    if cli.lake_climate_contrast {
+        let contrast = planet.lake_climate_contrast(10);
+        let show = |name: &str, (cells, water, land): (usize, planet::SurfaceStats, planet::SurfaceStats)| {
+            format!(
+                "{name} {cells} cells: annual {:.1} / {:.1} °C, range {:.1} / {:.1} K, frozen {:.0} / {:.0}%",
+                water.annual,
+                land.annual,
+                water.range,
+                land.range,
+                100.0 * water.frozen,
+                100.0 * land.frozen,
+            )
+        };
+        info!(
+            "    lake climate (open water / land): {} | {} | {} | {}",
+            show("lakes", contrast.lakes),
+            show("large lakes", contrast.large_lakes),
+            show("land next to large lakes", contrast.near),
+            show("land 2-3 cells from them", contrast.around),
+        );
+    }
     info!("    state hash {:016x}", planet.state_hash());
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1372,6 +1447,71 @@ fn write_snapshot_files(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
             .save(&path)
             .with_context(|| format!("writing {}", path.display()))?;
         debug!(path = %path.display(), "Wrote snapshot");
+    }
+    Ok(())
+}
+
+/// Appends the plate id of every cell to the plate map log (see `Cli::plate_log`).
+#[cfg(not(target_arch = "wasm32"))]
+fn append_plate_map(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::Write;
+    let simulation = planet.tectonics();
+    let mut file = std::io::BufWriter::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?,
+    );
+    write!(file, "{}", simulation.time())?;
+    for cell in 0..simulation.mesh().len() as u32 {
+        write!(
+            file,
+            ",{}",
+            simulation.plate_id(simulation.owner(cell).plate)
+        )?;
+    }
+    writeln!(file)?;
+    Ok(())
+}
+
+/// Appends the most overloaded section of every plate to the section log (see
+/// `Cli::plate_log`).
+#[cfg(not(target_arch = "wasm32"))]
+fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::Write;
+    let simulation = planet.tectonics();
+    let new = !path.exists();
+    let mut file = std::io::BufWriter::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?,
+    );
+    if new {
+        writeln!(
+            file,
+            "time,plate,cells,overload,level_overload,cut_overload,length_km,piece_cells,\
+             strength,piece_continental,opening,residual,timer"
+        )?;
+    }
+    for record in simulation.section_records() {
+        writeln!(
+            file,
+            "{},{},{},{:.4},{:.4},{:.4},{:.0},{},{:.3},{:.3},{:.3},{:.3},{}",
+            simulation.time(),
+            record.plate_id,
+            record.cells,
+            record.overload,
+            record.level_overload,
+            record.cut_overload,
+            record.length_km,
+            record.piece_cells,
+            record.strength,
+            record.piece_continental,
+            record.opening,
+            record.residual,
+            record.timer,
+        )?;
     }
     Ok(())
 }
@@ -1440,8 +1580,9 @@ struct PreviousSnapshot {
 /// discharge (m³/yr), longitude (°), the annual mean, January and July surface temperatures
 /// (°C), evaporation or evapotranspiration (m/yr), and January and July precipitation (m/yr),
 /// …, the lake depth (m, relative to the end-of-step surface as the erosion sees it), the plate-local index of the
-/// crust sample shown and the sample surface (m; what the erosion sees with
-/// `erosion.sample_surface`, written whether or not it is on).
+/// crust sample shown, the sample surface (m; what the erosion sees with
+/// `erosion.sample_surface`, written whether or not it is on) and the permanent ice cover (sea
+/// ice, lake ice or ice sheet, 0 to 1).
 #[cfg(not(target_arch = "wasm32"))]
 fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Write;
@@ -1478,7 +1619,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain,ice"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -1505,7 +1646,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
              {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
-             {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1}",
+             {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1},{:.3}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -1560,6 +1701,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
                 .unwrap_or(0.0),
             simulation.owner(cell).local,
             drain[cell as usize],
+            temperature.ice[cell as usize],
         )?;
     }
     file.flush()?;

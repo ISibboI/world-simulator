@@ -173,22 +173,23 @@ impl ModeData<'_> {
             .map_or(Vec3::ZERO, |vertex| Vec3::from(vertex.position))
     }
 
-    /// Arrows of a 3-component layer at [`ModeData::arrow_cells`], or `None` while the layer has
-    /// not arrived.
-    pub fn vector_samples(&self, layer: Layer) -> Option<Vec<Sample>> {
+    /// Arrows of a 3-component layer at [`ModeData::arrow_cells`] with the cell of each, or
+    /// `None` while the layer has not arrived.
+    pub fn vector_samples(&self, layer: Layer) -> Option<Vec<(u32, Sample)>> {
         self.fields.get(layer)?;
         Some(
             self.arrow_cells
                 .iter()
                 .filter_map(|&cell| {
                     let vector = self.fields.vector(layer, cell)?;
-                    Some(Sample {
+                    let sample = Sample {
                         // Arrows are at most about one spacing long.
                         base: base_point(self.mesh, cell, self.arrow_spacing, |vertex| {
                             self.position(vertex)
                         }),
                         vector: vector.as_dvec3(),
-                    })
+                    };
+                    Some((cell, sample))
                 })
                 .collect(),
         )

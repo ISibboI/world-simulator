@@ -36,6 +36,7 @@
 //! collisions, or capture of tiny plates by a neighbour ([`events`]).
 
 mod boundaries;
+mod breakup;
 mod crust;
 mod deformation;
 mod display;
@@ -53,6 +54,7 @@ mod topology;
 mod weak_zones;
 
 pub use boundaries::{GapStatistics, TrenchSediment};
+pub use breakup::{BreakupParams, BreakupStatistics, SectionRecord};
 pub use crust::*;
 pub use deformation::MIN_BAND_STRENGTH;
 pub use display::BoundaryClass;
@@ -277,7 +279,8 @@ pub struct TectonicParams {
     pub ocean_volume: f64,
     /// Bodies of water below sea level of at least this fraction of the surface are seas
     /// connected to the ocean by straits narrower than a cell (see
-    /// [`crate::sea::MIN_SEA_FRACTION`]); smaller closed ones are lakes or dry.
+    /// [`crate::sea::MIN_SEA_FRACTION`]); smaller closed ones are lakes or dry. Off by default
+    /// ([`crate::sea::NO_SIZE_RULE`], #173): every closed body is a lake or dry.
     pub min_sea_fraction: f64,
     /// Mantle flow below the plates.
     pub mantle: MantleParams,
@@ -298,6 +301,8 @@ pub struct TectonicParams {
     pub max_substep_movement: f64,
     /// Deformation of the plates (non-rigid plates, see [`sheet`]).
     pub sheet: SheetParams,
+    /// Breakup of plates by their internal stress (see [`breakup`]).
+    pub breakup: BreakupParams,
 }
 
 impl Default for TectonicParams {
@@ -357,7 +362,7 @@ impl Default for TectonicParams {
             boundary_coupling_width: 200e3,
             track_material_budget: false,
             ocean_volume: 1.335e18,
-            min_sea_fraction: crate::sea::MIN_SEA_FRACTION,
+            min_sea_fraction: crate::sea::NO_SIZE_RULE,
             mantle: MantleParams::default(),
             matching: MatchingParams::default(),
             events: PlateEventParams::default(),
@@ -366,6 +371,7 @@ impl Default for TectonicParams {
             polarity_flip_time: 3.0,
             max_substep_movement: 0.5,
             sheet: SheetParams::default(),
+            breakup: BreakupParams::default(),
         }
     }
 }
@@ -379,6 +385,9 @@ impl TectonicParams {
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
         if let Some(name) = name.strip_prefix("sheet.") {
             return self.sheet.set(name, value);
+        }
+        if let Some(name) = name.strip_prefix("breakup.") {
+            return self.breakup.set(name, value);
         }
         let sediment = &mut self.initial_sediment;
         let field = match name {
@@ -744,6 +753,11 @@ pub struct Simulation {
     force_balance: Option<dynamics::ForceBalance>,
     sheet_geometry: sheet::SheetGeometry,
     sheet_statistics: SheetStatistics,
+    /// Totals of the breakup by stress and the sections of the last step (see [`breakup`]).
+    breakup_statistics: BreakupStatistics,
+    section_records: Vec<SectionRecord>,
+    /// When the sections were last analysed (NaN: never).
+    last_section_analysis: f64,
 }
 
 impl Simulation {
@@ -917,6 +931,9 @@ impl Simulation {
             force_balance: None,
             sheet_geometry: sheet::SheetGeometry::default(),
             sheet_statistics: SheetStatistics::default(),
+            breakup_statistics: BreakupStatistics::default(),
+            section_records: Vec::new(),
+            last_section_analysis: f64::NAN,
         };
         simulation.sheet_geometry = sheet::SheetGeometry::new(&simulation.mesh);
         // The sediment cover is part of the initial planet (a stock, not a source); it is

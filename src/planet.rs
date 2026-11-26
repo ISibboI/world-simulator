@@ -197,6 +197,35 @@ pub struct SedimentReservoirs {
     pub shelf_on_filled_basins: f64,
 }
 
+/// Means over a set of cells of the temperature fields (see [`Planet::lake_climate_contrast`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SurfaceStats {
+    /// Annual mean surface temperature (°C).
+    pub annual: f64,
+    /// Difference between the warmest and the coldest month (K).
+    pub range: f64,
+    /// Share of the cells with permanent ice (cover > 0.5).
+    pub frozen: f64,
+}
+
+/// The temperatures of the same state with lakes as open water and as land (#173): for each set
+/// of cells, their number and the statistics with open water and with land.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LakeClimateContrast {
+    /// All lake cells.
+    pub lakes: (usize, SurfaceStats, SurfaceStats),
+    /// Cells of lakes of at least [`Self::LARGE_LAKE`] connected cells.
+    pub large_lakes: (usize, SurfaceStats, SurfaceStats),
+    /// Land next to large lakes.
+    pub near: (usize, SurfaceStats, SurfaceStats),
+    /// Land two or three cells from large lakes.
+    pub around: (usize, SurfaceStats, SurfaceStats),
+}
+
+impl LakeClimateContrast {
+    pub const LARGE_LAKE: usize = 20;
+}
+
 impl Planet {
     pub fn new(
         tectonics: Simulation,
@@ -215,8 +244,8 @@ impl Planet {
             tectonics.min_sea_fraction(),
         );
         let open = open_sills(&erosion);
-        let view = climate_elevations(tectonics.mesh(), &elevation, &seeds, open);
-        temperature.update(&view, None, tectonics.time());
+        let view = climate_elevations(tectonics.mesh(), &elevation, &seeds, open, None);
+        temperature.update(&view, None, None, tectonics.time());
         let cell_count = tectonics.mesh().len();
         let water = SurfaceWater::ocean_only(crate::sea::ocean_from(
             tectonics.mesh(),
@@ -445,9 +474,19 @@ impl Planet {
             self.tectonics.min_sea_fraction(),
         );
         let open = open_sills(&self.erosion);
-        let view = climate_elevations(self.tectonics.mesh(), &elevation, &seeds, open);
-        self.temperature
-            .update(&view, Some(&self.precipitation), self.tectonics.time());
+        // Lakes of the last erosion step, at their water surface if they are open water.
+        let lakes = self
+            .temperature
+            .params()
+            .open_water_lakes
+            .then_some(&self.water);
+        let view = climate_elevations(self.tectonics.mesh(), &elevation, &seeds, open, lakes);
+        self.temperature.update(
+            &view,
+            Some(&self.precipitation),
+            lakes.map(|water| &water.lake_depth[..]),
+            self.tectonics.time(),
+        );
         self.update_water_cycle(&view);
         let climate_time = start.elapsed();
 
@@ -604,6 +643,7 @@ impl Planet {
             elevation,
             &self.water.lake_evaporation,
             &fields.monthly,
+            &fields.monthly_lake_ice,
             &fields.thermal_equator,
         );
         let cycle = self.climate.water_cycle();
@@ -613,6 +653,108 @@ impl Planet {
 
     pub fn water_cycle(&self) -> &WaterCycle {
         self.climate.water_cycle()
+    }
+
+    /// A paired diagnostic of the lakes' effect on the temperatures (#173): the temperature
+    /// model is run again from its current state on the current topography and lakes, once
+    /// with lakes as open water and once as land, for `updates` updates each, and the fields
+    /// are compared on the lakes and the land around them.
+    pub fn lake_climate_contrast(&self, updates: usize) -> LakeClimateContrast {
+        let mesh = self.tectonics.mesh();
+        let elevation = self.tectonics.surface_elevations();
+        let seeds = crate::sea::ocean_seeds(
+            mesh,
+            &elevation,
+            -crate::sea::SILL_TOLERANCE,
+            self.tectonics.min_sea_fraction(),
+        );
+        let open = open_sills(&self.erosion);
+        let run = |on: bool| {
+            let mut model = self.temperature.clone();
+            model.params_mut().open_water_lakes = on;
+            let lakes = on.then_some(&self.water);
+            let view = climate_elevations(mesh, &elevation, &seeds, open, lakes);
+            for _ in 0..updates {
+                model.update(
+                    &view,
+                    Some(&self.precipitation),
+                    lakes.map(|water| &water.lake_depth[..]),
+                    self.tectonics.time(),
+                );
+            }
+            (model.fields().clone(), view)
+        };
+        let (water, view) = run(true);
+        let (land, _) = run(false);
+        let lake: Vec<bool> = (0..elevation.len())
+            .map(|cell| {
+                self.water.lake_depth[cell] >= crate::temperature::LAKE_DEPTH && view[cell] >= 0.0
+            })
+            .collect();
+        // Large lakes: connected lake cells of at least `LARGE_LAKE` cells.
+        let mut large = vec![false; lake.len()];
+        let mut seen = vec![false; lake.len()];
+        for start in 0..lake.len() {
+            if !lake[start] || seen[start] {
+                continue;
+            }
+            seen[start] = true;
+            let mut component = vec![start];
+            let mut next = 0;
+            while next < component.len() {
+                let cell = component[next];
+                next += 1;
+                for &n in mesh.neighbors(cell as u32) {
+                    let n = n as usize;
+                    if lake[n] && !seen[n] {
+                        seen[n] = true;
+                        component.push(n);
+                    }
+                }
+            }
+            if component.len() >= LakeClimateContrast::LARGE_LAKE {
+                for cell in component {
+                    large[cell] = true;
+                }
+            }
+        }
+        // Rings of land (not lakes, not ocean) around the large lakes.
+        let mut ring = vec![0u8; lake.len()];
+        let mut reached = large.clone();
+        let mut front: Vec<usize> = (0..lake.len()).filter(|&c| large[c]).collect();
+        for distance in 1..=3u8 {
+            let mut next = Vec::new();
+            for &cell in &front {
+                for &n in mesh.neighbors(cell as u32) {
+                    let n = n as usize;
+                    if !reached[n] && !lake[n] && view[n] >= 0.0 {
+                        reached[n] = true;
+                        ring[n] = distance;
+                        next.push(n);
+                    }
+                }
+            }
+            front = next;
+        }
+        let compare = |cells: &dyn Fn(usize) -> bool| {
+            let cells: Vec<usize> = (0..lake.len()).filter(|&c| cells(c)).collect();
+            let mean = |fields: &TemperatureFields,
+                        value: &dyn Fn(&TemperatureFields, usize) -> f64| {
+                cells.iter().map(|&c| value(fields, c)).sum::<f64>() / cells.len().max(1) as f64
+            };
+            let stats = |fields: &TemperatureFields| SurfaceStats {
+                annual: mean(fields, &|f, c| f.annual_mean[c]),
+                range: mean(fields, &|f, c| f.seasonal_range(c)),
+                frozen: mean(fields, &|f, c| f64::from(u8::from(f.ice[c] > 0.5))),
+            };
+            (cells.len(), stats(&water), stats(&land))
+        };
+        LakeClimateContrast {
+            lakes: compare(&|c| lake[c]),
+            large_lakes: compare(&|c| large[c]),
+            near: compare(&|c| ring[c] == 1),
+            around: compare(&|c| ring[c] >= 2),
+        }
     }
 
     /// Whether a sill on which the sea stands connects the basin behind it to the ocean (see
@@ -841,16 +983,28 @@ fn open_sills(erosion: &Option<ErosionParams>) -> bool {
 /// The surface elevations as the climate and temperature models see them: closed depressions
 /// below sea level are land (raised to sea level; the lapse rate ignores elevations below it
 /// anyway), so that they get runoff and potential evaporation instead of ocean evaporation.
+/// With `lakes` (the surface water of the last erosion step), lake cells outside the ocean are at
+/// their water surface (#173), at least at sea level.
 fn climate_elevations(
     mesh: &crate::sphere::SphereMesh,
     elevation: &[f64],
     seeds: &[usize],
     open_sills: bool,
+    lakes: Option<&SurfaceWater>,
 ) -> Vec<f64> {
     let ocean = crate::sea::ocean_from(mesh, elevation, seeds.iter().copied(), open_sills);
     let mut elevation = elevation.to_vec();
-    for (e, ocean) in elevation.iter_mut().zip(ocean) {
+    for (cell, (e, ocean)) in elevation.iter_mut().zip(ocean).enumerate() {
         if !ocean {
+            if let Some(water) = lakes
+                && water
+                    .lake_depth
+                    .get(cell)
+                    .is_some_and(|&depth| depth >= crate::temperature::LAKE_DEPTH)
+            {
+                // The floor as the lake loads it, plus the water on it.
+                *e += water.load_correction[cell] + water.lake_depth[cell];
+            }
             *e = e.max(0.0);
         }
     }

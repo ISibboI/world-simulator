@@ -32,13 +32,26 @@ use crate::sphere::SphereMesh;
 /// the basin is an arm of the sea fed over its sill, like the Mediterranean, not a lake.
 pub const SILL_TOLERANCE: f64 = 1e-6;
 
-/// Bodies of water below sea level of at least this fraction of the planet's surface are seas
-/// (default of [`crate::tectonics::TectonicParams::min_sea_fraction`]): 0.2%, ~10⁶ km² on an
+/// The former size rule (`--set min_sea_fraction=0.002` restores it; off by default since #173):
+/// bodies of water below sea level of at least this fraction of the planet's surface are seas
+/// (see [`crate::tectonics::TectonicParams::min_sea_fraction`]): 0.2%, ~10⁶ km² on an
 /// Earth-sized planet, ~80 cells of the default grid. On Earth every water body of that size
 /// below sea level is connected to the ocean, mostly through straits far narrower than a cell
 /// (Mediterranean, Black Sea, Red Sea, Baltic); the largest closed one, the Caspian Sea, has a
-/// third of it.
+/// third of it. Since water is conserved without it (#168) and lakes are open water in the
+/// climate (#173), a closed basin keeps the water its own balance gives it.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the documented value to restore the former rule; tests use it"
+    )
+)]
 pub const MIN_SEA_FRACTION: f64 = 0.002;
+
+/// A [`crate::tectonics::TectonicParams::min_sea_fraction`] that turns the size rule off (the
+/// default): no body of water but the largest covers the whole surface.
+pub const NO_SIZE_RULE: f64 = 1.0;
 
 /// The ocean's priority flood (Barnes et al., 2014) from its seeds: the pass level of every
 /// cell, the lowest possible highest `level` on a path of neighbouring cells from a seed, and
@@ -157,7 +170,7 @@ fn sea_seeds(
     let cell_count = mesh.len();
     let min_cells = min_sea_fraction * cell_count as f64;
     let mut seas = Vec::new();
-    if others.is_empty() || min_cells > cell_count as f64 {
+    if others.is_empty() || min_cells >= cell_count as f64 {
         return seas;
     }
     let mut in_basin = vec![false; cell_count];
