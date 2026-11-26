@@ -60,7 +60,7 @@ def lake_climate(c, land, lake, nbz, valid, add):
         m = dry & (bins == b)
         ref_r[b] = rng[m].mean(); ref_t[b] = c['t_annual'][m].mean(); ref_p[b] = c['precip'][m].mean()
     def anomaly(mask, field, ref):
-        return np.mean([field[i] - ref[bins[i]] for i in np.nonzero(mask)[0]]) if mask.any() else np.nan
+        return np.nanmean([field[i] - ref.get(bins[i], np.nan) for i in np.nonzero(mask)[0]]) if mask.any() else np.nan
     if large.any():
         add('large lakes |Jul − Jan| minus land at their latitudes (K)', anomaly(large, rng, ref_r))
         ring = large.copy(); rings = []

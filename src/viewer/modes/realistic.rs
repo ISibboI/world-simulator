@@ -434,8 +434,8 @@ fn layers(cell: &CellInfo, season: Period, abiotic: bool, closed_lake: bool) -> 
         let cold = smoothstep(0.0, -10.0, temperature);
         (mix(MELTING_SEA_ICE, SEA_ICE, cold), cover)
     } else if let WaterBody::Lake(depth) = body {
-        // Lakes ice over in their own way: not from the climate's `ice`, which is sea ice
-        // below sea level and the snowfall-limited ice sheet above it. In the annual state where
+        // Lakes ice over in their own way here, not from the climate's `ice` (since #173 the
+        // lake ice of the temperature model; using it is a follow-up). In the annual state where
         // the annual mean is far below freezing; in a month by its temperature, or where even
         // the warmest month freezes. The ice is
         // snow-covered where snow falls, grey and bare where it does not.

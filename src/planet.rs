@@ -687,7 +687,9 @@ impl Planet {
         let (water, view) = run(true);
         let (land, _) = run(false);
         let lake: Vec<bool> = (0..elevation.len())
-            .map(|cell| self.water.lake_depth[cell] > 0.0 && view[cell] >= 0.0)
+            .map(|cell| {
+                self.water.lake_depth[cell] >= crate::temperature::LAKE_DEPTH && view[cell] >= 0.0
+            })
             .collect();
         // Large lakes: connected lake cells of at least `LARGE_LAKE` cells.
         let mut large = vec![false; lake.len()];
@@ -995,7 +997,10 @@ fn climate_elevations(
     for (cell, (e, ocean)) in elevation.iter_mut().zip(ocean).enumerate() {
         if !ocean {
             if let Some(water) = lakes
-                && water.lake_depth.get(cell).is_some_and(|&depth| depth > 0.0)
+                && water
+                    .lake_depth
+                    .get(cell)
+                    .is_some_and(|&depth| depth >= crate::temperature::LAKE_DEPTH)
             {
                 // The floor as the lake loads it, plus the water on it.
                 *e += water.load_correction[cell] + water.lake_depth[cell];
