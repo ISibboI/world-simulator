@@ -1033,13 +1033,14 @@ impl Viewer {
         self.display_outdated = true;
     }
 
-    /// Shows a past frame that the history decoded.
+    /// Shows a past frame that the history decoded: the requested one, or one requested before
+    /// it while the time bar is dragged (see [`History::poll`]).
     fn poll_history(&mut self) {
         let Some(result) = self.history.as_mut().and_then(History::poll) else {
             return;
         };
         match result {
-            Ok(frame) if self.viewing == Some(frame.index) => {
+            Ok(frame) if self.viewing.is_some() => {
                 let Some(picking) = &self.picking else {
                     self.walk.stop();
                     return;
@@ -1168,6 +1169,9 @@ impl Viewer {
         self.walk.stop();
         self.shown_frame = None;
         self.frame_error = None;
+        if let Some(history) = &mut self.history {
+            history.cancel();
+        }
         if self.viewing.take().is_some() || self.live_pending {
             self.show_latest();
         }
