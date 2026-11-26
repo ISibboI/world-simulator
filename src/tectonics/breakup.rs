@@ -59,7 +59,12 @@ pub struct BreakupParams {
     /// nothing in the simulation.
     pub diagnose: bool,
     /// Depth-integrated strength (N/m) of old lithosphere (relative strength 1): the traction a
-    /// section can carry per metre of its length.
+    /// section can carry per metre of its length in tension and shear. Estimates for old
+    /// lithosphere span ~10¹³–10¹⁴ N/m depending on the rheology (Kohlstedt, Evans & Mackwell
+    /// 1995; Burov 2011); 5 × 10¹³ is at the upper end, as the model's basal drag
+    /// (`basal_drag`, ×4 under continents) is: with 2 × 10¹³ about half of all plates were
+    /// overloaded at any time and the plate count rose by two thirds (4 seeds); 4 × 10¹³ and
+    /// 8 × 10¹³ gave the same plate shapes (see `notes/issue-123/results.md`).
     pub strength: f64,
     /// Time (Myr) for which a section must stay overloaded before the plate breaks.
     pub time: f64,
@@ -81,9 +86,9 @@ pub struct BreakupParams {
 impl Default for BreakupParams {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             diagnose: false,
-            strength: 1e13,
+            strength: 5e13,
             time: 5.0,
             min_area: 0.005,
             band: 3,
@@ -188,6 +193,8 @@ struct SectionEdge {
     q: DVec3,
     weight: f64,
     length: f64,
+    /// Where it is (unit vector).
+    r: DVec3,
 }
 
 impl SectionEdge {
@@ -198,26 +205,67 @@ impl SectionEdge {
         let mid = (r + other).normalize();
         let chord = other - r;
         let normal = (chord - mid * chord.dot(mid)).normalize();
-        let along = mid.cross(normal);
-        [-0.25, 0.25].map(|offset| {
-            let point = (mid + along * (offset * face)).normalize();
-            let tangent = point.cross(normal);
-            Self {
-                p: point.cross(tangent),
-                q: normal.cross(point),
-                weight: 0.5 * face * strength,
-                length: 0.5 * face,
-            }
+        let along = mid.cross(normal) * (0.25 * face);
+        // At a point x of the section with the unit normal n, the relative velocity ω × x
+        // slides by (ω × x) · (x × n) = −ω · n and opens by (ω × x) · n = ω · (n × x). The two
+        // points lie ±ℓ/4 from the middle (off the sphere by ~(ℓ/4)², negligible).
+        [mid - along, mid + along].map(|point| Self {
+            p: -normal,
+            q: normal.cross(point),
+            weight: 0.5 * face * strength,
+            length: 0.5 * face,
+            r: point,
         })
     }
 }
 
-/// Most iterations of the limit analysis of a section (see [`limit_overload`]), and of the
-/// quick estimate in the sweep over the level sections, of which the [`REFINED`] most overloaded
-/// per distance field are then analysed fully.
+/// Most iterations of the limit analysis of a section (see [`limit_overload`]); the sweep over
+/// the level sections estimates them quickly ([`quick_overload`]) and analyses the [`REFINED`]
+/// most overloaded per distance field fully.
 const ITERATIONS: usize = 30;
-const QUICK_ITERATIONS: usize = 1;
 const REFINED: usize = 4;
+
+/// A quick lower bound of [`limit_overload`]: the best of three mechanisms, the rotation about
+/// the torque's axis (the net force across the section), the rotation about the section's
+/// middle (bending) and `warm` (the best one of the last section, updated).
+fn quick_overload(
+    torque: DVec3,
+    edges: &[SectionEdge],
+    force: f64,
+    compression: f64,
+    warm: &mut DVec3,
+) -> f64 {
+    let magnitude2 = torque.length_squared();
+    if magnitude2 == 0.0 || edges.is_empty() || force <= 0.0 {
+        return 0.0;
+    }
+    let a = 0.5 * (1.0 + compression);
+    let b = 0.5 * (1.0 - compression);
+    let dissipation = |omega: DVec3| -> f64 {
+        edges
+            .iter()
+            .map(|e| {
+                let open = omega.dot(e.q);
+                e.weight * (omega.dot(e.p).abs() + a * open.abs() + b * open)
+            })
+            .sum::<f64>()
+            * force
+    };
+    let middle: DVec3 = edges.iter().map(|e| e.r * e.weight).sum();
+    let mut best = (f64::INFINITY, DVec3::ZERO);
+    for candidate in [torque / magnitude2, middle, *warm] {
+        let along = candidate.dot(torque);
+        if along > 0.0 {
+            let omega = candidate / along;
+            let d = dissipation(omega);
+            if d < best.0 {
+                best = (d, omega);
+            }
+        }
+    }
+    *warm = best.1;
+    1.0 / best.0
+}
 
 /// The overload of a section that must carry the torque `torque` (N per unit radius), with
 /// strength `force` (N per unit length on the unit sphere) of lithosphere of relative strength
@@ -608,6 +656,7 @@ impl Simulation {
             q: DVec3::ZERO,
             weight: 0.0,
             length: 0.0,
+            r: DVec3::ZERO,
         };
         for (f, distance) in fields.iter().enumerate() {
             let levels = distance.iter().copied().max().unwrap_or(0) as usize + 1;
@@ -659,14 +708,8 @@ impl Simulation {
                     continue;
                 }
                 let crossing = &edges[edge_count[level]..edge_count[level + 1]];
-                let (overload, _) = limit_overload(
-                    torque,
-                    crossing,
-                    force,
-                    params.compression,
-                    &mut warm,
-                    QUICK_ITERATIONS,
-                );
+                let overload =
+                    quick_overload(torque, crossing, force, params.compression, &mut warm);
                 candidates.push((overload, level, torque, warm));
             }
             candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -1002,9 +1045,11 @@ mod tests {
             }
             (fingerprint(&simulation), simulation.section_records.len())
         };
-        let mut diagnosed = TectonicParams::default();
+        let mut plain = TectonicParams::default();
+        plain.breakup.enabled = false;
+        let mut diagnosed = plain.clone();
         diagnosed.breakup.diagnose = true;
-        let (plain, none) = run(TectonicParams::default());
+        let (plain, none) = run(plain);
         let (analysed, records) = run(diagnosed);
         assert!(plain == analysed, "the analysis changed the simulation");
         assert_eq!(none, 0);

@@ -1914,6 +1914,8 @@ mod tests {
         rigid.sheet.enabled = false;
         let mut stiff = TectonicParams::default();
         stiff.sheet.rigid_viscosity = 0.0;
+        // Without the breakup by stress, which needs the sheet's forces.
+        stiff.breakup.enabled = false;
         assert!(
             run(rigid) == run(stiff),
             "stiff deforming plates differ from rigid plates"
