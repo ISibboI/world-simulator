@@ -30,7 +30,8 @@ pub struct Uniforms {
     /// Direction towards the light (`w` unused).
     pub light_direction: [f32; 4],
     /// Size of the view in physical pixels (`x`, `y`), for lines of a fixed width; `z` is 1 if
-    /// the render mode shows its colours unlit, 0 if lit (`w` unused).
+    /// the render mode shows its colours unlit, 0 if lit; `w` is the number of points along a
+    /// ray of the realistic mode's atmosphere, 0 without one (see [`super::atmosphere`]).
     pub viewport: [f32; 4],
     /// The inverse of `view_projection`, for the view direction of the sky's pixels.
     pub inverse_view_projection: [[f32; 4]; 4],
@@ -42,8 +43,9 @@ pub struct Uniforms {
     /// Colour of the light as an sRGB factor (`xyz`) and the share of ambient light (`w`).
     pub light_color: [f32; 4],
     /// The sky's exposure: how many magnitudes fainter the stars appear than to a dark-adapted
-    /// view (`x`), the size of a pixel in radians (`y`), and the exposure's factor on the sun's
-    /// sRGB colour (`z`; `w` unused). See [`super::sky::Adaptation`].
+    /// view (`x`), the size of a pixel in radians (`y`), the exposure's factor on the sun's sRGB
+    /// colour (`z`), and whether the sun and the stars are drawn (`w`, 1 or 0). See
+    /// [`super::sky::Adaptation`].
     pub stars: [f32; 4],
     /// The colours of the stars in sRGB, see [`super::sky::STAR_TEMPERATURES`].
     pub star_colors: [[f32; 4]; 8],
@@ -336,7 +338,10 @@ fn detail_pipeline(
     target_format: wgpu::TextureFormat,
     msaa_samples: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("realistic.wgsl"));
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("realistic.wgsl"),
+        source: wgpu::ShaderSource::Wgsl(REALISTIC_SHADER.into()),
+    });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("realistic surface"),
         layout: Some(layout),
@@ -431,6 +436,14 @@ fn overlay_pipeline(
     })
 }
 
+/// The shaders of the realistic mode's surface and of the sky, with the atmosphere
+/// (`atmosphere.wgsl`, see [`super::atmosphere`]) they share (WGSL has no includes).
+const REALISTIC_SHADER: &str = concat!(
+    include_str!("atmosphere.wgsl"),
+    include_str!("realistic.wgsl")
+);
+const SKY_SHADER: &str = concat!(include_str!("atmosphere.wgsl"), include_str!("sky.wgsl"));
+
 /// The pipeline of the sky (the sun and the stars): one full-screen triangle behind the planet, depth-tested
 /// against it without writing depth, added to the background.
 fn sky_pipeline(
@@ -439,7 +452,10 @@ fn sky_pipeline(
     target_format: wgpu::TextureFormat,
     msaa_samples: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("sky.wgsl"));
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("sky.wgsl"),
+        source: wgpu::ShaderSource::Wgsl(SKY_SHADER.into()),
+    });
     let additive = wgpu::BlendState {
         color: wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::One,
@@ -575,8 +591,9 @@ pub struct PlanetCallback {
     pub overlay: Option<Overlay>,
     /// Lines to draw over the planet, at most [`MAX_LINE_SEGMENTS`] (the rest are dropped).
     pub lines: Vec<LineSegment>,
-    /// Whether to draw the sky, the sun and the stars (only when the planet is lit by the sun).
-    pub sun: bool,
+    /// Whether to draw the sky pass: the sun and the stars (only when the planet is lit by the
+    /// sun) and the realistic mode's atmosphere off the disc.
+    pub sky: bool,
 }
 
 impl egui_wgpu::CallbackTrait for PlanetCallback {
@@ -698,7 +715,7 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
         render_pass.set_bind_group(0, &resources.bind_group, &[]);
         let Some(mesh) = resources.mesh.as_ref().filter(|mesh| mesh.has_vertices) else {
             // No planet yet: only the sun.
-            if self.sun {
+            if self.sky {
                 render_pass.set_pipeline(&resources.sky_pipeline);
                 render_pass.draw(0..3, 0..1);
             }
@@ -719,7 +736,7 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
             }
         }
         // After the planet, so that its depth hides the sun where the planet is in front.
-        if self.sun {
+        if self.sky {
             render_pass.set_pipeline(&resources.sky_pipeline);
             render_pass.draw(0..3, 0..1);
         }
@@ -749,8 +766,8 @@ mod tests {
         use naga::back::glsl;
         let shaders = [
             ("planet.wgsl", include_str!("planet.wgsl")),
-            ("sky.wgsl", include_str!("sky.wgsl")),
-            ("realistic.wgsl", include_str!("realistic.wgsl")),
+            ("sky.wgsl", super::SKY_SHADER),
+            ("realistic.wgsl", super::REALISTIC_SHADER),
             ("overlay.wgsl", include_str!("overlay.wgsl")),
             ("outline.wgsl", include_str!("outline.wgsl")),
         ];

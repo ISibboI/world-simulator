@@ -2,7 +2,9 @@
 // plane, depth-tested against the planet (which hides them where it is in front), added to the
 // background. The sun's disc has its true angular size (from the sun model), limb darkening, and
 // a glow around it as a camera would show it. The stars are a procedural field fixed in space,
-// as bright as the adapted exposure lets them be (see `sky.rs`).
+// as bright as the adapted exposure lets them be (see `sky.rs`). In the realistic mode the same
+// pass draws the atmosphere off the disc (`atmosphere.wgsl`, prepended to this file): the limb
+// glow and the ring around a backlit planet.
 
 struct Uniforms {
     view_projection: mat4x4<f32>,
@@ -16,10 +18,13 @@ struct Uniforms {
     sun_color: vec4<f32>,
     light_color: vec4<f32>,
     // How many magnitudes fainter the stars appear than to a dark-adapted view (x), the size of
-    // a pixel in radians (y), and the exposure's factor on the sun (z, 2^stops).
+    // a pixel in radians (y), the exposure's factor on the sun (z, 2^stops), and whether the sun
+    // and the stars are drawn (w: 1 with the sun's light, 0 with the camera light).
     stars: vec4<f32>,
     // Black-body colours of the stars from 3200 K to 20000 K (see STAR_TEMPERATURES in sky.rs).
     star_colors: array<vec4<f32>, 8>,
+    // The camera's position (xyz).
+    eye: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -68,11 +73,56 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // times, so that a dark-adapted view flashes when the sun appears without the glare filling
     // the screen.
     let gain = uniforms.stars.z;
-    let intensity = mix(glow * uniforms.sun_color.w * min(gain, GLOW_GAIN), limb * gain, disc);
-    var color = uniforms.sun_color.rgb * intensity;
-    // Skipped while even the brightest star is (nearly) beyond the visible limit.
-    if uniforms.stars.x < VISIBLE_LIMIT - BRIGHTEST - 0.1 {
-        color += stars(direction, uniforms.stars.x);
+    let samples = i32(uniforms.viewport.w);
+    let eye = uniforms.eye.xyz;
+    // The atmosphere (`viewport.w`: points along a ray, 0 without an atmosphere) along rays
+    // that pass the planet: the limb glow, and the ring around a backlit planet. It also dims
+    // and reddens what lies behind it: the stars and the sun's disc along this pixel's ray, the
+    // glow along the ray to the sun. (The sun and the stars are sRGB values, hence the powers.)
+    var air: Limb;
+    air.inscattered = vec3<f32>(0.0);
+    air.transmittance = vec3<f32>(1.0);
+    // The sRGB factors of the transmittances (1 where the ray misses the atmosphere: most
+    // pixels skip the powers).
+    var behind = vec3<f32>(1.0);
+    var towards_sun = vec3<f32>(1.0);
+    if samples > 0 {
+        air = limb_light(
+            eye,
+            direction,
+            uniforms.light_direction.xyz,
+            radius,
+            uniforms.stars.y,
+            atmosphere_top(pow(max(gain, 1e-6), 2.2)),
+            select(3, 2, samples < 12),
+            samples,
+        );
+        if air.transmittance.b < 1.0 {
+            behind = pow(air.transmittance, vec3<f32>(1.0 / 2.2));
+        }
+        // (With the highest top, and through the surface for a sun behind the planet, whose
+        // glow `sun_color.w` fades out anyway.)
+        let t = -dot(eye, sun);
+        let rc = length(cross(eye, sun));
+        if t > 0.0 && rc < 1.0 + ATMOSPHERE_TOP {
+            towards_sun = pow(exp(-2.0 * optical_depth(max(rc, 1.0), 0.0)), vec3<f32>(1.0 / 2.2));
+        }
+    }
+    var color = vec3<f32>(0.0);
+    // The sun and the stars are drawn with the sun's light only (`stars.w`).
+    if uniforms.stars.w > 0.5 {
+        let glow_color = glow * uniforms.sun_color.w * min(gain, GLOW_GAIN) * towards_sun;
+        let disc_color = vec3<f32>(limb * gain) * behind;
+        color = uniforms.sun_color.rgb * mix(glow_color, disc_color, disc);
+        // Skipped while even the brightest star is (nearly) beyond the visible limit.
+        if uniforms.stars.x < VISIBLE_LIMIT - BRIGHTEST - 0.1 {
+            color += stars(direction, uniforms.stars.x) * behind;
+        }
+    }
+    let scattered = air.inscattered.r + air.inscattered.g + air.inscattered.b;
+    if scattered > 0.0 {
+        let light = pow(max(uniforms.light_color.rgb, vec3<f32>(0.0)), vec3<f32>(2.2));
+        color += sky_linear_to_srgb(shoulder(light * ATMOSPHERE_PI * air.inscattered));
     }
     return vec4<f32>(color, 0.0);
 }
@@ -188,4 +238,10 @@ fn stars(direction: vec3<f32>, dimming: f32) -> vec3<f32> {
         }
     }
     return color;
+}
+
+fn sky_linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let low = c * 12.92;
+    let high = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(high, low, c <= vec3<f32>(0.0031308));
 }

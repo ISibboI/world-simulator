@@ -24,6 +24,7 @@
 #![allow(clippy::disallowed_methods)]
 
 mod arrows;
+mod atmosphere;
 mod banner;
 mod cell_info;
 mod fields;
@@ -1250,6 +1251,7 @@ impl Viewer {
             self.camera_position(),
             sun.direction,
             sun.angular_radius,
+            self.atmosphere_samples() > 0,
         );
         let moving = self.adaptation.update(exposure.target(), seconds);
         (Some(exposure), moving)
@@ -1279,7 +1281,7 @@ impl Viewer {
                     Shading::Lit => 0.0,
                     Shading::Unlit => 1.0,
                 },
-                0.0,
+                self.atmosphere_samples() as f32,
             ],
             inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
             sun_direction: sun.direction.extend(sun.angular_radius).to_array(),
@@ -1299,7 +1301,7 @@ impl Viewer {
                 self.adaptation.star_dimming(),
                 field_of_view / viewport.y.max(1.0),
                 gain,
-                0.0,
+                if self.sky_shown() { 1.0 } else { 0.0 },
             ],
             star_colors: sky::star_colors(),
             eye: eye.extend(0.0).to_array(),
@@ -1320,6 +1322,17 @@ impl Viewer {
         match self.mode {
             RenderModeId::Realistic => modes::realistic::light(self.switcher.options(self.mode)),
             _ => Light::Camera,
+        }
+    }
+
+    /// The number of points along a ray of the realistic mode's atmosphere, 0 without one (the
+    /// data modes, or switched off).
+    fn atmosphere_samples(&self) -> u32 {
+        match self.mode {
+            RenderModeId::Realistic => {
+                modes::realistic::atmosphere_samples(self.switcher.options(self.mode))
+            }
+            _ => 0,
         }
     }
 
@@ -1443,7 +1456,7 @@ impl eframe::App for Viewer {
                             surface: self.display.clone(),
                             overlay: self.overlay.clone(),
                             lines,
-                            sun: self.sky_shown(),
+                            sky: self.sky_shown() || self.atmosphere_samples() > 0,
                         },
                     ));
             });

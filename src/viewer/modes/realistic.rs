@@ -37,6 +37,8 @@ pub const LIGHT: usize = 0;
 pub const SEASON: usize = 1;
 /// Index of the detail option.
 pub const DETAIL: usize = 2;
+/// Index of the atmosphere switch.
+pub const ATMOSPHERE: usize = 3;
 
 const OPTIONS: &[ModeOption] = &[
     ModeOption {
@@ -57,6 +59,13 @@ const OPTIONS: &[ModeOption] = &[
                 (2 octaves, one pattern, no relief) for slow devices, Medium (4), High (6, ridged \
                 mountains)",
         kind: OptionKind::Choice(Quality::CHOICES),
+    },
+    ModeOption {
+        label: "Atmosphere",
+        hover: "The air and its haze, true to scale: a thin glow at the limb, a pale haze \
+                towards the edge of the disc, sunlight reddened near the terminator, and a ring \
+                of light around the planet when the sun is behind it",
+        kind: OptionKind::Switch { default: true },
     },
 ];
 
@@ -146,7 +155,8 @@ impl RenderMode for Realistic {
         Legend {
             description: "The planet in space, lit by the simulation's sun: surface colours \
                           derived from the simulated climate (vegetation from rain and warmth, \
-                          none without life), relief true to scale, sun glint on the water. \
+                          none without life), relief and atmosphere true to scale, sun glint on \
+                          the water. \
                           The view adapts to the light like an eye: after the sun goes behind \
                           the planet or out of view, more stars appear over a few seconds."
                 .into(),
@@ -160,6 +170,19 @@ impl RenderMode for Realistic {
 /// The light chosen in the options of the realistic mode.
 pub fn light(options: &OptionValues) -> Light {
     Light::from_index(options.get(LIGHT) as usize)
+}
+
+/// The number of points along a ray of the atmosphere (`atmosphere.wgsl`), 0 when it is
+/// switched off: more with a higher detail level.
+pub fn atmosphere_samples(options: &OptionValues) -> u32 {
+    if !options.is_on(ATMOSPHERE) {
+        return 0;
+    }
+    match Quality::of(options) {
+        Quality::Low => 8,
+        Quality::Medium => 12,
+        Quality::High => 16,
+    }
 }
 
 /// The season chosen in the options of the realistic mode.
