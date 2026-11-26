@@ -541,26 +541,37 @@ pub fn detail_vertices(data: &ModeData, faces: &[[u32; 3]]) -> Vec<DetailVertex>
             pack_corner(strike, squeeze, own[cell].ocean)
         })
         .collect();
-    let unorm = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    // The colours of a corner depend only on its cell: encoded once per cell rather than once
+    // per corner (six times as often), since this runs on the page's main thread for every new
+    // state (#174).
     let color = |albedo: [f32; 3], alpha: f32| {
-        let [r, g, b] = albedo.map(|channel| unorm(srgb(channel)));
+        let [r, g, b] = albedo.map(srgb8);
         [r, g, b, unorm(alpha)]
     };
+    let colors: Vec<CellColors> = layers
+        .iter()
+        .map(|layers| CellColors {
+            bare: color(layers.bare, layers.cover),
+            plants: color(layers.plants, layers.snow_cover),
+            snow: color(layers.snow, layers.water_roughness / 0.5),
+            water: color(layers.water, layers.relief),
+        })
+        .collect();
     let plate = |cell: u32| data.cells[cell as usize].plate.min(u32::from(u16::MAX)) as u16;
     let mut vertices = Vec::with_capacity(faces.len() * 3);
     for &face in faces {
         let plates = face.map(plate);
         let ridges = face.map(|cell| corners[cell as usize]);
         for (corner, &cell) in face.iter().enumerate() {
-            let layers = &layers[cell as usize];
+            let colors = &colors[cell as usize];
             let vertex = &data.vertices[cell as usize];
             vertices.push(DetailVertex {
                 position: vertex.position,
                 normal: vertex.normal,
-                bare: color(layers.bare, layers.cover),
-                plants: color(layers.plants, layers.snow_cover),
-                snow: color(layers.snow, layers.water_roughness / 0.5),
-                water: color(layers.water, layers.relief),
+                bare: colors.bare,
+                plants: colors.plants,
+                snow: colors.snow,
+                water: colors.water,
                 coast: coasts[cell as usize],
                 plates: [plates[0], plates[1], plates[2], corner as u16],
                 ridges,
@@ -568,6 +579,50 @@ pub fn detail_vertices(data: &ModeData, faces: &[[u32; 3]]) -> Vec<DetailVertex>
         }
     }
     vertices
+}
+
+/// The colours of a cell's corners in [`detail_vertices`].
+struct CellColors {
+    bare: [u8; 4],
+    plants: [u8; 4],
+    snow: [u8; 4],
+    water: [u8; 4],
+}
+
+/// A value in 0..1 as an 8-bit unsigned normalised value.
+fn unorm(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// A linear colour channel in 8-bit sRGB: `unorm(srgb(linear))`, exactly, but without its
+/// `powf`, which dominated the cost of [`detail_vertices`] in the browser (#174). The table
+/// holds the smallest value that encodes to each of 1..=255 (found with `srgb` itself, whose
+/// encoding only grows with the value), and the code is the number of them not above `linear`;
+/// NaN, negative values and zero encode to 0.
+fn srgb8(linear: f32) -> u8 {
+    static THRESHOLDS: std::sync::OnceLock<[f32; 255]> = std::sync::OnceLock::new();
+    let thresholds = THRESHOLDS.get_or_init(|| {
+        std::array::from_fn(|code| {
+            // The encoding only grows with the value, and non-negative floats sort like their
+            // bits: a bisection over the bits of 0..=1.
+            let wanted = code as u8 + 1;
+            let (mut low, mut high) = (0_u32, 1.0_f32.to_bits());
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if unorm(srgb(f32::from_bits(middle))) >= wanted {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            f32::from_bits(low)
+        })
+    });
+    if linear > 0.0 {
+        thresholds.partition_point(|&threshold| threshold <= linear) as u8
+    } else {
+        0
+    }
 }
 
 /// The coast value of a cell: positive on land, negative on water, 0.4 to 1 in size. The coast
@@ -897,6 +952,61 @@ mod tests {
         assert_eq!(layers_lake.relief, 0.0);
         // Below sea level outside depressions: the ocean.
         assert!(layers(&cell(-150.0, 20.0, 0.0, 0.0), Period::Annual, false, false).water_cell);
+    }
+
+    /// The encoding of [`detail_vertices`] before #174.
+    fn srgb8_reference(linear: f32) -> u8 {
+        unorm(srgb(linear))
+    }
+
+    #[test]
+    fn srgb8_matches_the_power_function() {
+        let check = |value: f32| {
+            assert_eq!(
+                srgb8(value),
+                srgb8_reference(value),
+                "{value:e} ({:#x})",
+                value.to_bits()
+            );
+        };
+        // A spread of values over 0..=1 (every 1021st float) and beyond, the floats around every
+        // code boundary, and special values.
+        let one = 1.0_f32.to_bits();
+        for bits in (0..=one).step_by(1021) {
+            check(f32::from_bits(bits));
+        }
+        for code in 1..=255_u8 {
+            // The first float that encodes to `code` or more.
+            let (mut low, mut high) = (0, one);
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if srgb8_reference(f32::from_bits(middle)) >= code {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            let boundary = low;
+            for bits in boundary.saturating_sub(200)..=(boundary + 200).min(one) {
+                check(f32::from_bits(bits));
+            }
+        }
+        for value in [
+            0.0,
+            -0.0,
+            -1.0,
+            1e-30,
+            0.003_130_8,
+            0.5,
+            1.0,
+            1.000_001,
+            2.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ] {
+            check(value);
+        }
     }
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {

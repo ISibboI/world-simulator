@@ -7,8 +7,12 @@
 //! difference to the frame before (mostly zeros), compressed with lz4, with a keyframe every
 //! [`KEY_INTERVAL`] frames, so that showing a frame decodes at most that many. A [`FrameStore`]
 //! keeps the encoded frames: a temporary file on the desktop, IndexedDB on the web; only the
-//! state of the latest frame (the base of the next difference) and the last decoded one stay in
-//! memory.
+//! last decoded frame stays in memory (and in the encoder the state of the latest frame, the base
+//! of the next difference).
+//!
+//! The simulation encodes the frames ([`FrameEncoder`], in its thread on the desktop and its
+//! worker on the web), and the view only stores them, so that the encoding does not take time
+//! from the view (#174).
 //!
 //! When the store is full (its capacity, or a failed write such as an exhausted browser quota),
 //! the history stops recording: the frames it has stay viewable.
@@ -19,7 +23,6 @@ pub mod store;
 use std::ops::Range;
 
 use super::{CellInfo, PlateInfo};
-pub use codec::BYTES_PER_CELL;
 use codec::{Kind, Planes, State};
 pub use store::FrameStore;
 
@@ -44,14 +47,64 @@ pub struct Frame {
     pub plates: Vec<PlateInfo>,
 }
 
+/// Encodes the states of a run into the frames of its history, where the states are made: in
+/// the simulation's thread (desktop) or worker (web), so that the view only stores the frames
+/// (#174). Each frame is the difference to the one before, every [`KEY_INTERVAL`]th one a
+/// keyframe; the view must record every frame it is given, in order.
+#[derive(Default)]
+pub struct FrameEncoder {
+    /// The state of the last encoded frame, the base of the next delta frame.
+    latest: Option<State>,
+    /// Frames since the last keyframe.
+    since_key: usize,
+}
+
+impl FrameEncoder {
+    /// The frame of a state, or `None` if it is not later than the last encoded one (the
+    /// simulation sends a state again when the view asks for other fields).
+    pub fn encode(
+        &mut self,
+        time: f64,
+        cells: &[CellInfo],
+        plates: &[PlateInfo],
+    ) -> Option<Vec<u8>> {
+        if self
+            .latest
+            .as_ref()
+            .is_some_and(|latest| time <= latest.time)
+        {
+            return None;
+        }
+        let state = State {
+            time,
+            planes: Planes::new(cells),
+            plates: plates.to_vec(),
+        };
+        let key = self.since_key + 1 >= KEY_INTERVAL;
+        let previous = if key { None } else { self.latest.as_ref() };
+        let frame = codec::encode(&state, previous);
+        self.since_key = if codec::kind(&frame).unwrap_or(Kind::Key) == Kind::Key {
+            0
+        } else {
+            self.since_key + 1
+        };
+        self.latest = Some(state);
+        Some(frame)
+    }
+
+    /// Makes the next frame a keyframe: after a frame that may not have reached the view, so
+    /// that the frames after it do not depend on it.
+    // Only the web worker can fail to post a frame; the desktop's simulation ends instead.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn force_keyframe(&mut self) {
+        self.since_key = KEY_INTERVAL;
+    }
+}
+
 /// The frames of one run.
 pub struct History {
     store: Box<dyn FrameStore>,
     frames: Vec<Entry>,
-    /// The state of the last recorded frame, the base of the next delta frame.
-    latest: Option<State>,
-    /// Frames since the last keyframe.
-    since_key: usize,
     /// Bytes of the encoded frames, and their size before compression.
     stored: u64,
     raw: u64,
@@ -72,8 +125,6 @@ impl History {
         Self {
             store,
             frames: Vec::new(),
-            latest: None,
-            since_key: 0,
             stored: 0,
             raw: 0,
             full: false,
@@ -84,23 +135,20 @@ impl History {
         }
     }
 
-    /// Records a state, if it is later than the last recorded one (the simulation sends a state
-    /// again when the view asks for other fields) and the store has room. Returns whether it
-    /// was recorded.
-    pub fn record(&mut self, time: f64, cells: &[CellInfo], plates: &[PlateInfo]) -> bool {
+    /// Records a frame of the simulation's [`FrameEncoder`], if it is later than the last
+    /// recorded one and the store has room. Returns whether it was recorded.
+    pub fn record(&mut self, frame: Vec<u8>) -> bool {
         self.check_writes();
+        let (kind, time, raw) = match codec::header(&frame) {
+            Ok(header) => header,
+            Err(error) => {
+                tracing::error!("A frame for the history refused: {error}");
+                return false;
+            }
+        };
         if self.full || self.frames.last().is_some_and(|entry| time <= entry.time) {
             return false;
         }
-        let state = State {
-            time,
-            planes: Planes::new(cells),
-            plates: plates.to_vec(),
-        };
-        let key = self.since_key + 1 >= KEY_INTERVAL;
-        let previous = if key { None } else { self.latest.as_ref() };
-        let frame = codec::encode(&state, previous);
-        let kind = codec::kind(&frame).unwrap_or(Kind::Key);
         if self.stored + frame.len() as u64 > self.store.capacity() {
             tracing::info!(
                 frames = self.frames.len(),
@@ -114,24 +162,18 @@ impl History {
         tracing::debug!(
             index,
             key = kind == Kind::Key,
-            raw = BYTES_PER_CELL * cells.len() + codec::PLATE_BYTES * plates.len(),
+            raw,
             encoded = frame.len(),
             "Frame recorded"
         );
         self.stored += frame.len() as u64;
-        self.raw += (BYTES_PER_CELL * cells.len() + codec::PLATE_BYTES * plates.len()) as u64;
+        self.raw += raw as u64;
         self.store.append(index, frame);
         self.frames.push(Entry {
             time,
             key: kind == Kind::Key,
             lost: false,
         });
-        self.since_key = if kind == Kind::Key {
-            0
-        } else {
-            self.since_key + 1
-        };
-        self.latest = Some(state);
         true
     }
 
@@ -351,11 +393,25 @@ mod tests {
         bytemuck::cast_slice(cells).to_vec()
     }
 
+    /// Encodes the states of `steps` steps of `count` cells and records them.
+    fn record(history: &mut History, steps: usize, count: usize, plates: bool) {
+        let mut encoder = FrameEncoder::default();
+        for step in 0..steps {
+            let plates = if plates {
+                vec![plate(step)]
+            } else {
+                Vec::new()
+            };
+            let frame = encoder
+                .encode(step as f64, &cells(count, step), &plates)
+                .expect("a later state");
+            history.record(frame);
+        }
+    }
+
     fn history(steps: usize, capacity: u64) -> History {
         let mut history = History::new(Box::new(MemoryStore::new(capacity)));
-        for step in 0..steps {
-            history.record(step as f64, &cells(100, step), &[plate(step)]);
-        }
+        record(&mut history, steps, 100, true);
         history
     }
 
@@ -398,11 +454,49 @@ mod tests {
     }
 
     #[test]
+    fn a_forced_keyframe_restarts_the_chain() {
+        let mut encoder = FrameEncoder::default();
+        let first = encoder.encode(0.0, &cells(100, 0), &[]).unwrap();
+        // Lost on the way to the view.
+        let _lost = encoder.encode(1.0, &cells(100, 1), &[]).unwrap();
+        encoder.force_keyframe();
+        let next = encoder.encode(2.0, &cells(100, 2), &[]).unwrap();
+        assert_eq!(codec::kind(&next), Ok(Kind::Key));
+        assert_eq!(
+            codec::kind(&encoder.encode(3.0, &cells(100, 3), &[]).unwrap()),
+            Ok(Kind::Delta)
+        );
+        let mut history = History::new(Box::new(MemoryStore::new(u64::MAX)));
+        assert!(history.record(first));
+        assert!(history.record(next));
+        assert_eq!(
+            bytes(&show(&mut history, 1).cells),
+            quantised(&cells(100, 2))
+        );
+    }
+
+    #[test]
     fn repeated_states_are_recorded_once() {
-        let mut history = history(3, u64::MAX);
-        assert!(!history.record(2.0, &cells(100, 2), &[]));
-        assert!(!history.record(1.0, &cells(100, 1), &[]));
+        let mut encoder = FrameEncoder::default();
+        let frames: Vec<Vec<u8>> = (0..3)
+            .map(|step| encoder.encode(step as f64, &cells(100, step), &[]).unwrap())
+            .collect();
+        // A state sent again (with other fields) is not encoded again.
+        assert!(encoder.encode(2.0, &cells(100, 2), &[]).is_none());
+        assert!(encoder.encode(1.0, &cells(100, 1), &[]).is_none());
+        let mut history = History::new(Box::new(MemoryStore::new(u64::MAX)));
+        for frame in &frames {
+            assert!(history.record(frame.clone()));
+        }
+        // Nor recorded again.
+        assert!(!history.record(frames[2].clone()));
+        assert!(!history.record(frames[1].clone()));
+        assert!(!history.record(vec![0; 3]));
         assert_eq!(history.len(), 3);
+        assert_eq!(
+            bytes(&show(&mut history, 2).cells),
+            quantised(&cells(100, 2))
+        );
     }
 
     #[test]
@@ -412,7 +506,9 @@ mod tests {
         let recorded = history.len();
         assert!(recorded > 1 && recorded < 200, "{recorded}");
         assert!(history.bytes().0 <= 3_000);
-        assert!(!history.record(1000.0, &cells(100, 0), &[]));
+        let mut encoder = FrameEncoder::default();
+        let frame = encoder.encode(1000.0, &cells(100, 0), &[]).unwrap();
+        assert!(!history.record(frame));
         let last = show(&mut history, recorded - 1);
         assert_eq!(last.index, recorded - 1);
         assert_eq!(history.time(recorded - 1), Some((recorded - 1) as f64));
@@ -462,9 +558,7 @@ mod tests {
         }
         let reads = Rc::new(RefCell::new(Reads::default()));
         let mut history = History::new(Box::new(Slow(MemoryStore::new(u64::MAX), reads.clone())));
-        for step in 0..10 {
-            history.record(step as f64, &cells(50, step), &[]);
-        }
+        record(&mut history, 10, 50, false);
         let complete = || {
             assert!(
                 reads.borrow_mut().pending.take().is_some(),
@@ -513,9 +607,7 @@ mod tests {
             }
         }
         let mut history = History::new(Box::new(Failing(MemoryStore::new(u64::MAX))));
-        for step in 0..10 {
-            history.record(step as f64, &cells(50, step), &[]);
-        }
+        record(&mut history, 10, 50, false);
         assert!(history.is_full());
         assert_eq!(history.len(), 7);
         assert_eq!(show(&mut history, 3).index, 3);
