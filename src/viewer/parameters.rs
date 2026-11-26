@@ -678,7 +678,7 @@ mod tests {
             "--seed",
             "3",
             "--no-erosion",
-            "--biosphere=abiotic",
+            "--biosphere=modern",
             "--set",
             "basal_drag=8e14",
             "--set=climate.x=-1",
@@ -689,7 +689,7 @@ mod tests {
         let mut panel = ParameterPanel::new(&given, None);
         assert_eq!(field(&mut panel, "seed").text, "3");
         assert!(field(&mut panel, "no-erosion").flag);
-        assert_eq!(field(&mut panel, "biosphere").text, "abiotic");
+        assert_eq!(field(&mut panel, "biosphere").text, "modern");
         assert_eq!(
             field(&mut panel, "set").text,
             "basal_drag=8e14\nclimate.x=-1"
@@ -701,7 +701,7 @@ mod tests {
                 "world-simulator",
                 "--seed=3",
                 "--no-erosion",
-                "--biosphere=abiotic",
+                "--biosphere=modern",
                 "--epoch=-0",
                 "--co2=2",
                 "--set=basal_drag=8e14",

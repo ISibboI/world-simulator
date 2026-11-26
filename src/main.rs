@@ -172,20 +172,22 @@ struct Cli {
     #[arg(long)]
     lake_climate_contrast: bool,
 
-    /// Life on the planet, as far as the parameters see it: `modern` is today's vegetated Earth
-    /// with a biogenic ocean, `abiotic` a planet without life (bare land, no transpiration,
-    /// braided rivers, no biogenic pelagic sediment). See `presets::Biosphere`.
-    #[arg(long, value_enum, default_value_t = Biosphere::Modern)]
+    /// Life on the planet, as far as the parameters see it: `abiotic` (the default) is a barren
+    /// planet without life (bare land, no transpiration, braided rivers, no biogenic pelagic
+    /// sediment), `modern` today's vegetated Earth with a biogenic ocean. The default run is a
+    /// barren planet at the earliest start; `--biosphere modern --epoch 4` gives today's Earth,
+    /// the default before #190. See `presets::Biosphere`.
+    #[arg(long, value_enum, default_value_t = Biosphere::Abiotic)]
     biosphere: Biosphere,
 
     /// Time of the planet's history at the start of the run, in Gyr counted forwards: 0 is the
-    /// earliest start (4.0 Ga, when the planet has cooled enough for plates and oceans), 0.5 the
-    /// Archean (3.5 Ga), 4 today, up to 9.43 (the Sun before it leaves the main sequence). Sets
+    /// earliest start (4.0 Ga, when the planet has cooled enough for plates and oceans; the
+    /// default), 0.5 the Archean (3.5 Ga), 4 today, up to 9.43 (the Sun before it leaves the main sequence). Sets
     /// the solar constant of the Sun, which then brightens during the run (~1% per 100 Myr;
     /// `--set temperature.solar_brightening=0` keeps it), and, unless `--co2` is given, a
     /// greenhouse forcing that offsets the difference to today's Sun at the start (in the future
     /// down to a CO₂ floor) and then stays fixed. See `presets::Epoch`.
-    #[arg(long, default_value_t = sun::PRESENT_EPOCH)]
+    #[arg(long, default_value_t = sun::EARLIEST_EPOCH)]
     epoch: f64,
 
     /// CO₂ relative to the pre-industrial 280 ppm; the greenhouse forcing becomes

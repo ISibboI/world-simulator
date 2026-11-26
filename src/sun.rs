@@ -26,7 +26,7 @@
 //! the planet has cooled enough for plates and oceans, [`EPOCH_ZERO_AGE`] = 0.57 Gyr after the
 //! sun's zero age (4.0 Ga, the end of the Hadean on Earth); [`PRESENT_EPOCH`] (4.0) is today, and
 //! [`MAX_EPOCH`] (9.43) the end of the sun model, before the sun leaves the main sequence. See
-//! `notes/issue-150/plan.md`.
+//! `notes/issue-150/plan.md`. A run starts at epoch 0 unless `--epoch` says otherwise (#190).
 
 use glam::DVec3;
 
@@ -51,6 +51,8 @@ pub const MAX_AGE: f64 = 10.0;
 /// present, 4.0 Ga (the oldest preserved crust, the Acasta Gneiss, is 4.03 Gyr old; Bowring &
 /// Williams, 1999).
 pub const PRESENT_EPOCH: f64 = 4.0;
+/// The earliest start of a simulation, epoch 0 (4.0 Ga), and the default start of a run (#190).
+pub const EARLIEST_EPOCH: f64 = 0.0;
 /// The age of the sun in Gyr at epoch 0, the earliest start of a simulation.
 pub const EPOCH_ZERO_AGE: f64 = SOLAR_AGE - PRESENT_EPOCH;
 /// The latest epoch, at the end of the sun model ([`MAX_AGE`]): 9.43.

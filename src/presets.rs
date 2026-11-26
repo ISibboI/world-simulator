@@ -1,13 +1,18 @@
 //! Presets for the biosphere and the age of the planet.
 //!
-//! The default parameters describe **present-day Earth**: a living planet with today's
-//! vegetation, atmosphere, Sun and biogenic ocean (see issue #28 for the inventory). The presets
-//! set groups of parameters for other planets, each with its physical reasoning; they are
-//! applied before the `--set` overrides, so a single parameter can still be changed on top.
+//! The default values of the parameter structs describe **present-day Earth**: a living planet
+//! with today's vegetation, atmosphere, Sun and biogenic ocean (see issue #28 for the
+//! inventory). The presets set groups of parameters for other planets, each with its physical
+//! reasoning; they are applied before the `--set` overrides, so a single parameter can still be
+//! changed on top.
 //!
-//! - [`Biosphere`]: `modern` (the defaults) or `abiotic`, a planet without life: bare land, no
+//! The **default run** (#190) is not present-day Earth but a barren planet at the earliest
+//! start: [`Biosphere::Abiotic`] at epoch 0 (4.0 Ga). `--biosphere modern --epoch 4` (URL
+//! `biosphere=modern&epoch=4`) gives today's Earth, the parameter defaults unchanged.
+//!
+//! - [`Biosphere`]: `abiotic` (the default of a run), a planet without life: bare land, no
 //!   transpiration or root-zone soil water, rivers without root-bound banks (braided), and no
-//!   biogenic pelagic sediment.
+//!   biogenic pelagic sediment; or `modern`, the parameter defaults.
 //! - [`Epoch`]: the time of the planet's history at the start of the run, counted forwards in
 //!   Gyr from the earliest start (0; today is [`PRESENT_EPOCH`], 4.0). It sets the brightness of
 //!   the Sun (Gough, 1981) and the greenhouse forcing that kept the young Earth from freezing
@@ -34,11 +39,11 @@ pub const CO2_FORCING_PER_E_FOLD: f64 = 5.35;
 /// epochs (see [`Epoch::greenhouse_forcing`]).
 pub const MIN_CO2: f64 = 10.0 / 280.0;
 
-/// Which life the planet carries, as far as the physical parameters see it.
+/// Which life the planet carries, as far as the physical parameters see it. A run is
+/// [`Biosphere::Abiotic`] unless `--biosphere` says otherwise (#190).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Biosphere {
     /// Today's Earth: the default parameters, unchanged.
-    #[default]
     Modern,
     /// A planet without life, like Earth before land plants (and before plankton for the
     /// pelagic sediment). In 4-seed runs over 1000 Myr (means of 200–1000 Myr against modern):
@@ -46,7 +51,9 @@ pub enum Biosphere {
     /// more arid land (less recycling), ~80 m lower land and ~2% less land (K ×2), and the same
     /// sediment flux to the ocean within the scatter. The initial highlands of ~1.5 km lie
     /// close to the threshold of land ice in this model, so the first ~100 Myr are much colder
-    /// (−3 to −9 K, ice sheets even on tropical plateaus).
+    /// (−3 to −9 K, ice sheets even on tropical plateaus). The default of a run, together with
+    /// epoch 0; see `notes/issue-190/results.md` for that climate.
+    #[default]
     Abiotic,
 }
 
