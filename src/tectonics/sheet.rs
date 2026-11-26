@@ -1781,6 +1781,7 @@ impl Simulation {
                 self.plates[plate as usize].sheet.split_timer = 0.0;
                 self.plates[new_plate as usize].sheet.split_timer = 0.0;
                 self.sheet_statistics.splits += 1;
+                self.record_split_cause(plate, new_plate, events::SplitCause::SheetSplit);
                 tracing::debug!(
                     plate,
                     new_plate,

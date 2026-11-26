@@ -869,6 +869,33 @@ fn snapshot(
         events.rift_motion_alignment.0 / events.rift_motion_alignment.1.max(1) as f64,
         events.rift_motion_alignment.1,
     );
+    {
+        let tallies: Vec<String> = tectonics::SplitCause::ALL
+            .iter()
+            .zip(&events.splits_by_cause)
+            .map(|(cause, tally)| {
+                format!(
+                    "{} {} ({}/{} at plumes; boundary {}/{}/{}, plates {}/{}/{})",
+                    cause.name(),
+                    tally.count,
+                    tally.near_plume[0],
+                    tally.near_plume[1],
+                    tally.boundary[0],
+                    tally.boundary[1],
+                    tally.boundary[2],
+                    tally.plates[0],
+                    tally.plates[1],
+                    tally.plates[2],
+                )
+            })
+            .collect();
+        info!(
+            "    splits by cause (within {:.3}/{:.3} rad of a plume; continental cells all/belts/fabric): {}",
+            tectonics::PLUME_SPLIT_DISTANCES[0],
+            tectonics::PLUME_SPLIT_DISTANCES[1],
+            tallies.join(" | "),
+        );
+    }
     log_sediment_reservoirs(&planet_statistics);
     {
         let field = simulation.dynamic_topography();

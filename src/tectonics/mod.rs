@@ -60,7 +60,9 @@ pub use cover::{CohortMasses, CoverBudget, CoverMasses, CoverTerm};
 pub use crust::*;
 pub use deformation::MIN_BAND_STRENGTH;
 pub use display::BoundaryClass;
-pub use events::{EventCounts, PlateEventParams, WEAK_BELT_THRESHOLD};
+pub use events::{
+    EventCounts, PLUME_SPLIT_DISTANCES, PlateEventParams, SplitCause, WEAK_BELT_THRESHOLD,
+};
 pub use generation::InitialConfiguration;
 pub use initial_sediment::{InitialSedimentParams, PlatformEmplacement};
 pub use ledger::MassLedger;
