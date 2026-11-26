@@ -78,6 +78,13 @@ that trench sinks only remove, and that the LIFO cohort never falls below the mi
   other crust, eroded to <4 destinations>, metamorphosed, subducted, accreted, collision,
   subduction erosion, other tectonics` — sums to 100%.
 
+## Review
+
+Independent code review of the diff: [review-code.md](review-code.md). Fixed: the cohort start
+reset the cover's own budget start (finding 1; the closure test now starts the cohort later and
+fails without the fix); closed depressions are classified at the start of the step (3); the
+metamorphism caveat of the well-mixed bound is documented (2); one pass per mass sum (5).
+
 ## Measurement
 
-4 seeds × 1000 Myr (defaults, 6 subdivisions) through `runs`; results in `results.md`.
+4 seeds × 1000 Myr (defaults, 6 subdivisions) through `runs`; results in [results.md](results.md).
