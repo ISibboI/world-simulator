@@ -157,7 +157,8 @@ struct Cli {
 
     /// Log the plates for analysis (#123): every this many Myr, append the plate id of every
     /// cell to `plate_maps.csv` in `--output` (time, then the ids in cell order), and after every
-    /// step append the most overloaded section of every plate to `plate_sections.csv` (see
+    /// analysis of the sections (`breakup.interval`) append the most overloaded section of every
+    /// plate to `plate_sections.csv` (see
     /// `tectonics::SectionRecord`). Changes nothing in the simulation.
     #[arg(long, value_name = "MYR")]
     plate_log: Option<f64>,
@@ -1160,7 +1161,7 @@ fn snapshot(
     let breakup = simulation.breakup_statistics();
     info!(
         "    breakup by stress: {} plates broken ({} cells; {} opening, {} closing, the others \
-         sliding), {} plates overloaded now (largest overload {:.2}), {:.1} s",
+         sliding), {} plates overloaded at the last analysis (largest overload {:.2}), {:.1} s",
         breakup.splits,
         breakup.split_cells,
         breakup.opening_splits,

@@ -40,6 +40,8 @@
 //! there: the smaller part becomes a new plate (the larger one keeps the plate's identity and
 //! colour), and the new boundary is classified by the plates' motions like any other.
 //!
+//! The analysis needs the sheet's forces: with `sheet.enabled=0` plates do not break by stress.
+//!
 //! Grid: sections are resolved to a cell (~110 km at 6 subdivisions); strips narrower than ~3
 //! cells are near the resolution limit, and the minimum part size keeps fragments well above it.
 
@@ -66,7 +68,8 @@ pub struct BreakupParams {
     /// and collision belts doubled (4 seeds); 4 × 10¹³ and 8 × 10¹³ gave the same plate shapes
     /// (see `notes/issue-123/results.md`).
     pub strength: f64,
-    /// Time (Myr) for which a section must stay overloaded before the plate breaks.
+    /// Time (Myr) for which a section must stay overloaded before the plate breaks (counted in
+    /// steps of [`Self::interval`], so 5 Myr with analyses every 2 Myr take 6 Myr).
     pub time: f64,
     /// Smallest part of a plate that breaks off, as a fraction of the surface.
     pub min_area: f64,
@@ -224,7 +227,8 @@ impl SectionEdge {
         let normal = (chord - mid * chord.dot(mid)).normalize();
         let along = mid.cross(normal) * (0.25 * face);
         // At a point x of the section with the unit normal n, the relative velocity ω × x
-        // slides by (ω × x) · (x × n) = −ω · n and opens by (ω × x) · n = ω · (n × x). The two
+        // slides by (ω × x) · (x × n) = −ω · n and opens by −(ω × x) · n = ω · (n × x) (n points
+        // away from the loaded side, which moves with ω relative to the other). The two
         // points lie ±ℓ/4 from the middle (off the sphere by ~(ℓ/4)², negligible).
         [mid - along, mid + along].map(|point| Self {
             p: -normal,
@@ -272,7 +276,7 @@ fn quick_overload(
     let mut best = (f64::INFINITY, DVec3::ZERO);
     for candidate in [torque / magnitude2, middle, *warm] {
         let along = candidate.dot(torque);
-        if along > 0.0 {
+        if along != 0.0 {
             let omega = candidate / along;
             let d = dissipation(omega);
             if d < best.0 {
@@ -320,7 +324,7 @@ fn limit_overload(
     let mut omega = torque / magnitude2;
     let mut best = dissipation(omega);
     let along = warm.dot(torque);
-    if along > 0.0 {
+    if along != 0.0 {
         let candidate = *warm / along;
         let d = dissipation(candidate);
         if d < best {
@@ -354,7 +358,7 @@ fn limit_overload(
         let lambda = (1.0 + torque.dot(qg)) / denominator;
         let next = qt * lambda - qg;
         let d = dissipation(next);
-        if !(d < best) {
+        if d.partial_cmp(&best) != Some(std::cmp::Ordering::Less) {
             break;
         }
         let converged = d > best * (1.0 - 1e-4);
@@ -841,7 +845,7 @@ impl Simulation {
     }
 
     /// Splits the plates that have been overloaded for long enough (see
-    /// [`PlateSheet::pending_breakup`]) along their most overloaded section, if both parts are
+    /// [`super::sheet::PlateSheet::pending_breakup`]) along their most overloaded section, if both parts are
     /// still large enough.
     pub(super) fn break_overloaded_plates(&mut self) {
         let min_cells = self.params.breakup.min_cells(self.mesh.len());
@@ -850,6 +854,7 @@ impl Simulation {
                 continue;
             };
             if self.plates.len() >= self.params.events.max_plates {
+                self.event_counts.blocked_splits += 1;
                 continue;
             }
             let mut marked = vec![false; self.mesh.len()];
@@ -894,7 +899,7 @@ impl Simulation {
         }
     }
 
-    /// The most overloaded section of every plate at the last step (only with
+    /// The most overloaded section of every plate, if this step analysed them (only with
     /// [`BreakupParams::diagnose`]).
     pub fn section_records(&self) -> &[SectionRecord] {
         &self.section_records
@@ -1010,6 +1015,19 @@ mod tests {
     }
 
     #[test]
+    fn quick_estimates_see_bending_either_way_round() {
+        let edges = straight_section();
+        let plastic = 0.02f64 * 0.02 * 3.0 / 8.0;
+        for sign in [1.0, -1.0] {
+            let mut warm = DVec3::ZERO;
+            let s = quick_overload(DVec3::X * (sign * plastic), &edges, 1.0, 3.0, &mut warm);
+            // About the middle (the full analysis shifts the hinge towards the stronger,
+            // compressed side): (3/8) / (1/2) of the limit.
+            assert!((0.74..=1.0).contains(&s), "bending ({sign}): {s}");
+        }
+    }
+
+    #[test]
     fn narrow_arms_break_where_compact_plates_do_not() {
         let simulation = Simulation::new(SphereMesh::icosphere(4), 4, TectonicParams::default(), 1);
         let mesh = &simulation.mesh;
@@ -1065,10 +1083,12 @@ mod tests {
     fn the_analysis_alone_changes_nothing() {
         let run = |params: TectonicParams| {
             let mut simulation = Simulation::new(SphereMesh::icosphere(4), 8, params, 5);
+            let mut records = 0;
             for _ in 0..10 {
                 simulation.step(1.0);
+                records += simulation.section_records.len();
             }
-            (fingerprint(&simulation), simulation.section_records.len())
+            (fingerprint(&simulation), records)
         };
         let mut plain = TectonicParams::default();
         plain.breakup.enabled = false;

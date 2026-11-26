@@ -1427,6 +1427,9 @@ impl Simulation {
         self.update_sheet_statistics();
         if analyse {
             self.analyse_sections(&forces, &rotations, dt);
+        } else {
+            // The records are those of this step's analysis only.
+            self.section_records.clear();
         }
     }
 
