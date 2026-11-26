@@ -387,13 +387,16 @@ impl Climate {
 
     /// Solves the water cycle for the given surface elevation (m, sea level 0; land at or above
     /// 0), the evaporation of lakes beyond the land's evapotranspiration (m/yr over the mean cell
-    /// area `4πR²/N`, as the water balance computes it; empty for none), monthly surface temperatures (°C; month 0 is January) and the
+    /// area `4πR²/N`, as the water balance computes it; empty for none), monthly surface
+    /// temperatures (°C; month 0 is January), the monthly ice cover of the lakes (0 to 1, NaN off
+    /// lakes; empty if the temperature model does not know the lakes, see [`ice_free`]) and the
     /// thermal equator of each month (degrees).
     pub fn update(
         &mut self,
         elevation: &[f64],
         lake_evaporation: &[f64],
         monthly_temperature: &[Vec<f64>],
+        monthly_lake_ice: &[Vec<f64>],
         itcz: &[Vec<f64>],
     ) {
         let cell_count = elevation.len();
@@ -426,6 +429,10 @@ impl Climate {
             .iter()
             .map(|&month| &monthly_temperature[month][..])
             .collect();
+        let lake_ice: Vec<&[f64]> = months
+            .iter()
+            .map(|&month| monthly_lake_ice.get(month).map_or(&[][..], |ice| &ice[..]))
+            .collect();
         let mut iterations = vec![0; month_count];
         for _ in 0..rounds {
             for &slot in &slots {
@@ -433,6 +440,7 @@ impl Climate {
                 let mut input = self.month_inputs(
                     elevation,
                     &monthly_temperature[months[slot]],
+                    lake_ice[slot],
                     thermal_equator,
                     slot,
                 );
@@ -449,6 +457,7 @@ impl Climate {
                 let lake = self.add_lake_evaporation(
                     lake_evaporation,
                     &lake_temperature,
+                    &lake_ice,
                     slot,
                     &mut input,
                 );
@@ -590,6 +599,7 @@ impl Climate {
         &self,
         elevation: &[f64],
         temperature: &[f64],
+        lake_ice: &[f64],
         thermal_equator: &[f64],
         slot: usize,
     ) -> Month {
@@ -672,7 +682,8 @@ impl Climate {
                 let air = (vapour[cell] / vapour_per_humidity[cell])
                     .min(params.surface_humidity * saturated);
                 potential[cell] = transfer * (saturated - air);
-                lake_potential[cell] = potential[cell] * ice_free(temperature[cell]);
+                lake_potential[cell] =
+                    potential[cell] * open_water(temperature[cell], lake_ice.get(cell).copied());
             }
         }
 
@@ -745,6 +756,7 @@ impl Climate {
         &self,
         lake: &[f64],
         temperature: &[&[f64]],
+        ice: &[&[f64]],
         slot: usize,
         month: &mut Month,
     ) -> Vec<f64> {
@@ -754,18 +766,12 @@ impl Climate {
             if rate <= 0.0 {
                 continue;
             }
-            let mean = temperature
-                .iter()
-                .map(|t| lake_season(t[cell]))
-                .sum::<f64>()
-                / temperature.len() as f64;
+            let season =
+                |month: usize| lake_season(temperature[month][cell], ice[month].get(cell).copied());
+            let mean = (0..temperature.len()).map(season).sum::<f64>() / temperature.len() as f64;
             // A lake frozen all year (or a cell that has become ocean since the water balance)
             // returns the water evenly over the year.
-            let weight = if mean > 0.0 {
-                lake_season(temperature[slot][cell]) / mean
-            } else {
-                1.0
-            };
+            let weight = if mean > 0.0 { season(slot) / mean } else { 1.0 };
             added[cell] =
                 rate * mean_area / self.area[cell] * WATER_DENSITY / SECONDS_PER_YEAR * weight;
             month.evaporation[cell] += added[cell];
@@ -1152,11 +1158,21 @@ fn ice_free(t: f64) -> f64 {
     ((t + 2.0) / 4.0).clamp(0.0, 1.0)
 }
 
-/// The seasonal weight of lake evaporation at the monthly mean surface temperature `t` (°C):
-/// the saturation specific humidity of the ice-free water surface, which sets how much it can
-/// evaporate.
-fn lake_season(t: f64) -> f64 {
-    ice_free(t) * saturation_specific_humidity(t)
+/// The fraction of a month in which a lake is free of ice: one minus its ice cover `ice` (0 to 1)
+/// where the temperature model knows the lake (#173), otherwise [`ice_free`] at the monthly
+/// mean temperature `t` (°C).
+fn open_water(t: f64, ice: Option<f64>) -> f64 {
+    match ice {
+        Some(ice) if !ice.is_nan() => 1.0 - ice.clamp(0.0, 1.0),
+        _ => ice_free(t),
+    }
+}
+
+/// The seasonal weight of lake evaporation at the monthly mean surface temperature `t` (°C) and
+/// the lake's ice cover (see [`open_water`]): the saturation specific humidity of the ice-free
+/// water surface, which sets how much it can evaporate.
+fn lake_season(t: f64, ice: Option<f64>) -> f64 {
+    open_water(t, ice) * saturation_specific_humidity(t)
 }
 
 /// Saturation vapour pressure over water in Pa at `t` °C (Magnus formula, Alduchov & Eskridge,
@@ -1377,7 +1393,7 @@ mod tests {
     fn solve(mesh: &SphereMesh, elevation: &[f64]) -> (Climate, Vec<f64>, Vec<f64>) {
         let mut climate = Climate::new(mesh, RADIUS, ClimateParams::default());
         let monthly = vec![temperatures(mesh, elevation); 12];
-        climate.update(elevation, &[], &monthly, &vec![vec![0.0]; 12]);
+        climate.update(elevation, &[], &monthly, &[], &vec![vec![0.0]; 12]);
         let precipitation = climate.water_cycle().precipitation.clone();
         let evaporation = climate.water_cycle().evaporation.clone();
         (climate, precipitation, evaporation)
@@ -1470,7 +1486,7 @@ mod tests {
         let warm: Vec<f64> = (0..mesh.len() as u32)
             .map(|c| -25.0 + 52.0 * math::cos(math::asin(mesh.vertex(c).z) - 10f64.to_radians()))
             .collect();
-        climate.update(&ocean, &[], &vec![warm; 12], &vec![vec![10.0]; 12]);
+        climate.update(&ocean, &[], &vec![warm; 12], &[], &vec![vec![10.0]; 12]);
         let precipitation = &climate.water_cycle().precipitation;
         let mean_at = |from: f64, to: f64| {
             let cells: Vec<f64> = (0..mesh.len())
@@ -1510,7 +1526,7 @@ mod tests {
         let monthly = vec![temperatures(&mesh, &elevation); 12];
         let solve = |lake: &[f64]| {
             let mut climate = Climate::new(&mesh, RADIUS, ClimateParams::default());
-            climate.update(&elevation, lake, &monthly, &vec![vec![0.0]; 12]);
+            climate.update(&elevation, lake, &monthly, &[], &vec![vec![0.0]; 12]);
             climate
         };
         // A large lake in the westerlies, evaporating 1 m/yr beyond the land's
@@ -1559,11 +1575,11 @@ mod tests {
         // full once all four months have been solved again.
         let mut climate = wet;
         let double: Vec<f64> = lake.iter().map(|e| 2.0 * e).collect();
-        climate.update(&elevation, &double, &monthly, &vec![vec![0.0]; 12]);
+        climate.update(&elevation, &double, &monthly, &[], &vec![vec![0.0]; 12]);
         let partial = climate.water_cycle().total_lake_evaporation / given;
         assert!(partial > 1.0 && partial < 2.0, "{partial}");
         for _ in 0..3 {
-            climate.update(&elevation, &double, &monthly, &vec![vec![0.0]; 12]);
+            climate.update(&elevation, &double, &monthly, &[], &vec![vec![0.0]; 12]);
         }
         let full = climate.water_cycle().total_lake_evaporation / given;
         assert!((full - 2.0).abs() < 1e-9, "{full}");
@@ -1571,10 +1587,41 @@ mod tests {
         // A frozen lake: no potential evaporation, but the climate still returns the water.
         let frozen = vec![vec![-20.0; mesh.len()]; 12];
         let mut climate = Climate::new(&mesh, RADIUS, ClimateParams::default());
-        climate.update(&elevation, &lake, &frozen, &vec![vec![0.0]; 12]);
+        climate.update(&elevation, &lake, &frozen, &[], &vec![vec![0.0]; 12]);
         let cycle = climate.water_cycle();
         assert!(cycle.lake_potential_evaporation.iter().all(|&e| e == 0.0));
         assert!((cycle.total_lake_evaporation / given - 1.0).abs() < 1e-9);
+
+        // The lake ice of the temperature model replaces the ramp (#173): a lake under ice in
+        // warm air does not evaporate, a half-frozen one evaporates half; cells without a lake
+        // (NaN) keep the ramp, and the water returns in full.
+        let lake_cells: Vec<usize> = (0..mesh.len()).filter(|&c| lake[c] > 0.0).collect();
+        let potential = |ice: f64| {
+            let cover: Vec<f64> = (0..mesh.len())
+                .map(|c| if lake[c] > 0.0 { ice } else { f64::NAN })
+                .collect();
+            let mut climate = Climate::new(&mesh, RADIUS, ClimateParams::default());
+            climate.update(
+                &elevation,
+                &lake,
+                &monthly,
+                &vec![cover; 12],
+                &vec![vec![0.0]; 12],
+            );
+            let cycle = climate.water_cycle().clone();
+            assert!((cycle.total_lake_evaporation / given - 1.0).abs() < 1e-9);
+            cycle
+        };
+        let (open, half, frozen) = (potential(0.0), potential(0.5), potential(1.0));
+        for &c in &lake_cells {
+            assert_eq!(frozen.lake_potential_evaporation[c], 0.0);
+            let ratio = half.lake_potential_evaporation[c] / open.lake_potential_evaporation[c];
+            assert!((ratio - 0.5).abs() < 0.05, "{ratio}");
+        }
+        let land = (0..mesh.len())
+            .find(|&c| lake[c] <= 0.0 && elevation[c] >= 0.0)
+            .unwrap();
+        assert!(frozen.lake_potential_evaporation[land] > 0.0);
     }
 
     #[test]
@@ -1582,6 +1629,11 @@ mod tests {
         assert_eq!(ice_free(-5.0), 0.0);
         assert_eq!(ice_free(0.0), 0.5);
         assert_eq!(ice_free(5.0), 1.0);
+        // With the lake ice of the temperature model, its open share instead.
+        assert_eq!(open_water(-5.0, Some(0.25)), 0.75);
+        assert_eq!(open_water(5.0, Some(1.0)), 0.0);
+        assert_eq!(open_water(5.0, Some(f64::NAN)), 1.0);
+        assert_eq!(open_water(-5.0, None), 0.0);
     }
 
     #[test]

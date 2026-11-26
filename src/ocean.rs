@@ -37,6 +37,7 @@ pub struct Gyres {
     pub streamfunction: Vec<f64>,
 }
 
+#[derive(Clone)]
 pub struct GyreModel {
     hierarchy: Hierarchy,
     radius: f64,
