@@ -294,6 +294,8 @@ impl Simulation {
                 let mut sheet = self.plates[plate as usize].sheet.clone();
                 sheet.pending_split = None;
                 sheet.split_timer = 0.0;
+                sheet.pending_breakup = None;
+                sheet.breakup_timer = 0.0;
                 sheet
             },
         };
@@ -301,6 +303,9 @@ impl Simulation {
         // The tracked crust of the remaining part is no longer accurate, nor its pending split.
         self.plates[plate as usize].tracked = None;
         self.plates[plate as usize].sheet.pending_split = None;
+        // Its sections change: the time it was overloaded starts again.
+        self.plates[plate as usize].sheet.pending_breakup = None;
+        self.plates[plate as usize].sheet.breakup_timer = 0.0;
         let new_index = self.plates.len() as u32;
         self.plates.push(new_plate);
 
@@ -344,8 +349,10 @@ impl Simulation {
         assert_ne!(into, absorbed, "a plate cannot be merged into itself");
         let rotations = self.rotations();
         self.polarities.merge(into, absorbed, &rotations);
-        // The receiving plate gains crust at new vertices.
+        // The receiving plate gains crust at new vertices; its pending breakup is out of date.
         self.plates[into as usize].tracked = None;
+        self.plates[into as usize].sheet.pending_breakup = None;
+        self.plates[into as usize].sheet.breakup_timer = 0.0;
         let to_into =
             self.plates[into as usize].rotation.inverse() * self.plates[absorbed as usize].rotation;
         let cell_count = self.mesh.len();
