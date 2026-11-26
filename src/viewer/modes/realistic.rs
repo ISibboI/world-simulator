@@ -713,7 +713,7 @@ fn surface_gradient(data: &ModeData, cell: usize) -> glam::DVec3 {
         by += y * rise;
     }
     let determinant = xx * yy - xy * xy;
-    if !(determinant.abs() > 1e-20) {
+    if determinant.is_nan() || determinant.abs() <= 1e-20 {
         return glam::DVec3::ZERO;
     }
     // Metres per radian, then per km of the surface.
@@ -754,7 +754,7 @@ fn strike(
     let mean = 0.5 * (a + d);
     let spread = (0.25 * (a - d) * (a - d) + b * b).sqrt();
     let (major, minor) = (mean + spread, mean - spread);
-    if !(major > 1e-12) {
+    if major.is_nan() || major <= 1e-12 {
         return ([0.0; 3], 0.0);
     }
     let coherence = (major - minor) / (major + minor);
@@ -763,7 +763,7 @@ fn strike(
     let strength = smoothstep(STRIKE_SLOPE.0, STRIKE_SLOPE.1, slope as f32)
         * (coherence as f32).sqrt()
         * (2.0 * ruggedness).min(1.0);
-    if !(strength > 0.0) {
+    if strength.is_nan() || strength <= 0.0 {
         return ([0.0; 3], 0.0);
     }
     // The principal direction (the slope), and the strike across it.
