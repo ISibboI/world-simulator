@@ -1,21 +1,28 @@
-//! The time bar along the bottom edge of the 3D view: pause and resume the simulation, step one
-//! frame back or forward, a slider over the recorded frames of the run (see [`super::history`]),
-//! "Live" to follow the newest state again, and the time of the shown frame.
+//! The time bar along the bottom edge of the 3D view: play or pause the view, step one frame back
+//! or forward, a slider over the recorded frames of the run (see [`super::history`]), "Live" to
+//! follow the newest state again, pause or resume the simulation, and the time of the shown
+//! frame.
 //!
-//! Viewing a past frame does not pause the simulation: the slider keeps growing while the view
-//! stays on the chosen frame. Stepping forward on the newest frame while the simulation is paused
-//! computes one more step. Keys (when no text field has focus and no drop-down list is open):
-//! space pauses or resumes, ← and → step, End goes live. While paused, the desktop simulation
-//! writes the snapshot of its paused step only on resume.
+//! Play and pause act on the view only (issue #120): pausing freezes the view on its frame while
+//! the simulation goes on and the slider keeps growing; playing walks forward through the
+//! recorded frames at [`WALK_RATE`] frames per second (see [`Walk`]) until the newest, and then
+//! follows the simulation live, at its own pace. The simulation has a button of its own (the
+//! cog), drawn pressed while the simulation is paused; the time is then shown in the warning
+//! colour. Stepping forward on the newest frame while the simulation is paused computes one more
+//! step. Keys (when no text field has focus and no drop-down list is open): space plays or pauses
+//! the view, P pauses or resumes the simulation, ← and → step, End goes live. While paused, the
+//! desktop simulation writes the snapshot of its paused step only on resume.
 //!
 //! On wide screens the bar is one row; on narrow ones (phones) the slider gets a row of its own
 //! below the buttons, and the time too if it does not fit beside them (see [`rows`]). On touch
 //! screens the buttons and the slider are touch-sized (see `UiOptions`).
 //!
-//! The bar collapses (its ⌄ button) into a flat strip with only the expand button, pause/resume
-//! and the time; the keys keep working. Like the other panels it starts collapsed on narrow
-//! screens, unless the user collapsed or expanded it before: that choice is remembered across
-//! restarts and reloads (see [`super::settings`]).
+//! The bar collapses (its ⌄ button) into a flat strip with only the expand button, play/pause,
+//! the simulation's button and the time; the keys keep working. Like the other panels it starts
+//! collapsed on narrow screens, unless the user collapsed or expanded it before: that choice is
+//! remembered across restarts and reloads (see [`super::settings`]).
+
+use std::time::Duration;
 
 use eframe::egui;
 
@@ -40,6 +47,10 @@ pub struct TimelineView<'a> {
     pub time_of: &'a dyn Fn(usize) -> Option<f64>,
     /// The time of the newest state.
     pub live_time: f64,
+    /// Whether the view walks forward or follows the newest state (rather than staying on its
+    /// frame).
+    pub playing: bool,
+    /// Whether the simulation is paused.
     pub paused: bool,
     /// The run is complete (or failed): nothing to pause or step.
     pub finished: bool,
@@ -56,7 +67,10 @@ pub struct TimelineView<'a> {
 /// What the user asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeAction {
-    TogglePause,
+    /// Play or pause the view.
+    TogglePlay,
+    /// Pause or resume the simulation.
+    ToggleSimulation,
     Back,
     Forward,
     Seek(usize),
@@ -73,7 +87,9 @@ pub fn keys(ctx: &egui::Context) -> Option<TimeAction> {
     ctx.input_mut(|input| {
         let none = egui::Modifiers::NONE;
         if input.consume_key(none, egui::Key::Space) {
-            Some(TimeAction::TogglePause)
+            Some(TimeAction::TogglePlay)
+        } else if input.consume_key(none, egui::Key::P) {
+            Some(TimeAction::ToggleSimulation)
         } else if input.consume_key(none, egui::Key::ArrowLeft) {
             Some(TimeAction::Back)
         } else if input.consume_key(none, egui::Key::ArrowRight) {
@@ -86,12 +102,62 @@ pub fn keys(ctx: &egui::Context) -> Option<TimeAction> {
     })
 }
 
+/// Frames per second at which a playing view walks through the recorded frames.
+pub const WALK_RATE: f64 = 5.0;
+
+/// The pace of a view walking through the recorded frames: each frame stays on screen for
+/// 1 / [`WALK_RATE`] seconds from when it is shown, so slow reads or rebuilds slow the walk down
+/// rather than skipping or flashing frames.
+#[derive(Debug, Default)]
+pub struct Walk {
+    playing: bool,
+    /// When the last frame of the walk was shown.
+    last: Option<web_time::Instant>,
+}
+
+impl Walk {
+    pub fn is_playing(&self) -> bool {
+        self.playing
+    }
+
+    /// Starts walking; the first frame is due at once.
+    pub fn play(&mut self) {
+        self.playing = true;
+        self.last = None;
+    }
+
+    pub fn stop(&mut self) {
+        self.playing = false;
+        self.last = None;
+    }
+
+    /// How long until the next frame is due (zero: now), or `None` if the walk does not go on
+    /// by itself: it is stopped, or the frame it asked for is not shown yet (its read wakes the
+    /// view).
+    pub fn wait(&self, now: web_time::Instant, shown: bool) -> Option<Duration> {
+        if !self.playing || !shown {
+            return None;
+        }
+        let interval = Duration::from_secs_f64(1.0 / WALK_RATE);
+        Some(
+            self.last
+                .map_or(Duration::ZERO, |last| interval.saturating_sub(now - last)),
+        )
+    }
+
+    /// A frame of the walk is on screen from `now` on.
+    pub fn shown(&mut self, now: web_time::Instant) {
+        self.last = Some(now);
+    }
+}
+
 /// Whether the forward button does anything: the next frame, or a step of the paused
 /// simulation on the newest one.
 pub fn can_step_forward(view: &TimelineView) -> bool {
-    if view.live || view.position + 1 >= view.positions {
+    if view.live {
         view.paused && !view.finished && !view.step_pending
     } else {
+        // A past frame, or the newest one with the view paused: forward goes live on it.
         true
     }
 }
@@ -148,7 +214,7 @@ fn buttons_width(ui: &egui::Ui) -> f32 {
         .size()
         .x
         + 2.0 * spacing.button_padding.x;
-    4.0 * side + live.max(side) + 4.0 * spacing.item_spacing.x
+    5.0 * side + live.max(side) + 5.0 * spacing.item_spacing.x
 }
 
 /// The width of the time label showing `text`.
@@ -216,8 +282,8 @@ impl TimeBar {
     }
 }
 
-/// The collapsed bar: the expand button, pause/resume and the time in one flat row, as wide as
-/// they are.
+/// The collapsed bar: the expand button, play/pause, the simulation's button and the time in one
+/// flat row, as wide as they are.
 fn show_strip(
     ctx: &egui::Context,
     view: &TimelineView,
@@ -237,7 +303,8 @@ fn show_strip(
                         {
                             *toggle = true;
                         }
-                        pause_button(ui, view, action);
+                        play_button(ui, view, action);
+                        simulation_button(ui, view, action);
                         time_label(ui, view, time_text(view));
                         if view.error.is_some() {
                             ui.colored_label(ui.visuals().error_fg_color, "⚠")
@@ -317,6 +384,10 @@ fn show_bar(
 /// The symbols of the buttons, drawn rather than taken from a font (egui's fonts lack them).
 #[derive(Debug, Clone, Copy)]
 enum Icon {
+    /// A cog: the simulation, with pause bars in its hub while it is paused.
+    Simulation {
+        paused: bool,
+    },
     Play,
     Pause,
     Back,
@@ -329,10 +400,13 @@ enum Icon {
 
 /// A square button with an icon.
 fn icon_button(ui: &mut egui::Ui, icon: Icon, enabled: bool) -> egui::Response {
+    let selected = matches!(icon, Icon::Simulation { paused: true });
     let side = ui.spacing().interact_size.y;
     let response = ui.add_enabled(
         enabled,
-        egui::Button::new("").min_size(egui::vec2(side, side)),
+        egui::Button::new("")
+            .min_size(egui::vec2(side, side))
+            .selected(selected),
     );
     let color = ui.style().interact(&response).fg_stroke.color;
     let color = if enabled {
@@ -367,6 +441,34 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, enabled: bool) -> egui::Response {
     };
     let width = rect.width();
     match icon {
+        Icon::Simulation { paused } => {
+            // Larger than the other icons, so that the teeth and the bars stay legible.
+            let center = rect.center();
+            let radius = 0.75 * width;
+            let ring = 0.55 * radius;
+            let stroke = egui::Stroke::new(0.28 * radius, color);
+            painter.circle_stroke(center, ring, stroke);
+            for tooth in 0..6 {
+                let angle = tooth as f32 * std::f32::consts::FRAC_PI_3;
+                let direction = egui::vec2(angle.cos(), angle.sin());
+                painter.line_segment(
+                    [center + direction * ring, center + direction * radius],
+                    egui::Stroke::new(0.22 * radius, color),
+                );
+            }
+            if paused {
+                let height = 0.5 * ring;
+                for x in [-0.22 * ring, 0.22 * ring] {
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(x, -height),
+                            center + egui::vec2(x, height),
+                        ],
+                        egui::Stroke::new(0.25 * ring, color),
+                    );
+                }
+            }
+        }
         Icon::Play => {
             painter.add(triangle(rect.left() + 0.1 * width, rect.right(), true));
         }
@@ -401,18 +503,46 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, enabled: bool) -> egui::Response {
     response
 }
 
-fn pause_button(ui: &mut egui::Ui, view: &TimelineView, action: &mut Option<TimeAction>) {
-    let (icon, tip) = if view.paused {
-        (Icon::Play, "Resume the simulation (space)")
+/// Plays or pauses the view.
+fn play_button(ui: &mut egui::Ui, view: &TimelineView, action: &mut Option<TimeAction>) {
+    let (icon, tip) = if view.playing {
+        (
+            Icon::Pause,
+            "Pause the view on this frame; the simulation goes on (space)".to_owned(),
+        )
     } else {
-        (Icon::Pause, "Pause the simulation (space)")
+        (
+            Icon::Play,
+            format!(
+                "Play: walk through the frames ({WALK_RATE} per second) up to the newest, then \
+                 follow the simulation (space)"
+            ),
+        )
     };
-    if icon_button(ui, icon, !view.finished)
-        .on_hover_text(tip)
-        .on_disabled_hover_text("The simulation is complete")
-        .clicked()
+    if icon_button(ui, icon, true).on_hover_text(tip).clicked() {
+        *action = Some(TimeAction::TogglePlay);
+    }
+}
+
+/// Pauses or resumes the simulation.
+fn simulation_button(ui: &mut egui::Ui, view: &TimelineView, action: &mut Option<TimeAction>) {
+    let tip = if view.paused {
+        "The simulation is paused: resume it (P)"
+    } else {
+        "Pause the simulation (P); the view can still play the recorded frames"
+    };
+    if icon_button(
+        ui,
+        Icon::Simulation {
+            paused: view.paused && !view.finished,
+        },
+        !view.finished,
+    )
+    .on_hover_text(tip)
+    .on_disabled_hover_text("The simulation is complete")
+    .clicked()
     {
-        *action = Some(TimeAction::TogglePause);
+        *action = Some(TimeAction::ToggleSimulation);
     }
 }
 
@@ -428,15 +558,19 @@ fn buttons(
     {
         *toggle = true;
     }
-    pause_button(ui, view, action);
     if icon_button(ui, Icon::Back, view.position > 0)
         .on_hover_text("One frame back (←)")
         .clicked()
     {
         *action = Some(TimeAction::Back);
     }
+    play_button(ui, view, action);
     let forward_tip = if view.live || view.position + 1 >= view.positions {
-        "Compute one more step (→)"
+        if view.paused && !view.finished {
+            "Compute one more step (→)"
+        } else {
+            "Follow the simulation again (→)"
+        }
     } else {
         "One frame forward (→)"
     };
@@ -445,7 +579,7 @@ fn buttons(
         .on_disabled_hover_text(if view.step_pending {
             "Computing the step…"
         } else {
-            "Pause to step the simulation (→ then computes one step)"
+            "Pause the simulation (cog) to compute single steps with →"
         })
         .clicked()
     {
@@ -458,16 +592,25 @@ fn buttons(
     {
         *action = Some(TimeAction::Live);
     }
+    simulation_button(ui, view, action);
 }
 
 fn time_label(ui: &mut egui::Ui, view: &TimelineView, text: String) {
     let mut text = egui::RichText::new(text).monospace();
-    if view.loading {
+    let paused = view.paused && !view.finished;
+    if paused {
+        let color = ui.visuals().warn_fg_color;
+        text = text.color(if view.loading {
+            color.gamma_multiply(0.5)
+        } else {
+            color
+        });
+    } else if view.loading {
         text = text.weak();
     }
     let label = ui.label(text);
-    if view.paused && !view.finished {
-        label.on_hover_text("Paused");
+    if paused {
+        label.on_hover_text("The simulation is paused");
     }
 }
 
@@ -500,6 +643,7 @@ mod tests {
             live: true,
             time_of,
             live_time: 9.0,
+            playing: true,
             paused: false,
             finished: false,
             step_pending: false,
@@ -527,9 +671,38 @@ mod tests {
         view.position = 3;
         assert!(can_step_forward(&view));
         assert_eq!(time_text(&view), "3 Myr · live 9");
+        // Paused on the newest frame: forward goes live.
+        view.position = 9;
+        assert!(can_step_forward(&view));
         view.live = true;
         view.position = 9;
         assert_eq!(time_text(&view), "9 Myr");
+    }
+
+    #[test]
+    fn the_walk_goes_on_only_once_its_frame_is_shown() {
+        let start = web_time::Instant::now();
+        let interval = Duration::from_secs_f64(1.0 / WALK_RATE);
+        let mut walk = Walk::default();
+        assert_eq!(walk.wait(start, true), None);
+        walk.play();
+        // The first frame at once.
+        assert_eq!(walk.wait(start, true), Some(Duration::ZERO));
+        walk.shown(start);
+        // Not before the frame asked for is shown…
+        assert_eq!(walk.wait(start + interval, false), None);
+        // …then the rest of the interval.
+        assert_eq!(
+            walk.wait(start + interval / 4, true),
+            Some(interval * 3 / 4)
+        );
+        assert_eq!(walk.wait(start + interval * 2, true), Some(Duration::ZERO));
+        walk.stop();
+        assert_eq!(walk.wait(start + interval * 2, true), None);
+        // Playing again starts at once, not after a stale interval.
+        walk.shown(start);
+        walk.play();
+        assert_eq!(walk.wait(start, true), Some(Duration::ZERO));
     }
 
     #[test]

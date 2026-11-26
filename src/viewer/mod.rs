@@ -476,6 +476,10 @@ struct Viewer {
     /// The recorded frame shown (or being read), or `None` while the view follows the newest
     /// state.
     viewing: Option<usize>,
+    /// The recorded frame on screen (`viewing` once its read completed), and the walk of a
+    /// playing view through the recorded frames (see [`timeline::Walk`]).
+    shown_frame: Option<usize>,
+    walk: timeline::Walk,
     /// Why the past frame could not be shown.
     frame_error: Option<String>,
     /// Whether the user paused the simulation, and asked for a step that has not arrived.
@@ -653,6 +657,8 @@ impl Viewer {
             history: None,
             latest: None,
             viewing: None,
+            shown_frame: None,
+            walk: timeline::Walk::default(),
             frame_error: None,
             paused: false,
             step_pending: false,
@@ -740,6 +746,8 @@ impl Viewer {
         }))));
         self.latest = None;
         self.viewing = None;
+        self.shown_frame = None;
+        self.walk.stop();
         self.frame_error = None;
         self.paused = false;
         self.step_pending = false;
@@ -986,9 +994,11 @@ impl Viewer {
         match result {
             Ok(frame) if self.viewing == Some(frame.index) => {
                 let Some(picking) = &self.picking else {
+                    self.walk.stop();
                     return;
                 };
                 if frame.cells.len() != picking.mesh.len() {
+                    self.walk.stop();
                     self.frame_error = Some("the frame does not fit the mesh".to_owned());
                     return;
                 }
@@ -1000,11 +1010,20 @@ impl Viewer {
                     .unwrap_or(self.shown_time);
                 self.frame_error = None;
                 self.show(time, Arc::new(frame.cells), Arc::new(frame.plates), fields);
+                self.shown_frame = Some(frame.index);
+                // The walk holds every frame for its interval from when it is shown.
+                if self.walk.is_playing() {
+                    self.walk.shown(web_time::Instant::now());
+                }
             }
             Ok(_) => {}
             // A read that failed after the view went live again is no longer of interest.
             Err(_) if self.viewing.is_none() => {}
-            Err(error) => self.frame_error = Some(format!("Cannot show this frame: {error}")),
+            Err(error) => {
+                // The frames after a lost one are lost as well: no use walking on.
+                self.walk.stop();
+                self.frame_error = Some(format!("Cannot show this frame: {error}"));
+            }
         }
     }
 
@@ -1028,6 +1047,11 @@ impl Viewer {
             self.go_live();
             return;
         }
+        self.hold(index);
+    }
+
+    /// Shows the recorded frame `index` and stays on it, even if it is the newest.
+    fn hold(&mut self, index: usize) {
         self.viewing = Some(index);
         if let Some(history) = &mut self.history {
             history.request(index);
@@ -1035,8 +1059,51 @@ impl Viewer {
         self.poll_history();
     }
 
+    /// Pauses a view that follows the newest state: it stays on the newest recorded frame,
+    /// read from the history, so that it has every field (`Fields::from_frame`) like any other
+    /// past frame. With a full history (the newest state was not recorded) that is the last
+    /// recorded frame.
+    fn freeze(&mut self) {
+        let Some(last) = self
+            .history
+            .as_ref()
+            .and_then(|history| history.len().checked_sub(1))
+        else {
+            return;
+        };
+        self.walk.stop();
+        self.hold(last);
+    }
+
+    /// Walks a playing view on to the next frame once it is due, and asks for a repaint when
+    /// the one after will be.
+    fn walk(&mut self, ctx: &egui::Context) {
+        let Some(index) = self.viewing else {
+            return;
+        };
+        let now = web_time::Instant::now();
+        let Some(wait) = self.walk.wait(now, self.shown_frame == Some(index)) else {
+            return;
+        };
+        if wait.is_zero() {
+            // On the last position this goes live: from then on the view follows the
+            // simulation at its own pace.
+            self.view(index + 1);
+            if self.viewing.is_some() && self.shown_frame == self.viewing {
+                // Read at once (the frame was decoded before): the next one is due later.
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    1.0 / timeline::WALK_RATE,
+                ));
+            }
+        } else {
+            ctx.request_repaint_after(wait);
+        }
+    }
+
     /// Follows the newest state again.
     fn go_live(&mut self) {
+        self.walk.stop();
+        self.shown_frame = None;
         self.frame_error = None;
         if self.viewing.take().is_some()
             && let Some(latest) = &self.latest
@@ -1066,7 +1133,24 @@ impl Viewer {
         let positions = self.positions();
         let position = self.viewing.unwrap_or(positions.saturating_sub(1));
         match action {
-            TimeAction::TogglePause => {
+            TimeAction::TogglePlay => {
+                if self.viewing.is_none() {
+                    self.freeze();
+                } else if self.walk.is_playing() {
+                    self.walk.stop();
+                } else if self.frame_error.is_some() {
+                    // The frames after one that cannot be read cannot be either (see
+                    // `History`): play on from the newest state.
+                    self.go_live();
+                } else {
+                    self.walk.play();
+                }
+                tracing::info!(
+                    playing = self.viewing.is_none() || self.walk.is_playing(),
+                    "View playing"
+                );
+            }
+            TimeAction::ToggleSimulation => {
                 if self.finished() {
                     return;
                 }
@@ -1081,20 +1165,30 @@ impl Viewer {
             }
             TimeAction::Back => {
                 if position > 0 && positions > 0 {
+                    self.walk.stop();
                     self.view(position - 1);
                 }
             }
             TimeAction::Forward => {
-                if self.viewing.is_some() {
+                if position + 1 < positions {
+                    self.walk.stop();
                     self.view(position + 1);
                 } else if self.paused && !self.finished() && !self.step_pending {
+                    // On the newest frame (live or paused on it): show the step when it comes.
+                    self.go_live();
                     self.step_pending = true;
                     if let Some(control) = &mut self.control {
                         control.step();
                     }
+                } else if self.viewing.is_some() {
+                    // Paused on the newest frame: follow the simulation again.
+                    self.go_live();
                 }
             }
-            TimeAction::Seek(index) => self.view(index),
+            TimeAction::Seek(index) => {
+                self.walk.stop();
+                self.view(index);
+            }
             TimeAction::Live => self.go_live(),
         }
     }
@@ -1130,6 +1224,7 @@ impl Viewer {
             live: self.viewing.is_none(),
             time_of: &time_of,
             live_time: latest.time,
+            playing: self.viewing.is_none() || self.walk.is_playing(),
             paused: self.paused,
             finished: self.finished(),
             step_pending: self.step_pending,
@@ -1383,6 +1478,7 @@ impl eframe::App for Viewer {
             updated = true;
         }
         self.poll_history();
+        self.walk(ui.ctx());
         if updated && let Some(time) = self.time {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Title(format!(
