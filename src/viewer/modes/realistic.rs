@@ -434,8 +434,8 @@ fn layers(cell: &CellInfo, season: Period, abiotic: bool, closed_lake: bool) -> 
         let cold = smoothstep(0.0, -10.0, temperature);
         (mix(MELTING_SEA_ICE, SEA_ICE, cold), cover)
     } else if let WaterBody::Lake(depth) = body {
-        // Lakes ice over in their own way: not from the climate's `ice`, which is sea ice
-        // below sea level and the snowfall-limited ice sheet above it. In the annual state where
+        // Lakes ice over in their own way here, not from the climate's `ice` (since #173 the
+        // lake ice of the temperature model; using it is a follow-up). In the annual state where
         // the annual mean is far below freezing; in a month by its temperature, or where even
         // the warmest month freezes. The ice is
         // snow-covered where snow falls, grey and bare where it does not.
@@ -656,13 +656,13 @@ fn coast_value(data: &ModeData, layers: &[Layers], cell: usize) -> f32 {
     height.max(floor)
 }
 
-/// The cells with the air temperatures over land below sea level: lakes whose floor is below
-/// sea level and dry closed depressions. The climate gives such cells the surface temperature
-/// of the ocean (it knows only land above sea level), which would keep a lake inside a frozen
-/// continent open in winter; they take the mean of their neighbours above sea level instead
-/// (spread inwards over up to 8 rings; cells with no such land in reach keep their own).
+/// The cells with the air temperatures over dry land below sea level (closed depressions): they
+/// take the mean of their neighbours above sea level (spread inwards over up to 8 rings; cells
+/// with no such land in reach keep their own). Lakes keep their own temperatures: the climate
+/// treats them as open water with their own ice (#173).
 fn lake_air<'a>(data: &ModeData<'a>) -> std::borrow::Cow<'a, [CellInfo]> {
-    let low_lake = |cell: &CellInfo| !cell.is_sea() && cell.elevation < 0.0;
+    let low_lake =
+        |cell: &CellInfo| !cell.is_sea() && cell.elevation < 0.0 && cell.lake_depth <= 0.0;
     if !data.cells.iter().any(low_lake) {
         return std::borrow::Cow::Borrowed(data.cells);
     }
@@ -1299,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn lakes_below_sea_level_take_the_air_of_the_land_around() {
+    fn dry_land_below_sea_level_takes_the_air_of_the_land_around() {
         use super::super::super::plate_colors::PlateColors;
         use super::super::super::{Fields, plate_infos};
         use clap::Parser;
@@ -1307,13 +1307,20 @@ mod tests {
         let planet = crate::build_planet(&cli).unwrap();
         let mesh = planet.tectonics().mesh();
         let plates = plate_infos(&planet);
-        // Cold land at +500 m, a lake of two rings below sea level with the ocean's warmth.
+        // Cold land at +500 m, a dry depression of two rings below sea level with the ocean's
+        // warmth, and a lake at the last cell below sea level with the temperature of its own water.
         let lake: Vec<u32> = std::iter::once(0)
             .chain(mesh.neighbors(0).iter().copied())
             .collect();
+        let far = mesh.len() as u32 - 1;
         let cells: Vec<CellInfo> = (0..mesh.len() as u32)
             .map(|cell| {
                 if lake.contains(&cell) {
+                    CellInfo {
+                        drainage: CellInfo::drainage_bits(Some(0), false, true, 0.0),
+                        ..cell_at(-100.0)
+                    }
+                } else if cell == far {
                     CellInfo {
                         drainage: CellInfo::drainage_bits(Some(0), false, true, 300.0),
                         lake_depth: 300.0,
@@ -1347,11 +1354,8 @@ mod tests {
             assert_eq!(air[cell as usize].temperature_january, -20.0);
         }
         assert_eq!(cells[0].temperature_january, 0.0);
-        // So the lake freezes in January.
-        assert_eq!(
-            layers(&air[0], Period::January, false, false).snow_cover,
-            1.0
-        );
+        // The lake keeps its own temperature (#173).
+        assert_eq!(air[far as usize].temperature_january, 0.0);
     }
 
     #[test]

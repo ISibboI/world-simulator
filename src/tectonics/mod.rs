@@ -279,7 +279,8 @@ pub struct TectonicParams {
     pub ocean_volume: f64,
     /// Bodies of water below sea level of at least this fraction of the surface are seas
     /// connected to the ocean by straits narrower than a cell (see
-    /// [`crate::sea::MIN_SEA_FRACTION`]); smaller closed ones are lakes or dry.
+    /// [`crate::sea::MIN_SEA_FRACTION`]); smaller closed ones are lakes or dry. Off by default
+    /// ([`crate::sea::NO_SIZE_RULE`], #173): every closed body is a lake or dry.
     pub min_sea_fraction: f64,
     /// Mantle flow below the plates.
     pub mantle: MantleParams,
@@ -361,7 +362,7 @@ impl Default for TectonicParams {
             boundary_coupling_width: 200e3,
             track_material_budget: false,
             ocean_volume: 1.335e18,
-            min_sea_fraction: crate::sea::MIN_SEA_FRACTION,
+            min_sea_fraction: crate::sea::NO_SIZE_RULE,
             mantle: MantleParams::default(),
             matching: MatchingParams::default(),
             events: PlateEventParams::default(),

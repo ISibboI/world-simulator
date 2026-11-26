@@ -316,6 +316,11 @@ impl Planes {
         }
     }
 
+    /// Bytes of the quantised attributes.
+    pub fn size(&self) -> usize {
+        self.bytes.len()
+    }
+
     /// The attributes of the cells, as far as the quantisation keeps them.
     pub fn cell_infos(&self) -> Vec<CellInfo> {
         let count = self.cells;

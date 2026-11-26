@@ -4,7 +4,10 @@ A simulation of an Earth-like planet: plate tectonics, climate, water cycle and 
 icosphere, with a 3D viewer (eframe/egui + wgpu). It runs as a desktop program
 (`cargo run --release -- --help`; `--headless` for batch runs with PNG snapshots) and in the
 browser: **https://isibboi.github.io/world-simulator/** (parameters as URL query parameters,
-e.g. `?seed=3&subdivisions=5`).
+e.g. `?seed=3&subdivisions=5`). Without a seed, the desktop 3D view and the web page start a
+new planet with a random seed; the parameter panel shows it, and the web page puts it into its
+URL, so a reload or a shared link makes the same planet. `--headless` runs use seed 0 unless
+given one.
 
 ## Supported browsers
 
