@@ -481,8 +481,8 @@ pub fn detail_vertices(data: &ModeData, faces: &[[u32; 3]]) -> Vec<DetailVertex>
         return Vec::new();
     }
     let closed = closed_lakes(data);
-    let own: Vec<Layers> = data
-        .cells
+    let cells = lake_air(data);
+    let own: Vec<Layers> = cells
         .iter()
         .zip(&closed)
         .map(|(cell, &closed)| layers(cell, season, data.abiotic, closed))
@@ -603,6 +603,58 @@ fn coast_value(data: &ModeData, layers: &[Layers], cell: usize) -> f32 {
     // Sub-cell lakes only in humid land: a floor above the noise's reach in dry land.
     let floor = 0.4 + 0.15 * (1.0 - smoothstep(0.3, 0.8, moisture_index(info)));
     height.max(floor)
+}
+
+/// The cells with the air temperatures over lakes whose floor is below sea level. The climate
+/// gives such cells the surface temperature of the ocean (it knows only land above sea level),
+/// which would keep a lake inside a frozen continent open in winter; they take the mean of
+/// their neighbours above sea level instead (spread inwards over a few rings for large lakes).
+fn lake_air<'a>(data: &ModeData<'a>) -> std::borrow::Cow<'a, [CellInfo]> {
+    let low_lake =
+        |cell: &CellInfo| matches!(cell.water_body(), WaterBody::Lake(_)) && cell.elevation < 0.0;
+    if !data.cells.iter().any(low_lake) {
+        return std::borrow::Cow::Borrowed(data.cells);
+    }
+    let mut cells = data.cells.to_vec();
+    // Cells with the air temperature of land: above sea level, or lakes already filled in.
+    let mut known: Vec<bool> = cells.iter().map(|cell| cell.elevation >= 0.0).collect();
+    for _ in 0..8 {
+        let mut changed = Vec::new();
+        for cell in 0..cells.len() {
+            if known[cell] || !low_lake(&cells[cell]) {
+                continue;
+            }
+            let neighbours: Vec<&CellInfo> = data
+                .mesh
+                .neighbors(cell as u32)
+                .iter()
+                .filter(|&&n| known[n as usize])
+                .map(|&n| &cells[n as usize])
+                .collect();
+            if neighbours.is_empty() {
+                continue;
+            }
+            let mean = |pick: fn(&CellInfo) -> f32| {
+                neighbours.iter().map(|cell| pick(cell)).sum::<f32>() / neighbours.len() as f32
+            };
+            changed.push((
+                cell,
+                mean(|cell| cell.temperature),
+                mean(|cell| cell.temperature_january),
+                mean(|cell| cell.temperature_july),
+            ));
+        }
+        if changed.is_empty() {
+            break;
+        }
+        for (cell, annual, january, july) in changed {
+            cells[cell].temperature = annual;
+            cells[cell].temperature_january = january;
+            cells[cell].temperature_july = july;
+            known[cell] = true;
+        }
+    }
+    std::borrow::Cow::Owned(cells)
 }
 
 /// Whether each lake cell belongs to a closed lake, one whose water does not leave: its
@@ -1113,6 +1165,62 @@ mod tests {
         );
         belt.sort_by(f32::total_cmp);
         assert!(belt[belt.len() / 2] > 0.15, "{belt:?}");
+    }
+
+    #[test]
+    fn lakes_below_sea_level_take_the_air_of_the_land_around() {
+        use super::super::super::plate_colors::PlateColors;
+        use super::super::super::{Fields, plate_infos};
+        use clap::Parser;
+        let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "3"]);
+        let planet = crate::build_planet(&cli).unwrap();
+        let mesh = planet.tectonics().mesh();
+        let plates = plate_infos(&planet);
+        // Cold land at +500 m, a lake of two rings below sea level with the ocean's warmth.
+        let lake: Vec<u32> = std::iter::once(0)
+            .chain(mesh.neighbors(0).iter().copied())
+            .collect();
+        let cells: Vec<CellInfo> = (0..mesh.len() as u32)
+            .map(|cell| {
+                if lake.contains(&cell) {
+                    CellInfo {
+                        drainage: CellInfo::drainage_bits(Some(0), false, true, 300.0),
+                        lake_depth: 300.0,
+                        ..cell_at(-100.0)
+                    }
+                } else {
+                    CellInfo {
+                        temperature_january: -20.0,
+                        ..cell_at(500.0)
+                    }
+                }
+            })
+            .collect();
+        let vertices = super::super::super::surface_vertices(mesh, &cells, 1.0, 1e11);
+        let (plate_colors, fields) = (PlateColors::default(), Fields::default());
+        let options = OptionValues::defaults(Realistic.options());
+        let data = ModeData {
+            mesh,
+            vertices: &vertices,
+            cells: &cells,
+            plates: &plates,
+            plate_colors: &plate_colors,
+            fields: &fields,
+            arrow_cells: &[],
+            arrow_spacing: 0.1,
+            options: &options,
+            abiotic: false,
+        };
+        let air = lake_air(&data);
+        for &cell in &lake {
+            assert_eq!(air[cell as usize].temperature_january, -20.0);
+        }
+        assert_eq!(cells[0].temperature_january, 0.0);
+        // So the lake freezes in January.
+        assert_eq!(
+            layers(&air[0], Period::January, false, false).snow_cover,
+            1.0
+        );
     }
 
     fn cell_at(elevation: f32) -> CellInfo {

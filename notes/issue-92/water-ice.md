@@ -1,165 +1,172 @@
-# #92 stage 4: water and ice details — plan
+# #92 stage 4: water and ice details
 
-Status: plan (2026-11-26), before review. Stage 4 of [plan.md](plan.md) §10, adapted to
-Sebastian's decisions (§0): **no rivers** (invisible from space); relief true to scale; no zoom;
-LOD by the pixel footprint as in stage 2; Detail default Medium; Light option only in the
-Realistic mode; Topographic stays the start-up mode; nothing but the sun (its glow and glint) may
-over-expose.
+Stage 4 of [plan.md](plan.md) §10, adapted to Sebastian's decisions (§0):
 
-Project goal: an Earth-*like* planet, judged by physical plausibility; the ~110 km grid
-(~220 km on the web) is accepted and explained where it shows.
+- **no rivers**, since they are invisible from space;
+- relief true to scale, no zoom;
+- level of detail by the pixel footprint, as in stage 2;
+- Detail defaults to Medium; the Light option exists only in the Realistic mode;
+- Topographic stays the start-up mode;
+- nothing but the sun, its glow and its glint may over-expose.
 
-## 1. What stages 1–3 already do
+The plan was reviewed by an independent agent before the implementation (§6). Its main findings
+changed the design: a mean-preserving sea-ice rule, a strike *tensor* instead of per-corner
+noise fields, a structure tensor for the crests, and several lake fixes.
 
-- **Lakes** are water cells (`CellInfo::water_body`, #128: a closed depression with ≥ 1 m of
-  water) with one flat colour `LAKE` (0.012, 0.03, 0.04) whatever their depth, the ocean's
-  wind roughness (Cox & Munk) and so the same glint, and a coast value
-  `−(0.5 + 0.5 smoothstep(0, 200 m, depth))`, so the noise (±0.5) never erases a lake.
-  In January/July a lake freezes with the land rule `smoothstep(−1, −6 °C)` and shows `SNOW`.
-- **Dry depressions** (closed depressions with < 1 m of water) are ordinary land.
-- **Sub-cell "lakes" on all lowlands:** land corners have the coast value
-  `0.4 + 0.6 smoothstep(0, 2000 m, elevation)`; the noise reaches ±0.5, so wherever the land is
-  below ~500 m the noise opens small water patches — in deserts as well as in humid lowlands —
-  and they take the water layer of the cell (shelf colour, glint). On land next to a high lake
-  the coast value counts the height above sea level, not above the lake, so the shoreline is
-  pushed into the lake.
-- **Sea ice:** annual state: binary, `ice > 0.5` → full `SEA_ICE`. January/July: the binary
-  permanent ice, or `smoothstep(−1, −6 °C)` of the month's temperature. So in July the annual
-  ice (> 0.5) stays fully frozen, and a cell with annual cover 0.4 shows open water in January
-  unless its month is cold. The edge noise is the plate-anchored pattern, i.e. it rides on the
-  oceanic plate under the ice.
-- **Snow:** a cover per cell (month freezing × precipitation); the shader roughens it with an
-  independent pattern (`3.2 w c(1−c) n₂`) and sharpens it around ½. The snow does not follow the
-  bump relief.
-- **Bump relief:** isotropic fBm (ridged on High); no orientation.
+**No frame change, no codec change.** Everything comes from fields the frames already hold
+(elevation, lake depth, drainage bits, temperatures and precipitation of the year, January and
+July, the annual ice cover, moisture). The detail vertex grows from 52 to 60 bytes (+8 bytes:
+the strike tensor and an ocean flag): 14.7 MB at 6 subdivisions (was 12.8), 3.7 MB at 5 (was 3.2).
 
-## 2. Changes
+## 1. What stages 1–3 did, and what was wrong
 
-### 2.1 Lakes
+- **Lakes** had one flat colour whatever their depth, the ocean's roughness, and froze with the
+  rule for land snow.
+- **Sub-cell lakes on all lowlands:** the noise (±0.5) opened water wherever land corners
+  were below ~500 m (coast value < 0.5), in deserts as well. These patches had the ocean's shelf
+  colour.
+- **Sea ice** was binary in the annual state (`ice > 0.5`). In January and July the permanent
+  ice stayed fully frozen in summer. A month froze only below −1…−6 °C, but the model's melting
+  ice sits at 0 °C. The edge noise rode on the oceanic plate under the ice.
+- Snow did not follow the bump relief, and the relief had no orientation.
 
-1. **Colour by depth and salinity** (CPU, `layers`):
-   - fresh water from a turbid, greenish shallow colour at ≤ 3 m to clear dark water at
-     ≥ 150 m (logarithmic, like the ocean's shelf→deep): `LAKE_SHALLOW` ≈ (0.030, 0.050, 0.035)
-     (albedo ~0.045), `LAKE_DEEP` ≈ (0.008, 0.020, 0.032) (~0.018);
-   - **saline lakes:** endorheic lakes (the lake's water does not leave: following the
-     receivers inside the lake ends at a cell without a receiver) in an arid climate (moisture
-     index P/PET of the lake cell < 0.4…0.2) are tinted towards a pale, shallow saline colour
-     `SALINE` ≈ (0.06, 0.11, 0.10) (Aral, Great Salt Lake, Caspian shallows), weighted by
-     aridity and shallowness. The simulation has no salinity; this is a proxy from closure and
-     aridity, as in nature (closed lakes in dry climates are saline).
-2. **Calmer water:** lakes are fetch-limited; their roughness uses Cox & Munk with half the
-   wind speed, so their glint is sharper than the ocean's at the same wind.
-3. **Lake ice** with the simulation's own rule: the frozen share of the chosen month is
-   `1 − ice_free(T) = clamp((2 − T)/4, 0, 1)` (`climate::ice_free`, which also stops lake
-   evaporation); colour `LAKE_ICE` ≈ (0.60, 0.64, 0.70), snow-covered lake ice, darker than
-   fresh snow. Annual state: the permanent ice share only. Noise anchored to the plate (the
-   lake sits on the crust).
-4. **Shorelines:** the coast value of a land corner counts its height above the highest water
-   surface among its water neighbours (a lake's level `elevation + depth`, or the sea), not above
-   sea level. Lakes on plateaus get shorelines in the same place as sea coasts.
-5. **No sub-cell lakes in dry land:** the coast value of land corners gets a floor that grows
-   with aridity, `0.4 → 0.55` as the moisture index falls from 0.8 to 0.3. At ≥ 0.5 the ±0.5
-   noise cannot open water inside the land, so only humid lowlands keep sub-cell lakes (as on
-   glaciated shields and wet plains on Earth). Shorelines next to water move by a few per cent of
-   an edge.
-6. **Playas / salt flats:** a dry depression's sink (a cell of a closed depression without a
-   receiver: water reaches it and evaporates) in an arid climate shows a salt flat
-   `SALT_FLAT` ≈ (0.50, 0.48, 0.44) (albedo ~0.48; playas 0.3–0.5, salt pans higher), blended
-   by aridity (MI 0.4 → 0.15); its plant cover is cut accordingly. Only the sink, not the whole
-   basin, since only the lowest part floods and dries.
+## 2. Lakes (`modes/realistic.rs`, `layers`, `detail_vertices`)
 
-### 2.2 Sea ice
+| Rule | Colour (linear reflectance) |
+|---|---|
+| Fresh lakes: turbid, greenish shallow water at ≤ 3 m to dark clear water at ≥ 300 m (logarithmic) | (0.030, 0.050, 0.035) → (0.009, 0.021, 0.028) |
+| **Saline lakes:** a closed lake (the drainage, followed inside the lake, ends at a cell without a receiver, the exit of an endorheic lake) in a dry climate (moisture index 0.5 → 0.2), more so when shallow | → (0.06, 0.11, 0.10) |
+| **Salt flat (playa):** the sink of a dry closed depression (no receiver: water collects there and evaporates) in a dry climate (MI 0.4 → 0.15). At most half the cell, since Earth's largest salt flats are smaller than a cell | → (0.50, 0.48, 0.44), plants cut by the same share |
+| **Lake ice** (January/July): from −1 °C, fully frozen at −5 °C (shallow) to −10 °C (≥ 200 m deep, which stores the summer's heat); all year where the annual mean is −10 … −20 °C | snow-covered (0.60, 0.64, 0.70) where snow falls, bare grey ice (0.24, 0.28, 0.32) where it does not |
 
-1. **Continuous cover**, so the edge falls between cells where the interpolated cover crosses ½
-   (sub-cell, not in cell steps):
-   - annual state: the annual mean cover `ice` (0–1) of the simulation as it is;
-   - January/July: the month's cover from the month's surface temperature, `smoothstep(−1, −4 °C)`
-     (open water cannot cool below −1.8 °C in the model, so a mean below that means ice),
-     clamped to what the annual mean allows: at least `12·ice − 11` (ice nearly all year
-     stays), at most `12·ice` (ice that is rare in the annual mean cannot cover a whole month).
-2. **Colour by temperature:** cold, snow-covered sea ice (≈ 0.72) to melting, wet ice with melt
-   ponds (≈ 0.47), from the season's temperature (−10 °C → 0 °C), like the model's own
-   `sea_ice_albedo` / `melting_ice_albedo` switch at 0 °C.
-3. **Noise frame:** sea ice is part of the climate, not of the crust: its edge pattern is
-   anchored to the **world frame** (`up`), not to the oceanic plate below. Otherwise the pattern
-   would drift ~10–100 km per Myr frame under an ice edge that stays where the climate puts it.
-   Per corner the vertex carries an "ocean" flag; the shader mixes the plate pattern and a
-   world-frame pattern by the interpolated ocean share, and evaluates the world pattern only in
-   pixels where the snow/ice layer is partial (in branch, after the derivatives).
-   Leads in the marginal ice zone show open water and glint; the floes do not.
-4. Ice sheets on land: continuous share as well (`ice` instead of `ice > 0.5`), merged with the
-   seasonal snow by `max`.
+- **Calmer water:** lakes are fetch-limited, so their waves are those of half the wind speed
+  (Cox & Munk). Their glint is sharper than the ocean's.
+- **Air over low lakes:** the climate gives cells below sea level the ocean's surface
+  temperature, also a lake's floor below sea level. A lake inside a frozen continent would then
+  stay open in winter (seen in seed 2 at 130 Myr: a warm strip along a rift lake on the January
+  map). For the ice, such lakes take the mean temperature of their neighbours above sea level,
+  spread inwards over up to 8 rings (`lake_air`).
+- **Shorelines** as at the coast (stage 2). A land corner's coast value now counts its height
+  above the highest water surface next to it (a lake's level or the sea), not above sea level.
+  A lake on a plateau gets its shore in the middle of the edge like a sea coast, not pushed into
+  the lake.
+- **Sub-cell lakes only in humid land:** the coast value of land has a floor that grows with
+  aridity, 0.4 → 0.55 as the moisture index falls from 0.8 to 0.3. Above 0.5 the ±0.5 noise
+  cannot open water, so dry land has no sub-cell lakes, while humid lowlands keep them (as on
+  glaciated shields and wet plains). The water layer of land is now the shallow lake colour with
+  the lake roughness, no longer the ocean's shelf.
 
-### 2.3 Seasonal snow lines
+The simulation has no salt. Saline lakes and salt flats are proxies from closure and aridity,
+which is how they arise in nature. Lakes are rare in short runs: 0–1.4% of the land in most
+frames of seeds 0–3, up to 5.5% (seed 2, 130 Myr). Dry closed depressions are rarer still.
 
-- The snow line follows the relief: on rugged land the snow noise is mixed towards the implied
-  height of the bump relief (the same fBm that tilts the normals, its ridged form on High), so
-  the snow lies on the bump peaks and ridges and the valleys melt out, as with a lapse rate.
-  `n_snow = mix(n_pattern, height, ruggedness)`.
-- The cell covers stay as stage 1 (month below freezing × the month's precipitation); with the
-  continuous ice share (2.2.4) the edge between an iced cell and a snow-free one is sub-cell.
+## 3. Sea ice, snow and ice sheets
 
-### 2.4 Ridge orientation in orogens
+- **Annual state:** the ice cover sharpened around one half, `smoothstep(0.3, 0.7, ice)`, the
+  topographic view's rule made continuous. A plain linear cover made the whole polar ocean
+  (annual cover 0.5–0.8) a field of holes. Now the pack is closed, with a marginal zone of floes
+  where the cover crosses one half. This is sub-cell: the edge lies where the interpolated cover
+  crosses ½, not along the triangles.
+- **January/July:** the frames hold only the annual cover. The month's temperature can't
+  tell melting ice (0 °C in the model) from open water at its freezing point (−1.8 °C). So the
+  hemisphere's winter month (the colder of the two) gets `min(1, 2·ice)` and the summer month
+  `max(0, 2·ice − 1)`. The two average to the annual cover. Arctic-like ice with `ice = 0.8`
+  keeps 60% in July: a loose summer pack.
+- **Colour:** cold, snow-covered ice (0.68, 0.72, 0.78; albedo ≈ 0.72) to melting, wet ice
+  with melt ponds (0.42, 0.48, 0.55; ≈ 0.47), from the season's temperature (−10 → 0 °C). These
+  are surface albedos. The climate model's 0.55 / 0.45 are planetary albedos, which include the
+  atmosphere.
+- **Noise frame:** sea ice belongs to the climate, not to the crust under it. Its pattern is
+  anchored to the **world frame**, not to the oceanic plate. Otherwise it would drift 10–100 km
+  per Myr frame under an edge that stays where the climate puts it. The floes come from a
+  pattern one octave finer than the cells'. The shader mixes it in by the interpolated ocean
+  share (a flag per vertex), renormalised, only in pixels with partial cover. Leads show open
+  water and glint; floes do not.
+- **Ice sheets on land:** the same sharpened share (was `ice > 0.5`). The climate scales land
+  ice by snowfall, so cold, dry deserts can show patchy ice where the share is near ½. Ice
+  sheets also bury most of the bump relief (60% less).
+- **Snow on the relief:** on rugged land the snow pattern mixes in the height that the bump
+  relief implies: the noise on Medium, or −|noise| (recentred and rescaled) where High draws
+  ridged crests. Snow then lies on the crests first and the valleys melt out, as with a lapse
+  rate. The mix is renormalised to keep its spread.
 
-Data: no frame change needed. The strike of a mountain belt is perpendicular to the slope of the
-surface across it, and the frames hold every cell's elevation.
+## 4. Ridges along mountain belts
 
-- **CPU:** per land cell, the gradient of the drawn surface height (`surface_height`, sea at 0)
-  by least squares over its neighbours in the tangent plane; strike `s = normalize(up × ∇h)`;
-  anisotropy `a = smoothstep(3, 15 m/km, |∇h|) × ruggedness` (0 on water, plains and flat
-  crests). Thresholds checked against a real state (a 3–4 km belt over 200–300 km is 10–20 m/km).
-- **Vertex data:** like the plates, each vertex carries the strike of **all three corners**:
-  `ridges: [u32; 3]`, per corner `s·a` as snorm8 xyz plus a flag byte (bit 0: ocean corner,
-  for 2.2.3). Passed as one flat `vec3<u32>` varying; unpacked with shifts (no
-  `unpack4x8snorm`, which GLSL ES 3.00 lacks). `DetailVertex` 52 → 64 bytes (+23%; 15.7 MB at
-  6 subdivisions, 3.9 MB at 5).
-- **Shader (Medium/High; Low has no bump):** where a corner of the triangle has `a > 0`, each
-  such corner `j` with `b_j > 0` evaluates the fBm in a stretched frame:
-  `y = base·anchor`, `y_j = y − (1 − 1/k_j)(y·ŝ_j)ŝ_j`, `k_j = 1 + 3a_j` (ridges up to 4× as long
-  as wide), `ŝ_j` the strike rotated into the plate frame. The gradient is `M_j ∇n`. Isotropic
-  corners use the existing `shape`. The results are blended with the barycentric weights and
-  renormalised (`Σ b_j n_j / sqrt(Σ b_j²)`, isotropic corners merged first since they share one
-  field), so the variance stays the same. Each `ŝ_j` is constant per cell, so there is no swirl
-  (a strike interpolated across the triangle would shear the noise by |y|·Δθ ≈ several cycles
-  per cell); the blend is continuous across edges because a shared edge has the same two
-  corners. The oriented field replaces `shape` in the bump and the snow height; the coastline
-  keeps the isotropic `shape`.
-- **Cost:** up to 3 extra fBm per pixel, but only in orogen triangles (a few % of the disc).
+The frames suffice: a belt's strike is perpendicular to the slope of the surface across it.
 
-### 2.5 Legend and text
+- **CPU:** the gradient of the drawn surface height at every cell, by least squares over its
+  neighbours (sea at 0). From it the **structure tensor** over the cell and its neighbours,
+  `Σ ∇h ∇hᵀ`, in the cell's tangent plane. It is sign-free, so the two flanks of a range agree
+  and its crest, where the gradient vanishes, takes their direction. The strike is
+  perpendicular to the principal axis. Its strength is
+  - `smoothstep(2, 8 m/km)` of the rms slope along the axis (gradients over ±1 cell are
+    smoothed: a 4 km range 400 km wide measures ~5–10 m/km at 220 km cells),
+  - times the coherence `(λ₁ − λ₂)/(λ₁ + λ₂)`,
+  - times the ruggedness.
+- **Vertex:** the squeeze tensor `σ ŝŝᵀ` (σ = 1 − 1/k, ridges up to k = 4 times as long as
+  wide) in the world frame as 6 snorm8 values, plus the ocean flag. It is interpolated like any
+  attribute.
+- **Shader** (Medium and High; Low has no bump): where the tensor is non-zero, the relief noise
+  is evaluated at `M y` with `M = I − R⁻¹ S R`, its gradient `M ∇n`. Here y is the point in the
+  plate frame, R the plate's rotation and S the interpolated tensor. `ŝ` is tangent at its cell
+  centre, so the squeeze acts about the cell centre and `y·ŝ` stays below about one cycle of
+  the first octave within a triangle. Interpolating the tensor therefore shears the noise by at
+  most about a cycle where strikes really disagree, and nowhere else. One extra fBm, only in
+  orogen pixels. The coastline keeps the isotropic noise.
+- On a real state (seed 2, 130 Myr, 5 subdivisions) 280 of ~2600 land cells line up, with a
+  median squeeze of 0.03, a 90th percentile of 0.37 and a maximum of 0.71: only the steep belts.
 
-Swatches: Lake, Saline lake, Salt flat, Sea ice (with Ice, snow). Description: lakes and their
-ice, salt flats, sea ice of the season; the hover of *Season* mentions lake ice.
+## 5. Frame times
 
-## 3. Grid limits (accepted, to explain)
+FRAME_TIMES
 
-- A lake is at least one cell (~110 km; ~220 km on the web). Small lakes do not exist in the
-  data; humid lowlands get sub-cell water patches from the noise only (decoration).
-- Lake ice and sea ice of a month come from monthly mean temperatures, with ramps standing in for
-  the freeze-up within the month; sea ice per month is a proxy bounded by the simulated annual
-  cover (the frames do not hold the monthly ice).
-- Saline lakes and salt flats are proxies (closure + aridity); the simulation has no salt.
-- Strike from the surface gradient over one ring of cells: belts narrower than ~2 cells have a
-  noisy strike; a flat plateau has none (isotropic).
+## 6. Plan review (independent agent, before the implementation)
 
-## 4. Tests
+Adopted:
+- the July sea ice vanished with a temperature rule, because melting ice sits at 0 °C. Now
+  winter/summer from the annual cover;
+- `Σ bᵢ nᵢ / sqrt(Σ bᵢ²)` over per-corner noise fields inflates the relief up to √3 where the
+  fields agree. Replaced by one fBm with an interpolated squeeze tensor (cheaper, no
+  renormalisation);
+- a strike vector cancels at the crest. Now the sign-free tensor, from the structure tensor
+  over the neighbours, so crests get oriented;
+- the snow height on High is −|n|, recentred;
+- sub-cell lakes on land had the ocean's colour;
+- lake ice came too early and was white without snow;
+- lakes below sea level have the ocean's temperature and sea-ice field;
+- playas were capped at half a cell;
+- mixes of independent patterns are renormalised.
 
-- Lakes: deeper → darker; saline tint only for closed lakes in arid climate; lake roughness
-  below the ocean's at the same wind; lake ice follows `ice_free` (open at +2 °C, frozen at
-  −2 °C), none in the annual state without permanent ice.
-- Playa: arid dry sink → salt flat (brighter, albedo 0.3–0.55); humid sink or non-sink → not.
-- Coast values: arid lowland ≥ 0.5 (no noise lakes), humid lowland 0.4; land beside a high
-  lake counts from the lake's level.
-- Sea ice: annual = `ice`; July with `ice = 1` stays frozen; `ice = 0` never freezes; a cold
-  January with intermediate `ice` freezes; colder ice brighter; all albedos below the knee (0.86).
-- Strike: a synthetic north–south ridge gives a north–south strike with `a > 0`; flat land
-  `a = 0`; water 0; the ocean flag set on ocean corners only; vertex packing round-trips.
-- naga: `realistic.wgsl` still translates to GLSL ES 3.00.
+Not adopted:
+- a per-corner plate frame for the ridges, to remove the plate seam. The seam was accepted in
+  stage 2 (`detail.md`). It still cuts across ridges where a belt is a plate boundary;
+- depth-dependent freezing beyond the simple shift above.
 
-## 5. Measurements and screenshots
+## 7. Grid limits and proxies (accepted)
 
-- Frame times as stage 3 (median while dragging, 5 subdivisions, 1280×800, Low/Medium/High),
-  llvmpipe and SwiftShader WebGL2, before/after.
-- Screenshots in [water-ice/](water-ice/): lakes, lake ice (January), snow lines January vs
-  July, a sea-ice edge, an orogen close-up; desktop, web, phone 390×844. A longer run (more
-  orogens and lakes than at 10 Myr) if a 10 Myr state shows too few.
+- A lake is at least one cell: ~110 km, or ~220 km on the web. Sub-cell lakes in humid
+  lowlands are decoration from the noise.
+- Ice of a month: from the annual cover (sea ice) or the monthly mean temperature (lakes, snow),
+  with ramps standing in for the freeze-up within the month. A summer pack is spread evenly over
+  the cells that keep ice, so it looks loose everywhere rather than closed in the centre.
+- Saline lakes and salt flats are proxies; the simulation tracks no salt.
+- The strike over ±1 cell: belts narrower than ~2 cells have a noisy strike, and flat plateaus
+  none. Plate seams (stage 2) cut through ridges where a belt is a plate boundary.
+
+## 8. Checks
+
+Unit tests (`modes/realistic.rs`):
+- lakes: darker with depth; saline only when closed and dry; calmer than the ocean; lake ice in
+  a cold month, not in a mild one or the annual state; deep lakes freeze later;
+- salt flats only at dry sinks, at most half a cell;
+- sea ice: annual cover sharpened; winter and summer average to the annual cover; Arctic-like
+  ice stays in July; colder ice is brighter; all albedos below the exposure knee (0.86);
+- the strike of a synthetic north–south range runs north–south on its flanks and crest, and
+  none on the plains;
+- lakes below sea level take the air of the land around and freeze;
+- the coast floor of dry land and the ocean flag in the detail mesh;
+- naga translates `realistic.wgsl` to GLSL ES 3.00 (WebGL2).
+
+## 9. Screenshots ([water-ice/](water-ice/))
+
+SCREENSHOTS
