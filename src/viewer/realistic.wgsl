@@ -38,6 +38,10 @@ struct Detail {
     // clouds), the frequency of that octave per planet radius (y), whether the cloud tops have
     // relief (z: 0 or 1), whether the clouds cast shadows (w: 0 or 1).
     clouds: vec4<f32>,
+    // The clouds' drift (#187, `clouds.wgsl`; zero without it): the two layers of the pressure
+    // field (0, 1) and of the finer octaves (2, 3), each its seed (xyz) and weight (w), and the
+    // shift of every layer along the wind (4: in planet radii per unit of `wind`).
+    drift: array<vec4<f32>, 5>,
 };
 
 @group(0) @binding(1)
@@ -64,6 +68,8 @@ struct VertexInput {
     // The clouds of the cell: cover (x), type (y: 1 convective, 0 sheets), typical optical
     // depth / 64 (z), cloud-top height above the ground / 16 km (w).
     @location(9) clouds: vec4<f32>,
+    // The cell's wind (world frame, divided by the drift's wind scale; zero without the drift).
+    @location(10) wind: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -81,6 +87,7 @@ struct VertexOutput {
     @location(7) @interpolate(flat) plates: vec3<u32>,
     @location(8) @interpolate(flat) ridges: vec3<u32>,
     @location(9) clouds: vec4<f32>,
+    @location(10) wind: vec3<f32>,
 };
 
 @vertex
@@ -103,6 +110,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.plates = input.plates.xyz;
     output.ridges = input.ridges;
     output.clouds = input.clouds;
+    output.wind = input.wind.xyz;
     return output;
 }
 
@@ -422,7 +430,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 0.0,
                 detail.clouds.x,
             );
-            let field = cloud_field(up, cloud_base, cloud_octaves, persistence, 1.0 - 0.9 * cell_clouds.y);
+            let field = cloud_field(up, input.wind, cloud_base, cloud_octaves, persistence, 1.0 - 0.9 * cell_clouds.y);
             cloud_tau = cloud_depth(field, up, cell_clouds, cover, footprint);
             cloud_reflection = cloud_reflectance(cloud_tau, mu0);
             cloud_transmission = 1.0 - cloud_reflection;
@@ -453,6 +461,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                     let towards = normalize(up + offset);
                     let shading = cloud_field(
                         towards,
+                        input.wind,
                         cloud_base,
                         min(cloud_octaves, 3.0),
                         persistence,

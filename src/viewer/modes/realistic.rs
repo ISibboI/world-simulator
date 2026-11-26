@@ -27,7 +27,7 @@ use super::{Legend, ModeData, ModeOption, OptionKind, OptionValues, Period, Rend
 use crate::viewer::CellInfo;
 use crate::viewer::cell_info::WaterBody;
 use crate::viewer::lighting::Light;
-use crate::viewer::renderer::{DetailUniforms, DetailVertex, MAX_PLATES};
+use crate::viewer::renderer::{CloudDrift, DetailUniforms, DetailVertex, MAX_PLATES};
 
 pub struct Realistic;
 
@@ -215,8 +215,13 @@ impl RenderMode for Realistic {
             description.push_str(
                 " Clouds are a decoration derived from the climate (the simulation has none): \
                  their amount and type follow the humidity, rain and warmth of the season; their \
-                 pattern is noise fixed in space.",
+                 pattern is noise,",
             );
+            description.push_str(if clouds_drift(options) {
+                " which drifts slowly with the season's winds (an hour of weather per second)."
+            } else {
+                " fixed in space (it drifts with the wind at detail High)."
+            });
         }
         Legend {
             description: description.into(),
@@ -598,6 +603,18 @@ pub fn detail_vertices(data: &ModeData, faces: &[[u32; 3]]) -> Vec<DetailVertex>
     } else {
         vec![[0; 4]; data.cells.len()]
     };
+    let winds: Vec<[i8; 4]> = if clouds_drift(data.options) {
+        (0..data.cells.len())
+            .map(|cell| {
+                drift_wind(
+                    data.mesh.vertex(cell as u32),
+                    season.wind(&data.cells[cell]),
+                )
+            })
+            .collect()
+    } else {
+        vec![[0; 4]; data.cells.len()]
+    };
     let plate = |cell: u32| data.cells[cell as usize].plate.min(u32::from(u16::MAX)) as u16;
     let mut vertices = Vec::with_capacity(faces.len() * 3);
     for &face in faces {
@@ -617,6 +634,7 @@ pub fn detail_vertices(data: &ModeData, faces: &[[u32; 3]]) -> Vec<DetailVertex>
                 plates: [plates[0], plates[1], plates[2], corner as u16],
                 ridges,
                 clouds: clouds[cell as usize],
+                wind: winds[cell as usize],
             });
         }
     }
@@ -1220,7 +1238,119 @@ pub fn detail_uniforms(data: &ModeData) -> DetailUniforms {
         } else {
             [0.0; 4]
         },
+        // Set for every drawn frame (`renderer::PlanetCallback::cloud_drift`).
+        drift: [[0.0; 4]; 5],
     }
+}
+
+/// Whether the clouds drift with the wind (#187): with the clouds on at detail High only (the
+/// drift needs continuous redraws; Low and Medium keep static clouds, Sebastian on #187).
+pub fn clouds_drift(options: &OptionValues) -> bool {
+    options.is_on(CLOUDS) && Quality::of(options) == Quality::High
+}
+
+/// How often the view redraws while the clouds drift, with `pixels_per_radius` physical pixels
+/// per planet radius: often enough that the fastest clouds ([`DRIFT_FAST_WIND`]) move half a
+/// pixel per frame, at most 30 and at least 2 times a second. Far less often than every vsync:
+/// about 4 times a second in a 1280×800 window (~2 px/s).
+pub fn drift_repaint(pixels_per_radius: f32) -> std::time::Duration {
+    let pixels_per_second =
+        f64::from(pixels_per_radius) * DRIFT_FAST_WIND * DRIFT_RATE / DRIFT_RADIUS;
+    let seconds = (0.5 / pixels_per_second.max(1e-6)).clamp(1.0 / 30.0, 0.5);
+    std::time::Duration::from_secs_f64(seconds)
+}
+
+/// The speed (m/s) of the fastest drifting clouds for [`drift_repaint`]: the model's westerlies
+/// reach about 8 m/s.
+const DRIFT_FAST_WIND: f64 = 10.0;
+
+/// Simulated seconds of weather per second of display: an hour per second, a day in 24 s. At
+/// 8 m/s (the model's westerlies) the clouds move ~29 km per second, 1–2 pixels in a 1280×800
+/// window.
+pub const DRIFT_RATE: f64 = 3600.0;
+
+/// The speed (m/s) encoded as 1 in [`DetailVertex::wind`]; faster winds are clipped.
+pub const DRIFT_WIND_SCALE: f32 = 20.0;
+
+/// The period of the drift's layers (simulated seconds) for the pressure field (lows and highs
+/// live about a week) and for the finer octaves (cloud systems of a day or two): every layer is
+/// advected for half its period at most, which bounds the shear where the wind changes. Long
+/// enough that the clouds visibly drift rather than only form and dissolve in place.
+const SYNOPTIC_PERIOD: f64 = 6.0 * 86_400.0;
+const FINE_PERIOD: f64 = 2.0 * 86_400.0;
+
+/// Planet radius (m) of the drift's shifts.
+const DRIFT_RADIUS: f64 = 6.371e6;
+
+/// The wind of a cell for the clouds' drift: the vector `[east, north]` (m/s) at `position` in the
+/// world frame, divided by [`DRIFT_WIND_SCALE`], as snorm8 (zero where it is unknown).
+fn drift_wind(position: glam::DVec3, wind: [f32; 2]) -> [i8; 4] {
+    if !wind.iter().all(|c| c.is_finite()) {
+        return [0; 4];
+    }
+    let vector =
+        crate::viewer::arrows::tangent_vector(position, wind) / f64::from(DRIFT_WIND_SCALE);
+    let [x, y, z] = vector
+        .to_array()
+        .map(|c| (c.clamp(-1.0, 1.0) * 127.0).round() as i8);
+    [x, y, z, 0]
+}
+
+/// The two layers of one scale of the drift at the simulated time `time` (s): for each, its
+/// seed (xyz), weight (w) and shift along the wind (planet radii per unit of
+/// [`DetailVertex::wind`]). The layers are half a period apart; each is advected from −½ to +½
+/// period and then starts again with a new seed, where its weight `sin(π φ)` is 0. The squares
+/// of the two weights sum to 1.
+fn drift_layers(time: f64, period: f64, salt: u64) -> ([[f32; 4]; 2], [f32; 2]) {
+    let mut layers = [[0.0; 4]; 2];
+    let mut shifts = [0.0; 2];
+    for (layer, (slot, shift)) in layers.iter_mut().zip(&mut shifts).enumerate() {
+        let phase = time / period + 0.5 * layer as f64;
+        let cycle = phase.floor();
+        let fraction = phase - cycle;
+        // The shift in planet radii per DRIFT_WIND_SCALE.
+        *shift = ((fraction - 0.5) * period * f64::from(DRIFT_WIND_SCALE) / DRIFT_RADIUS) as f32;
+        let seed = drift_seed(cycle as i64, salt.wrapping_add(layer as u64));
+        let weight = (std::f64::consts::PI * fraction).sin();
+        *slot = [seed[0], seed[1], seed[2], weight as f32];
+    }
+    (layers, shifts)
+}
+
+/// An offset in the noise's lattice for a cycle of a layer: within ±32 cells, so that the noise's
+/// coordinates stay small (f32 precision).
+fn drift_seed(cycle: i64, salt: u64) -> [f32; 3] {
+    let mut state = (cycle as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(salt.wrapping_mul(0xD1B5_4A32_D192_ED03));
+    [0; 3].map(|_| {
+        // splitmix64
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        (z >> 40) as f32 / (1u64 << 24) as f32 * 64.0 - 32.0
+    })
+}
+
+/// The clouds' drift (`realistic.wgsl`'s `detail.drift`) after `seconds` of display time.
+pub fn cloud_drift(seconds: f64) -> CloudDrift {
+    let time = seconds * DRIFT_RATE;
+    let (synoptic, synoptic_shifts) = drift_layers(time, SYNOPTIC_PERIOD, 1);
+    let (fine, fine_shifts) = drift_layers(time, FINE_PERIOD, 3);
+    [
+        synoptic[0],
+        synoptic[1],
+        fine[0],
+        fine[1],
+        [
+            synoptic_shifts[0],
+            synoptic_shifts[1],
+            fine_shifts[0],
+            fine_shifts[1],
+        ],
+    ]
 }
 
 /// Frequency of the clouds' first octave after the pressure field, in cycles per planet radius
@@ -2176,6 +2306,173 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn drifting_clouds_keep_their_cover() {
+        // A port of `cloud_field` with the drift (without the swirl, as above): the two layers of
+        // ψ and of the finer octaves, cross-faded with the uniforms of `cloud_drift`, advected by
+        // a zonal wind of trades, westerlies and polar easterlies. The share of points above the
+        // threshold of a cover stays the cover at every moment (start, a quarter and half of a
+        // period, both kinds of spectrum, 6 octaves as at High).
+        let deviation = cloud_constant("NOISE_DEVIATION");
+        let pressure_weight = cloud_constant("CLOUD_PRESSURE_WEIGHT");
+        let pressure_frequency = cloud_constant("CLOUD_PRESSURE_FREQUENCY");
+        let zonal = cloud_constant("CLOUD_ZONAL");
+        let clouds = include_str!("../clouds.wgsl");
+        assert!(clouds.contains(
+            "cloud_pressure(u - wind * shift.x, detail.drift[0].xyz) * detail.drift[0].w"
+        ));
+        assert!(clouds.contains("cloud_octaves(swirled - wind * shift.z, detail.drift[2].xyz,"));
+        let quantile = |p: f32| 0.5513 * (p / (1.0 - p)).ln();
+        let points: Vec<(glam::Vec3, glam::Vec3)> = (0..20_000)
+            .map(|i| {
+                let z = 1.0 - (2.0 * i as f32 + 1.0) / 20_000.0;
+                let angle = i as f32 * 2.399_963;
+                let r = (1.0 - z * z).sqrt();
+                let u = glam::Vec3::new(r * angle.cos(), r * angle.sin(), z);
+                // East: easterly trades within 30°, westerlies to 60°, polar easterlies.
+                let latitude = z.asin().to_degrees().abs();
+                let east = if latitude < 30.0 {
+                    -6.0
+                } else if latitude < 60.0 {
+                    8.0
+                } else {
+                    -3.0
+                };
+                let vector = crate::viewer::arrows::tangent_vector(u.as_dvec3(), [east, 0.5]);
+                (u, vector.as_vec3() / DRIFT_WIND_SCALE)
+            })
+            .collect();
+        let stretch = glam::Vec3::new(1.0, 1.0, zonal);
+        let noise = |q: glam::Vec3| shader_noise(q.to_array());
+        for seconds in [0.0, 12.0, 24.0, 36.0, 1000.0] {
+            let drift = cloud_drift(seconds);
+            let weights = [0, 1, 2, 3].map(|layer| drift[layer][3]);
+            assert!((weights[0].powi(2) + weights[1].powi(2) - 1.0).abs() < 1e-5);
+            assert!((weights[2].powi(2) + weights[3].powi(2) - 1.0).abs() < 1e-5);
+            for (persistence, synoptic) in [(0.5, 1.0), (1.2, 0.1)] {
+                let field = |(u, wind): &(glam::Vec3, glam::Vec3)| {
+                    let w = pressure_weight * synoptic;
+                    let seed = |layer: usize| glam::Vec3::from_slice(&drift[layer][..3]);
+                    let pressure: f32 = (0..2)
+                        .map(|layer| {
+                            let q = (*u - *wind * drift[4][layer]) * stretch;
+                            drift[layer][3]
+                                * noise(
+                                    q * pressure_frequency
+                                        + glam::Vec3::new(3.7, -1.3, 8.9)
+                                        + seed(layer),
+                                )
+                        })
+                        .sum();
+                    let mut sum = -w * pressure / deviation;
+                    let mut variance = w * w;
+                    let mut amplitude = 1.0;
+                    for octave in 0..6 {
+                        let frequency = CLOUD_FREQUENCY * 2.0_f32.powi(octave);
+                        let offset = glam::Vec3::splat(octave as f32 * 5.17 - 11.0);
+                        let n: f32 = (2..4)
+                            .map(|layer| {
+                                let q = (*u - *wind * drift[4][layer]) * stretch;
+                                drift[layer][3] * noise(q * frequency + offset + seed(layer))
+                            })
+                            .sum();
+                        sum += amplitude * n / deviation;
+                        variance += amplitude * amplitude;
+                        amplitude *= persistence;
+                    }
+                    sum / variance.sqrt()
+                };
+                let values: Vec<f32> = points.iter().map(field).collect();
+                for cover in [0.05, 0.1, 0.3, 0.5, 0.7, 0.9, 0.95] {
+                    let threshold = -quantile(cover);
+                    let share = values.iter().filter(|&&v| v > threshold).count() as f32
+                        / values.len() as f32;
+                    assert!(
+                        (share - cover).abs() < 0.06,
+                        "{seconds} s, persistence {persistence}: {cover} -> {share}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn drift_layers_fade_out_before_they_restart() {
+        // Each layer moves on continuously and takes a new seed only where its weight is 0; the
+        // layers of a scale are independent (different seeds).
+        let step = 0.05;
+        let mut previous = cloud_drift(0.0);
+        for i in 1..20_000 {
+            let drift = cloud_drift(f64::from(i) * step);
+            for layer in 0..4 {
+                let jumped = drift[layer][..3] != previous[layer][..3];
+                if jumped {
+                    assert!(
+                        drift[layer][3] < 0.01 && previous[layer][3] < 0.01,
+                        "layer {layer} at {} s: {:?} -> {:?}",
+                        f64::from(i) * step,
+                        previous[layer],
+                        drift[layer]
+                    );
+                } else {
+                    let moved = (drift[4][layer] - previous[4][layer]).abs();
+                    assert!(moved < 1e-3, "layer {layer}: shift {moved}");
+                }
+            }
+            assert_ne!(drift[0][..3], drift[1][..3]);
+            assert_ne!(drift[2][..3], drift[3][..3]);
+            for layer in 0..4 {
+                assert!(drift[layer][..3].iter().all(|c| c.abs() <= 32.0));
+            }
+            previous = drift;
+        }
+    }
+
+    #[test]
+    fn clouds_drift_only_at_high_with_the_clouds_on() {
+        let mut options = OptionValues::defaults(Realistic.options());
+        let mut drifting = Vec::new();
+        for detail in 0..3 {
+            for clouds in [0, 1] {
+                options.set(DETAIL, detail);
+                options.set(CLOUDS, clouds);
+                if clouds_drift(&options) {
+                    drifting.push((Quality::of(&options), clouds));
+                }
+                with_planet(
+                    |_, _| {},
+                    &options,
+                    |data| {
+                        let vertices = detail_vertices(data, data.mesh.faces());
+                        let winds = vertices.iter().filter(|v| v.wind != [0; 4]).count();
+                        if clouds_drift(data.options) {
+                            assert!(winds > vertices.len() / 2, "{winds}");
+                        } else {
+                            assert_eq!(winds, 0);
+                        }
+                        assert_eq!(detail_uniforms(data).drift, [[0.0; 4]; 5]);
+                    },
+                );
+            }
+        }
+        assert_eq!(drifting, [(Quality::High, 1)]);
+        // A redraw rate far below vsync: ~4 per second in a 1280×800 window (about 370 pixels
+        // per radius at the centre), never more than 30.
+        let interval = drift_repaint(370.0).as_secs_f64();
+        assert!((0.2..0.3).contains(&interval), "{interval}");
+        assert!(drift_repaint(1e5).as_secs_f64() >= 1.0 / 30.0 - 1e-9);
+        assert!(drift_repaint(1.0).as_secs_f64() <= 0.5);
+    }
+
+    #[test]
+    fn the_drift_wind_points_along_the_wind() {
+        let position = glam::DVec3::new(1.0, 0.0, 0.0);
+        // East at (1, 0, 0) is +y, north +z.
+        assert_eq!(drift_wind(position, [10.0, 0.0]), [0, 64, 0, 0]);
+        assert_eq!(drift_wind(position, [0.0, -40.0]), [0, 0, -127, 0]);
+        assert_eq!(drift_wind(position, [f32::NAN, 1.0]), [0; 4]);
     }
 
     #[test]
