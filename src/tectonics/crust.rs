@@ -115,6 +115,11 @@ pub struct Crust {
 ///   cohort goes as late as the removed masses allow, so its half-life is an **upper bound**.
 ///   Burial metamorphism, which physically converts the bottom of a column, is youngest first
 ///   here as well, to keep it a bound.
+///
+/// Caveat of the lower bound: burial metamorphism converts the bottom of a column, which in a
+/// layered column is the cohort, faster than in proportion. Where metamorphism removes much of
+/// the cohort, the well-mixed half-life is therefore not strictly a lower bound (the cohort's
+/// fate in the log shows the metamorphosed share).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Cohort {
     pub mixed: f64,

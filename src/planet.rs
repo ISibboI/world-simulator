@@ -83,8 +83,9 @@ pub struct CoverExport {
     pub denudation: f64,
     /// The sediment part of [`Self::denudation`]: reworked cover.
     pub reworked: f64,
-    /// Where it went ([`EXPORT_DESTINATIONS`]): deposits on continental crust above sea level
-    /// outside closed depressions, in closed depressions (lakes, endorheic and dry basins), and
+    /// Where it went ([`EXPORT_DESTINATIONS`]), by the surface at the start of the step: deposits
+    /// on continental crust above sea level outside closed depressions, in closed depressions
+    /// (lakes, endorheic and dry basins, also those the step fills), and
     /// in the ocean (flooded continental crust: shelves, epicontinental seas); and the net gain of
     /// all other crust (the ocean basins: transitional and oceanic crust, including the little
     /// land on it). They sum to [`Self::denudation`] because erosion conserves mass; the net
@@ -686,7 +687,7 @@ impl Planet {
                         result.sediment_delta[cell] * crate::isostasy::SEDIMENT_ROCK_DENSITY,
                         result.bedrock_delta[cell] * bedrock_density[cell],
                         result.water.ocean[cell],
-                        result.water.depression[cell],
+                        result.water.depression_at_start[cell],
                     )
                 }),
                 cell_area / 1e12,
@@ -1183,8 +1184,8 @@ mod tests {
             }),
             RADIUS,
         );
-        planet.track_cover_cohort_from(1.0);
-        for _ in 0..6 {
+        planet.track_cover_cohort_from(4.0);
+        for _ in 0..9 {
             planet.step(1.0);
         }
         let statistics = planet.statistics();

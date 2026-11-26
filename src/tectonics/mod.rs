@@ -958,7 +958,7 @@ impl Simulation {
             simulation.add_initial_sediment(seed, &is_continental, &plate_of_cell);
         }
         simulation.ledger = MassLedger::new(simulation.total_mass());
-        simulation.start_cover_budget();
+        simulation.start_cover_budget(0..3);
         simulation.sea_level = simulation.solve_sea_level();
         simulation.initial_sea_level = simulation.sea_level;
         // Initial subduction zones have fully developed slabs.

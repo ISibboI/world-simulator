@@ -175,20 +175,23 @@ pub struct CohortMasses {
 impl Simulation {
     /// The [`CoverMasses`] now (rock-equivalent m summed over all samples).
     pub(super) fn cover_masses(&self) -> CoverMasses {
-        sum(self
-            .plates
-            .iter()
-            .flat_map(|p| p.crust.iter().flatten())
-            .map(column_masses)
-            .collect::<Vec<_>>()
-            .iter())
+        let mut masses = [0.0; 3];
+        for crust in self.plates.iter().flat_map(|p| p.crust.iter().flatten()) {
+            for (sum, mass) in masses.iter_mut().zip(column_masses(crust)) {
+                *sum += mass;
+            }
+        }
+        masses
     }
 
     /// Sets the masses the budget starts from to the current ones, less what was recorded so
-    /// far.
-    pub(super) fn start_cover_budget(&mut self) {
+    /// far: all three (`masses` 0..3) at the start of the simulation, only the cohort's
+    /// (1..3) when the cohort is tagged.
+    pub(super) fn start_cover_budget(&mut self, masses: std::ops::Range<usize>) {
         let (now, recorded) = (self.cover_masses(), self.cover_budget.total());
-        self.cover_start = [0, 1, 2].map(|i| now[i] - recorded[i]);
+        for i in masses {
+            self.cover_start[i] = now[i] - recorded[i];
+        }
     }
 
     /// Factor from rock-equivalent metres of sediment summed over samples to Gt.
@@ -235,7 +238,7 @@ impl Simulation {
                 Cohort::NONE
             };
         }
-        self.start_cover_budget();
+        self.start_cover_budget(1..3);
         self.cover_cohort().on_continents[0]
     }
 
