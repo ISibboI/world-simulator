@@ -118,3 +118,35 @@ long; its overload rises from ~0.9 (380 Myr) to 2–7 from 390 Myr on, with F = 
 * Section search by level sets may miss oblique sections of compact plates; the min-cut
   refinement and three sources mitigate. Compact plates rarely matter for #123.
 * Disconnected bits after the cut are handled by `separate_detached_pieces` (captured < 1%).
+
+## Revisions after the review ([`review-plan.md`](review-plan.md))
+
+1. **Bending (review 1, accepted).** The projection on `â = T/|T|` measured almost only the
+   net force across a section. The overload is now the exact limit-analysis value
+   `S = max_ω (ω·T)/D(ω)` (minimised `D` on `ω·T = 1` by iteratively reweighted least squares,
+   ≤ 30 iterations, warm-started along the level sweep). Each mesh edge of a section is two
+   points ±ℓ/4 from its middle, so that even a one-edge neck has a finite moment capacity.
+   Tested against plastic beam theory (tension, compression, shear, bending of a straight
+   section within 3%). With bending, overloads of necks are ~5–20× larger than before (plate
+   475 of seed 0: S ≈ 36–39 at 403 Myr with F = 10¹³ N/m), so F must be recalibrated.
+2. **Compression (review 2, accepted).** Yield strength `k = 3` times larger in compression
+   (`breakup.compression`, Byerlee/Sibson: thrust faults need ~3× the differential stress of
+   normal faults). Every section reports its failure mode (opening −1…1: thrusting, sliding,
+   rifting); breaks are counted by mode. Sutures and captures after breaks are compared with
+   `main`.
+3. **Strength measure (review 3).** Kept `lithosphere_strength` (as all other splits; the
+   sheet's 0.35 oceanic floor is a stiffness device for the viscous solve, not a strength).
+   Young sea floor is weak, so breaks may follow young lithosphere and back-arcs; that is the
+   physical expectation (Farallon broke near the ridge–trench junctions). Linear in thickness:
+   first order; stated as such.
+4. **Load budget / residual (review 4, 6).** The removed net torque is logged per section
+   (`residual`, relative to the section's torque). It is of the order of the section torques:
+   the sheet's distributed ridge push and GPE forces are not in the torque balance, and the
+   sheet removes their net torque the same way, so the analysis is consistent with the solve.
+5. **Timer (review 7).** The timer now decays (−dt per step not overloaded) instead of
+   resetting. It stays per plate (the most overloaded section may move); the split happens
+   along the section overloaded at the moment it is due.
+6. **Search (review 5).** Kept the three distance fields and the min-cut refinement;
+   trench-parallel sections of compact plates are a known gap (stated). Disconnected far
+   sides are handled by the existing detached-piece rule.
+7. **Minor**: consistent rounding of the minimum part; scratch arrays reused per step.

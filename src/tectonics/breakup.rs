@@ -212,8 +212,12 @@ impl SectionEdge {
     }
 }
 
-/// Most iterations of the limit analysis of a section (see [`limit_overload`]).
+/// Most iterations of the limit analysis of a section (see [`limit_overload`]), and of the
+/// quick estimate in the sweep over the level sections, of which the [`REFINED`] most overloaded
+/// per distance field are then analysed fully.
 const ITERATIONS: usize = 30;
+const QUICK_ITERATIONS: usize = 1;
+const REFINED: usize = 4;
 
 /// The overload of a section that must carry the torque `torque` (N per unit radius), with
 /// strength `force` (N per unit length on the unit sphere) of lithosphere of relative strength
@@ -230,6 +234,7 @@ fn limit_overload(
     force: f64,
     compression: f64,
     warm: &mut DVec3,
+    iterations: usize,
 ) -> (f64, f64) {
     let magnitude2 = torque.length_squared();
     if magnitude2 == 0.0 || edges.is_empty() || force <= 0.0 {
@@ -259,7 +264,7 @@ fn limit_overload(
         }
     }
     let linear: DVec3 = edges.iter().map(|e| e.q * (e.weight * b)).sum::<DVec3>();
-    for _ in 0..ITERATIONS {
+    for _ in 0..iterations {
         let scale = edges
             .iter()
             .map(|e| omega.dot(e.p).abs().max(omega.dot(e.q).abs()))
@@ -538,6 +543,7 @@ impl Simulation {
             self.section_force(),
             self.params.breakup.compression,
             &mut warm,
+            ITERATIONS,
         );
         let length: f64 = edges.iter().map(|e| e.length).sum();
         let mean_strength = if length > 0.0 {
@@ -641,8 +647,11 @@ impl Simulation {
                 }
             }
             // Section between the levels below `level` and the others.
+            // Quick estimates (lower bounds) for all levels, then the most overloaded ones in
+            // full.
             let (mut below, mut torque) = (0usize, DVec3::ZERO);
             let mut warm = DVec3::ZERO;
+            let mut candidates: Vec<(f64, usize, DVec3, DVec3)> = Vec::new();
             for level in 1..levels {
                 below += count[level - 1];
                 torque += level_torque[level - 1];
@@ -650,8 +659,27 @@ impl Simulation {
                     continue;
                 }
                 let crossing = &edges[edge_count[level]..edge_count[level + 1]];
-                let (overload, _) =
-                    limit_overload(torque, crossing, force, params.compression, &mut warm);
+                let (overload, _) = limit_overload(
+                    torque,
+                    crossing,
+                    force,
+                    params.compression,
+                    &mut warm,
+                    QUICK_ITERATIONS,
+                );
+                candidates.push((overload, level, torque, warm));
+            }
+            candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            for &(_, level, torque, mut warm) in candidates.iter().take(REFINED) {
+                let crossing = &edges[edge_count[level]..edge_count[level + 1]];
+                let (overload, _) = limit_overload(
+                    torque,
+                    crossing,
+                    force,
+                    params.compression,
+                    &mut warm,
+                    ITERATIONS,
+                );
                 if best.is_none_or(|(o, _, _, _)| overload > o) {
                     best = Some((overload, f, level as u32, torque));
                 }
@@ -677,26 +705,38 @@ impl Simulation {
             let max_level = distance.iter().copied().max().unwrap_or(0);
             let low = level.saturating_sub(1 + params.band as u32);
             let high = (level + params.band as u32).min(max_level);
-            let (source, sink) = (n, n + 1);
-            let mut network = Network::new(n + 2);
-            for (i, &cell) in piece.iter().enumerate() {
-                if distance[i] <= low {
-                    network.link(source, i, UNBREAKABLE);
-                } else if distance[i] >= high {
-                    network.link(i, sink, UNBREAKABLE);
+            // The network spans the band only: cells at its edges are tied to the source and
+            // sink, and every link that can be cut lies between them.
+            let band: Vec<usize> = (0..n)
+                .filter(|&i| (low..=high).contains(&distance[i]))
+                .collect();
+            let mut node = vec![u32::MAX; n];
+            for (k, &i) in band.iter().enumerate() {
+                node[i] = k as u32;
+            }
+            let (source, sink) = (band.len(), band.len() + 1);
+            let mut network = Network::new(band.len() + 2);
+            for (k, &i) in band.iter().enumerate() {
+                let cell = piece[i];
+                if distance[i] == low {
+                    network.link(source, k, UNBREAKABLE);
+                } else if distance[i] == high {
+                    network.link(k, sink, UNBREAKABLE);
                 }
                 for slot in geometry.edges(cell) {
                     let m = geometry.neighbor[slot];
                     let j = index[m as usize];
-                    if j == u32::MAX || m < cell {
+                    if j == u32::MAX || m < cell || node[j as usize] == u32::MAX {
                         continue;
                     }
                     let s = 0.5 * (strength[cell as usize] + strength[m as usize]);
-                    network.link(i, j as usize, geometry.face[slot] * s);
+                    network.link(k, node[j as usize] as usize, geometry.face[slot] * s);
                 }
             }
             network.max_flow(source, sink);
-            let reachable = network.reachable(source);
+            let in_band = network.reachable(source);
+            let reachable =
+                |i: usize| distance[i] < low || (node[i] != u32::MAX && in_band[node[i] as usize]);
             // The part connected to the source's cells.
             let mut side = vec![false; n];
             let mut stack: Vec<usize> = (0..n).filter(|&i| distance[i] <= low).collect();
@@ -706,7 +746,7 @@ impl Simulation {
             while let Some(i) = stack.pop() {
                 for &m in self.mesh.neighbors(piece[i]) {
                     let j = index[m as usize];
-                    if j != u32::MAX && reachable[j as usize] && !side[j as usize] {
+                    if j != u32::MAX && reachable(j as usize) && !side[j as usize] {
                         side[j as usize] = true;
                         stack.push(j as usize);
                     }
@@ -860,11 +900,11 @@ mod tests {
         // A pull west on the loaded side (tension across the section) at (1, 0, 0): torque
         // r × f.
         let pull = |n: f64| DVec3::X.cross(DVec3::new(0.0, -n, 0.0));
-        let (s, opening) = limit_overload(pull(0.02), &edges, force, 3.0, &mut warm);
+        let (s, opening) = limit_overload(pull(0.02), &edges, force, 3.0, &mut warm, ITERATIONS);
         assert!((s - 1.0).abs() < 0.02, "tension: {s}");
         assert!(opening > 0.9, "{opening}");
         // Pushed east: compression, three times as strong.
-        let (s, opening) = limit_overload(pull(-0.06), &edges, force, 3.0, &mut warm);
+        let (s, opening) = limit_overload(pull(-0.06), &edges, force, 3.0, &mut warm, ITERATIONS);
         assert!((s - 1.0).abs() < 0.02, "compression: {s}");
         assert!(opening < -0.9, "{opening}");
         // Sheared north–south.
@@ -874,12 +914,20 @@ mod tests {
             force,
             3.0,
             &mut warm,
+            ITERATIONS,
         );
         assert!((s - 1.0).abs() < 0.02, "shear: {s}");
         // A bending moment about the radial axis: the plastic moment of a section of length L
         // in tension on one half and compression (k = 3) on the other is F L² · k / (2 (1 + k)).
         let plastic = force * length * length * 3.0 / (2.0 * 4.0);
-        let (s, _) = limit_overload(DVec3::X * plastic, &edges, force, 3.0, &mut warm);
+        let (s, _) = limit_overload(
+            DVec3::X * plastic,
+            &edges,
+            force,
+            3.0,
+            &mut warm,
+            ITERATIONS,
+        );
         assert!((s - 1.0).abs() < 0.03, "bending: {s}");
         // With equal strengths: F L² / 4.
         let (s, _) = limit_overload(
@@ -888,6 +936,7 @@ mod tests {
             force,
             1.0,
             &mut warm,
+            ITERATIONS,
         );
         assert!((s - 1.0).abs() < 0.03, "symmetric bending: {s}");
     }
