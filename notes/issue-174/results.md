@@ -83,3 +83,54 @@ time every message, records `requestAnimationFrame` times, long tasks and WebGL 
 optionally throttles the CPU and records a CPU profile over the DevTools protocol. Native step
 times: `--headless --subdivisions 5 --duration 100` with `RAYON_NUM_THREADS=1` at ece532d,
 05c13b7 (#163), 97b0bef (#165), fe442d9 (#168) and main: 19.4, 15.8, 16.1, 16.5, 16.5 s.
+
+## Who does what per frame (PR #176 review question)
+
+Measured after merging main (with #175's water/ice detail), headless chromium/SwiftShader,
+390×844, 5 subdivisions, realistic mode; ms of main-thread time per update (unthrottled / 4×
+CPU throttle), from CPU profiles.
+
+**Worker (web) / simulation thread (desktop)**, per step: the simulation step; `cell_infos` (the
+attributes of every cell, full precision) and `plate_infos`; the extra fields the mode asked for
+(`Fields::extract`); the mesh with the first update only; posting it all with the buffers
+transferred (web) or sent through a channel (desktop). With this change also the frame of the
+history (`FrameEncoder`: quantisation into planes, difference to the previous frame, lz4).
+
+**Page main thread** per arriving update, before this change:
+
+| step | unthrottled | 4× |
+|---|---|---|
+| message handler: copy the transferred buffers into `Vec`s (cells, plates, fields) | 0.3 | 4.7 |
+| history: quantise (`Planes::new`) | 4.5 | 38 |
+| history: delta + lz4 (`codec::encode`) | 1.7 | 13 |
+| history: IndexedDB put (copy into JS, transaction) | 2.6 | 12 |
+| `show`: surface mesh vertices, drainage, plate colours | 1.7 | 15 |
+| `refresh_display`: the mode's colours/overlay; realistic: detail mesh + uniforms | 9.1 | 62 |
+| per drawn frame (~1.7 per update): exposure metering incl. the atmosphere's limb, egui, GPU uploads/submission | ~5.5 | ~35 |
+| **all page work per update** | **27** | **189** |
+
+The page does not decode anything for the latest state: it gets the cells at full precision and
+builds the meshes from them. Decoding happens only when the time bar shows a past frame (read
+from IndexedDB, delta chain from the keyframe, dequantise). The desktop does the same in its
+view thread.
+
+## Frame encoding in the worker
+
+The simulation side now encodes the history frame (`viewer::FrameEncoder`, the former
+`History::record` logic, byte-identical frames, format unchanged at version 11) and sends it with
+the update (web: one more transferred `ArrayBuffer`, ~120–140 KB; `None` for a state sent again
+with other fields). The page stores it as it is (`History::record(frame)`, reading kind, time and
+size from the header). It still also gets the full cells for the latest state: decoding the
+frame instead would cost more than the copy (native: decode 0.6 ms + dequantise 1.5 ms vs. a
+0.05 ms copy of the cells; on the page the copy is 0.3 ms) and would show the latest state
+quantised. If a message cannot be posted, the next frame is a keyframe.
+
+| | page: history per update | page: all work per update | long tasks, 40 s (4×) | worker step (median) |
+|---|---|---|---|---|
+| before (merged main + #174 fix) | 8.8 / 63 ms | 27 / 189 ms | 82, 14.5 s | 450 / 478 ms |
+| frames encoded in the worker | 1.8 / 11 ms | 20 / 155 ms | 73, 8.8 s | 463 / 501 ms |
+
+(unthrottled / 4× throttle; the worker is not throttled. The worker's step grows by the encoding,
+~2–3%.) What remains on the page per update is the IndexedDB put, the meshes of the shown
+state, and the per-frame work. The detail mesh (~9 / 62 ms) is now the largest part; it could move
+to the worker only for the latest frame, and the view would then need it again for past frames.

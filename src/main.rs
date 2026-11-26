@@ -345,6 +345,7 @@ fn run_simulation_thread(
         .with_context(|| format!("creating output directory {}", cli.output.display()))?;
     let planet = build_planet(cli)?;
     let mut first_update = true;
+    let mut encoder = viewer::FrameEncoder::default();
     let mut publish = |planet: &Planet, step_time: Option<Duration>, layers: viewer::Layers| {
         if cancelled.load(Ordering::Relaxed) {
             return ControlFlow::Break(());
@@ -353,16 +354,23 @@ fn run_simulation_thread(
         let cells = viewer::cell_infos(planet);
         let cells_built = start.elapsed();
         let fields = Fields::extract(planet, layers);
+        let fields_built = start.elapsed() - cells_built;
+        let time = planet.tectonics().time();
+        let plates = viewer::plate_infos(planet);
+        // The frame of the history, here rather than in the view (#174).
+        let frame = encoder.encode(time, &cells, &plates);
         debug!(
             ?cells_built,
-            fields_built = ?start.elapsed() - cells_built,
+            ?fields_built,
+            frame_built = ?start.elapsed() - cells_built - fields_built,
             field_bytes = fields.bytes(),
             "Surface update built"
         );
         let update = SurfaceUpdate {
-            time: planet.tectonics().time(),
+            time,
             cells: Arc::new(cells),
-            plates: Arc::new(viewer::plate_infos(planet)),
+            plates: Arc::new(plates),
+            frame,
             // The mesh only with the first update of a simulation.
             mesh: std::mem::take(&mut first_update).then(|| Arc::new(MeshUpdate::of(planet))),
             step_seconds: step_time.map(|time| time.as_secs_f64()),

@@ -450,6 +450,26 @@ pub fn kind(frame: &[u8]) -> Result<Kind, String> {
     }
 }
 
+/// What the header of a frame says: its kind, its time, and its size before compression (the
+/// plates and the quantised cells).
+pub fn header(frame: &[u8]) -> Result<(Kind, f64, usize), String> {
+    let kind = kind(frame)?;
+    let header = frame.get(..HEADER).ok_or("truncated frame")?;
+    let number = |range: std::ops::Range<usize>| {
+        u32::from_le_bytes(header[range].try_into().expect("4 bytes")) as usize
+    };
+    let time = f64::from_le_bytes(header[2..10].try_into().expect("8 bytes"));
+    if !time.is_finite() {
+        return Err("a frame without a valid time".to_owned());
+    }
+    let raw = number(14..18)
+        .checked_mul(PLATE_BYTES)
+        .zip(number(10..14).checked_mul(BYTES_PER_CELL))
+        .and_then(|(plates, cells)| plates.checked_add(cells))
+        .ok_or("a frame of an impossible size")?;
+    Ok((kind, time, raw))
+}
+
 /// Decodes a frame: a keyframe alone, a delta frame on the state of the frame before it.
 pub fn decode(frame: &[u8], previous: Option<&State>) -> Result<State, String> {
     let kind = kind(frame)?;

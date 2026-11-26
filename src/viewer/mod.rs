@@ -60,7 +60,7 @@ pub use fields::Layer;
 pub use fields::{Fields, Layers, PlateInfo, plate_infos};
 #[cfg(target_arch = "wasm32")]
 pub use history::store::MemoryStore;
-pub use history::{FrameStore, History};
+pub use history::{FrameEncoder, FrameStore, History};
 use lighting::{Light, Lighting, SunView};
 pub use modes::RenderModeId;
 use modes::switcher::{ModeSwitcher, SwitcherView};
@@ -110,6 +110,9 @@ pub struct SurfaceUpdate {
     pub cells: Arc<Vec<CellInfo>>,
     /// Every plate, by index ([`plate_infos`]).
     pub plates: Arc<Vec<PlateInfo>>,
+    /// The state as a frame of the history, encoded by the simulation with its
+    /// [`FrameEncoder`]: `None` for a repeated state (sent again with other fields).
+    pub frame: Option<Vec<u8>>,
     /// The mesh: sent with the first update of a simulation, `None` after.
     pub mesh: Option<Arc<MeshUpdate>>,
     /// Seconds since the previous update, i.e. the time of the step: `None` for the initial
@@ -868,7 +871,11 @@ impl Viewer {
     }
 
     /// Takes a new state of the simulation. The first one of a simulation brings its mesh.
-    fn receive(&mut self, update: SurfaceUpdate) {
+    fn receive(&mut self, mut update: SurfaceUpdate) {
+        // Every frame, so that the frames after it, differences to it, can be decoded.
+        if let (Some(history), Some(frame)) = (&mut self.history, update.frame.take()) {
+            history.record(frame);
+        }
         if let Some(mesh) = &update.mesh {
             self.set_mesh(mesh);
         }
@@ -890,9 +897,6 @@ impl Viewer {
         if let Some(picking) = &self.picking {
             self.plate_colors
                 .update(&picking.mesh, &update.cells, &update.plates);
-        }
-        if let Some(history) = &mut self.history {
-            history.record(update.time, &update.cells, &update.plates);
         }
         self.latest = Some(Latest {
             time: update.time,

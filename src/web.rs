@@ -12,7 +12,9 @@
 //! `web/index.html`. It sends `{ generating: true }` before it builds the planet, then a
 //! surface update after every step as
 //! `{ time, cells, plates }` (the attributes of the cells as [`viewer::CellInfo`]s, the
-//! [`viewer::PlateInfo`] of every plate, and with the first update also `directions` and `faces`, the mesh),
+//! [`viewer::PlateInfo`] of every plate, `frame`, the state encoded for the page's frame history
+//! by the worker's [`viewer::FrameEncoder`] (not for a state sent again), and with the first
+//! update also `directions` and `faces`, the mesh),
 //! with the buffers transferred rather than copied, or `{ error }` if the simulation fails. A restart from the
 //! parameter panel terminates the worker and starts a new one with the new query string, which
 //! also replaces the query of the page URL, so that the setting can be shared as a link. Each
@@ -57,8 +59,9 @@ use tracing_subscriber::util::SubscriberInitExt;
 use crate::device::{self, DeviceSignals, Source};
 use crate::query::{args_to_query, query_to_args, without_worker_files, worker_query};
 use crate::viewer::{
-    self, CellInfo, Fields, FrameStore, Launch, Layer, Layers, MeshUpdate, PlateInfo, RenderModeId,
-    SimulationControl, SimulationEvent, SurfaceUpdate, UiOptions, has_option, with_default,
+    self, CellInfo, Fields, FrameEncoder, FrameStore, Launch, Layer, Layers, MeshUpdate, PlateInfo,
+    RenderModeId, SimulationControl, SimulationEvent, SurfaceUpdate, UiOptions, has_option,
+    with_default,
 };
 
 mod frames;
@@ -589,6 +592,10 @@ fn start_worker(
                     error!("Field from the simulation worker refused: {message}");
                 }
             }
+            let frame = get(&data, "frame")
+                .dyn_into::<js_sys::ArrayBuffer>()
+                .ok()
+                .map(|buffer| js_sys::Uint8Array::new(&buffer).to_vec());
             if let Ok(document) = document() {
                 document.set_title(&format!("World Simulator — {time:.0} Myr"));
             }
@@ -598,6 +605,7 @@ fn start_worker(
                 time,
                 cells: Arc::new(cells),
                 plates: Arc::new(plates),
+                frame,
                 mesh,
                 step_seconds,
                 fields,
@@ -635,6 +643,8 @@ struct WorkerState {
     /// The layers the page asked for.
     layers: Layers,
     first_update: bool,
+    /// Encodes the states into the frames of the page's history.
+    encoder: FrameEncoder,
     /// Paused by the page, the steps it asked for meanwhile, and whether the step loop is
     /// stopped (to be scheduled again on resume or a step).
     paused: bool,
@@ -684,11 +694,23 @@ impl WorkerState {
         put_words("cells", bytemuck::cast_slice(&cells));
         let plates = viewer::plate_infos(planet);
         put_words("plates", bytemuck::cast_slice(&plates));
+        // The frame of the history, here rather than on the page (#174); none for a state
+        // sent again.
+        let time = planet.tectonics().time();
+        if let Some(frame) = self.encoder.encode(time, &cells, &plates) {
+            let array = js_sys::Uint8Array::new_with_length(frame.len() as u32);
+            array.copy_from(&frame);
+            let buffer = array.buffer();
+            set(&message, "frame", &buffer);
+            transfer.push(&buffer);
+        }
         if let Some(mesh) = &mesh {
             put_words("faces", bytemuck::cast_slice(&mesh.faces));
         }
         if let Err(error) = self.scope.post_message_with_transfer(&message, &transfer) {
             error!("Could not send the surface to the page: {error:?}");
+            // The page's history did not get this frame: the next must not depend on it.
+            self.encoder.force_keyframe();
         }
     }
 
@@ -809,6 +831,7 @@ fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()>
         run,
         layers,
         first_update: true,
+        encoder: FrameEncoder::default(),
         paused: false,
         steps: 0,
         stopped: false,
