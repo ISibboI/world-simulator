@@ -460,6 +460,12 @@ pub struct Hydrology {
     pub sea_fed_evaporation: f64,
     /// Endorheic land draining into lakes fed by the sea (cells).
     pub endorheic_sea_fed_cells: f64,
+    /// Diagnostic (#46): endorheic land by the size of the depression it drains into (1,
+    /// 2–3, 4–10, more than 10 cells), and the lake cover and evaporation of depressions that
+    /// spill (cells, m³/yr).
+    pub endorheic_by_size: [f64; 4],
+    pub spilling_lake_cells: f64,
+    pub spilling_lake_evaporation: f64,
     /// The water (m³) the ocean held above the sill of a basin it could not fill at the end of
     /// the step and poured into that basin (the sea-level solve's deficit); zero if none, or if
     /// the basin joined the ocean.
@@ -1424,6 +1430,10 @@ fn water_state(
             hydrology.lake_bodies += bodies;
             hydrology.split_lakes += usize::from(bodies > 1);
             hydrology.lake_cells += covered_total;
+            if spills {
+                hydrology.spilling_lake_cells += covered_total;
+                hydrology.spilling_lake_evaporation += flux_evaporation;
+            }
             // A depression that does not spill lets nothing out; one that spills passes on its
             // inflow less the evaporation of its lake.
             discharge[cell] = if spills {
@@ -1460,6 +1470,14 @@ fn water_state(
             if lakes.cells[terminal[cell] as usize].len() == 1 {
                 hydrology.endorheic_pit_cells += 1.0;
             }
+            let size = lakes.cells[terminal[cell] as usize].len();
+            let bucket = match size {
+                1 => 0,
+                2..=3 => 1,
+                4..=10 => 2,
+                _ => 3,
+            };
+            hydrology.endorheic_by_size[bucket] += 1.0;
             if sea_fed[terminal[cell] as usize] {
                 hydrology.endorheic_sea_fed_cells += 1.0;
             }

@@ -1293,6 +1293,16 @@ fn snapshot(
         hydrology.playas,
         100.0 * hydrology.playa_cells as f64 / land_cells,
     );
+    info!(
+        "    lakes #46: endorheic by depression size 1 / 2-3 / 4-10 / >10 cells: {:.2} / {:.2} / \
+         {:.2} / {:.2}% of land | spilling lakes {:.2}% of land, evaporation {:.0} km³/yr",
+        100.0 * hydrology.endorheic_by_size[0] / land_cells,
+        100.0 * hydrology.endorheic_by_size[1] / land_cells,
+        100.0 * hydrology.endorheic_by_size[2] / land_cells,
+        100.0 * hydrology.endorheic_by_size[3] / land_cells,
+        100.0 * hydrology.spilling_lake_cells / land_cells,
+        hydrology.spilling_lake_evaporation / 1e9,
+    );
     // Metres of sea level per m³ of water over the ocean.
     let per_ocean_area = 1.0
         / (planet_statistics.ocean_fraction.max(1e-9) * cell_area * simulation.mesh().len() as f64);
