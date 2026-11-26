@@ -755,6 +755,8 @@ pub struct Simulation {
     /// Totals of the breakup by stress and the sections of the last step (see [`breakup`]).
     breakup_statistics: BreakupStatistics,
     section_records: Vec<SectionRecord>,
+    /// When the sections were last analysed (NaN: never).
+    last_section_analysis: f64,
 }
 
 impl Simulation {
@@ -930,6 +932,7 @@ impl Simulation {
             sheet_statistics: SheetStatistics::default(),
             breakup_statistics: BreakupStatistics::default(),
             section_records: Vec::new(),
+            last_section_analysis: f64::NAN,
         };
         simulation.sheet_geometry = sheet::SheetGeometry::new(&simulation.mesh);
         // The sediment cover is part of the initial planet (a stock, not a source); it is

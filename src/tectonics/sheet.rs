@@ -771,7 +771,7 @@ impl Simulation {
             .iter()
             .map(|w| w.weak.iter().any(|&weak| weak))
             .collect();
-        let analyse = params.breakup.analyse();
+        let analyse = self.section_analysis_due();
         let forces = if analyse {
             self.cell_forces(&vec![true; plate_count])
         } else {

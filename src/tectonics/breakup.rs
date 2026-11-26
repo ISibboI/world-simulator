@@ -62,9 +62,9 @@ pub struct BreakupParams {
     /// section can carry per metre of its length in tension and shear. Estimates for old
     /// lithosphere span ~10¹³–10¹⁴ N/m depending on the rheology (Kohlstedt, Evans & Mackwell
     /// 1995; Burov 2011); 5 × 10¹³ is at the upper end, as the model's basal drag
-    /// (`basal_drag`, ×4 under continents) is: with 2 × 10¹³ about half of all plates were
-    /// overloaded at any time and the plate count rose by two thirds (4 seeds); 4 × 10¹³ and
-    /// 8 × 10¹³ gave the same plate shapes (see `notes/issue-123/results.md`).
+    /// (`basal_drag`, ×4 under continents) is: with 2 × 10¹³ the plate count rose by two thirds
+    /// and collision belts doubled (4 seeds); 4 × 10¹³ and 8 × 10¹³ gave the same plate shapes
+    /// (see `notes/issue-123/results.md`).
     pub strength: f64,
     /// Time (Myr) for which a section must stay overloaded before the plate breaks.
     pub time: f64,
@@ -81,6 +81,9 @@ pub struct BreakupParams {
     /// Time (Myr) from which plates break (for comparisons with a run without breakup up to
     /// then).
     pub from: f64,
+    /// Time (Myr) between analyses of the sections: the loads change over millions of years,
+    /// and the analysis takes ~7% of a step at 6 subdivisions; every 2 Myr halves that.
+    pub interval: f64,
 }
 
 impl Default for BreakupParams {
@@ -94,6 +97,7 @@ impl Default for BreakupParams {
             band: 3,
             compression: 3.0,
             from: 0.0,
+            interval: 2.0,
         }
     }
 }
@@ -109,6 +113,7 @@ impl BreakupParams {
             "min_area" => self.min_area = value,
             "band" => self.band = value.max(0.0) as usize,
             "from" => self.from = value,
+            "interval" => self.interval = value.max(0.0),
             "compression" => self.compression = value.max(0.0),
             _ => anyhow::bail!("unknown breakup parameter {name}"),
         }
@@ -119,7 +124,19 @@ impl BreakupParams {
     pub(super) fn analyse(&self) -> bool {
         self.enabled || self.diagnose
     }
+}
 
+impl Simulation {
+    /// Whether the sections are analysed in this step (see [`BreakupParams::interval`]).
+    pub(super) fn section_analysis_due(&self) -> bool {
+        let params = &self.params.breakup;
+        params.analyse()
+            && (self.last_section_analysis.is_nan()
+                || self.time + 1e-9 >= self.last_section_analysis + params.interval)
+    }
+}
+
+impl BreakupParams {
     /// The smallest part (cells) of a mesh of `cell_count` cells that breaks off.
     fn min_cells(&self, cell_count: usize) -> usize {
         ((self.min_area * cell_count as f64).ceil() as usize).max(1)
@@ -360,12 +377,20 @@ fn limit_overload(
 
 impl Simulation {
     /// Analyses the sections of every plate after the deforming-plate solve (see the module
-    /// documentation) and marks plates that have been overloaded for long enough. `forces` are
+    /// documentation) and marks plates that have been overloaded for long enough (`dt` is the
+    /// step; the timers count the time since the last analysis). `forces` are
     /// the forces on the lithosphere of every cell (N, world frame) at the plates' rotations
     /// `rotations` before the solve; the plates' rotations and deformation velocities are the
     /// solved ones.
     pub(super) fn analyse_sections(&mut self, forces: &[DVec3], rotations: &[DVec3], dt: f64) {
         let start = web_time::Instant::now();
+        // The time since the last analysis.
+        let dt = if self.last_section_analysis.is_nan() {
+            dt
+        } else {
+            (self.time - self.last_section_analysis).max(dt)
+        };
+        self.last_section_analysis = self.time;
         let params = self.params.breakup.clone();
         let radius = self.params.planet_radius;
         let cell_count = self.mesh.len();
