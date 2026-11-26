@@ -194,6 +194,8 @@ pub(super) struct PlateSheet {
     /// vertices of the part to break off there, once due (see [`super::breakup`]).
     pub(super) breakup_timer: f64,
     pub(super) pending_breakup: Option<Vec<u32>>,
+    /// How the plate's most overloaded section fails (see `breakup::SectionRecord::opening`).
+    pub(super) breakup_opening: f64,
 }
 
 impl PlateSheet {
@@ -212,6 +214,7 @@ impl PlateSheet {
             pending_split: None,
             breakup_timer: 0.0,
             pending_breakup: None,
+            breakup_opening: 0.0,
         }
     }
 

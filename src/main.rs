@@ -1159,9 +1159,15 @@ fn snapshot(
     );
     let breakup = simulation.breakup_statistics();
     info!(
-        "    breakup by stress: {} plates broken, {} plates overloaded now (largest overload \
-         {:.2}), {:.1} s",
-        breakup.splits, breakup.overloaded, breakup.max_overload, breakup.seconds,
+        "    breakup by stress: {} plates broken ({} cells; {} opening, {} closing, the others \
+         sliding), {} plates overloaded now (largest overload {:.2}), {:.1} s",
+        breakup.splits,
+        breakup.split_cells,
+        breakup.opening_splits,
+        breakup.closing_splits,
+        breakup.overloaded,
+        breakup.max_overload,
+        breakup.seconds,
     );
     info!(
         "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
@@ -1453,13 +1459,13 @@ fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Res
         writeln!(
             file,
             "time,plate,cells,overload,level_overload,cut_overload,length_km,piece_cells,\
-             strength,piece_continental,timer"
+             strength,piece_continental,opening,residual,timer"
         )?;
     }
     for record in simulation.section_records() {
         writeln!(
             file,
-            "{},{},{},{:.4},{:.4},{:.4},{:.0},{},{:.3},{:.3},{}",
+            "{},{},{},{:.4},{:.4},{:.4},{:.0},{},{:.3},{:.3},{:.3},{:.3},{}",
             simulation.time(),
             record.plate_id,
             record.cells,
@@ -1470,6 +1476,8 @@ fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Res
             record.piece_cells,
             record.strength,
             record.piece_continental,
+            record.opening,
+            record.residual,
             record.timer,
         )?;
     }

@@ -114,5 +114,5 @@ def plate_table(plate_of, neighbours, xyz, spacing, min_area=0.002):
 
 
 def is_narrow(m):
-    """Long and narrow, or two bulbs joined by a neck at most ~4 cells (~450 km) wide."""
-    return m['aspect'] >= 4.0 or (m['neck'] is not None and m['neck'] <= 2)
+    """Long and narrow (aspect >= 5), or two bulbs joined by a neck at most ~4 cells (~450 km) wide."""
+    return m["aspect"] >= 5.0 or (m['neck'] is not None and m['neck'] <= 2)
