@@ -86,6 +86,9 @@ pub struct DetailVertex {
     /// / 64 and cloud-top height / 16 km (all zero with the clouds off; see
     /// `modes::realistic::cloud_layer`).
     pub clouds: [u8; 4],
+    /// The cell's wind for the clouds' drift (snorm8 x, y, z in the world frame, divided by
+    /// `modes::realistic::DRIFT_WIND_SCALE`; zero without the drift, #187).
+    pub wind: [i8; 4],
 }
 
 /// The realistic mode's second uniform buffer: the orientation of every plate (a quaternion
@@ -102,7 +105,14 @@ pub struct DetailUniforms {
     /// the frequency of that octave in cycles per planet radius (`y`), whether the cloud tops have
     /// relief (`z`, 0 or 1) and whether the clouds cast shadows (`w`).
     pub clouds: [f32; 4],
+    /// The clouds' drift at the moment drawn (zero without it; see
+    /// `modes::realistic::cloud_drift`): the seed and weight of the two layers of the pressure
+    /// field and of the finer octaves, and their shifts along the wind.
+    pub drift: CloudDrift,
 }
+
+/// The clouds' drift at one moment, see [`DetailUniforms::drift`].
+pub type CloudDrift = [[f32; 4]; 5];
 
 /// The realistic mode's de-indexed mesh and its uniforms; uploaded when its id changes.
 #[derive(Clone)]
@@ -136,12 +146,15 @@ struct PlanetResources {
     detail_pipeline: wgpu::RenderPipeline,
     /// The same with clouds, created when they are first switched on.
     cloud_pipeline: Option<wgpu::RenderPipeline>,
+    /// The same with drifting clouds (#187, detail High), created when first shown.
+    drift_pipeline: Option<wgpu::RenderPipeline>,
     /// What the realistic pipelines are made with.
     pipeline_layout: wgpu::PipelineLayout,
     target_format: wgpu::TextureFormat,
     msaa_samples: u32,
-    /// Whether this frame draws the clouds.
+    /// Whether this frame draws the clouds, and whether they drift.
     clouds_shown: bool,
+    drift_shown: bool,
     detail_uniform_buffer: wgpu::Buffer,
     /// The de-indexed mesh last uploaded: its buffer, [`Detail::id`] and number of vertices.
     detail: Option<(wgpu::Buffer, u64, u32)>,
@@ -299,7 +312,7 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
         &pipeline_layout,
         render_state.target_format,
         msaa_samples,
-        &realistic_shader(false),
+        &realistic_shader(false, false),
     );
     let detail_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("detail uniforms"),
@@ -336,10 +349,12 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
             pipeline,
             detail_pipeline,
             cloud_pipeline: None,
+            drift_pipeline: None,
             pipeline_layout,
             target_format: render_state.target_format,
             msaa_samples,
             clouds_shown: false,
+            drift_shown: false,
             detail_uniform_buffer,
             detail: None,
             detail_shown: false,
@@ -381,7 +396,7 @@ fn detail_pipeline(
                 attributes: &wgpu::vertex_attr_array![
                     0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4, 3 => Unorm8x4,
                     4 => Unorm8x4, 5 => Unorm8x4, 6 => Float32, 7 => Uint16x4,
-                    8 => Uint32x3, 9 => Unorm8x4
+                    8 => Uint32x3, 9 => Unorm8x4, 10 => Snorm8x4
                 ],
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -471,16 +486,23 @@ const REALISTIC_SHADER: &str = concat!(
     include_str!("realistic.wgsl"),
     include_str!("clouds.wgsl")
 );
-/// The realistic shader with or without the clouds' code (see `CLOUDS_COMPILED` there).
-fn realistic_shader(clouds: bool) -> String {
-    if clouds {
-        REALISTIC_SHADER.to_owned()
-    } else {
-        REALISTIC_SHADER.replace(
+/// The realistic shader with or without the clouds' code (see `CLOUDS_COMPILED` there), and
+/// with or without their drift (`CLOUD_DRIFT_COMPILED` in `clouds.wgsl`).
+fn realistic_shader(clouds: bool, drift: bool) -> String {
+    let mut source = REALISTIC_SHADER.to_owned();
+    if !clouds {
+        source = source.replace(
             "const CLOUDS_COMPILED: bool = true;",
             "const CLOUDS_COMPILED: bool = false;",
-        )
+        );
     }
+    if !(clouds && drift) {
+        source = source.replace(
+            "const CLOUD_DRIFT_COMPILED: bool = true;",
+            "const CLOUD_DRIFT_COMPILED: bool = false;",
+        );
+    }
+    source
 }
 const SKY_SHADER: &str = concat!(include_str!("atmosphere.wgsl"), include_str!("sky.wgsl"));
 
@@ -634,6 +656,9 @@ pub struct PlanetCallback {
     /// Whether to draw the sky pass: the sun and the stars (only when the planet is lit by the
     /// sun) and the realistic mode's atmosphere off the disc.
     pub sky: bool,
+    /// The clouds' drift at this moment, while it is shown (realistic mode, clouds on, detail
+    /// High; #187).
+    pub cloud_drift: Option<CloudDrift>,
 }
 
 impl egui_wgpu::CallbackTrait for PlanetCallback {
@@ -682,16 +707,20 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
         }
         resources.detail_shown = false;
         resources.clouds_shown = false;
+        resources.drift_shown = false;
         if let Some(detail) = self
             .surface
             .as_ref()
             .and_then(|surface| surface.detail.as_ref())
             .filter(|detail| !detail.vertices.is_empty())
         {
+            let drift = self.cloud_drift.filter(|_| detail.uniforms.clouds[0] > 0.0);
+            let mut uniforms = *detail.uniforms;
+            uniforms.drift = drift.unwrap_or_default();
             queue.write_buffer(
                 &resources.detail_uniform_buffer,
                 0,
-                bytemuck::bytes_of(detail.uniforms.as_ref()),
+                bytemuck::bytes_of(&uniforms),
             );
             let bytes: &[u8] = bytemuck::cast_slice(detail.vertices.as_slice());
             let fits = |buffer: &wgpu::Buffer| buffer.size() >= bytes.len() as u64;
@@ -713,16 +742,22 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
             }
             resources.detail_shown = true;
             if detail.uniforms.clouds[0] > 0.0 {
-                if resources.cloud_pipeline.is_none() {
-                    resources.cloud_pipeline = Some(detail_pipeline(
+                let pipeline = if drift.is_some() {
+                    &mut resources.drift_pipeline
+                } else {
+                    &mut resources.cloud_pipeline
+                };
+                if pipeline.is_none() {
+                    *pipeline = Some(detail_pipeline(
                         device,
                         &resources.pipeline_layout,
                         resources.target_format,
                         resources.msaa_samples,
-                        &realistic_shader(true),
+                        &realistic_shader(true, drift.is_some()),
                     ));
                 }
                 resources.clouds_shown = true;
+                resources.drift_shown = drift.is_some();
             }
         }
         let Some(surface) = &self.surface else {
@@ -776,7 +811,12 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
         };
         match &resources.detail {
             Some((buffer, _, count)) if resources.detail_shown => {
-                let pipeline = match &resources.cloud_pipeline {
+                let clouds = if resources.drift_shown {
+                    &resources.drift_pipeline
+                } else {
+                    &resources.cloud_pipeline
+                };
+                let pipeline = match clouds {
                     Some(pipeline) if resources.clouds_shown => pipeline,
                     _ => &resources.detail_pipeline,
                 };
@@ -821,12 +861,22 @@ mod tests {
     #[test]
     fn shaders_translate_to_webgl2() {
         use naga::back::glsl;
-        let without_clouds = super::realistic_shader(false);
-        assert_ne!(without_clouds, super::REALISTIC_SHADER);
+        let without_clouds = super::realistic_shader(false, false);
+        let static_clouds = super::realistic_shader(true, false);
+        let drifting_clouds = super::realistic_shader(true, true);
+        assert_ne!(without_clouds, static_clouds);
+        assert_ne!(static_clouds, drifting_clouds);
+        assert_eq!(drifting_clouds, super::REALISTIC_SHADER);
+        // No drift without the clouds' code.
+        assert_eq!(super::realistic_shader(false, true), without_clouds);
         let shaders = [
             ("planet.wgsl", include_str!("planet.wgsl")),
             ("sky.wgsl", super::SKY_SHADER),
-            ("realistic.wgsl", super::REALISTIC_SHADER),
+            (
+                "realistic.wgsl with drifting clouds",
+                drifting_clouds.as_str(),
+            ),
+            ("realistic.wgsl with static clouds", static_clouds.as_str()),
             ("realistic.wgsl without clouds", without_clouds.as_str()),
             ("overlay.wgsl", include_str!("overlay.wgsl")),
             ("outline.wgsl", include_str!("outline.wgsl")),
@@ -874,7 +924,7 @@ mod tests {
                         .count();
                     assert!(varyings <= 15, "{name}: {varyings} varyings");
                     if name.starts_with("realistic.wgsl") {
-                        assert_eq!(varyings, 10, "{output}");
+                        assert_eq!(varyings, 11, "{output}");
                     }
                 }
             }

@@ -1508,6 +1508,19 @@ impl Viewer {
         }
     }
 
+    /// Whether the clouds drift (#187): in the realistic mode with the clouds on at detail High.
+    /// The view then redraws at the rate of [`modes::realistic::drift_repaint`].
+    fn clouds_drift(&self) -> bool {
+        self.mode == RenderModeId::Realistic
+            && modes::realistic::clouds_drift(self.switcher.options(self.mode))
+            // Only once the surface with clouds is there (not while it loads).
+            && self
+                .display
+                .as_ref()
+                .and_then(|display| display.detail.as_ref())
+                .is_some_and(|detail| detail.uniforms.clouds[0] > 0.0)
+    }
+
     /// Whether the sky (the sun and the stars) is drawn: only with the sun's light.
     fn sky_shown(&self) -> bool {
         self.light() != Light::Camera
@@ -1621,6 +1634,14 @@ impl eframe::App for Viewer {
                 let lines = shown
                     .map(|(cell, _)| self.outline(cell, pixels_per_point))
                     .unwrap_or_default();
+                // Drifting clouds move on the display's clock, redrawn at a modest rate.
+                let cloud_drift = self.clouds_drift().then(|| {
+                    ui.ctx()
+                        .request_repaint_after(modes::realistic::drift_repaint(
+                            self.points_per_radius * pixels_per_point,
+                        ));
+                    modes::realistic::cloud_drift(ui.input(|input| input.time))
+                });
                 ui.painter()
                     .add(eframe::egui_wgpu::Callback::new_paint_callback(
                         rect,
@@ -1630,6 +1651,7 @@ impl eframe::App for Viewer {
                             overlay: self.overlay.clone(),
                             lines,
                             sky: self.sky_shown() || self.atmosphere_samples() > 0,
+                            cloud_drift,
                         },
                     ));
             });
