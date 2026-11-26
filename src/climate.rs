@@ -1248,18 +1248,6 @@ impl ColumnSaturation {
     }
 }
 
-/// [`ColumnSaturation::relative_humidity`] for one column (NaN for NaN inputs).
-pub fn column_relative_humidity(
-    precipitation: f64,
-    column_temperature: f64,
-    elevation: f64,
-    params: &ClimateParams,
-) -> f64 {
-    ColumnSaturation::new(column_temperature, params).map_or(f64::NAN, |column| {
-        column.relative_humidity(precipitation, elevation)
-    })
-}
-
 /// Zonal-mean low-level wind (eastward, poleward) in m/s at a latitude (degrees, positive) of the
 /// circulation, i.e. measured from the ITCZ. Representative of Earth's moisture-carrying lower
 /// troposphere: trade winds converging on the ITCZ (Hadley cell), westerlies with a weak
@@ -1434,6 +1422,10 @@ mod tests {
 
     #[test]
     fn column_relative_humidity_inverts_the_rain_law() {
+        let column_relative_humidity = |p: f64, t: f64, z: f64, params: &ClimateParams| {
+            ColumnSaturation::new(t, params)
+                .map_or(f64::NAN, |column| column.relative_humidity(p, z))
+        };
         // Forward: the precipitation of a column at humidity r (as the budget computes it, with
         // the saturation column over high ground), then back.
         let params = ClimateParams::default();

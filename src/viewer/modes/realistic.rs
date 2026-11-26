@@ -980,7 +980,7 @@ const STRATOCUMULUS_DRY: (f32, f32) = (0.1, 0.6);
 /// The inputs of [`cloud_layer`] for a cell.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CloudClimate {
-    /// Column relative humidity (see [`crate::climate::column_relative_humidity`]).
+    /// Column relative humidity (see [`crate::climate::ColumnSaturation::relative_humidity`]).
     pub humidity: f32,
     /// Temperature of the free troposphere (°C): the zonal mean of the sea-level temperature.
     pub column_temperature: f32,

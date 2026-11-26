@@ -29,7 +29,7 @@ the column relative humidity, `W_sat` the saturated column of the zonal-mean sea
 temperature of the month above the cell's elevation, `τ` = 10 days, `a` = 14, `r₀` = 0.7.
 Given the cell's precipitation this inverts uniquely for `r`: `ln P` grows monotonically and
 concavely with `r`, so Newton's method on the logarithm converges in a few steps.
-`climate::column_relative_humidity` does this with exactly the model's saturation column and
+`climate::ColumnSaturation::relative_humidity` does this with exactly the model's saturation column and
 rain law (default parameters: the view does not know `--set climate.*` overrides). A unit test
 runs the rain law forward and back (within 1e-4, also over high ground).
 
@@ -107,8 +107,9 @@ refreshed" log (§6).
   height / 16 km. 64 → 68 bytes: 16.7 MB at 6 subdivisions, 4.2 MB at 5. Zero with the switch
   off.
 - One more interpolated varying: 10 of WebGL2's 15. The naga test now counts them.
-- `DetailUniforms` gains `clouds: vec4` (most octaves, base frequency, relief, shadows). With the
-  switch off the shader skips the clouds by a branch on the uniform.
+- `DetailUniforms` gains `clouds: vec4` (most octaves, base frequency, relief, shadows).
+- Two pipelines for the surface: without the clouds' code (used while they are off) and with
+  it (created when they are first switched on). See §6 for why.
 
 ## 3. The shader (`clouds.wgsl`, used by `realistic.wgsl`)
 
@@ -201,11 +202,60 @@ it repaints only on interaction. A decision for later.)
 
 ## 6. Frame times
 
-FRAME_TIMES
+Median frame time while dragging (the method of stages 2–4), 1280×800, 5 subdivisions, seed 0 at
+10 Myr, Realistic with the Sun light, the default view (about two thirds of the disc lit). Both
+renderers run on the CPU, so these are worst cases and only the ratios matter; on real GPUs,
+phones included, this is far below a frame.
+
+| | Low | Medium | High |
+|---|---|---|---|
+| Desktop, llvmpipe (2 threads, MSAA 4×), before | 104 ms | 128 ms | 131 ms |
+| clouds off | 105 ms (+1%) | 129 ms (+1%) | 132 ms (+1%) |
+| clouds on | 130 ms (+25%) | 164 ms (+28%) | 182 ms (+40%) |
+| Web, chromium with SwiftShader (WebGL2), before | 443 ms | 530 ms | 543 ms |
+| clouds off | 439 ms (±0) | 541 ms (+2%) | 542 ms (±0) |
+| clouds on | 574 ms (+30%) | 697 ms (+32%) | 768 ms (+41%) |
+
+- **Clouds off costs nothing.** A first version skipped the clouds by a branch on the uniform
+  only. That cost nothing on llvmpipe but +18–22% on SwiftShader, whose compiler kept paying for
+  the code in the branch. The view now compiles the shader twice, with the clouds' code and
+  without it (a WGSL constant, `CLOUDS_COMPILED`), and creates the cloud pipeline when the
+  clouds are first switched on. The naga test translates both variants.
+- **Clouds on:** ψ plus 2/4/6 octaves of noise per pixel, against 2–18 evaluations for the
+  surface. High pays for its 6 octaves and the shadows near the terminator.
+- The web numbers need a local build with DEBUG logging and longer measuring windows (the
+  frame-time log drops windows with fewer than 5 frames, and SwiftShader draws ~2 per second);
+  neither change is committed.
+- **CPU per update** (a new frame or option, never while dragging), at 5 subdivisions (10k
+  cells): natively the cloud layers take 1.4 ms per month, 2.5 ms for the year (two months),
+  and the detail mesh 3.5 → 6.1 ms with clouds. On the page (wasm, desktop CPU) the display
+  refresh measured over six season switches went from ~19 ms to ~26 ms (median; noisy, the
+  page renders with SwiftShader on the same CPU).
 
 ## 7. Screenshots ([clouds/](clouds/))
 
-SCREENSHOTS
+5 subdivisions, seed 0 at 10 Myr, Realistic, Detail Medium unless noted.
+
+- `desktop-full-off-on.png`: the default view without and with clouds (the year, Sun light).
+  The tropics carry broken cumulus and clusters, the mid-latitudes swirls around the lows, the
+  desert of the eastern continent is clear.
+- `desktop-jan-jul-tropics.png`: January and July, Camera light (the whole disc lit). The
+  subtropics of the winter hemisphere clear, the rain belt moves towards the summer hemisphere.
+- `desktop-jan-jul-south.png`: the southern ocean and the polar continent, January and July
+  (Camera light). In January (southern summer) the polar land is warm and clear, the storm track
+  breaks up; in July the storm track is a ring of swirling bands and the polar region is
+  overcast above the sea ice.
+- `desktop-terminator.png`, `desktop-closeups.png` (3×): the terminator without clouds, with
+  clouds (cloud tops lit orange beyond the ground's terminator, the relief of convective tops),
+  and the crescent (nothing but the glint saturates).
+- `desktop-crescent.png`: the crescent (#159's angle) with clouds.
+- `desktop-levels.png` (2×): Low, Medium, High. Low has smooth shapes (2 octaves), Medium the
+  swirled bands, High fine cumulus texture.
+- `web-full.png`: the web version (chromium, SwiftShader WebGL2) with the options and the legend
+  (*Clouds* switch, *Cloud* swatch, the added sentence).
+- `web-terminator.png`: the web version near the terminator.
+- `phone.png`, `phone-options.png`: phone width (390×844): the clouds, and the options panel
+  with the new switch; panels start collapsed as before.
 
 ## 8. Plan review (independent agent, before the implementation)
 
