@@ -158,14 +158,18 @@ fn relative_style(arrow_spacing: f64) -> ArrowStyle {
     }
 }
 
-impl Plates {
-    /// The plate id of a cell's plate (its index if the plate is unknown).
-    fn plate_id(data: &ModeData, plate: u32) -> u32 {
-        data.plates
-            .get(plate as usize)
-            .map_or(plate, |info| info.id)
-    }
+/// The colour of a plate (by its index, [`crate::viewer::CellInfo::plate`]) in this mode and in
+/// the plate-motion arrows: its colour for its life, by its id (its index if the plate is
+/// unknown).
+pub(super) fn plate_color(data: &ModeData, plate: u32) -> [u8; 3] {
+    let id = data
+        .plates
+        .get(plate as usize)
+        .map_or(plate, |info| info.id);
+    data.plate_colors.color(id)
+}
 
+impl Plates {
     fn omega(data: &ModeData, plate: u32) -> DVec3 {
         data.plates
             .get(plate as usize)
@@ -285,7 +289,7 @@ impl RenderMode for Plates {
             data.cells
                 .iter()
                 .map(|cell| {
-                    let mut color = rgba(data.plate_colors.color(Self::plate_id(data, cell.plate)));
+                    let mut color = rgba(plate_color(data, cell.plate));
                     if !cell.is_continental() {
                         for channel in &mut color[..3] {
                             *channel *= OCEANIC_SHADE;
