@@ -54,6 +54,9 @@ struct VertexInput {
     @location(6) coast: f32,
     // The plates of the triangle's corners (xyz) and this vertex's corner (w).
     @location(7) plates: vec4<u32>,
+    // Per corner of the triangle: the strike of a mountain belt (snorm8 xyz, world frame), the
+    // squeeze of the relief noise along it (bits 24–30, 0 to 0.8) and the ocean (bit 31).
+    @location(8) ridges: vec3<u32>,
 };
 
 struct VertexOutput {
@@ -69,6 +72,7 @@ struct VertexOutput {
     // Barycentric coordinates (xyz) and the coast value (w).
     @location(6) corner_coast: vec4<f32>,
     @location(7) @interpolate(flat) plates: vec3<u32>,
+    @location(8) @interpolate(flat) ridges: vec3<u32>,
 };
 
 @vertex
@@ -89,6 +93,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
         input.coast,
     );
     output.plates = input.plates.xyz;
+    output.ridges = input.ridges;
     return output;
 }
 
@@ -175,6 +180,17 @@ fn noise(x: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(value, derivative);
 }
 
+// The signed byte `byte` (0 to 2) of `word` in [-1, 1] (snorm8; GLSL ES 3.00 has no
+// unpackSnorm4x8).
+fn snorm8(word: u32, byte: u32) -> f32 {
+    return max(f32(bitcast<i32>(word << (24u - 8u * byte)) >> 24u) / 127.0, -1.0);
+}
+
+// The squeeze of a corner's relief noise along its strike.
+fn corner_squeeze(word: u32) -> f32 {
+    return f32((word >> 24u) & 127u) * (0.8 / 127.0);
+}
+
 // Fractal sum of `octaves` (fractional: the last one fades in) octaves of noise at `x`: value
 // (x) and gradient with respect to `x` (yzw), scaled so that the value has a standard deviation
 // of about 0.4 (|value| > 1 in about 1% of the pixels; the raw sum's is about 0.15).
@@ -235,6 +251,46 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let n_shape = clamp(shape.x, -1.0, 1.0);
     let n_pattern = clamp(pattern, -1.0, 1.0);
 
+    // Mountain ridges along the strike of a belt (with the bump relief, Medium and High): each
+    // corner with a strike has its own noise field, squeezed along its strike (ridges up to
+    // five times as long as wide), the others share `shape`; the fields are blended by the
+    // squared barycentric weights. A corner's field is fixed by its cell, so the blend is
+    // continuous across the triangles' edges; neighbouring corners of a belt have nearly the
+    // same field, so the blend keeps its contrast there.
+    var relief = shape;
+    let squeezes = vec3<f32>(
+        corner_squeeze(input.ridges.x),
+        corner_squeeze(input.ridges.y),
+        corner_squeeze(input.ridges.z),
+    );
+    if detail.settings.z > 0.0 && max(squeezes.x, max(squeezes.y, squeezes.z)) > 0.0 {
+        let y = anchor * base;
+        let w = b * b;
+        var sum = vec4<f32>(0.0);
+        for (var j = 0; j < 3; j++) {
+            if w[j] <= 0.0 {
+                continue;
+            }
+            if squeezes[j] > 0.0 {
+                let word = input.ridges[j];
+                let strike = vec3<f32>(snorm8(word, 0u), snorm8(word, 1u), snorm8(word, 2u));
+                let along = rotate(inverse, normalize(strike));
+                let n = fbm(y - squeezes[j] * dot(y, along) * along, octaves);
+                // The gradient with respect to `y`: the squeeze is symmetric.
+                let gradient = n.yzw - squeezes[j] * dot(n.yzw, along) * along;
+                sum += w[j] * vec4<f32>(n.x, gradient);
+            } else {
+                sum += w[j] * shape;
+            }
+        }
+        relief = sum / (w.x + w.y + w.z);
+    }
+    // The height the bump relief implies, on which the snow lies first: the noise, or on High
+    // −|noise| (its crests where the noise crosses zero), recentred and scaled to the same
+    // spread (|n| of a normal spread 0.4 has a mean of 0.32 and a spread of 0.24).
+    let ridged_height = (0.32 - abs(relief.x)) * (0.4 / 0.24);
+    let height = clamp(mix(relief.x, ridged_height, detail.settings.w), -1.0, 1.0);
+
     // Coast: the coast value with noise, anti-aliased over a pixel.
     // (At most ±0.5 against corner values of ±0.4 to ±1: islands and lakes can appear only
     // where the land is low or the water shallow, never in the deep ocean.)
@@ -242,12 +298,30 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let edge = coast_width + weight * 2.0 * base * footprint + 1e-4;
     let land = smoothstep(-edge, edge, coast);
     // Snow line and plant cover: partial covers break up into patches; full and no cover stay.
-    // Snow and ice have crisp edges: the snow cover is sharpened around one half.
+    // Snow and ice have crisp edges: the snow cover is sharpened around one half. On rugged
+    // land the snow lies on the crests of the relief first. Sea ice belongs to the climate,
+    // not to the crust under it: its pattern is anchored to the world frame.
     let snow_cover = input.plants.a;
+    // (Two independent patterns mixed by t keep their spread when divided by
+    // sqrt(t² + (1 − t)²).)
+    // (Low draws no relief, and its pattern is the relief's noise itself.)
+    let rugged = select(0.0, input.water.a, detail.settings.z > 0.0);
+    var n_snow = mix(n_pattern, height, rugged) * inverseSqrt(1.0 - 2.0 * rugged * (1.0 - rugged));
+    let sea = dot(b, vec3<f32>(input.ridges >> vec3<u32>(31u)));
+    if sea > 0.0 && snow_cover > 0.01 && snow_cover < 0.99 {
+        // Floes and leads finer than the cells' pattern: from the second octave on.
+        let floes = clamp(
+            fbm(up * (2.0 * base) + vec3<f32>(-23.1, 11.9, 4.3), max(octaves - 1.0, 0.0)).x,
+            -1.0,
+            1.0,
+        );
+        n_snow = mix(n_snow, floes, sea) * inverseSqrt(1.0 - 2.0 * sea * (1.0 - sea));
+    }
+    n_snow = clamp(n_snow, -1.0, 1.0);
     let snow = smoothstep(
         0.2,
         0.8,
-        snow_cover + weight * 3.2 * snow_cover * (1.0 - snow_cover) * n_pattern,
+        snow_cover + weight * 3.2 * snow_cover * (1.0 - snow_cover) * n_snow,
     );
     let plant_cover = input.bare.a;
     let plants = clamp(
@@ -268,9 +342,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     // Bump relief: the noise's gradient tilts the normal of rugged land.
     let mesh_normal = normalize(input.normal);
-    var slope = rotate(orientation, shape.yzw);
+    var slope = rotate(orientation, relief.yzw);
     slope -= dot(slope, up) * up;
-    let ridged = detail.settings.w * select(1.0, -1.0, shape.x > 0.0);
+    let ridged = detail.settings.w * select(1.0, -1.0, relief.x > 0.0);
     // Every octave adds as much slope: normalised by their number, so that the relief does not
     // get rougher with more pixels per cell.
     let tilt = detail.settings.z * input.water.a * mix(1.0, ridged, detail.settings.w)
