@@ -55,7 +55,7 @@ struct VertexInput {
     // The plates of the triangle's corners (xyz) and this vertex's corner (w).
     @location(7) plates: vec4<u32>,
     // Per corner of the triangle: the strike of a mountain belt (snorm8 xyz, world frame), the
-    // squeeze of the relief noise along it (bits 24–30, 0 to 0.75) and the ocean (bit 31).
+    // squeeze of the relief noise along it (bits 24–30, 0 to 0.8) and the ocean (bit 31).
     @location(8) ridges: vec3<u32>,
 };
 
@@ -188,7 +188,7 @@ fn snorm8(word: u32, byte: u32) -> f32 {
 
 // The squeeze of a corner's relief noise along its strike.
 fn corner_squeeze(word: u32) -> f32 {
-    return f32((word >> 24u) & 127u) * (0.75 / 127.0);
+    return f32((word >> 24u) & 127u) * (0.8 / 127.0);
 }
 
 // Fractal sum of `octaves` (fractional: the last one fades in) octaves of noise at `x`: value
@@ -253,7 +253,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     // Mountain ridges along the strike of a belt (with the bump relief, Medium and High): each
     // corner with a strike has its own noise field, squeezed along its strike (ridges up to
-    // four times as long as wide), the others share `shape`; the fields are blended by the
+    // five times as long as wide), the others share `shape`; the fields are blended by the
     // squared barycentric weights. A corner's field is fixed by its cell, so the blend is
     // continuous across the triangles' edges; neighbouring corners of a belt have nearly the
     // same field, so the blend keeps its contrast there.

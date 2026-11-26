@@ -722,14 +722,15 @@ fn surface_gradient(data: &ModeData, cell: usize) -> glam::DVec3 {
 
 /// How the bump relief of a land cell lines up along the strike of a mountain belt: the strike
 /// `ŝ` (a unit tangent vector in the world frame; its sign does not matter) and the squeeze of
-/// the noise along it, `σ = 1 − 1/k` for ridges `k` times as long as wide (`k` up to 4, σ up to
-/// 0.75).
+/// the noise along it, `σ = 1 − 1/k` for ridges `k` times as long as wide (`k` up to 5, σ up to
+/// 0.8).
 ///
 /// The strike runs across the slope of the surface. It comes from the structure tensor of the
 /// surface gradients over the cell and its neighbours (`Σ ∇h ∇hᵀ`), which is sign-free, so that
 /// the two flanks of a range agree and its crest, where the gradient vanishes, takes the
 /// direction of its flanks. The strength grows with the slope along the principal direction
-/// (`STRIKE_SLOPE`), the coherence of the directions `(λ₁ − λ₂)/(λ₁ + λ₂)` and the ruggedness.
+/// (`STRIKE_SLOPE`), the coherence of the directions `(λ₁ − λ₂)/(λ₁ + λ₂)` (its root) and the
+/// ruggedness (full from one half).
 fn strike(
     data: &ModeData,
     gradients: &[glam::DVec3],
@@ -756,8 +757,10 @@ fn strike(
     }
     let coherence = (major - minor) / (major + minor);
     let slope = (major / count).sqrt();
-    let strength =
-        smoothstep(STRIKE_SLOPE.0, STRIKE_SLOPE.1, slope as f32) * coherence as f32 * ruggedness;
+    // Mountains of medium ruggedness already line up fully.
+    let strength = smoothstep(STRIKE_SLOPE.0, STRIKE_SLOPE.1, slope as f32)
+        * (coherence as f32).sqrt()
+        * (2.0 * ruggedness).min(1.0);
     if !(strength > 0.0) {
         return ([0.0; 3], 0.0);
     }
@@ -771,7 +774,7 @@ fn strike(
     if strike == glam::Vec3::ZERO {
         return ([0.0; 3], 0.0);
     }
-    (strike.to_array(), 1.0 - 1.0 / (1.0 + 3.0 * strength))
+    (strike.to_array(), 1.0 - 1.0 / (1.0 + 4.0 * strength))
 }
 
 /// East and north at a point of the unit sphere (any orthonormal tangent pair at the poles).
@@ -785,8 +788,8 @@ fn tangent_basis(up: glam::DVec3) -> (glam::DVec3, glam::DVec3) {
     (east, up.cross(east))
 }
 
-/// The most squeeze of the relief noise along a strike (ridges four times as long as wide).
-const MAX_SQUEEZE: f32 = 0.75;
+/// The most squeeze of the relief noise along a strike (ridges five times as long as wide).
+const MAX_SQUEEZE: f32 = 0.8;
 
 /// Packs a corner's strike (snorm8 x, y, z in bits 0–23), the squeeze along it (bits 24–30, in
 /// steps of `MAX_SQUEEZE / 127`) and whether the cell is ocean (bit 31), as `realistic.wgsl`
