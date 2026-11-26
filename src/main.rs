@@ -155,6 +155,13 @@ struct Cli {
     #[arg(long)]
     lake_log_from: Option<f64>,
 
+    /// Log the plates for analysis (#123): every this many Myr, append the plate id of every
+    /// cell to `plate_maps.csv` in `--output` (time, then the ids in cell order), and after every
+    /// step append the most overloaded section of every plate to `plate_sections.csv` (see
+    /// `tectonics::SectionRecord`). Changes nothing in the simulation.
+    #[arg(long, value_name = "MYR")]
+    plate_log: Option<f64>,
+
     /// Life on the planet, as far as the parameters see it: `modern` is today's vegetated Earth
     /// with a biogenic ocean, `abiotic` a planet without life (bare land, no transpiration,
     /// braided rivers, no biogenic pelagic sediment). See `presets::Biosphere`.
@@ -484,6 +491,7 @@ impl Cli {
         params.matching.verify = self.verify_matching;
         params.initial_sediment.enabled = !self.no_initial_sediment;
         params.track_material_budget = self.material_budget;
+        params.breakup.diagnose = self.plate_log.is_some();
         let mut overrides = Vec::with_capacity(self.overrides.len());
         for assignment in &self.overrides {
             let (name, value) = assignment
@@ -599,6 +607,17 @@ impl Run {
         let start = Instant::now();
         let mut previous_ledger: Option<PreviousSnapshot> = None;
         #[cfg(not(target_arch = "wasm32"))]
+        if cli.plate_log.is_some() {
+            for name in ["plate_maps.csv", "plate_sections.csv"] {
+                let path = cli.output.join(name);
+                if path.exists() {
+                    std::fs::remove_file(&path)
+                        .with_context(|| format!("removing {}", path.display()))?;
+                }
+            }
+            append_plate_map(&planet, &cli.output.join("plate_maps.csv"))?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         if cli.lake_log_from.is_some() {
             // A new run starts a new log.
             let path = cli.output.join("lakes.csv");
@@ -635,6 +654,18 @@ impl Run {
     fn finish_step(&mut self, cli: &Cli) -> anyhow::Result<()> {
         if self.step.is_multiple_of(self.snapshot_every) || self.step == self.steps {
             snapshot(&self.planet, cli, &mut self.previous_ledger)?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(interval) = cli.plate_log {
+            let path = cli.output.join("plate_sections.csv");
+            append_plate_sections(&self.planet, &path)
+                .with_context(|| format!("writing {}", path.display()))?;
+            let every = ((interval / cli.dt).round() as u64).max(1);
+            if self.step.is_multiple_of(every) || self.step == self.steps {
+                let path = cli.output.join("plate_maps.csv");
+                append_plate_map(&self.planet, &path)
+                    .with_context(|| format!("writing {}", path.display()))?;
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(from) = cli.lake_log_from
@@ -1126,6 +1157,12 @@ fn snapshot(
         sheet.collision_convergence.0,
         sheet.collision_convergence.1,
     );
+    let breakup = simulation.breakup_statistics();
+    info!(
+        "    breakup by stress: {} plates broken, {} plates overloaded now (largest overload \
+         {:.2}), {:.1} s",
+        breakup.splits, breakup.overloaded, breakup.max_overload, breakup.seconds,
+    );
     info!(
         "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
          cell, {} mismatches | distinct samples: {} cells shared a sample, {:.1}% of them got \
@@ -1372,6 +1409,69 @@ fn write_snapshot_files(planet: &Planet, cli: &Cli) -> anyhow::Result<()> {
             .save(&path)
             .with_context(|| format!("writing {}", path.display()))?;
         debug!(path = %path.display(), "Wrote snapshot");
+    }
+    Ok(())
+}
+
+/// Appends the plate id of every cell to the plate map log (see `Cli::plate_log`).
+#[cfg(not(target_arch = "wasm32"))]
+fn append_plate_map(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::Write;
+    let simulation = planet.tectonics();
+    let mut file = std::io::BufWriter::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?,
+    );
+    write!(file, "{}", simulation.time())?;
+    for cell in 0..simulation.mesh().len() as u32 {
+        write!(
+            file,
+            ",{}",
+            simulation.plate_id(simulation.owner(cell).plate)
+        )?;
+    }
+    writeln!(file)?;
+    Ok(())
+}
+
+/// Appends the most overloaded section of every plate to the section log (see
+/// `Cli::plate_log`).
+#[cfg(not(target_arch = "wasm32"))]
+fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::Write;
+    let simulation = planet.tectonics();
+    let new = !path.exists();
+    let mut file = std::io::BufWriter::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?,
+    );
+    if new {
+        writeln!(
+            file,
+            "time,plate,cells,overload,level_overload,cut_overload,length_km,piece_cells,\
+             strength,piece_continental,timer"
+        )?;
+    }
+    for record in simulation.section_records() {
+        writeln!(
+            file,
+            "{},{},{},{:.4},{:.4},{:.4},{:.0},{},{:.3},{:.3},{}",
+            simulation.time(),
+            record.plate_id,
+            record.cells,
+            record.overload,
+            record.level_overload,
+            record.cut_overload,
+            record.length_km,
+            record.piece_cells,
+            record.strength,
+            record.piece_continental,
+            record.timer,
+        )?;
     }
     Ok(())
 }

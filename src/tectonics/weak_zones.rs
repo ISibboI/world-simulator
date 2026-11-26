@@ -79,7 +79,7 @@ pub const MIN_STRENGTH: f64 = 0.05;
 const BAND_WIDTH: f64 = 0.35;
 
 /// Capacity of links that cannot break (inside crust that is not cut, and to the blocks).
-const UNBREAKABLE: f64 = 1e12;
+pub(super) const UNBREAKABLE: f64 = 1e12;
 
 /// Strength of the lithosphere under `crust` relative to old (cold, unthinned) lithosphere,
 /// ∝ its mechanical thickness: lithosphere thickens with the square root of its thermal age
@@ -233,7 +233,7 @@ impl Break {
 }
 
 /// A flow network for the minimum cut (Dinic's algorithm).
-struct Network {
+pub(super) struct Network {
     /// Per edge: target node, residual capacity; edge `e ^ 1` is the reverse of edge `e`.
     to: Vec<u32>,
     capacity: Vec<f64>,
@@ -242,7 +242,7 @@ struct Network {
 }
 
 impl Network {
-    fn new(nodes: usize) -> Self {
+    pub(super) fn new(nodes: usize) -> Self {
         Self {
             to: Vec::new(),
             capacity: Vec::new(),
@@ -251,7 +251,7 @@ impl Network {
     }
 
     /// A link that can carry `capacity` in both directions.
-    fn link(&mut self, a: usize, b: usize, capacity: f64) {
+    pub(super) fn link(&mut self, a: usize, b: usize, capacity: f64) {
         self.edges[a].push(self.to.len() as u32);
         self.to.push(b as u32);
         self.capacity.push(capacity);
@@ -279,7 +279,7 @@ impl Network {
 
     /// Maximum flow from `source` to `sink`; afterwards, the nodes reachable from `source` in
     /// the residual network are its side of a minimum cut.
-    fn max_flow(&mut self, source: usize, sink: usize) -> f64 {
+    pub(super) fn max_flow(&mut self, source: usize, sink: usize) -> f64 {
         let mut total = 0.0;
         loop {
             let level = self.levels(source);
@@ -330,7 +330,7 @@ impl Network {
     }
 
     /// Nodes reachable from `source` in the residual network.
-    fn reachable(&self, source: usize) -> Vec<bool> {
+    pub(super) fn reachable(&self, source: usize) -> Vec<bool> {
         self.levels(source)
             .into_iter()
             .map(|level| level != u32::MAX)

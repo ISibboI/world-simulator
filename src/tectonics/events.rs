@@ -352,6 +352,7 @@ impl Simulation {
         let first_new_plate = self.plates.len() as u32;
         self.rift_above_plumes();
         self.split_deforming_plates();
+        self.break_overloaded_plates();
         if self.configuration_changes == configuration {
             self.initiate_subduction(dt, first_new_plate, boundaries);
         } else {
