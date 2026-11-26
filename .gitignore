@@ -3,3 +3,4 @@
 /.claude/worktrees/
 /agent-scratch/
 /dist
+__pycache__/

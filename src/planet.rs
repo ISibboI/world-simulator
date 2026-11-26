@@ -86,6 +86,9 @@ pub struct PlanetStatistics {
     /// Global mean precipitation and evaporation in m/yr (equal when the water cycle is closed).
     pub global_precipitation: f64,
     pub global_evaporation: f64,
+    /// Lake evaporation that the climate returned to the air (m³/yr): the evaporation of the
+    /// lakes of the previous steps, as the solved months saw it.
+    pub lake_evaporation_to_air: f64,
     /// Mean runoff (precipitation minus evapotranspiration, which feeds the rivers) of land in
     /// m/yr.
     pub land_runoff: f64,
@@ -211,13 +214,15 @@ impl Planet {
             -crate::sea::SILL_TOLERANCE,
             tectonics.min_sea_fraction(),
         );
-        let view = climate_elevations(tectonics.mesh(), &elevation, &seeds);
+        let open = open_sills(&erosion);
+        let view = climate_elevations(tectonics.mesh(), &elevation, &seeds, open);
         temperature.update(&view, None, tectonics.time());
         let cell_count = tectonics.mesh().len();
         let water = SurfaceWater::ocean_only(crate::sea::ocean_from(
             tectonics.mesh(),
             &elevation,
             seeds.iter().copied(),
+            open,
         ));
         let mut planet = Self {
             tectonics,
@@ -439,7 +444,8 @@ impl Planet {
             -crate::sea::SILL_TOLERANCE,
             self.tectonics.min_sea_fraction(),
         );
-        let view = climate_elevations(self.tectonics.mesh(), &elevation, &seeds);
+        let open = open_sills(&self.erosion);
+        let view = climate_elevations(self.tectonics.mesh(), &elevation, &seeds, open);
         self.temperature
             .update(&view, Some(&self.precipitation), self.tectonics.time());
         self.update_water_cycle(&view);
@@ -466,11 +472,12 @@ impl Planet {
                     dense_crust: &self.tectonics.dense_crust_thicknesses(),
                     precipitation: &self.precipitation,
                     runoff: &self.climate.water_cycle().runoff,
-                    potential_evaporation: &self.climate.water_cycle().potential_evaporation,
+                    potential_evaporation: &self.climate.water_cycle().lake_potential_evaporation,
                     plate: &plate,
                     class: &class,
                     ocean_volume: self.tectonics.ocean_volume(),
                     ocean_seeds: &seeds,
+                    water_volume: self.tectonics.water_volume(),
                     previous_lakes: &self
                         .water
                         .lake_depth
@@ -500,11 +507,16 @@ impl Planet {
                     self.tectonics.mesh(),
                     &elevation,
                     seeds.iter().copied(),
+                    open,
                 );
                 // The erosion's ocean at the start of the step (its result has the one at the
                 // end).
-                let sample =
-                    crate::sea::ocean_from(self.tectonics.mesh(), surface, seeds.iter().copied());
+                let sample = crate::sea::ocean_from(
+                    self.tectonics.mesh(),
+                    surface,
+                    seeds.iter().copied(),
+                    open,
+                );
                 per_cell.iter().zip(&sample).filter(|(a, b)| a != b).count()
             } else {
                 0
@@ -523,6 +535,13 @@ impl Planet {
                 self.inland_change +=
                     (result.hydrology.inland_cells - self.hydrology.inland_cells).abs();
             }
+            // The lake evaporation the balance removed in this step, and what the climate
+            // returned to the air in it (from the lakes of earlier steps; #126).
+            debug!(
+                removed = result.hydrology.lake_evaporation / 1e9,
+                into_air = self.climate.water_cycle().total_lake_evaporation / 1e9,
+                "Lake evaporation (km³/yr)"
+            );
             debug!(
                 inland_cells = result.hydrology.inland_cells,
                 inland_depressions = result.hydrology.inland_depressions,
@@ -546,6 +565,7 @@ impl Planet {
                 self.tectonics.mesh(),
                 &elevation,
                 seeds.iter().copied(),
+                open,
             ));
         }
         if self.cover_cohort.is_none() && self.tectonics.time() >= self.cover_cohort_time - 1e-9 {
@@ -576,10 +596,16 @@ impl Planet {
         4.0 * std::f64::consts::PI * self.planet_radius.powi(2) / self.tectonics.mesh().len() as f64
     }
 
+    /// Solves the water cycle on the climate's `elevation`, with the evaporation of the lakes of
+    /// the last erosion step as a moisture source (#126).
     fn update_water_cycle(&mut self, elevation: &[f64]) {
         let fields = self.temperature.fields();
-        self.climate
-            .update(elevation, &fields.monthly, &fields.thermal_equator);
+        self.climate.update(
+            elevation,
+            &self.water.lake_evaporation,
+            &fields.monthly,
+            &fields.thermal_equator,
+        );
         let cycle = self.climate.water_cycle();
         debug!(iterations = ?cycle.iterations, clipped = cycle.clipped, "Water cycle solved");
         self.precipitation = cycle.precipitation.clone();
@@ -589,12 +615,19 @@ impl Planet {
         self.climate.water_cycle()
     }
 
+    /// Whether a sill on which the sea stands connects the basin behind it to the ocean (see
+    /// [`crate::sea::ocean_from`]).
+    pub fn open_sills(&self) -> bool {
+        open_sills(&self.erosion)
+    }
+
     pub fn statistics(&self) -> PlanetStatistics {
         let elevation = self.tectonics.surface_elevations();
         let ocean = crate::sea::ocean_mask(
             self.tectonics.mesh(),
             &elevation,
             self.tectonics.min_sea_fraction(),
+            self.open_sills(),
         );
         // Land includes closed depressions below sea level (dry or holding lakes).
         let land: Vec<usize> = (0..elevation.len()).filter(|&cell| !ocean[cell]).collect();
@@ -675,6 +708,7 @@ impl Planet {
             arid_land_fraction,
             global_precipitation,
             global_evaporation,
+            lake_evaporation_to_air: cycle.total_lake_evaporation,
             land_runoff,
             itcz: cycle.itcz.clone(),
             clipped_precipitation: cycle.clipped,
@@ -798,6 +832,12 @@ fn crust_class(crust: &Crust) -> CrustClass {
     }
 }
 
+/// Whether a sill on which the sea stands connects the basin behind it to the ocean (see
+/// [`crate::sea::ocean_from`]): only without [`ErosionParams::sea_spill`].
+fn open_sills(erosion: &Option<ErosionParams>) -> bool {
+    erosion.as_ref().is_none_or(|params| !params.sea_spill)
+}
+
 /// The surface elevations as the climate and temperature models see them: closed depressions
 /// below sea level are land (raised to sea level; the lapse rate ignores elevations below it
 /// anyway), so that they get runoff and potential evaporation instead of ocean evaporation.
@@ -805,8 +845,9 @@ fn climate_elevations(
     mesh: &crate::sphere::SphereMesh,
     elevation: &[f64],
     seeds: &[usize],
+    open_sills: bool,
 ) -> Vec<f64> {
-    let ocean = crate::sea::ocean_from(mesh, elevation, seeds.iter().copied());
+    let ocean = crate::sea::ocean_from(mesh, elevation, seeds.iter().copied(), open_sills);
     let mut elevation = elevation.to_vec();
     for (e, ocean) in elevation.iter_mut().zip(ocean) {
         if !ocean {

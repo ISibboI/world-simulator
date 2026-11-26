@@ -1206,14 +1206,16 @@ fn snapshot(
     let single_sample = planet.endorheic_single_sample_drainage();
     info!(
         "    hydrology: runoff {:.0} km³/yr, to the ocean {:.0} km³/yr, lake evaporation {:.0} \
-         km³/yr | endorheic {:.1}% of land ({:.1}% into single-cell pits, {:.1}% into \
-         single-sample depressions; ocean differs from the per-cell surface at {} cells), lakes {:.1}% of land, \
-         lake potential evaporation {:.2} m/yr | depressions {}, endorheic {}, with inner sills \
+         km³/yr (into the air {:.0}) | endorheic {:.1}% of land ({:.1}% into single-cell pits, \
+         {:.1}% into single-sample depressions; ocean differs from the per-cell surface at {} \
+         cells), lakes {:.1}% of land, lake potential evaporation {:.2} m/yr | depressions {}, \
+         endorheic {}, with inner sills \
          {} | sediment trapped in lakes {:.2} km³/yr | all closed depressions {} ({:.1}% of \
          land), playas {} ({:.1}% of land)",
         hydrology.runoff / 1e9,
         hydrology.to_ocean / 1e9,
         hydrology.lake_evaporation / 1e9,
+        planet_statistics.lake_evaporation_to_air / 1e9,
         100.0 * hydrology.endorheic_cells / land_cells,
         100.0 * hydrology.endorheic_pit_cells / land_cells,
         100.0 * single_sample / land_cells,
@@ -1248,6 +1250,23 @@ fn snapshot(
         planet_statistics.sea_level_deficit / 1e9,
         planet_statistics.sea_level_deficit * per_ocean_area,
         planet_statistics.inland_change,
+    );
+    info!(
+        "    spill: {} lakes in {} depressions holding water, {} of them with several \
+         (inner sills) | sea-fed lakes {} ({:.1} cells covered, sea water {:.0} km³ = {:.2} m \
+         of sea level, evaporation beyond their own inflow {:.0} km³/yr, endorheic land into \
+         them {:.1}% of land) | poured over sills at the end of the step {:.0} km³ ({:.2} m)",
+        hydrology.lake_bodies,
+        hydrology.lakes,
+        hydrology.split_lakes,
+        hydrology.sea_fed_lakes,
+        hydrology.sea_fed_cells,
+        hydrology.sea_water / 1e9,
+        hydrology.sea_water * per_ocean_area,
+        hydrology.sea_fed_evaporation / 1e9,
+        100.0 * hydrology.endorheic_sea_fed_cells / land_cells,
+        hydrology.sea_spill_deficit / 1e9,
+        hydrology.sea_spill_deficit * per_ocean_area,
     );
     info!(
         "    temperature global {:5.1} °C, equator {:5.1} °C, poles {:6.1} °C | \
@@ -1424,7 +1443,12 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     let elevation = simulation.surface_elevations();
     // The surface as the erosion sees it (cells showing one sample at one level, #112 b).
     let drain = simulation.sample_surface_elevations();
-    let ocean = sea::ocean_mask(mesh, &elevation, simulation.min_sea_fraction());
+    let ocean = sea::ocean_mask(
+        mesh,
+        &elevation,
+        simulation.min_sea_fraction(),
+        planet.open_sills(),
+    );
     // With the load of the water that actually stands on each cell (#127).
     let elevation = planet.surface_elevations();
     let temperature = planet.temperature();
@@ -1446,7 +1470,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,sample,drain"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -1473,7 +1497,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
              {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
-             {:.3},{:.3},{:.1},{},{:.1}",
+             {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -1511,6 +1535,18 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             planet
                 .surface_water()
                 .lake_depth
+                .get(cell as usize)
+                .copied()
+                .unwrap_or(0.0),
+            planet
+                .surface_water()
+                .lake_evaporation
+                .get(cell as usize)
+                .copied()
+                .unwrap_or(0.0),
+            planet
+                .water_cycle()
+                .lake_evaporation
                 .get(cell as usize)
                 .copied()
                 .unwrap_or(0.0),

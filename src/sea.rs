@@ -189,9 +189,9 @@ fn sea_seeds(
     seas
 }
 
-/// The pass level of every cell from `seeds` (see [`Flood`]).
-#[cfg(test)]
-fn pass_levels(mesh: &SphereMesh, level: &[f64], seeds: &[usize]) -> Vec<f64> {
+/// The pass level of every cell from `seeds` (see [`Flood`]): the lowest level at which water
+/// from the seeds reaches it.
+pub fn pass_levels(mesh: &SphereMesh, level: &[f64], seeds: &[usize]) -> Vec<f64> {
     flood(mesh, level, seeds).pass
 }
 
@@ -219,23 +219,42 @@ pub fn ocean_seeds(
 /// The ocean among cells with the given surface elevations relative to sea level (m): the cells
 /// below sea level connected to the largest body of water below sea level, or to another one of
 /// at least `min_sea_fraction` of the surface (see [`MIN_SEA_FRACTION`]), also over sills on
-/// which the sea level stands (see [`SILL_TOLERANCE`]).
-pub fn ocean_mask(mesh: &SphereMesh, elevation: &[f64], min_sea_fraction: f64) -> Vec<bool> {
+/// which the sea level stands (see [`SILL_TOLERANCE`]) if `open_sills` (see [`ocean_from`]).
+pub fn ocean_mask(
+    mesh: &SphereMesh,
+    elevation: &[f64],
+    min_sea_fraction: f64,
+    open_sills: bool,
+) -> Vec<bool> {
     let Flood { pass, .. } = ocean_flood(mesh, elevation, -SILL_TOLERANCE, min_sea_fraction);
+    let sill = if open_sills {
+        SILL_TOLERANCE
+    } else {
+        -SILL_TOLERANCE
+    };
     pass.iter()
         .zip(elevation)
-        .map(|(&pass, &e)| pass < SILL_TOLERANCE && e < -SILL_TOLERANCE)
+        .map(|(&pass, &e)| pass < sill && e < -SILL_TOLERANCE)
         .collect()
 }
 
 /// The cells below sea level (`elevation < 0`, less [`SILL_TOLERANCE`]) connected to the
-/// `seeds` through cells below sea level or sills at sea level.
+/// `seeds` through cells below sea level, and with `open_sills` also over sills at sea level
+/// (within [`SILL_TOLERANCE`]; the model before #168). Without, a sill on which the sea stands
+/// closes the basin behind it, which the sea fills by pouring over the sill (see
+/// [`crate::erosion::ErosionParams::sea_spill`]).
 pub fn ocean_from(
     mesh: &SphereMesh,
     elevation: &[f64],
     seeds: impl IntoIterator<Item = usize>,
+    open_sills: bool,
 ) -> Vec<bool> {
-    let passable = |cell: usize| elevation[cell] < SILL_TOLERANCE;
+    let sill = if open_sills {
+        SILL_TOLERANCE
+    } else {
+        -SILL_TOLERANCE
+    };
+    let passable = |cell: usize| elevation[cell] < sill;
     let mut reached = vec![false; mesh.len()];
     let mut queue = VecDeque::new();
     for seed in seeds {
@@ -538,7 +557,7 @@ mod tests {
         assert!(all.level < solved.level);
         // The mask agrees: the depression is below sea level but not ocean.
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - solved.level)).collect();
-        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION, true);
         for cell in 0..dry.len() {
             assert_eq!(ocean[cell], dry[cell] == -2000.0, "{cell}");
         }
@@ -553,7 +572,7 @@ mod tests {
         let basin = dry.iter().filter(|&&d| d == -1800.0).count();
         assert!(basin as f64 > MIN_SEA_FRACTION * dry.len() as f64);
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d + 1000.0)).collect();
-        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION, true);
         assert_eq!(
             ocean.iter().filter(|&&o| o).count(),
             dry.iter().filter(|&&d| d < 0.0).count()
@@ -571,7 +590,7 @@ mod tests {
             (-1000.0, MIN_SEA_FRACTION),
         );
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - solved.level)).collect();
-        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION, true);
         assert!((held(&dry, &ocean, solved.level, 1e10) / volume - 1.0).abs() < 1e-9);
         assert!(ocean.iter().zip(&dry).any(|(&o, &d)| o && d == -1800.0));
         // Sills inside it do not make it smaller.
@@ -585,7 +604,7 @@ mod tests {
         assert!(inner.contains(&-900.0));
         assert!(ocean_seeds(&mesh, &inner, -1000.0, MIN_SEA_FRACTION).len() >= 3);
         // Without the rule, it is a lake.
-        let ocean = ocean_mask(&mesh, &elevation, 1.0);
+        let ocean = ocean_mask(&mesh, &elevation, 1.0, true);
         assert!(!ocean.iter().zip(&dry).any(|(&o, &d)| o && d == -1800.0));
     }
 
@@ -606,7 +625,7 @@ mod tests {
             let seeds = ocean_seeds(&mesh, &dry, reference, MIN_SEA_FRACTION);
             assert_eq!(seeds.len(), 2, "{reference}");
             let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - reference)).collect();
-            let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
+            let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION, true);
             for (cell, &d) in dry.iter().enumerate() {
                 assert_eq!(ocean[cell], d < reference, "{reference} {cell}");
             }
@@ -633,7 +652,7 @@ mod tests {
         let solved = sea_level(&mesh, &dry, &pores, area, volume, (0.0, MIN_SEA_FRACTION));
         assert!(solved.level > -300.0 && solved.deficit == 0.0, "{solved:?}");
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - solved.level)).collect();
-        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION, true);
         for cell in 0..dry.len() {
             assert_eq!(ocean[cell], elevation[cell] < 0.0, "{cell}");
         }
@@ -684,7 +703,7 @@ mod tests {
         // The sea spills over the rim: the basin is an arm of the sea holding the deficit, the
         // rim (at sea level) is not ocean.
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - solved.level)).collect();
-        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION, true);
         for (cell, &d) in dry.iter().enumerate() {
             assert_eq!(ocean[cell], d < rim, "{cell}");
         }
@@ -743,7 +762,7 @@ mod tests {
             .unwrap();
         dry[pit] = -8000.0;
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d + 1000.0)).collect();
-        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION, true);
         assert!(!ocean[pit]);
         assert_eq!(
             ocean.iter().filter(|&&o| o).count(),
@@ -761,7 +780,7 @@ mod tests {
         );
         assert!(solved.level < -1000.0, "{solved:?}");
         let elevation: Vec<f64> = dry.iter().map(|&d| to_surface(d - solved.level)).collect();
-        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION);
+        let ocean = ocean_mask(&mesh, &elevation, MIN_SEA_FRACTION, true);
         assert!(!ocean[pit]);
         assert!((held(&dry, &ocean, solved.level, 1e10) / volume - 1.0).abs() < 1e-9);
     }

@@ -1174,6 +1174,12 @@ impl Simulation {
         self.params.ocean_volume - self.lake_water
     }
 
+    /// The planet's water (m³): the ocean's and the lakes' (see
+    /// [`TectonicParams::ocean_volume`]).
+    pub fn water_volume(&self) -> f64 {
+        self.params.ocean_volume
+    }
+
     /// Sets the water held in lakes (m³), which the ocean lacks: closed depressions, also those
     /// below sea level that the ocean does not reach (see [`crate::sea`]), hold lakes fed by
     /// their rivers, and their water is taken from the ocean, so that the planet's water is
@@ -1331,6 +1337,7 @@ impl Simulation {
             &self.mesh,
             &self.surface_elevations(),
             self.params.min_sea_fraction,
+            true,
         )
     }
 
