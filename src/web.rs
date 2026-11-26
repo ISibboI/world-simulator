@@ -677,8 +677,9 @@ struct WorkerState {
     /// Pause and step requests of the page.
     pausing: Pausing,
     /// The part loop is not scheduled: stopped for a pause (to be scheduled again on resume or
-    /// a step), or the run is complete or failed.
+    /// a step), or for good.
     stopped: bool,
+    /// The run is complete or failed.
     complete: bool,
 }
 

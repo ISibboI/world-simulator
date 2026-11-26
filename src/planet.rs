@@ -71,21 +71,6 @@ pub struct StepInProgress {
     times: [Duration; 3],
 }
 
-impl StepPart {
-    /// For the log.
-    fn name(&self) -> &'static str {
-        match self {
-            StepPart::TectonicsStart => "tectonics start",
-            StepPart::Substeps(_) => "tectonic substep",
-            StepPart::TectonicsEnd(_) => "tectonics end",
-            StepPart::Temperature => "temperature",
-            StepPart::WaterCycle { .. } => "water cycle",
-            StepPart::Erosion { .. } => "erosion",
-            StepPart::Done => "done",
-        }
-    }
-}
-
 /// The next part of a step.
 enum StepPart {
     /// The plate velocities, the deformation and the number of substeps.
@@ -108,6 +93,21 @@ enum StepPart {
         seeds: Vec<usize>,
     },
     Done,
+}
+
+impl StepPart {
+    /// For the log.
+    fn name(&self) -> &'static str {
+        match self {
+            StepPart::TectonicsStart => "tectonics start",
+            StepPart::Substeps(_) => "tectonic substep",
+            StepPart::TectonicsEnd(_) => "tectonics end",
+            StepPart::Temperature => "temperature",
+            StepPart::WaterCycle { .. } => "water cycle",
+            StepPart::Erosion { .. } => "erosion",
+            StepPart::Done => "done",
+        }
+    }
 }
 
 /// The continental cover of [`CoverCohort::start`] and how much of it is left (Gt), per tracer
@@ -652,7 +652,7 @@ impl Planet {
     /// parts the planet is in a consistent state, but part-way through the step (its time too):
     /// it can be read (e.g. hashed), but should not be shown as a state of the simulation.
     /// Taking the parts with anything else in between gives the same result as
-    /// [`Planet::step`].
+    /// the whole step at once.
     pub fn continue_step(&mut self, step: &mut StepInProgress) -> bool {
         let span = step.span.clone();
         let _entered = span.enter();

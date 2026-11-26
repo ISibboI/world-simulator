@@ -1099,7 +1099,7 @@ impl Simulation {
         self.end_step(step);
     }
 
-    /// Starts a step of `dt` Myr (see [`Simulation::step`]), which then takes
+    /// Starts a step of `dt` Myr (the substeps as in `Simulation::step`), which then takes
     /// [`Simulation::next_substep`] for every substep and [`Simulation::end_step`]. Between these
     /// parts the state is consistent, but the time is part-way through the step.
     pub fn begin_step(&mut self, dt: f64) -> TectonicStep {

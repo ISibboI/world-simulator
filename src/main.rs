@@ -421,7 +421,7 @@ fn run_simulation_thread(
     type Publish<'a> = dyn FnMut(&Planet, Option<Duration>, viewer::Layers) -> ControlFlow<()> + 'a;
     fn take(
         request: Request,
-        run: &Run,
+        run: &mut Run,
         pausing: &mut Pausing,
         layers: &mut viewer::Layers,
         publish: &mut Publish,
@@ -431,7 +431,11 @@ fn run_simulation_thread(
                 let new = requested.0 & !layers.0 != 0;
                 *layers = requested;
                 if new && !run.in_step() {
-                    return publish(&run.planet, None, *layers);
+                    let start = Instant::now();
+                    let flow = publish(&run.planet, None, *layers);
+                    // The time of this extra update does not count into the next step's.
+                    run.previous_update += start.elapsed();
+                    return flow;
                 }
             }
             Request::Paused(value, number) => pausing.set_paused(value, number),
@@ -442,7 +446,7 @@ fn run_simulation_thread(
     // Part by part, reading the requests after every part.
     let stopped = 'run: loop {
         while let Ok(request) = requests.try_recv() {
-            if take(request, &run, &mut pausing, &mut layers, &mut publish).is_break() {
+            if take(request, &mut run, &mut pausing, &mut layers, &mut publish).is_break() {
                 break 'run true;
             }
         }
@@ -465,7 +469,7 @@ fn run_simulation_thread(
                 let Ok(request) = requests.recv() else {
                     break true;
                 };
-                if take(request, &run, &mut pausing, &mut layers, &mut publish).is_break() {
+                if take(request, &mut run, &mut pausing, &mut layers, &mut publish).is_break() {
                     break true;
                 }
             }
@@ -629,8 +633,9 @@ fn is_last_step(time: f64, duration: f64, dt: f64) -> bool {
     time + 0.5 * dt >= (duration / dt).round() * dt
 }
 
-/// A simulation run, step by step: [`simulate`] runs it in one loop; the web worker runs one
-/// step at a time, so that it can take messages from the page in between.
+/// A simulation run, step by step: [`simulate`] runs it in one loop; the desktop thread of the 3D
+/// view and the web worker run it part by part ([`Run::advance_part`]), so that they can take
+/// requests of the view in between (see [`pausing`]).
 struct Run {
     planet: Planet,
     /// The number of steps of the run and of the last one taken.

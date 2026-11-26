@@ -937,6 +937,9 @@ impl Viewer {
         let asked = newer && self.step_pending;
         if newer {
             self.step_pending = false;
+            // The simulation stops after the step it was asked for; "pausing" only if it does
+            // not report it soon (it writes the step's snapshot first).
+            self.request_time = Some(web_time::Instant::now());
         }
         self.time = Some(update.time);
         self.pace.record(update.step_seconds);

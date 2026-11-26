@@ -1,7 +1,7 @@
 //! Pausing and stepping a running simulation of the 3D view, the same on the desktop thread and
 //! in the web worker (#116).
 //!
-//! A run advances part by part ([`Run::advance_part`]: the parts of [`crate::planet::Planet::step`]),
+//! A run advances part by part ([`Run::advance_part`]: the parts of [`crate::planet::Planet::continue_step`]),
 //! and the simulation reads the requests of the view after every part, so a pause takes effect
 //! at the next part boundary, inside a step or between steps, rather than only after the whole
 //! step. Between the parts the planet is consistent, and nothing but reads happens there, so a
