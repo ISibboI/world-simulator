@@ -1513,6 +1513,12 @@ impl Viewer {
     fn clouds_drift(&self) -> bool {
         self.mode == RenderModeId::Realistic
             && modes::realistic::clouds_drift(self.switcher.options(self.mode))
+            // Only once the surface with clouds is there (not while it loads).
+            && self
+                .display
+                .as_ref()
+                .and_then(|display| display.detail.as_ref())
+                .is_some_and(|detail| detail.uniforms.clouds[0] > 0.0)
     }
 
     /// Whether the sky (the sun and the stars) is drawn: only with the sun's light.

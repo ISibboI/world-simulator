@@ -1251,12 +1251,12 @@ pub fn clouds_drift(options: &OptionValues) -> bool {
 
 /// How often the view redraws while the clouds drift, with `pixels_per_radius` physical pixels
 /// per planet radius: often enough that the fastest clouds ([`DRIFT_FAST_WIND`]) move half a
-/// pixel per frame, at most 30 and at least 2 times a second. Far less often than every vsync:
+/// pixel per frame, at most 15 and at least 2 times a second. Far less often than every vsync:
 /// about 4 times a second in a 1280×800 window (~2 px/s).
 pub fn drift_repaint(pixels_per_radius: f32) -> std::time::Duration {
     let pixels_per_second =
         f64::from(pixels_per_radius) * DRIFT_FAST_WIND * DRIFT_RATE / DRIFT_RADIUS;
-    let seconds = (0.5 / pixels_per_second.max(1e-6)).clamp(1.0 / 30.0, 0.5);
+    let seconds = (0.5 / pixels_per_second.max(1e-6)).clamp(1.0 / 15.0, 0.5);
     std::time::Duration::from_secs_f64(seconds)
 }
 
@@ -1283,13 +1283,15 @@ const FINE_PERIOD: f64 = 2.0 * 86_400.0;
 const DRIFT_RADIUS: f64 = 6.371e6;
 
 /// The wind of a cell for the clouds' drift: the vector `[east, north]` (m/s) at `position` in the
-/// world frame, divided by [`DRIFT_WIND_SCALE`], as snorm8 (zero where it is unknown).
+/// world frame, divided by [`DRIFT_WIND_SCALE`], as snorm8 (zero where it is unknown; faster
+/// winds keep their direction at the largest speed).
 fn drift_wind(position: glam::DVec3, wind: [f32; 2]) -> [i8; 4] {
     if !wind.iter().all(|c| c.is_finite()) {
         return [0; 4];
     }
     let vector =
         crate::viewer::arrows::tangent_vector(position, wind) / f64::from(DRIFT_WIND_SCALE);
+    let vector = vector.clamp_length_max(1.0);
     let [x, y, z] = vector
         .to_array()
         .map(|c| (c.clamp(-1.0, 1.0) * 127.0).round() as i8);
@@ -2325,9 +2327,9 @@ mod tests {
         ));
         assert!(clouds.contains("cloud_octaves(swirled - wind * shift.z, detail.drift[2].xyz,"));
         let quantile = |p: f32| 0.5513 * (p / (1.0 - p)).ln();
-        let points: Vec<(glam::Vec3, glam::Vec3)> = (0..20_000)
+        let points: Vec<(glam::Vec3, glam::Vec3)> = (0..10_000)
             .map(|i| {
-                let z = 1.0 - (2.0 * i as f32 + 1.0) / 20_000.0;
+                let z = 1.0 - (2.0 * i as f32 + 1.0) / 10_000.0;
                 let angle = i as f32 * 2.399_963;
                 let r = (1.0 - z * z).sqrt();
                 let u = glam::Vec3::new(r * angle.cos(), r * angle.sin(), z);
@@ -2346,7 +2348,15 @@ mod tests {
             .collect();
         let stretch = glam::Vec3::new(1.0, 1.0, zonal);
         let noise = |q: glam::Vec3| shader_noise(q.to_array());
-        for seconds in [0.0, 12.0, 24.0, 36.0, 1000.0] {
+        const COVERS: [f32; 7] = [0.05, 0.1, 0.3, 0.5, 0.7, 0.9, 0.95];
+        // The share of every cover at every moment, per spectrum and kind of moment: a single
+        // layer of the finer octaves (every 48 s: weights 1 and 0) or an even blend (12 s
+        // later: 0.71 each), over six periods of the finer octaves.
+        let mut shares = vec![vec![[0.0_f32; 2]; COVERS.len()]; 2];
+        let moments: Vec<f64> = (0..6)
+            .flat_map(|cycle| [48.0 * f64::from(cycle), 48.0 * f64::from(cycle) + 12.0])
+            .collect();
+        for (moment, &seconds) in moments.iter().enumerate() {
             let drift = cloud_drift(seconds);
             let weights = [0, 1, 2, 3].map(|layer| drift[layer][3]);
             assert!((weights[0].powi(2) + weights[1].powi(2) - 1.0).abs() < 1e-5);
@@ -2385,7 +2395,7 @@ mod tests {
                     sum / variance.sqrt()
                 };
                 let values: Vec<f32> = points.iter().map(field).collect();
-                for cover in [0.05, 0.1, 0.3, 0.5, 0.7, 0.9, 0.95] {
+                for (index, cover) in COVERS.into_iter().enumerate() {
                     let threshold = -quantile(cover);
                     let share = values.iter().filter(|&&v| v > threshold).count() as f32
                         / values.len() as f32;
@@ -2393,7 +2403,20 @@ mod tests {
                         (share - cover).abs() < 0.06,
                         "{seconds} s, persistence {persistence}: {cover} -> {share}"
                     );
+                    shares[usize::from(persistence > 1.0)][index][moment % 2] += share / 6.0;
                 }
+            }
+        }
+        // The cloud amount does not pulse as the layers cross-fade: on average the even blends
+        // have the share of the single layers (the sum of two layers is only a little more
+        // Gaussian than one). (Single moments differ by up to ~0.03 with the realisation of
+        // the few dozen lows and highs on the sphere.)
+        for (spectrum, covers) in shares.iter().enumerate() {
+            for (cover, [single, blend]) in COVERS.iter().zip(covers) {
+                assert!(
+                    (single - blend).abs() < 0.01,
+                    "spectrum {spectrum}, cover {cover}: single {single}, blend {blend}"
+                );
             }
         }
     }
@@ -2417,14 +2440,16 @@ mod tests {
                         drift[layer]
                     );
                 } else {
-                    let moved = (drift[4][layer] - previous[4][layer]).abs();
-                    assert!(moved < 1e-3, "layer {layer}: shift {moved}");
+                    // Downwind: the noise is sampled at `u − wind · shift`, and the shift
+                    // grows, so the pattern moves with the wind.
+                    let moved = drift[4][layer] - previous[4][layer];
+                    assert!(moved > 0.0 && moved < 1e-3, "layer {layer}: shift {moved}");
                 }
             }
             assert_ne!(drift[0][..3], drift[1][..3]);
             assert_ne!(drift[2][..3], drift[3][..3]);
-            for layer in 0..4 {
-                assert!(drift[layer][..3].iter().all(|c| c.abs() <= 32.0));
+            for layer in &drift[..4] {
+                assert!(layer[..3].iter().all(|c| c.abs() <= 32.0));
             }
             previous = drift;
         }
@@ -2459,10 +2484,10 @@ mod tests {
         }
         assert_eq!(drifting, [(Quality::High, 1)]);
         // A redraw rate far below vsync: ~4 per second in a 1280×800 window (about 370 pixels
-        // per radius at the centre), never more than 30.
+        // per radius at the centre), never more than 15.
         let interval = drift_repaint(370.0).as_secs_f64();
         assert!((0.2..0.3).contains(&interval), "{interval}");
-        assert!(drift_repaint(1e5).as_secs_f64() >= 1.0 / 30.0 - 1e-9);
+        assert!(drift_repaint(1e5).as_secs_f64() >= 1.0 / 15.0 - 1e-9);
         assert!(drift_repaint(1.0).as_secs_f64() <= 0.5);
     }
 
@@ -2472,6 +2497,8 @@ mod tests {
         // East at (1, 0, 0) is +y, north +z.
         assert_eq!(drift_wind(position, [10.0, 0.0]), [0, 64, 0, 0]);
         assert_eq!(drift_wind(position, [0.0, -40.0]), [0, 0, -127, 0]);
+        // Too fast: clipped along its direction.
+        assert_eq!(drift_wind(position, [40.0, 40.0]), [0, 90, 90, 0]);
         assert_eq!(drift_wind(position, [f32::NAN, 1.0]), [0; 4]);
     }
 

@@ -73,7 +73,7 @@ clouds (two layers of ψ and of every octave, also for the shadows).
 
 While Realistic is shown with clouds on at High, the view asks for a repaint after an interval
 that moves the fastest clouds (10 m/s) by half a pixel per frame at the centre of the disc,
-clamped to 2–30 per second: ~4 per second in a 1280×800 window, more on large screens
+clamped to 2–15 per second: ~4 per second in a 1280×800 window, more on large screens
 (the view has no zoom). No continuous repaint otherwise. The page stops drawing in a hidden
 tab by itself.
 
