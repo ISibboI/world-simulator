@@ -76,7 +76,7 @@ const OPTIONS: &[ModeOption] = &[
                 fronts and polar stratus where the air is humid, towering storms where it is \
                 warm and wet (the tropical rain belt), stratocumulus over cold subtropical \
                 seas; with the season. A decoration: their pattern is noise",
-        kind: OptionKind::Switch { default: false },
+        kind: OptionKind::Switch { default: true },
     },
 ];
 
@@ -2012,8 +2012,11 @@ mod tests {
     #[test]
     fn clouds_only_with_the_switch() {
         let faces = |data: &ModeData| detail_vertices(data, data.mesh.faces());
-        let options = OptionValues::defaults(Realistic.options());
-        assert!(!options.is_on(CLOUDS));
+        // On by default (Sebastian on #183); the mode's options are not stored across restarts,
+        // so every start shows them.
+        assert!(OptionValues::defaults(Realistic.options()).is_on(CLOUDS));
+        let mut options = OptionValues::defaults(Realistic.options());
+        options.set(CLOUDS, 0);
         with_planet(
             |_, _| {},
             &options,

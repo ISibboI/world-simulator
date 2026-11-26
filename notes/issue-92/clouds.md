@@ -4,7 +4,8 @@ Stage 5 of [plan.md](plan.md) §10, "Clouds (optional): climate-derived cloud la
 Sebastian's decisions that apply (§0 and his comments on #92):
 
 - clouds are an **optional decoration** (decision 7): the simulation has no clouds, so they are
-  derived from the climate fields; a *Clouds* switch in the Realistic mode, **off by default**;
+  derived from the climate fields; a *Clouds* switch in the Realistic mode, planned off by
+  default, **on by default** since Sebastian's review of #183;
 - detail generated on the fly with distance-based LOD (pixel footprint), Detail Medium default;
 - no zoom; relief and atmosphere true to scale;
 - nothing but the sun, its glow and its glint may over-expose (#159, #162, #170's exposure);
@@ -188,7 +189,10 @@ it repaints only on interaction. A decision for later.)
 
 ## 4. UI
 
-- Option **Clouds** (switch, off by default) after *Atmosphere*, with a hover text.
+- Option **Clouds** (switch, **on by default**, Sebastian on #183) after *Atmosphere*, with a
+  hover text. The modes' options are not stored across restarts (only the render mode, the time
+  bar and the web's subdivisions are), so every start shows the clouds, and no setting saved by
+  an earlier version can keep them off.
 - Legend: a *Cloud* swatch and one sentence while the switch is on.
 - No new panel; on phones the options sit in the collapsed switcher as before.
 
@@ -316,3 +320,8 @@ Not changed:
   extreme limb, so no clouds stand out above the limb.
 - Summer storm tracks are clearer than Earth's (the model's column humidity there is lower).
 - The view uses the default rain-law parameters.
+
+## 11. Sebastian's review of #183
+
+"Clouds on by default. Keep clouds static, make issue about slow drift. Look is ok for now."
+The switch is now on by default; the clouds stay static; the drift is #187.
