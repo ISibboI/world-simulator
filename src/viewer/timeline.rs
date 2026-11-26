@@ -121,11 +121,19 @@ enum Rows {
     Three,
 }
 
+/// The longest time text the bar may show until the simulation goes on: a past frame's (#121).
+fn longest_time_text(view: &TimelineView) -> String {
+    format!("{0:.0} Myr · live {0:.0}", view.live_time)
+}
+
 /// The layout for a bar with `inner` points of width, buttons and time text of the given widths
-/// and `spacing` points between widgets.
-fn rows(inner: f32, buttons: f32, text: f32, spacing: f32, narrow: bool) -> Rows {
+/// and `spacing` points between widgets. The one-row layout is chosen by the width of the
+/// longest text (`longest`), not the shown one, so that the slider keeps its width and position
+/// when the view leaves the live state: otherwise a drag starting at the live end would map to
+/// the end of the shorter slider of the past frame, back to live, and so on every frame (#121).
+fn rows(inner: f32, buttons: f32, text: f32, longest: f32, spacing: f32, narrow: bool) -> Rows {
     let beside = buttons + spacing + text;
-    if !narrow && beside + spacing + MIN_SLIDER <= inner {
+    if !narrow && buttons + spacing + longest + spacing + MIN_SLIDER <= inner {
         Rows::One
     } else if beside <= inner {
         Rows::Two
@@ -175,6 +183,9 @@ pub struct TimeBar {
     open: Option<bool>,
     /// A choice of the user (the collapse or expand button) not yet remembered.
     chosen: Option<bool>,
+    /// Where the slider was last drawn, and its id.
+    #[cfg_attr(not(test), allow(dead_code))]
+    slider: Option<(egui::Rect, egui::Id)>,
 }
 
 impl TimeBar {
@@ -183,6 +194,7 @@ impl TimeBar {
         Self {
             open: stored,
             chosen: None,
+            slider: None,
         }
     }
 
@@ -203,7 +215,7 @@ impl TimeBar {
         let mut action = None;
         let mut toggle = false;
         let rect = if open {
-            show_bar(ctx, view, &mut action, &mut toggle)
+            show_bar(ctx, view, &mut action, &mut toggle, &mut self.slider)
         } else {
             show_strip(ctx, view, &mut action, &mut toggle)
         };
@@ -258,6 +270,7 @@ fn show_bar(
     view: &TimelineView,
     action: &mut Option<TimeAction>,
     toggle: &mut bool,
+    slider_rect: &mut Option<(egui::Rect, egui::Id)>,
 ) -> egui::Rect {
     let screen = ctx.content_rect();
     let width = (screen.width() - 2.0 * MARGIN).max(100.0);
@@ -269,10 +282,13 @@ fn show_bar(
                 let inner = width - 2.0 * ui.spacing().window_margin.leftf();
                 ui.set_width(inner);
                 let text = time_text(view);
+                let width = text_width(ui, &text);
+                let longest = text_width(ui, &longest_time_text(view)).max(width);
                 let rows = rows(
                     inner,
                     buttons_width(ui),
-                    text_width(ui, &text),
+                    width,
+                    longest,
                     ui.spacing().item_spacing.x,
                     narrow,
                 );
@@ -283,9 +299,19 @@ fn show_bar(
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    time_label(ui, view, text);
+                                    // As wide as the longest text, so that the slider keeps
+                                    // its width (see `rows`).
+                                    let size = egui::vec2(longest, ui.spacing().interact_size.y);
+                                    ui.allocate_ui_with_layout(
+                                        size,
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.set_min_width(longest);
+                                            time_label(ui, view, text);
+                                        },
+                                    );
                                     let room = ui.available_width();
-                                    slider(ui, view, action, room);
+                                    *slider_rect = slider(ui, view, action, room);
                                 },
                             );
                         });
@@ -298,12 +324,12 @@ fn show_bar(
                                 |ui| time_label(ui, view, text),
                             );
                         });
-                        slider(ui, view, action, inner);
+                        *slider_rect = slider(ui, view, action, inner);
                     }
                     Rows::Three => {
                         ui.horizontal(|ui| buttons(ui, view, action, toggle));
                         time_label(ui, view, text);
-                        slider(ui, view, action, inner);
+                        *slider_rect = slider(ui, view, action, inner);
                     }
                 }
                 if let Some(error) = view.error {
@@ -471,22 +497,38 @@ fn time_label(ui: &mut egui::Ui, view: &TimelineView, text: String) {
     }
 }
 
-fn slider(ui: &mut egui::Ui, view: &TimelineView, action: &mut Option<TimeAction>, width: f32) {
+/// The slider over the positions, and where it is and its id (if there is one).
+fn slider(
+    ui: &mut egui::Ui,
+    view: &TimelineView,
+    action: &mut Option<TimeAction>,
+    width: f32,
+) -> Option<(egui::Rect, egui::Id)> {
     if view.positions < 2 {
-        return;
+        return None;
     }
     let mut position = view.position.min(view.positions - 1);
     ui.spacing_mut().slider_width = width.max(40.0);
+    // The same id in every layout: egui ties a drag to the id of the pressed widget, and the
+    // layout may change during a drag (on phones the time text gets a row of its own when the
+    // view leaves the live state, #121).
     let response = ui
-        .add(
-            egui::Slider::new(&mut position, 0..=view.positions - 1)
-                .show_value(false)
-                .trailing_fill(true),
+        .scope_builder(
+            egui::UiBuilder::new().scope_id(egui::Id::unique("time slider")),
+            |ui| {
+                ui.add(
+                    egui::Slider::new(&mut position, 0..=view.positions - 1)
+                        .show_value(false)
+                        .trailing_fill(true),
+                )
+            },
         )
+        .inner
         .on_hover_text(&view.about);
     if response.changed() && position != view.position {
         *action = Some(TimeAction::Seek(position));
     }
+    Some((response.rect, response.id))
 }
 
 #[cfg(test)]
@@ -562,14 +604,70 @@ mod tests {
     }
 
     #[test]
+    fn the_slider_stays_put_when_the_view_leaves_live() {
+        // #121: a shorter slider for the longer time text of a past frame sent a slow drag from
+        // the live end back to live on every other frame; on phones the time text's own row
+        // gave the slider another id, which ended the drag.
+        let time_of = |index: usize| Some(index as f64 * 25.0);
+        for (touch, width) in [
+            (false, 1280.0),
+            (false, 700.0),
+            (true, 700.0),
+            (true, 412.0),
+            (true, 390.0),
+        ] {
+            let ctx = egui::Context::default();
+            if touch {
+                // As `UiOptions` sets up touch screens.
+                ctx.all_styles_mut(|style| {
+                    style.spacing.interact_size = egui::vec2(48.0, 48.0);
+                    style.spacing.button_padding = egui::vec2(12.0, 10.0);
+                    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+                });
+            }
+            let mut rects = Vec::new();
+            for live in [true, false] {
+                let mut view = view(&time_of);
+                view.positions = 300;
+                view.live_time = 7474.0;
+                if !live {
+                    view.live = false;
+                    view.position = 3;
+                }
+                let mut bar = TimeBar::new(Some(true));
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 800.0),
+                    )),
+                    ..Default::default()
+                };
+                // The second pass: the first one sizes the new area.
+                for _ in 0..2 {
+                    ctx.run_ui(input.clone(), |ui| {
+                        bar.show(ui.ctx(), &view);
+                    })
+                    .textures_delta
+                    .clear();
+                }
+                let (rect, id) = bar.slider.expect("a slider");
+                rects.push((rect.x_range(), id));
+            }
+            assert_eq!(rects[0], rects[1], "at {width} points, touch {touch}");
+        }
+    }
+
+    #[test]
     fn time_text_moves_below_the_buttons_when_it_does_not_fit() {
         // Touch buttons (4 × 48 points with spacing) leave a 412-point phone too little room for
         // "275 Myr · live 317", but enough for "275 Myr".
         let inner = 412.0 - 2.0 * MARGIN - 2.0 * 6.0;
-        assert_eq!(rows(inner, 216.0, 170.0, 8.0, true), Rows::Three);
-        assert_eq!(rows(inner, 216.0, 60.0, 8.0, true), Rows::Two);
-        assert_eq!(rows(1200.0, 216.0, 170.0, 8.0, false), Rows::One);
+        assert_eq!(rows(inner, 216.0, 170.0, 170.0, 8.0, true), Rows::Three);
+        assert_eq!(rows(inner, 216.0, 60.0, 170.0, 8.0, true), Rows::Two);
+        assert_eq!(rows(1200.0, 216.0, 170.0, 170.0, 8.0, false), Rows::One);
         // A wide window too narrow for a useful slider beside buttons and time.
-        assert_eq!(rows(450.0, 216.0, 170.0, 8.0, false), Rows::Two);
+        assert_eq!(rows(450.0, 216.0, 170.0, 170.0, 8.0, false), Rows::Two);
+        // One row only if the longest text fits, also while the live one is shown (#121).
+        assert_eq!(rows(450.0, 216.0, 60.0, 170.0, 8.0, false), Rows::Two);
     }
 }

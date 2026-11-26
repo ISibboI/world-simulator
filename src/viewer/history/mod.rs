@@ -6,9 +6,13 @@
 //! the layers derived from plates. The vertices follow from the cells. Frames are stored as the
 //! difference to the frame before (mostly zeros), compressed with lz4, with a keyframe every
 //! [`KEY_INTERVAL`] frames, so that showing a frame decodes at most that many. A [`FrameStore`]
-//! keeps the encoded frames: a temporary file on the desktop, IndexedDB on the web; only the
-//! last decoded frame stays in memory (and in the encoder the state of the latest frame, the base
-//! of the next difference).
+//! keeps the encoded frames: a temporary file on the desktop, IndexedDB on the web. In memory stay
+//! only a few decoded states of one key interval, checkpoints every [`CHECKPOINT`] frames, so
+//! that a step back decodes a few frames rather than the chain from the keyframe (#121) (and in
+//! the encoder the state of the latest frame, the base of the next difference).
+//!
+//! While the time bar is dragged faster than frames are read (IndexedDB), every decoded frame is
+//! shown, not only the last requested one, so that the view keeps up (#121).
 //!
 //! The simulation encodes the frames ([`FrameEncoder`], in its thread on the desktop and its
 //! worker on the web), and the view only stores them, so that the encoding does not take time
@@ -110,14 +114,37 @@ pub struct History {
     raw: u64,
     /// The history no longer records (see the module documentation).
     full: bool,
-    /// The last decoded frame, from which the next ones decode with fewer reads.
-    decoded: Option<(usize, State)>,
-    /// The read in progress: from which frame, to which.
-    reading: Option<(usize, usize)>,
+    /// Decoded states of one key interval, by frame: every [`CHECKPOINT`]th frame from its
+    /// keyframe on, and the last decoded frame. A frame decodes from the nearest of them before
+    /// it, so that a step back reads and decodes a few frames, not the chain from the keyframe
+    /// (#121).
+    checkpoints: Vec<(usize, State)>,
+    /// The read in progress.
+    reading: Option<Read>,
+    /// The read in progress is no longer of interest (the view went live).
+    stale: bool,
     /// The frame to show next, while a read is in progress.
     wanted: Option<usize>,
     /// The result for the view.
     ready: Option<Result<Frame, String>>,
+}
+
+/// Every this many frames after a keyframe, the decoded state is kept as a checkpoint.
+const CHECKPOINT: usize = 5;
+/// At most this many bytes of checkpoints: a guard for large meshes (at 6 subdivisions the
+/// at most 6 checkpoints take ~14 MB).
+const CHECKPOINT_BYTES: usize = 32 << 20;
+
+/// A read of frames from the store.
+#[derive(Debug, Clone, Copy)]
+struct Read {
+    /// The first frame read, the last (the requested one) and the keyframe before it.
+    from: usize,
+    target: usize,
+    key: usize,
+    /// The checkpoint the first frame decodes on (`from - 1`), if it is not a keyframe.
+    base: Option<usize>,
+    started: web_time::Instant,
 }
 
 impl History {
@@ -128,8 +155,9 @@ impl History {
             stored: 0,
             raw: 0,
             full: false,
-            decoded: None,
+            checkpoints: Vec::new(),
             reading: None,
+            stale: false,
             wanted: None,
             ready: None,
         }
@@ -190,6 +218,7 @@ impl History {
             for entry in &mut self.frames[failed..] {
                 entry.lost = true;
             }
+            self.checkpoints.retain(|(index, _)| *index < failed);
             self.full = true;
         }
     }
@@ -222,20 +251,45 @@ impl History {
     /// Asks for a frame; [`History::poll`] returns it once it is decoded. A newer request
     /// replaces one that has not started.
     pub fn request(&mut self, index: usize) {
+        if self.reading.is_some_and(|read| read.target == index) {
+            // On its way.
+            self.wanted = None;
+            self.stale = false;
+            return;
+        }
         self.wanted = Some(index);
         self.start_read();
     }
 
-    /// Whether a requested frame is still being read.
-    pub fn is_loading(&self) -> bool {
-        self.reading.is_some() || self.wanted.is_some()
+    /// Forgets the requests: the view no longer shows past frames. A read in progress
+    /// completes, only as a checkpoint.
+    pub fn cancel(&mut self) {
+        self.wanted = None;
+        self.ready = None;
+        self.stale = self.reading.is_some();
     }
 
-    /// The requested frame, once it is decoded (or why it could not be).
+    /// Whether a requested frame is still being read.
+    pub fn is_loading(&self) -> bool {
+        (self.reading.is_some() && !self.stale) || self.wanted.is_some()
+    }
+
+    /// The decoded frame, once it is there (or why it could not be). While the view scrubs
+    /// faster than frames are read, this is also a frame that an older request asked for, so
+    /// that the view does not stand still until the scrubbing stops (#121); the requested
+    /// frame follows.
     pub fn poll(&mut self) -> Option<Result<Frame, String>> {
         self.check_writes();
         self.finish_read();
         self.ready.take()
+    }
+
+    /// The keyframe the frame decodes from.
+    fn key_of(&self, index: usize) -> usize {
+        (0..=index)
+            .rev()
+            .find(|&index| self.frames[index].key)
+            .unwrap_or(0)
     }
 
     fn start_read(&mut self) {
@@ -253,21 +307,28 @@ impl History {
             self.ready = Some(Err("this frame could not be stored".to_owned()));
             return;
         }
-        if let Some((index, state)) = &self.decoded
+        let key = self.key_of(target);
+        // The nearest checkpoint at or before the frame, after its keyframe.
+        let base = self
+            .checkpoints
+            .iter()
+            .rev()
+            .find(|(index, _)| (key..=target).contains(index));
+        if let Some((index, state)) = base
             && *index == target
         {
             self.ready = Some(Ok(frame(target, state)));
             return;
         }
-        let key = (0..=target)
-            .rev()
-            .find(|&index| self.frames[index].key)
-            .unwrap_or(0);
-        let from = match &self.decoded {
-            Some((index, _)) if (key..target).contains(index) => index + 1,
-            _ => key,
-        };
-        self.reading = Some((from, target));
+        let base = base.map(|(index, _)| *index);
+        let from = base.map_or(key, |index| index + 1);
+        self.reading = Some(Read {
+            from,
+            target,
+            key,
+            base,
+            started: web_time::Instant::now(),
+        });
         self.store.read(Range {
             start: from,
             end: target + 1,
@@ -276,43 +337,97 @@ impl History {
     }
 
     fn finish_read(&mut self) {
-        let Some((from, target)) = self.reading else {
+        let Some(read) = self.reading else {
             return;
         };
         let Some(result) = self.store.take_read() else {
             return;
         };
+        let started = web_time::Instant::now();
         self.reading = None;
-        let decoded = result.and_then(|frames| {
-            let mut state = match self.decoded.take() {
-                Some((index, state)) if index + 1 == from => Some(state),
-                _ => None,
-            };
-            for encoded in &frames {
-                state = Some(codec::decode(encoded, state.as_ref())?);
-            }
-            state.ok_or_else(|| "no frames read".to_owned())
-        });
-        // Only the latest request is shown; an older one only serves as the base of the next.
-        let shown = self.wanted.is_none();
+        let stale = std::mem::take(&mut self.stale);
+        let decoded = result.and_then(|frames| self.decode(read, &frames));
+        tracing::debug!(
+            from = read.from,
+            target = read.target,
+            newer = self.wanted.is_some(),
+            read_ms = (started - read.started).as_secs_f64() * 1e3,
+            decode_ms = started.elapsed().as_secs_f64() * 1e3,
+            "History frames read and decoded"
+        );
         match decoded {
-            Ok(state) => {
-                if shown {
-                    self.ready = Some(Ok(frame(target, &state)));
-                }
-                self.decoded = Some((target, state));
-            }
+            // Shown even if a newer request waits (see `poll`).
+            Ok(state) if !stale => self.ready = Some(Ok(frame(read.target, &state))),
+            Ok(_) => {}
             Err(error) => {
                 tracing::error!(
-                    frame = target,
+                    frame = read.target,
                     "Could not read a frame of the history: {error}"
                 );
-                if shown {
+                // Only the latest request's error is of interest.
+                if !stale && self.wanted.is_none() {
                     self.ready = Some(Err(error));
                 }
             }
         }
         self.start_read();
+    }
+
+    /// Decodes the frames of a read, keeps its checkpoints and returns the state of its last
+    /// frame.
+    fn decode(&mut self, read: Read, frames: &[Vec<u8>]) -> Result<State, String> {
+        if frames.len() != read.target + 1 - read.from {
+            return Err("frames missing".to_owned());
+        }
+        let base = match read.base {
+            Some(base) => Some(
+                self.checkpoints
+                    .iter()
+                    .find(|(index, _)| *index == base)
+                    .map(|(_, state)| state)
+                    .ok_or("the frame before it is gone")?,
+            ),
+            None => None,
+        };
+        let mut kept = Vec::new();
+        let mut state: Option<State> = None;
+        for (index, encoded) in (read.from..).zip(frames) {
+            let decoded = codec::decode(encoded, state.as_ref().or(base))?;
+            if (index - read.key).is_multiple_of(CHECKPOINT) && index != read.target {
+                kept.push((index, decoded.clone()));
+            }
+            state = Some(decoded);
+        }
+        let state = state.ok_or("no frames read")?;
+        // Only the checkpoints of this key interval stay, and of the last decoded frames only
+        // this one.
+        let key = read.key;
+        let next_key = (key + 1..self.frames.len())
+            .find(|&index| self.frames[index].key)
+            .unwrap_or(usize::MAX);
+        self.checkpoints.retain(|(index, _)| {
+            (key..next_key).contains(index) && (index - key).is_multiple_of(CHECKPOINT)
+        });
+        self.checkpoints.extend(kept);
+        self.checkpoints.push((read.target, state.clone()));
+        self.checkpoints.sort_by_key(|(index, _)| *index);
+        self.checkpoints.dedup_by_key(|(index, _)| *index);
+        // The guard for large meshes: the farthest from this frame go first.
+        let size = |state: &State| state.planes.size() + state.plates.len() * codec::PLATE_BYTES;
+        while self.checkpoints.len() > 1
+            && self
+                .checkpoints
+                .iter()
+                .map(|(_, state)| size(state))
+                .sum::<usize>()
+                > CHECKPOINT_BYTES
+        {
+            let farthest = (0..self.checkpoints.len())
+                .max_by_key(|&at| self.checkpoints[at].0.abs_diff(read.target))
+                .expect("checkpoints");
+            self.checkpoints.remove(farthest);
+        }
+        Ok(state)
     }
 }
 
@@ -326,6 +441,9 @@ fn frame(index: usize, state: &State) -> Frame {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::store::MemoryStore;
     use super::*;
 
@@ -514,72 +632,162 @@ mod tests {
         assert_eq!(history.time(recorded - 1), Some((recorded - 1) as f64));
     }
 
-    #[test]
-    fn only_the_latest_request_is_shown() {
-        use std::cell::RefCell;
-        use std::rc::Rc;
+    /// Reads of a store that complete when the test says so (or at once).
+    #[derive(Default)]
+    struct Reads {
+        instant: bool,
+        pending: Option<Range<usize>>,
+        done: Option<Result<Vec<Vec<u8>>, String>>,
+        ranges: Vec<Range<usize>>,
+    }
 
-        /// Reads of a store that complete when the test says so.
-        #[derive(Default)]
-        struct Reads {
-            pending: Option<Range<usize>>,
-            done: Option<Result<Vec<Vec<u8>>, String>>,
-            count: usize,
+    struct Slow(MemoryStore, Rc<RefCell<Reads>>);
+
+    impl FrameStore for Slow {
+        fn append(&mut self, index: usize, frame: Vec<u8>) {
+            self.0.append(index, frame);
         }
-        struct Slow(MemoryStore, Rc<RefCell<Reads>>);
-        impl FrameStore for Slow {
-            fn append(&mut self, index: usize, frame: Vec<u8>) {
-                self.0.append(index, frame);
-            }
-            fn read(&mut self, range: Range<usize>) {
-                let mut reads = self.1.borrow_mut();
-                reads.count += 1;
-                // The data as it is now; handed out when the test completes the read.
-                self.0.read(range.clone());
-                reads.done = self.0.take_read();
+        fn read(&mut self, range: Range<usize>) {
+            let mut reads = self.1.borrow_mut();
+            reads.ranges.push(range.clone());
+            // The data as it is now; handed out when the test completes the read.
+            self.0.read(range.clone());
+            reads.done = self.0.take_read();
+            if !reads.instant {
                 reads.pending = Some(range);
             }
-            fn take_read(&mut self) -> Option<Result<Vec<Vec<u8>>, String>> {
-                let mut reads = self.1.borrow_mut();
-                if reads.pending.is_some() {
-                    return None;
-                }
-                reads.done.take()
-            }
-            fn failed_write(&mut self) -> Option<usize> {
-                None
-            }
-            fn capacity(&self) -> u64 {
-                u64::MAX
-            }
-            fn describe(&self) -> &'static str {
-                "slow"
-            }
         }
-        let reads = Rc::new(RefCell::new(Reads::default()));
+        fn take_read(&mut self) -> Option<Result<Vec<Vec<u8>>, String>> {
+            let mut reads = self.1.borrow_mut();
+            if reads.pending.is_some() {
+                return None;
+            }
+            reads.done.take()
+        }
+        fn failed_write(&mut self) -> Option<usize> {
+            None
+        }
+        fn capacity(&self) -> u64 {
+            u64::MAX
+        }
+        fn describe(&self) -> &'static str {
+            "slow"
+        }
+    }
+
+    /// A history of `steps` frames of 50 cells in a [`Slow`] store.
+    fn slow(steps: usize, instant: bool) -> (History, Rc<RefCell<Reads>>) {
+        let reads = Rc::new(RefCell::new(Reads {
+            instant,
+            ..Reads::default()
+        }));
         let mut history = History::new(Box::new(Slow(MemoryStore::new(u64::MAX), reads.clone())));
-        record(&mut history, 10, 50, false);
-        let complete = || {
-            assert!(
-                reads.borrow_mut().pending.take().is_some(),
-                "a read is pending"
-            );
-        };
+        record(&mut history, steps, 50, false);
+        (history, reads)
+    }
+
+    fn complete(reads: &RefCell<Reads>) {
+        assert!(
+            reads.borrow_mut().pending.take().is_some(),
+            "a read is pending"
+        );
+    }
+
+    #[test]
+    fn frames_of_older_requests_are_shown_while_scrubbing() {
+        let (mut history, reads) = slow(10, false);
         history.request(5);
         assert!(history.poll().is_none());
-        // Scrubbing on while the read runs: only the last of these is shown.
+        // Scrubbing on while the read runs: 5 is shown when it arrives (#121), then the last
+        // request, not the ones in between.
         history.request(2);
         history.request(7);
         assert!(history.is_loading());
-        complete();
-        // Frame 5 arrived; 7 continues from it with one more read.
-        assert!(history.poll().is_none());
-        complete();
+        complete(&reads);
+        assert_eq!(history.poll().unwrap().unwrap().index, 5);
+        assert!(history.is_loading());
+        // 7 continues from 5 with one more read.
+        complete(&reads);
         let frame = history.poll().unwrap().unwrap();
         assert_eq!(frame.index, 7);
         assert_eq!(bytes(&frame.cells), quantised(&cells(50, 7)));
-        assert_eq!(reads.borrow().count, 2);
+        assert_eq!(reads.borrow().ranges, [0..6, 6..8]);
         assert!(!history.is_loading());
+        assert!(history.poll().is_none());
+    }
+
+    #[test]
+    fn a_request_for_the_frame_being_read_waits_for_it() {
+        let (mut history, reads) = slow(10, false);
+        history.request(5);
+        history.request(7);
+        history.request(5);
+        complete(&reads);
+        assert_eq!(history.poll().unwrap().unwrap().index, 5);
+        assert!(history.poll().is_none());
+        assert!(!history.is_loading());
+        assert_eq!(reads.borrow().ranges, vec![0..6]);
+    }
+
+    #[test]
+    fn a_read_is_not_shown_after_the_view_went_live() {
+        let (mut history, reads) = slow(10, false);
+        history.request(5);
+        history.cancel();
+        assert!(!history.is_loading());
+        complete(&reads);
+        assert!(history.poll().is_none());
+        // Back in the past: the read of 5 served as a checkpoint.
+        history.request(8);
+        complete(&reads);
+        assert_eq!(history.poll().unwrap().unwrap().index, 8);
+        assert_eq!(reads.borrow().ranges, [0..6, 6..9]);
+        // Also when the view leaves live again before the read arrives.
+        history.request(3);
+        history.cancel();
+        history.request(9);
+        complete(&reads);
+        assert!(history.poll().is_none());
+        complete(&reads);
+        assert_eq!(history.poll().unwrap().unwrap().index, 9);
+        assert!(history.poll().is_none());
+    }
+
+    #[test]
+    fn stepping_back_reads_a_few_frames() {
+        // #121: deltas only go forward from a keyframe; checkpoints keep steps back short.
+        let steps = 3 * KEY_INTERVAL;
+        let (mut history, reads) = slow(steps, true);
+        let check = |history: &mut History, index: usize| {
+            let frame = show(history, index);
+            assert_eq!(frame.index, index);
+            assert_eq!(bytes(&frame.cells), quantised(&cells(50, index)));
+            assert_eq!(frame.plates, []);
+        };
+        check(&mut history, steps - 1);
+        reads.borrow_mut().ranges.clear();
+        for index in (0..steps - 1).rev() {
+            check(&mut history, index);
+        }
+        let ranges = std::mem::take(&mut reads.borrow_mut().ranges);
+        // The first step into an earlier key interval reads it from its keyframe; the others
+        // at most to the checkpoint before them.
+        for range in &ranges {
+            let crosses = range.end % KEY_INTERVAL == 0;
+            assert!(
+                crosses || range.len() < CHECKPOINT,
+                "{range:?} of {ranges:?}"
+            );
+        }
+        let frames: usize = ranges.iter().map(ExactSizeIterator::len).sum();
+        assert!(frames < 3 * steps, "{frames} frames read");
+        assert!(history.checkpoints.len() <= KEY_INTERVAL.div_ceil(CHECKPOINT) + 1);
+        // Forward again: one frame per step.
+        for index in 1..steps {
+            check(&mut history, index);
+        }
+        let ranges = std::mem::take(&mut reads.borrow_mut().ranges);
+        assert!(ranges.iter().all(|range| range.len() == 1), "{ranges:?}");
     }
 
     #[test]
