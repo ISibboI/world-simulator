@@ -50,3 +50,40 @@
 ## Not changed
 - Walking backwards: no reverse play; ← decodes from the keyframe as before (#121).
 - The time text (#119).
+
+## PR #177 follow-up: 1 frame/s everywhere (Sebastian's comment)
+Request: keep space as is. The throttle applies in any situation, also once live and when live
+from the start, at 1 frame/s (fast/slow forward comes later).
+- `timeline::Walk::rate` is one field (default `VIEW_RATE = 1.0`) that sets the pace of a
+  playing view. It applies when walking through stored frames and when following the simulation
+  live. A later speed control only has to change it; `Walk::interval` clamps it to 0.001–1000.
+- **Live:** the view shows the **newest** state at each 1 s tick and skips the states in
+  between. *Why:* live then stays live, never more than 1 s behind the simulation. Showing every
+  state at 1/s would put a fast simulation further behind every second; that is what *playing*
+  from a paused frame does now. A run's last state still shows at the next tick.
+- **Shown at once, outside the pace:** slider drags, ←/→, End/Live, a single step asked for
+  with → while the simulation is paused, the first state of a new run, and the newest state
+  re-sent with the fields of a newly chosen render mode. Each of these starts a new 1 s interval.
+- Live, the time label shows the time of the state on screen. The slider handle stays at the
+  right end, so it can lead the picture by up to 1 s.
+- Pausing the view while live freezes on the state on screen, which may lag the newest state
+  (the recorded frame at or before it).
+- With the simulation usually at 1–4 steps/s, playing from a paused frame (1 frame/s) does not
+  catch up. Live/End jumps ahead.
+
+Tests (vscreen): desktop: live label 203 → 210 → 217 → 225 Myr, one change per ~1 s, in shots
+0.33 s apart (≈7 steps skipped per tick). The walk goes 280 → 283 Myr in ~3 s. Live after a
+view pause shows in < 0.15 s (`desktop-1fps.png`). Web 1280×800: the same live ticks and walk
+(`web-desktop-1fps.png`). Phone 390×844 touch: live ticks 468 → 474 → 479 Myr in 2.3 s
+(`web-phone-1fps.png`). fmt, clippy (native and wasm32), doc and the full test suite
+(485 passed) are clean with warnings denied.
+
+Review (fresh subagent) found three problems, all fixed:
+- A state re-sent for a new mode is now recognised by its time not being newer.
+- The first state of a run starts the 1 s interval.
+- The rate is clamped.
+
+Two findings were accepted as they are:
+- The slider/label mismatch of up to 1 s while live.
+- A step asked for just after pausing can take one tick, if a state that was already on its way
+  is taken as the step.

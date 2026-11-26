@@ -476,10 +476,12 @@ struct Viewer {
     /// The recorded frame shown (or being read), or `None` while the view follows the newest
     /// state.
     viewing: Option<usize>,
-    /// The recorded frame on screen (`viewing` once its read completed), and the walk of a
-    /// playing view through the recorded frames (see [`timeline::Walk`]).
+    /// The recorded frame on screen (`viewing` once its read completed), and the pace of a
+    /// playing view, through the recorded frames or live (see [`timeline::Walk`]).
     shown_frame: Option<usize>,
     walk: timeline::Walk,
+    /// The view is live and has not shown the newest state yet (it waits for its pace).
+    live_pending: bool,
     /// Why the past frame could not be shown.
     frame_error: Option<String>,
     /// Whether the user paused the simulation, and asked for a step that has not arrived.
@@ -659,6 +661,7 @@ impl Viewer {
             viewing: None,
             shown_frame: None,
             walk: timeline::Walk::default(),
+            live_pending: false,
             frame_error: None,
             paused: false,
             step_pending: false,
@@ -747,7 +750,11 @@ impl Viewer {
         self.latest = None;
         self.viewing = None;
         self.shown_frame = None;
-        self.walk.stop();
+        // The first state of the new simulation shows at once.
+        let rate = self.walk.rate;
+        self.walk = timeline::Walk::default();
+        self.walk.rate = rate;
+        self.live_pending = false;
         self.frame_error = None;
         self.paused = false;
         self.step_pending = false;
@@ -885,7 +892,10 @@ impl Viewer {
             return;
         }
         // A state sent again (with other fields) is not the step asked for.
-        if self.time.is_none_or(|time| update.time > time) {
+        let newer = self.time.is_none_or(|time| update.time > time);
+        // The step the user asked for shows at once, not at the pace of the view.
+        let asked = newer && self.step_pending;
+        if newer {
             self.step_pending = false;
         }
         self.time = Some(update.time);
@@ -909,7 +919,20 @@ impl Viewer {
             fields: update.fields.clone(),
         });
         if self.viewing.is_none() {
-            self.show(update.time, update.cells, update.plates, update.fields);
+            // The first state of a simulation, the newest state sent again with the fields of a
+            // new mode and an asked-for step show at once; others at the pace of the view.
+            let now = web_time::Instant::now();
+            let first = update.mesh.is_some();
+            let resent = !first && !newer;
+            if first || resent || asked || self.walk.due_in(now).is_zero() {
+                if !resent {
+                    self.walk.shown(now);
+                }
+                self.live_pending = false;
+                self.show(update.time, update.cells, update.plates, update.fields);
+            } else {
+                self.live_pending = true;
+            }
         }
     }
 
@@ -1052,6 +1075,7 @@ impl Viewer {
 
     /// Shows the recorded frame `index` and stays on it, even if it is the newest.
     fn hold(&mut self, index: usize) {
+        self.live_pending = false;
         self.viewing = Some(index);
         if let Some(history) = &mut self.history {
             history.request(index);
@@ -1059,26 +1083,43 @@ impl Viewer {
         self.poll_history();
     }
 
-    /// Pauses a view that follows the newest state: it stays on the newest recorded frame,
-    /// read from the history, so that it has every field (`Fields::from_frame`) like any other
-    /// past frame. With a full history (the newest state was not recorded) that is the last
-    /// recorded frame.
+    /// Pauses a view that follows the newest state: it stays on the shown state (the pace of
+    /// the view may keep it behind the newest), read from the history as a recorded frame, so
+    /// that it has every field (`Fields::from_frame`) like any other past frame. With a full
+    /// history (the shown state may not be recorded) that is the last recorded frame at or
+    /// before it.
     fn freeze(&mut self) {
-        let Some(last) = self
-            .history
-            .as_ref()
-            .and_then(|history| history.len().checked_sub(1))
-        else {
+        let Some(history) = &self.history else {
             return;
         };
+        let Some(last) = history.len().checked_sub(1) else {
+            return;
+        };
+        // The shown state, which the pace of the view may keep behind the newest one.
+        let shown = (0..=last)
+            .rev()
+            .find(|&index| {
+                history
+                    .time(index)
+                    .is_some_and(|time| time <= self.shown_time)
+            })
+            .unwrap_or(last);
         self.walk.stop();
-        self.hold(last);
+        self.hold(shown);
     }
 
-    /// Walks a playing view on to the next frame once it is due, and asks for a repaint when
-    /// the one after will be.
+    /// Walks a playing view on to the next frame once it is due, or shows the newest state of
+    /// a live one, and asks for a repaint when the next will be.
     fn walk(&mut self, ctx: &egui::Context) {
         let Some(index) = self.viewing else {
+            if self.live_pending {
+                let wait = self.walk.due_in(web_time::Instant::now());
+                if wait.is_zero() {
+                    self.show_latest();
+                } else {
+                    ctx.request_repaint_after(wait);
+                }
+            }
             return;
         };
         let now = web_time::Instant::now();
@@ -1091,23 +1132,28 @@ impl Viewer {
             self.view(index + 1);
             if self.viewing.is_some() && self.shown_frame == self.viewing {
                 // Read at once (the frame was decoded before): the next one is due later.
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
-                    1.0 / timeline::WALK_RATE,
-                ));
+                ctx.request_repaint_after(self.walk.interval());
             }
         } else {
             ctx.request_repaint_after(wait);
         }
     }
 
-    /// Follows the newest state again.
+    /// Follows the newest state again, showing it at once.
     fn go_live(&mut self) {
         self.walk.stop();
         self.shown_frame = None;
         self.frame_error = None;
-        if self.viewing.take().is_some()
-            && let Some(latest) = &self.latest
-        {
+        if self.viewing.take().is_some() || self.live_pending {
+            self.show_latest();
+        }
+    }
+
+    /// Shows the newest state, which starts the next interval of the view's pace.
+    fn show_latest(&mut self) {
+        self.live_pending = false;
+        self.walk.shown(web_time::Instant::now());
+        if let Some(latest) = &self.latest {
             let (time, cells, plates, fields) = (
                 latest.time,
                 latest.cells.clone(),
@@ -1224,6 +1270,8 @@ impl Viewer {
             live: self.viewing.is_none(),
             time_of: &time_of,
             live_time: latest.time,
+            live_shown: self.shown_time,
+            rate: self.walk.rate,
             playing: self.viewing.is_none() || self.walk.is_playing(),
             paused: self.paused,
             finished: self.finished(),

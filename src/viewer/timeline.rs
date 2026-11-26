@@ -5,8 +5,10 @@
 //!
 //! Play and pause act on the view only (issue #120): pausing freezes the view on its frame while
 //! the simulation goes on and the slider keeps growing; playing walks forward through the
-//! recorded frames at [`WALK_RATE`] frames per second (see [`Walk`]) until the newest, and then
-//! follows the simulation live, at its own pace. The simulation has a button of its own (the
+//! recorded frames until the newest, and then follows the simulation live. Either way the view
+//! changes at most [`VIEW_RATE`] times per second (see [`Walk`]); live, it then shows the newest
+//! state at each tick, skipping the states in between, so that it stays live. The user's own
+//! moves (slider, ←, →, End, Live) show at once. The simulation has a button of its own (the
 //! cog), drawn pressed while the simulation is paused; the time is then shown in the warning
 //! colour. Stepping forward on the newest frame while the simulation is paused computes one more
 //! step. Keys (when no text field has focus and no drop-down list is open): space plays or pauses
@@ -47,6 +49,11 @@ pub struct TimelineView<'a> {
     pub time_of: &'a dyn Fn(usize) -> Option<f64>,
     /// The time of the newest state.
     pub live_time: f64,
+    /// The time of the state shown while the view is live: the newest one the pace of the view
+    /// let through (see [`Walk`]).
+    pub live_shown: f64,
+    /// Frames per second of a playing view.
+    pub rate: f64,
     /// Whether the view walks forward or follows the newest state (rather than staying on its
     /// frame).
     pub playing: bool,
@@ -102,17 +109,31 @@ pub fn keys(ctx: &egui::Context) -> Option<TimeAction> {
     })
 }
 
-/// Frames per second at which a playing view walks through the recorded frames.
-pub const WALK_RATE: f64 = 5.0;
+/// The default of [`Walk::rate`]: frames per second of a playing view, walking through the
+/// recorded frames or following the simulation live.
+pub const VIEW_RATE: f64 = 1.0;
 
-/// The pace of a view walking through the recorded frames: each frame stays on screen for
-/// 1 / [`WALK_RATE`] seconds from when it is shown, so slow reads or rebuilds slow the walk down
-/// rather than skipping or flashing frames.
-#[derive(Debug, Default)]
+/// The pace of a playing view: each frame stays on screen for 1 / [`Walk::rate`] seconds from when
+/// it is shown, so slow reads or rebuilds slow a walk through the recorded frames down rather than
+/// skipping or flashing frames. A view following the simulation live keeps the same pace (see
+/// [`Walk::due_in`]).
+#[derive(Debug)]
 pub struct Walk {
     playing: bool,
-    /// When the last frame of the walk was shown.
+    /// Frames per second; a single value, for a later speed control.
+    pub rate: f64,
+    /// When the last frame of the view was shown.
     last: Option<web_time::Instant>,
+}
+
+impl Default for Walk {
+    fn default() -> Self {
+        Self {
+            playing: false,
+            rate: VIEW_RATE,
+            last: None,
+        }
+    }
 }
 
 impl Walk {
@@ -126,9 +147,22 @@ impl Walk {
         self.last = None;
     }
 
+    /// Stops walking through the recorded frames (the pace of a live view goes on).
     pub fn stop(&mut self) {
         self.playing = false;
-        self.last = None;
+    }
+
+    /// How long a frame stays on screen (at least; the rate is taken within 0.001–1000 frames per
+    /// second).
+    pub fn interval(&self) -> Duration {
+        Duration::from_secs_f64(1.0 / self.rate.clamp(1e-3, 1e3))
+    }
+
+    /// How long until the view may show its next frame (zero: now).
+    pub fn due_in(&self, now: web_time::Instant) -> Duration {
+        let interval = self.interval();
+        self.last
+            .map_or(Duration::ZERO, |last| interval.saturating_sub(now - last))
     }
 
     /// How long until the next frame is due (zero: now), or `None` if the walk does not go on
@@ -138,14 +172,10 @@ impl Walk {
         if !self.playing || !shown {
             return None;
         }
-        let interval = Duration::from_secs_f64(1.0 / WALK_RATE);
-        Some(
-            self.last
-                .map_or(Duration::ZERO, |last| interval.saturating_sub(now - last)),
-        )
+        Some(self.due_in(now))
     }
 
-    /// A frame of the walk is on screen from `now` on.
+    /// A frame of the view is on screen from `now` on.
     pub fn shown(&mut self, now: web_time::Instant) {
         self.last = Some(now);
     }
@@ -166,7 +196,7 @@ pub fn can_step_forward(view: &TimelineView) -> bool {
 pub fn time_text(view: &TimelineView) -> String {
     let shown = (view.time_of)(view.position).unwrap_or(view.live_time);
     if view.live {
-        format!("{shown:.0} Myr")
+        format!("{:.0} Myr", view.live_shown)
     } else {
         format!("{shown:.0} Myr · live {:.0}", view.live_time)
     }
@@ -514,8 +544,9 @@ fn play_button(ui: &mut egui::Ui, view: &TimelineView, action: &mut Option<TimeA
         (
             Icon::Play,
             format!(
-                "Play: walk through the frames ({WALK_RATE} per second) up to the newest, then \
-                 follow the simulation (space)"
+                "Play: walk through the frames ({} per second) up to the newest, then follow \
+                 the simulation (space)",
+                view.rate
             ),
         )
     };
@@ -643,6 +674,8 @@ mod tests {
             live: true,
             time_of,
             live_time: 9.0,
+            live_shown: 9.0,
+            rate: VIEW_RATE,
             playing: true,
             paused: false,
             finished: false,
@@ -682,7 +715,7 @@ mod tests {
     #[test]
     fn the_walk_goes_on_only_once_its_frame_is_shown() {
         let start = web_time::Instant::now();
-        let interval = Duration::from_secs_f64(1.0 / WALK_RATE);
+        let interval = Duration::from_secs_f64(1.0 / VIEW_RATE);
         let mut walk = Walk::default();
         assert_eq!(walk.wait(start, true), None);
         walk.play();
@@ -699,6 +732,8 @@ mod tests {
         assert_eq!(walk.wait(start + interval * 2, true), Some(Duration::ZERO));
         walk.stop();
         assert_eq!(walk.wait(start + interval * 2, true), None);
+        // A live view keeps the pace.
+        assert_eq!(walk.due_in(start + interval / 2), interval / 2);
         // Playing again starts at once, not after a stale interval.
         walk.shown(start);
         walk.play();
