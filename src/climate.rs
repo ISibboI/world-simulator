@@ -1199,6 +1199,71 @@ fn saturation_column(t: f64, lapse_rate: f64) -> (f64, f64) {
     (density * scale_height, scale_height)
 }
 
+/// The saturated air column of a free-troposphere temperature, for inverting the rain law of
+/// [`ClimateParams`] (see [`ColumnSaturation::relative_humidity`]). The realistic view's clouds
+/// (#92) use it; one per zonal temperature, since the column temperature is a zonal mean.
+#[derive(Debug, Clone, Copy)]
+pub struct ColumnSaturation {
+    /// `ln(W_sat · rate) − a r₀` at sea level.
+    offset: f64,
+    /// Scale height of water vapour in m.
+    scale_height: f64,
+    /// `a` of the rain law.
+    sensitivity: f64,
+    /// `ln r₀`.
+    log_reference: f64,
+}
+
+impl ColumnSaturation {
+    /// The column of the free-troposphere temperature `column_temperature` (°C, the zonal mean of
+    /// the sea-level temperature, as the water cycle uses it); `None` if it is not finite.
+    pub fn new(column_temperature: f64, params: &ClimateParams) -> Option<Self> {
+        if !column_temperature.is_finite() {
+            return None;
+        }
+        let law = RainLaw::new(params);
+        let (column, scale_height) = saturation_column(column_temperature, params.lapse_rate);
+        Some(Self {
+            offset: math::ln(column * law.rate) - law.sensitivity * law.reference,
+            scale_height,
+            sensitivity: law.sensitivity,
+            log_reference: math::ln(law.reference),
+        })
+    }
+
+    /// The column relative humidity `r = W / W_sat` at which the rain law gives the
+    /// precipitation `precipitation` (m/yr) above a surface `elevation` m high: the inverse of
+    /// [`RainLaw::rate`] with `W = r W_sat`. NaN for NaN inputs.
+    ///
+    /// `ln P(r) = ln r + ln(W_sat · rate) + a (min(r, 2) − r₀)` is concave and grows with r, so
+    /// Newton's method converges monotonically after its first step, with one logarithm per
+    /// step (2–3 steps from the first guess). Beyond twice saturation, where the law stops
+    /// steepening, the humidity is large but finite.
+    pub fn relative_humidity(&self, precipitation: f64, elevation: f64) -> f64 {
+        if !(precipitation.is_finite() && elevation.is_finite()) {
+            return f64::NAN;
+        }
+        // kg/m²/s; at least a trace, so that the logarithm stays finite.
+        let target = precipitation.max(1e-4) * WATER_DENSITY / SECONDS_PER_YEAR;
+        // The saturated column shrinks over high ground: ln W_sat drops by z / H.
+        let offset = self.offset - elevation.max(0.0) / self.scale_height - math::ln(target);
+        // First guess: the root with ln r frozen at the reference humidity (it varies slowly).
+        let mut humidity = ((-offset - self.log_reference) / self.sensitivity).clamp(0.05, 2.0);
+        for _ in 0..20 {
+            let below_cap = humidity < 2.0;
+            let residual = math::ln(humidity) + offset + self.sensitivity * humidity.min(2.0);
+            let slope = 1.0 / humidity + if below_cap { self.sensitivity } else { 0.0 };
+            let step = residual / slope;
+            humidity = (humidity - step).clamp(1e-3, 50.0);
+            // (Newton converges quadratically: the error after a step of 1e-4 is ~1e-8.)
+            if step.abs() < 1e-4 {
+                break;
+            }
+        }
+        humidity
+    }
+}
+
 /// Zonal-mean low-level wind (eastward, poleward) in m/s at a latitude (degrees, positive) of the
 /// circulation, i.e. measured from the ITCZ. Representative of Earth's moisture-carrying lower
 /// troposphere: trade winds converging on the ITCZ (Hadley cell), westerlies with a weak
@@ -1369,6 +1434,42 @@ mod tests {
         assert!(humid > 1.5 && humid < 1.6, "{humid}");
         let arid = budyko_runoff(0.1, 2.0, 2.6);
         assert!(arid < 0.001, "{arid}");
+    }
+
+    #[test]
+    fn column_relative_humidity_inverts_the_rain_law() {
+        let column_relative_humidity = |p: f64, t: f64, z: f64, params: &ClimateParams| {
+            ColumnSaturation::new(t, params)
+                .map_or(f64::NAN, |column| column.relative_humidity(p, z))
+        };
+        // Forward: the precipitation of a column at humidity r (as the budget computes it, with
+        // the saturation column over high ground), then back.
+        let params = ClimateParams::default();
+        let law = RainLaw::new(&params);
+        for &(t, elevation) in &[(27.0, 0.0), (10.0, 0.0), (-20.0, 0.0), (5.0, 3000.0)] {
+            let (column, scale_height) = saturation_column(t, params.lapse_rate);
+            let saturation = column * math::exp(-elevation / scale_height);
+            for &r in &[0.4, 0.6, 0.7, 0.8, 0.95, 1.2] {
+                let (rate, _) = law.rate(r * saturation, saturation);
+                let precipitation = rate * SECONDS_PER_YEAR / WATER_DENSITY;
+                let back = column_relative_humidity(precipitation, t, elevation, &params);
+                assert!(
+                    (back - r).abs() < 1e-4,
+                    "{t} °C, {elevation} m: {r} -> {back}"
+                );
+            }
+        }
+        // More rain at the same saturation means a more humid column; no rain a dry one.
+        let wet = column_relative_humidity(2.0, 25.0, 0.0, &params);
+        let dry = column_relative_humidity(0.1, 25.0, 0.0, &params);
+        assert!(wet > dry);
+        assert!(column_relative_humidity(0.0, 25.0, 0.0, &params) < dry);
+        // The same rain over high ground (a smaller saturated column) is more humid.
+        assert!(
+            column_relative_humidity(0.5, 10.0, 2000.0, &params)
+                > column_relative_humidity(0.5, 10.0, 0.0, &params)
+        );
+        assert!(column_relative_humidity(f64::NAN, 25.0, 0.0, &params).is_nan());
     }
 
     #[test]

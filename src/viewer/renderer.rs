@@ -82,6 +82,10 @@ pub struct DetailVertex {
     /// in the world frame), the squeeze of the relief noise along it (bits 24–30) and whether
     /// the cell is ocean (bit 31; its ice is anchored to the world, not to the plate).
     pub ridges: [u32; 3],
+    /// The clouds of the cell: cover, type (convective 1, sheets 0), typical optical depth
+    /// / 64 and cloud-top height / 16 km (all zero with the clouds off; see
+    /// `modes::realistic::cloud_layer`).
+    pub clouds: [u8; 4],
 }
 
 /// The realistic mode's second uniform buffer: the orientation of every plate (a quaternion
@@ -94,6 +98,10 @@ pub struct DetailUniforms {
     /// spacing), the most octaves (`y`), the strength of the bump relief (`z`, 0 for none) and
     /// whether mountains use ridged noise (`w`, 0 or 1).
     pub detail: [f32; 4],
+    /// The clouds: the most octaves of their pattern after the first (`x`, 0 without clouds),
+    /// the frequency of that octave in cycles per planet radius (`y`), whether the cloud tops have
+    /// relief (`z`, 0 or 1) and whether the clouds cast shadows (`w`).
+    pub clouds: [f32; 4],
 }
 
 /// The realistic mode's de-indexed mesh and its uniforms; uploaded when its id changes.
@@ -124,8 +132,16 @@ pub const MAX_LINE_SEGMENTS: usize = 64;
 /// GPU resources, stored in egui's callback resources.
 struct PlanetResources {
     pipeline: wgpu::RenderPipeline,
-    /// The realistic mode's surface with sub-cell detail (`realistic.wgsl`).
+    /// The realistic mode's surface with sub-cell detail (`realistic.wgsl`), without clouds.
     detail_pipeline: wgpu::RenderPipeline,
+    /// The same with clouds, created when they are first switched on.
+    cloud_pipeline: Option<wgpu::RenderPipeline>,
+    /// What the realistic pipelines are made with.
+    pipeline_layout: wgpu::PipelineLayout,
+    target_format: wgpu::TextureFormat,
+    msaa_samples: u32,
+    /// Whether this frame draws the clouds.
+    clouds_shown: bool,
     detail_uniform_buffer: wgpu::Buffer,
     /// The de-indexed mesh last uploaded: its buffer, [`Detail::id`] and number of vertices.
     detail: Option<(wgpu::Buffer, u64, u32)>,
@@ -283,6 +299,7 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
         &pipeline_layout,
         render_state.target_format,
         msaa_samples,
+        &realistic_shader(false),
     );
     let detail_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("detail uniforms"),
@@ -318,6 +335,11 @@ pub fn initialize(render_state: &egui_wgpu::RenderState, msaa_samples: u32) {
         .insert(PlanetResources {
             pipeline,
             detail_pipeline,
+            cloud_pipeline: None,
+            pipeline_layout,
+            target_format: render_state.target_format,
+            msaa_samples,
+            clouds_shown: false,
             detail_uniform_buffer,
             detail: None,
             detail_shown: false,
@@ -341,10 +363,11 @@ fn detail_pipeline(
     layout: &wgpu::PipelineLayout,
     target_format: wgpu::TextureFormat,
     msaa_samples: u32,
+    source: &str,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("realistic.wgsl"),
-        source: wgpu::ShaderSource::Wgsl(REALISTIC_SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("realistic surface"),
@@ -358,7 +381,7 @@ fn detail_pipeline(
                 attributes: &wgpu::vertex_attr_array![
                     0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4, 3 => Unorm8x4,
                     4 => Unorm8x4, 5 => Unorm8x4, 6 => Float32, 7 => Uint16x4,
-                    8 => Uint32x3
+                    8 => Uint32x3, 9 => Unorm8x4
                 ],
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -445,8 +468,20 @@ fn overlay_pipeline(
 /// (`atmosphere.wgsl`, see [`super::atmosphere`]) they share (WGSL has no includes).
 const REALISTIC_SHADER: &str = concat!(
     include_str!("atmosphere.wgsl"),
-    include_str!("realistic.wgsl")
+    include_str!("realistic.wgsl"),
+    include_str!("clouds.wgsl")
 );
+/// The realistic shader with or without the clouds' code (see `CLOUDS_COMPILED` there).
+fn realistic_shader(clouds: bool) -> String {
+    if clouds {
+        REALISTIC_SHADER.to_owned()
+    } else {
+        REALISTIC_SHADER.replace(
+            "const CLOUDS_COMPILED: bool = true;",
+            "const CLOUDS_COMPILED: bool = false;",
+        )
+    }
+}
 const SKY_SHADER: &str = concat!(include_str!("atmosphere.wgsl"), include_str!("sky.wgsl"));
 
 /// The pipeline of the sky (the sun and the stars): one full-screen triangle behind the planet, depth-tested
@@ -646,6 +681,7 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
             resources.overlay_shown = true;
         }
         resources.detail_shown = false;
+        resources.clouds_shown = false;
         if let Some(detail) = self
             .surface
             .as_ref()
@@ -676,6 +712,18 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
                 }
             }
             resources.detail_shown = true;
+            if detail.uniforms.clouds[0] > 0.0 {
+                if resources.cloud_pipeline.is_none() {
+                    resources.cloud_pipeline = Some(detail_pipeline(
+                        device,
+                        &resources.pipeline_layout,
+                        resources.target_format,
+                        resources.msaa_samples,
+                        &realistic_shader(true),
+                    ));
+                }
+                resources.clouds_shown = true;
+            }
         }
         let Some(surface) = &self.surface else {
             return Vec::new();
@@ -728,7 +776,11 @@ impl egui_wgpu::CallbackTrait for PlanetCallback {
         };
         match &resources.detail {
             Some((buffer, _, count)) if resources.detail_shown => {
-                render_pass.set_pipeline(&resources.detail_pipeline);
+                let pipeline = match &resources.cloud_pipeline {
+                    Some(pipeline) if resources.clouds_shown => pipeline,
+                    _ => &resources.detail_pipeline,
+                };
+                render_pass.set_pipeline(pipeline);
                 render_pass.set_vertex_buffer(0, buffer.slice(..));
                 render_pass.draw(0..*count, 0..1);
             }
@@ -769,10 +821,13 @@ mod tests {
     #[test]
     fn shaders_translate_to_webgl2() {
         use naga::back::glsl;
+        let without_clouds = super::realistic_shader(false);
+        assert_ne!(without_clouds, super::REALISTIC_SHADER);
         let shaders = [
             ("planet.wgsl", include_str!("planet.wgsl")),
             ("sky.wgsl", super::SKY_SHADER),
             ("realistic.wgsl", super::REALISTIC_SHADER),
+            ("realistic.wgsl without clouds", without_clouds.as_str()),
             ("overlay.wgsl", include_str!("overlay.wgsl")),
             ("outline.wgsl", include_str!("outline.wgsl")),
         ];
@@ -810,6 +865,18 @@ mod tests {
                 .and_then(|mut writer| writer.write().map(|_| ()))
                 .unwrap_or_else(|error| panic!("{name} {}: {error:?}", entry_point.name));
                 assert!(output.contains("#version 300 es"), "{name}");
+                // WebGL2 guarantees 15 vectors between the stages
+                // (MAX_VARYING_VECTORS, one location each here).
+                if entry_point.stage == naga::ShaderStage::Vertex {
+                    let varyings = output
+                        .lines()
+                        .filter(|line| line.contains(" out ") && line.contains("_vs2fs_location"))
+                        .count();
+                    assert!(varyings <= 15, "{name}: {varyings} varyings");
+                    if name.starts_with("realistic.wgsl") {
+                        assert_eq!(varyings, 10, "{output}");
+                    }
+                }
             }
         }
     }

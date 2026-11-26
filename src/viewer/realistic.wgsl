@@ -34,6 +34,10 @@ struct Detail {
     // Frequency of the first octave per planet radius (x), most octaves (y), strength of the
     // bump relief (z), ridged mountains (w: 0 or 1).
     settings: vec4<f32>,
+    // The clouds (`clouds.wgsl`): the most octaves of their pattern after the first (x, 0 without
+    // clouds), the frequency of that octave per planet radius (y), whether the cloud tops have
+    // relief (z: 0 or 1), whether the clouds cast shadows (w: 0 or 1).
+    clouds: vec4<f32>,
 };
 
 @group(0) @binding(1)
@@ -57,6 +61,9 @@ struct VertexInput {
     // Per corner of the triangle: the strike of a mountain belt (snorm8 xyz, world frame), the
     // squeeze of the relief noise along it (bits 24–30, 0 to 0.8) and the ocean (bit 31).
     @location(8) ridges: vec3<u32>,
+    // The clouds of the cell: cover (x), type (y: 1 convective, 0 sheets), typical optical
+    // depth / 64 (z), cloud-top height above the ground / 16 km (w).
+    @location(9) clouds: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -73,6 +80,7 @@ struct VertexOutput {
     @location(6) corner_coast: vec4<f32>,
     @location(7) @interpolate(flat) plates: vec3<u32>,
     @location(8) @interpolate(flat) ridges: vec3<u32>,
+    @location(9) clouds: vec4<f32>,
 };
 
 @vertex
@@ -94,12 +102,17 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     );
     output.plates = input.plates.xyz;
     output.ridges = input.ridges;
+    output.clouds = input.clouds;
     return output;
 }
 
 const PI: f32 = 3.14159265;
 // Reflectance of water at normal incidence (refractive index 1.33).
 const WATER_F0: f32 = 0.02;
+// Whether this variant of the shader draws clouds: the view compiles a second pipeline with
+// `false` (`renderer::REALISTIC_SHADER_WITHOUT_CLOUDS`), so that the clouds' code costs nothing
+// while they are off, also where a branch on the uniform would not skip it cheaply.
+const CLOUDS_COMPILED: bool = true;
 // Most octaves of the noise.
 const MAX_OCTAVES: i32 = 6;
 // Scale of the fractal sum (see `fbm`).
@@ -379,6 +392,79 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // The water body is seen through the surface, which reflects the Fresnel share of the view.
     let reflected = WATER_F0 + (1.0 - WATER_F0) * pow5(1.0 - nv);
     let body = albedo * (1.0 - reflected * water);
+    // (With the switch off, every cloud term below stays exactly 0 or 1, so the surface is
+    // drawn as without clouds.)
+    // Clouds (`clouds.wgsl`, with the switch on): their optical depth over the pixel, their
+    // reflection and diffuse transmission, the transmission of the sunlight on its way to the
+    // ground (the shadow), the incidence on the cloud tops and their height.
+    var cloud_tau = 0.0;
+    var cloud_reflection = 0.0;
+    var cloud_transmission = 1.0;
+    var shadow = 1.0;
+    var cloud_nl = 0.0;
+    var cloud_top = 0.0;
+    var shadow_tau = 0.0;
+    let cell_clouds = input.clouds;
+    if CLOUDS_COMPILED && detail.clouds.x > 0.0 && cell_clouds.x > 0.002 {
+        let mu0 = dot(up, l);
+        cloud_top = cell_clouds.w * 16.0 * CLOUD_KM;
+        // A cloud top sees the sun until it is this far (radians) below the horizon.
+        let dip = sqrt(2.0 * cloud_top);
+        if mu0 > -dip || ambient > 0.0 {
+            // Seen obliquely, a broken layer hides its gaps: the cover rises towards the limb.
+            let mu_view = max(dot(up, v), 0.05);
+            let cover = 1.0 - pow(1.0 - min(cell_clouds.x, 0.999), inverseSqrt(mu_view));
+            let persistence = mix(0.5, 1.2, cell_clouds.y);
+            let relief = detail.clouds.z > 0.0;
+            let cloud_base = detail.clouds.y;
+            let cloud_octaves = clamp(
+                log2(0.5 / max(cloud_base * footprint, 1e-6)) + 1.0,
+                0.0,
+                detail.clouds.x,
+            );
+            let field = cloud_field(up, cloud_base, cloud_octaves, persistence, 1.0 - 0.9 * cell_clouds.y);
+            cloud_tau = cloud_depth(field, up, cell_clouds, cover, footprint);
+            cloud_reflection = cloud_reflectance(cloud_tau, mu0);
+            cloud_transmission = 1.0 - cloud_reflection;
+            // The relief of the cloud tops: towers more than sheets. A volume scatters light
+            // arriving from the side, so the tops are lit until the sun sets at their own
+            // horizon.
+            var cloud_normal = up;
+            if relief {
+                let slope = field.yzw - dot(field.yzw, up) * up;
+                cloud_normal = normalize(
+                    up - slope * (mix(0.005, 0.025, cell_clouds.y)
+                        / (cloud_base * sqrt(max(cloud_octaves, 1.0)))),
+                );
+            }
+            // (Half of the light reaches a cloud's flanks diffusely, through the cloud: shaded
+            // sides are greyer, never black.)
+            let incidence = 0.5 * (dot(cloud_normal, l) + mu0);
+            cloud_nl = min(clamp((incidence + dip) / (1.0 + dip), 0.0, 1.0), 1.0 / gain);
+            // The sunlight passes the layer where the cloud is, at the cell's own cover (the
+            // limb's increase is a matter of the view, not of the light).
+            shadow_tau = cloud_depth(field, up, cell_clouds, cell_clouds.x, footprint);
+            shadow = 1.0 - cloud_reflectance(shadow_tau, mu0);
+            // The shadow on the ground lies away from the sun by the height times tan θ₀: only
+            // drawn where that is more than a third of a pixel (a low sun).
+            if detail.clouds.w > 0.0 && mu0 > 0.0 {
+                let offset = (l - mu0 * up) * (cloud_top / max(mu0, 0.05));
+                if length(offset) > footprint / 3.0 {
+                    let towards = normalize(up + offset);
+                    let shading = cloud_field(
+                        towards,
+                        cloud_base,
+                        min(cloud_octaves, 3.0),
+                        persistence,
+                        1.0 - 0.9 * cell_clouds.y,
+                    );
+                    let depth = cloud_depth(shading, towards, cell_clouds, cell_clouds.x, footprint);
+                    shadow = 1.0 - cloud_reflectance(depth, mu0);
+                    shadow_tau = depth;
+                }
+            }
+        }
+    }
     // The atmosphere (`atmosphere.wgsl`; `viewport.w` is the number of points along a ray, 0
     // without an atmosphere): the sunlight reaching the ground reddens towards the terminator,
     // and the air between the ground and the eye dims the surface and adds its own light.
@@ -386,7 +472,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // height of the aerosols: the air is measured from the interpolated radius of the corners
     // (at least the sea surface), or the mesh would show through the haze at grazing views.
     let samples = i32(uniforms.viewport.w);
-    let surface_point = up * max(input.position.w, 1.0);
+    // Over a cloud the air is that above its top: the point is lifted by the cloud's opacity
+    // times its height (the sunlight then sets later there, and the haze is thinner).
+    let surface_point = up * (max(input.position.w, 1.0) + (1.0 - exp(-cloud_tau)) * cloud_top);
     var direct = sun;
     var air: SurfaceAir;
     if samples > 0 {
@@ -400,8 +488,23 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         );
         direct = sun * air.sunlight;
     }
-    var color = body * (ambient + direct * nl);
-    var mirrored = direct * glint;
+    // The ground is lit through the clouds and seen through them; the clouds reflect. The
+    // sunlight through a cloud is the direct beam, which shows the relief, and diffuse light,
+    // which does not. (The diffuse light seen through a cloud is blurred over about its
+    // thickness, a few km, far less than a pixel: it keeps the pixel's colour.)
+    let mu_sun = max(dot(up, l), 0.0);
+    let beam = exp(-shadow_tau / max(mu_sun, 0.05));
+    var ground_light = ambient + direct * (nl * beam + min(mu_sun, 1.0 / gain) * max(shadow - beam, 0.0));
+    var seen = cloud_transmission;
+    // The cloud and the ground beneath it together reflect no more than the brightest surface
+    // (the shoulder's knee), also with the atmosphere off.
+    if cloud_reflection > 0.0 {
+        let brightest = max(body.r, max(body.g, body.b));
+        seen = min(seen, max(CLOUD_KNEE - cloud_reflection, 0.0) / max(brightest * shadow, 1e-4));
+    }
+    var color = body * ground_light * seen + cloud_reflection * (ambient + direct * cloud_nl);
+    let mu_eye = max(dot(up, v), 0.05);
+    var mirrored = direct * glint * exp(-shadow_tau / max(mu_sun, 0.05) - cloud_tau / mu_eye);
     if samples > 0 {
         // Nothing but the sun's glint may reach white, and the atmosphere can be far brighter
         // than the exposure allows (the twilight band, a crescent's haze): a hue-preserving
