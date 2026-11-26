@@ -409,6 +409,8 @@ mod tests {
             evaporation_january: 0.0,
             evaporation_july: 0.0,
             ice: 0.0,
+            lake_ice_january: f32::NAN,
+            lake_ice_july: f32::NAN,
             discharge: 0.0,
             lake_depth: 0.0,
             current_east: 0.0,
