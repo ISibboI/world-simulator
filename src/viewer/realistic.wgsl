@@ -61,8 +61,8 @@ struct VertexInput {
     // Per corner of the triangle: the strike of a mountain belt (snorm8 xyz, world frame), the
     // squeeze of the relief noise along it (bits 24–30, 0 to 0.8) and the ocean (bit 31).
     @location(8) ridges: vec3<u32>,
-    // The clouds of the cell: cover (x), convective share (y), mean optical depth / 64 of the
-    // cloudy part (z), cloud-top height / 16 km (w).
+    // The clouds of the cell: cover (x), type (y: 1 convective, 0 sheets), typical optical
+    // depth / 64 (z), cloud-top height above the ground / 16 km (w).
     @location(9) clouds: vec4<f32>,
 };
 
@@ -388,6 +388,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // The water body is seen through the surface, which reflects the Fresnel share of the view.
     let reflected = WATER_F0 + (1.0 - WATER_F0) * pow5(1.0 - nv);
     let body = albedo * (1.0 - reflected * water);
+    // (With the switch off, every cloud term below stays exactly 0 or 1, so the surface is
+    // drawn as without clouds.)
     // Clouds (`clouds.wgsl`, with the switch on): their optical depth over the pixel, their
     // reflection and diffuse transmission, the transmission of the sunlight on its way to the
     // ground (the shadow), the incidence on the cloud tops and their height.
@@ -435,8 +437,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             // sides are greyer, never black.)
             let incidence = 0.5 * (dot(cloud_normal, l) + mu0);
             cloud_nl = min(clamp((incidence + dip) / (1.0 + dip), 0.0, 1.0), 1.0 / gain);
-            shadow = cloud_transmission;
-            shadow_tau = cloud_tau;
+            // The sunlight passes the layer where the cloud is, at the cell's own cover (the
+            // limb's increase is a matter of the view, not of the light).
+            shadow_tau = cloud_depth(field, up, cell_clouds, cell_clouds.x, footprint);
+            shadow = 1.0 - cloud_reflectance(shadow_tau, mu0);
             // The shadow on the ground lies away from the sun by the height times tan θ₀: only
             // drawn where that is more than a third of a pixel (a low sun).
             if detail.clouds.w > 0.0 && mu0 > 0.0 {

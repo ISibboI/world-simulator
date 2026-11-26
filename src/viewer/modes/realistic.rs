@@ -911,7 +911,8 @@ pub struct CloudLayer {
     /// How convective the clouds are: small, crisp-edged elements (cumulus, 1) rather than
     /// smooth sheets (0).
     pub convective: f32,
-    /// Mean optical depth of the cloudy part.
+    /// Typical optical depth of the clouds (the shader scales it from about half at their
+    /// edges to 1.6 times in their cores).
     pub depth: f32,
     /// Height of the cloud tops in km (above sea level from [`cloud_layer`], above the ground
     /// from [`cloud_layers`]).
@@ -928,23 +929,23 @@ impl CloudLayer {
 
     /// The mean of `layers`: the mean cover, and the convective share, optical depth and top
     /// height weighted by the cover (clear for none).
-    fn mean(layers: &[CloudLayer]) -> CloudLayer {
-        let cover: f32 = layers.iter().map(|layer| layer.cover).sum();
-        if layers.is_empty() || cover <= 0.0 {
+    fn mean(layers: impl IntoIterator<Item = CloudLayer>) -> CloudLayer {
+        let (mut count, mut cover, mut convective, mut depth, mut top) = (0, 0.0, 0.0, 0.0, 0.0);
+        for layer in layers {
+            count += 1;
+            cover += layer.cover;
+            convective += layer.cover * layer.convective;
+            depth += layer.cover * layer.depth;
+            top += layer.cover * layer.top;
+        }
+        if count == 0 || cover <= 0.0 {
             return CloudLayer::CLEAR;
         }
-        let weighted = |pick: fn(&CloudLayer) -> f32| {
-            layers
-                .iter()
-                .map(|layer| layer.cover * pick(layer))
-                .sum::<f32>()
-                / cover
-        };
         CloudLayer {
-            cover: cover / layers.len() as f32,
-            convective: weighted(|layer| layer.convective),
-            depth: weighted(|layer| layer.depth),
-            top: weighted(|layer| layer.top),
+            cover: cover / count as f32,
+            convective: convective / cover,
+            depth: depth / cover,
+            top: top / cover,
         }
     }
 
@@ -1054,33 +1055,29 @@ pub fn cloud_layer(climate: &CloudClimate) -> CloudLayer {
 /// uses it for the saturation of the column; the cold anomaly of the sea surface is against the
 /// zonal mean of the ocean. Months the water cycle did not solve fall back to the year.
 pub fn cloud_layers(data: &ModeData, season: Period) -> Vec<CloudLayer> {
+    let bins = latitude_bins(data);
     let layers = match season {
         // The model's annual precipitation is the mean of its months, each with its own
         // saturation: the mean of the clouds of January and July, rather than the clouds of the
         // mean.
         Period::Annual => {
-            let january = month_cloud_layers(data, Period::January);
-            let july = month_cloud_layers(data, Period::July);
+            let january = month_cloud_layers(data, Period::January, &bins);
+            let july = month_cloud_layers(data, Period::July, &bins);
             january
                 .iter()
                 .zip(&july)
-                .map(|(a, b)| CloudLayer::mean(&[*a, *b]))
+                .map(|(a, b)| CloudLayer::mean([*a, *b]))
                 .collect()
         }
-        _ => month_cloud_layers(data, season),
+        _ => month_cloud_layers(data, season, &bins),
     };
     // Clouds are smoother than the cells: one pass of averaging over the neighbours, so that
     // their edges do not trace the triangles where the cover jumps between cells.
     (0..layers.len())
         .map(|cell| {
             let neighbours = data.mesh.neighbors(cell as u32);
-            let around = CloudLayer::mean(
-                &neighbours
-                    .iter()
-                    .map(|&n| layers[n as usize])
-                    .collect::<Vec<_>>(),
-            );
-            let mut layer = CloudLayer::mean(&[layers[cell], around]);
+            let around = CloudLayer::mean(neighbours.iter().map(|&n| layers[n as usize]));
+            let mut layer = CloudLayer::mean([layers[cell], around]);
             // The tops at least 1 km above the ground (the heights are above sea level).
             if layer.cover > 0.0 {
                 let ground = data.cells[cell].elevation.max(0.0) / 1000.0;
@@ -1091,39 +1088,40 @@ pub fn cloud_layers(data: &ModeData, season: Period) -> Vec<CloudLayer> {
         .collect()
 }
 
-/// The clouds of every cell in a month (or the year from its annual means).
-fn month_cloud_layers(data: &ModeData, season: Period) -> Vec<CloudLayer> {
+/// The clouds of every cell in a month, `bins` the latitude bin of every cell (see
+/// [`latitude_bins`]).
+fn month_cloud_layers(data: &ModeData, season: Period, bins: &[u8]) -> Vec<CloudLayer> {
     let params = crate::climate::ClimateParams::default();
     let cells = data.cells;
-    let latitudes: Vec<f64> = (0..cells.len())
-        .map(|cell| data.mesh.vertex(cell as u32).z.clamp(-1.0, 1.0).asin())
-        .collect();
     let temperature = |cell: &CellInfo| {
         let t = season.temperature(cell);
         if t.is_finite() { t } else { cell.temperature }
     };
     let pick = |value: f32, fallback: f32| if value.is_finite() { value } else { fallback };
-    let column = zonal_mean(&latitudes, |cell| {
+    let column = zonal_mean(bins, |cell| {
         let info = &cells[cell];
         Some(f64::from(temperature(info)) + params.lapse_rate * f64::from(info.elevation.max(0.0)))
     });
-    let ocean = zonal_mean(&latitudes, |cell| {
+    let ocean = zonal_mean(bins, |cell| {
         let info = &cells[cell];
         info.is_sea().then(|| f64::from(temperature(info)))
     });
+    // The saturated column of every latitude (the column temperature is zonal).
+    let saturation: Vec<Option<crate::climate::ColumnSaturation>> = column
+        .iter()
+        .map(|&t| crate::climate::ColumnSaturation::new(t, &params))
+        .collect();
     cells
         .iter()
-        .enumerate()
-        .map(|(cell, info)| {
+        .zip(bins)
+        .map(|(info, &bin)| {
+            let bin = usize::from(bin);
             let precipitation = pick(season.precipitation(info), info.precipitation);
-            let humidity = crate::climate::column_relative_humidity(
-                f64::from(precipitation),
-                column[cell],
-                f64::from(info.elevation),
-                &params,
-            ) as f32;
+            let humidity = saturation[bin].map_or(f32::NAN, |column| {
+                column.relative_humidity(f64::from(precipitation), f64::from(info.elevation)) as f32
+            });
             let stratocumulus = if info.is_sea() {
-                let anomaly = temperature(info) - ocean[cell] as f32;
+                let anomaly = temperature(info) - ocean[bin] as f32;
                 let evaporation = pick(season.evaporation(info), info.evaporation);
                 STRATOCUMULUS
                     * smoothstep(STRATOCUMULUS_COLD.0, STRATOCUMULUS_COLD.1, -anomaly)
@@ -1142,7 +1140,7 @@ fn month_cloud_layers(data: &ModeData, season: Period) -> Vec<CloudLayer> {
             };
             cloud_layer(&CloudClimate {
                 humidity,
-                column_temperature: column[cell] as f32,
+                column_temperature: column[bin] as f32,
                 precipitation,
                 moist,
                 stratocumulus,
@@ -1151,27 +1149,36 @@ fn month_cloud_layers(data: &ModeData, season: Period) -> Vec<CloudLayer> {
         .collect()
 }
 
-/// The zonal mean of `value` (cells without one left out) at the latitude (radians) of every
-/// cell, in 1° bins smoothed over a few degrees like the water cycle's (`climate.rs`); NaN in
-/// latitudes without values.
-fn zonal_mean(latitudes: &[f64], value: impl Fn(usize) -> Option<f64>) -> Vec<f64> {
-    const BINS: usize = 180;
-    let bin = |latitude: f64| {
-        (((latitude.to_degrees() + 90.0) / 180.0 * BINS as f64) as usize).min(BINS - 1)
-    };
-    let mut sum = [0.0; BINS];
-    let mut count = [0.0; BINS];
-    for (cell, &latitude) in latitudes.iter().enumerate() {
+/// Bins of latitude for [`zonal_mean`]: 1° wide, like the water cycle's (`climate.rs`).
+const LATITUDE_BINS: usize = 180;
+
+/// The latitude bin of every cell.
+fn latitude_bins(data: &ModeData) -> Vec<u8> {
+    (0..data.cells.len())
+        .map(|cell| {
+            let latitude = data.mesh.vertex(cell as u32).z.clamp(-1.0, 1.0).asin();
+            (((latitude.to_degrees() + 90.0) / 180.0 * LATITUDE_BINS as f64) as usize)
+                .min(LATITUDE_BINS - 1) as u8
+        })
+        .collect()
+}
+
+/// The zonal mean of `value` (cells without one left out) in every latitude bin, smoothed over a
+/// few degrees like the water cycle's (`climate.rs`); NaN in latitudes without values.
+fn zonal_mean(bins: &[u8], value: impl Fn(usize) -> Option<f64>) -> Vec<f64> {
+    let mut sum = [0.0; LATITUDE_BINS];
+    let mut count = [0.0; LATITUDE_BINS];
+    for (cell, &bin) in bins.iter().enumerate() {
         if let Some(value) = value(cell).filter(|value| value.is_finite()) {
-            sum[bin(latitude)] += value;
-            count[bin(latitude)] += 1.0;
+            sum[usize::from(bin)] += value;
+            count[usize::from(bin)] += 1.0;
         }
     }
     // Gaussian smoothing with a width of 3 bins (3°).
-    let smoothed: Vec<f64> = (0..BINS)
+    (0..LATITUDE_BINS)
         .map(|b| {
             let (mut s, mut c) = (0.0, 0.0);
-            for other in b.saturating_sub(9)..(b + 10).min(BINS) {
+            for other in b.saturating_sub(9)..(b + 10).min(LATITUDE_BINS) {
                 let d = (other as f64 - b as f64) / 3.0;
                 let w = (-0.5 * d * d).exp();
                 s += w * sum[other];
@@ -1179,10 +1186,6 @@ fn zonal_mean(latitudes: &[f64], value: impl Fn(usize) -> Option<f64>) -> Vec<f6
             }
             if c > 1e-9 { s / c } else { f64::NAN }
         })
-        .collect();
-    latitudes
-        .iter()
-        .map(|&latitude| smoothed[bin(latitude)])
         .collect()
 }
 
@@ -2027,12 +2030,9 @@ mod tests {
                     vertices.len()
                 );
                 // The tops lie at least 1 km above the ground.
-                for (triangle, face) in vertices.chunks(3).zip(data.mesh.faces()) {
-                    for (vertex, &cell) in triangle.iter().zip(face) {
-                        if vertex.clouds[0] > 0 {
-                            assert!(f32::from(vertex.clouds[3]) / 255.0 * 16.0 >= 0.99);
-                            let _ = cell;
-                        }
+                for (layer, cell) in cloud_layers(data, Period::Annual).iter().zip(data.cells) {
+                    if layer.cover > 0.0 {
+                        assert!(layer.top >= 1.0, "{layer:?}, {} m", cell.elevation);
                     }
                 }
                 let uniforms = detail_uniforms(data);
@@ -2129,7 +2129,7 @@ mod tests {
                 [r * angle.cos(), r * angle.sin(), z * zonal]
             })
             .collect();
-        for octaves in [1, 2, 4, 6] {
+        for octaves in [1.0, 2.0, 2.5, 4.0, 6.0_f32] {
             for (persistence, synoptic) in [(0.5, 1.0), (1.2, 0.1)] {
                 let field = |q: &[f32; 3]| {
                     let w = pressure_weight * synoptic;
@@ -2141,11 +2141,12 @@ mod tests {
                     let mut sum = -w * pressure / deviation;
                     let mut variance = w * w;
                     let (mut amplitude, mut frequency) = (1.0, CLOUD_FREQUENCY);
-                    for octave in 0..octaves {
+                    for octave in 0..octaves.ceil() as usize {
+                        // The last, fractional octave fades in.
+                        let a = amplitude * (octaves - octave as f32).min(1.0);
                         let offset = octave as f32 * 5.17 - 11.0;
-                        sum +=
-                            amplitude * shader_noise(q.map(|c| c * frequency + offset)) / deviation;
-                        variance += amplitude * amplitude;
+                        sum += a * shader_noise(q.map(|c| c * frequency + offset)) / deviation;
+                        variance += a * a;
                         amplitude *= persistence;
                         frequency *= 2.0;
                     }
@@ -2170,12 +2171,48 @@ mod tests {
     #[test]
     fn clouds_stay_below_the_knee() {
         // No cloud, nor a cloud with the ground beneath it, is brighter than the shoulder's knee
-        // (the brightest surface): the exposure's cap holds with the clouds.
+        // (the brightest surface), also with the atmosphere off: the exposure's cap holds with
+        // the clouds. A port of `cloud_reflectance` and of the composition in `realistic.wgsl`
+        // (reflectance factors at the capped incidence), over optical depths, sun heights,
+        // shadows and grounds up to fresh snow and beyond.
         let knee = crate::viewer::atmosphere::SHOULDER_KNEE as f32;
         assert_eq!(cloud_constant("CLOUD_KNEE"), knee);
-        assert!(cloud_constant("CLOUD_MAX_REFLECTANCE") < knee);
+        let max_reflectance = cloud_constant("CLOUD_MAX_REFLECTANCE");
+        assert!(max_reflectance < knee);
+        let g = cloud_constant("CLOUD_G");
+        let clouds = include_str!("../clouds.wgsl");
+        assert!(
+            clouds.contains("let x = (1.0 - CLOUD_G) * tau * 0.5 * (1.0 + 1.0 / max(mu0, 0.15));")
+        );
+        let reflectance = |tau: f32, mu0: f32| {
+            let x = (1.0 - g) * tau * 0.5 * (1.0 + 1.0 / mu0.max(0.15));
+            (x / (2.0 + x)).min(max_reflectance)
+        };
         let shader = include_str!("../realistic.wgsl");
-        assert!(shader.contains("seen = min(seen, max(CLOUD_KNEE - cloud_reflection, 0.0)"));
+        assert!(
+            shader.contains(
+                "max(CLOUD_KNEE - cloud_reflection, 0.0) / max(brightest * shadow, 1e-4)"
+            )
+        );
+        for tau in [0.0, 0.5, 2.0, 6.0, 15.0, 40.0, 64.0] {
+            for mu0 in [0.02, 0.1, 0.3, 0.6, 1.0] {
+                let r = reflectance(tau, mu0);
+                for shadow_tau in [0.0, tau, 40.0] {
+                    let shadow = 1.0 - reflectance(shadow_tau, mu0);
+                    for ground in [0.0, 0.3, 0.6, 0.86, 0.95] {
+                        let mut seen = 1.0 - r;
+                        if r > 0.0 {
+                            seen = seen.min((knee - r).max(0.0) / (ground * shadow).max(1e-4));
+                        }
+                        let total = r + seen * shadow * ground;
+                        assert!(
+                            total <= knee.max(ground) + 1e-6,
+                            "τ {tau}, μ₀ {mu0}, shadow {shadow}, ground {ground}: {total}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

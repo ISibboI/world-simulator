@@ -82,7 +82,7 @@ pub struct DetailVertex {
     /// in the world frame), the squeeze of the relief noise along it (bits 24–30) and whether
     /// the cell is ocean (bit 31; its ice is anchored to the world, not to the plate).
     pub ridges: [u32; 3],
-    /// The clouds of the cell: cover, convective share, mean optical depth of the cloudy part
+    /// The clouds of the cell: cover, type (convective 1, sheets 0), typical optical depth
     /// / 64 and cloud-top height / 16 km (all zero with the clouds off; see
     /// `modes::realistic::cloud_layer`).
     pub clouds: [u8; 4],

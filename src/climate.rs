@@ -1183,41 +1183,80 @@ fn saturation_column(t: f64, lapse_rate: f64) -> (f64, f64) {
     (density * scale_height, scale_height)
 }
 
-/// The column relative humidity `r = W / W_sat` at which the rain law of `params` gives the
-/// precipitation `precipitation` (m/yr), for a column of the free-troposphere temperature
-/// `column_temperature` (°C, the zonal mean of the sea-level temperature, as the water cycle
-/// uses it) above a surface `elevation` m high: the inverse of [`RainLaw::rate`] with
-/// `W = r W_sat`. The rate grows monotonically with `r`, so Newton's method from the reference
-/// humidity converges in a few steps. The realistic view's clouds (#92) use it. NaN inputs give
-/// NaN.
+/// The saturated air column of a free-troposphere temperature, for inverting the rain law of
+/// [`ClimateParams`] (see [`ColumnSaturation::relative_humidity`]). The realistic view's clouds
+/// (#92) use it; one per zonal temperature, since the column temperature is a zonal mean.
+#[derive(Debug, Clone, Copy)]
+pub struct ColumnSaturation {
+    /// `ln(W_sat · rate) − a r₀` at sea level.
+    offset: f64,
+    /// Scale height of water vapour in m.
+    scale_height: f64,
+    /// `a` and `r₀` of the rain law.
+    sensitivity: f64,
+    reference: f64,
+}
+
+impl ColumnSaturation {
+    /// The column of the free-troposphere temperature `column_temperature` (°C, the zonal mean of
+    /// the sea-level temperature, as the water cycle uses it); `None` if it is not finite.
+    pub fn new(column_temperature: f64, params: &ClimateParams) -> Option<Self> {
+        if !column_temperature.is_finite() {
+            return None;
+        }
+        let law = RainLaw::new(params);
+        let (column, scale_height) = saturation_column(column_temperature, params.lapse_rate);
+        Some(Self {
+            offset: math::ln(column * law.rate) - law.sensitivity * law.reference,
+            scale_height,
+            sensitivity: law.sensitivity,
+            reference: law.reference,
+        })
+    }
+
+    /// The column relative humidity `r = W / W_sat` at which the rain law gives the
+    /// precipitation `precipitation` (m/yr) above a surface `elevation` m high: the inverse of
+    /// [`RainLaw::rate`] with `W = r W_sat`. NaN for NaN inputs.
+    ///
+    /// `ln P(r) = ln r + ln(W_sat · rate) + a (min(r, 2) − r₀)` is concave and grows with r, so
+    /// Newton's method converges monotonically after its first step, with one logarithm per
+    /// step (2–3 steps from the first guess). Beyond twice saturation, where the law stops
+    /// steepening, the humidity is large but finite.
+    pub fn relative_humidity(&self, precipitation: f64, elevation: f64) -> f64 {
+        if !(precipitation.is_finite() && elevation.is_finite()) {
+            return f64::NAN;
+        }
+        // kg/m²/s; at least a trace, so that the logarithm stays finite.
+        let target = precipitation.max(1e-4) * WATER_DENSITY / SECONDS_PER_YEAR;
+        // The saturated column shrinks over high ground: ln W_sat drops by z / H.
+        let offset = self.offset - elevation.max(0.0) / self.scale_height - math::ln(target);
+        // First guess: the root with ln r frozen at the reference humidity (it varies slowly).
+        let mut humidity =
+            ((-offset - math::ln(self.reference)) / self.sensitivity).clamp(0.05, 2.0);
+        for _ in 0..20 {
+            let below_cap = humidity < 2.0;
+            let residual = math::ln(humidity) + offset + self.sensitivity * humidity.min(2.0);
+            let slope = 1.0 / humidity + if below_cap { self.sensitivity } else { 0.0 };
+            let step = residual / slope;
+            humidity = (humidity - step).clamp(1e-3, 50.0);
+            if step.abs() < 1e-6 {
+                break;
+            }
+        }
+        humidity
+    }
+}
+
+/// [`ColumnSaturation::relative_humidity`] for one column (NaN for NaN inputs).
 pub fn column_relative_humidity(
     precipitation: f64,
     column_temperature: f64,
     elevation: f64,
     params: &ClimateParams,
 ) -> f64 {
-    if !(precipitation.is_finite() && column_temperature.is_finite() && elevation.is_finite()) {
-        return f64::NAN;
-    }
-    let law = RainLaw::new(params);
-    let (column, scale_height) = saturation_column(column_temperature, params.lapse_rate);
-    let saturation = column * math::exp(-elevation.max(0.0) / scale_height);
-    // kg/m²/s; at least a trace, so that the logarithm below stays finite.
-    let target = precipitation.max(1e-4) * WATER_DENSITY / SECONDS_PER_YEAR;
-    // Solve ln P(r) = ln target: ln P is concave in r and grows with it, so Newton's method on
-    // the logarithm converges monotonically from the reference humidity.
-    let mut humidity = law.reference;
-    for _ in 0..12 {
-        let (rate, derivative) = law.rate(humidity * saturation, saturation);
-        // d ln P / dr = (dP/dW · W_sat) / P.
-        let slope = derivative * saturation / rate.max(1e-30);
-        let step = (math::ln(target) - math::ln(rate.max(1e-30))) / slope.max(1e-9);
-        humidity = (humidity + step).clamp(1e-3, 2.0);
-        if step.abs() < 1e-6 {
-            break;
-        }
-    }
-    humidity
+    ColumnSaturation::new(column_temperature, params).map_or(f64::NAN, |column| {
+        column.relative_humidity(precipitation, elevation)
+    })
 }
 
 /// Zonal-mean low-level wind (eastward, poleward) in m/s at a latitude (degrees, positive) of the

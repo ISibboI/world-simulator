@@ -62,7 +62,7 @@ fn cloud_field(
     let warped = (u - CLOUD_SWIRL * flow) * stretch;
     var amplitude = 1.0;
     var frequency = base;
-    for (var octave = 0; octave < MAX_OCTAVES + 1; octave++) {
+    for (var octave = 0; octave < MAX_OCTAVES; octave++) {
         let weight = clamp(octaves - f32(octave), 0.0, 1.0);
         if weight <= 0.0 {
             break;
