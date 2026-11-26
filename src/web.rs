@@ -331,6 +331,15 @@ async fn run_page() -> anyhow::Result<()> {
         .search()
         .map_err(|error| anyhow!("reading the URL: {error:?}"))?;
     let url_args = query_to_args(&search)?;
+    // Opening the page without a seed makes a new planet; its seed goes into the URL, so that
+    // reloading or sharing the page makes the same planet again.
+    let url_args = if has_option(&url_args, "seed") {
+        url_args
+    } else {
+        let args = viewer::with_random_seed(&url_args);
+        replace_query(&args_to_query(&args));
+        args
+    };
     let guess = device_signals(&window).guess();
     let source = device::source(has_option(&url_args, "subdivisions"), stored_subdivisions());
     info!(?source, "Subdivisions");

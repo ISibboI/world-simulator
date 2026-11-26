@@ -33,7 +33,7 @@ concurrency:
 env:
   TRUNK_VERSION: v0.22.2
   # The page parameters of the quick test: a small planet and a short run.
-  QUICK_QUERY: subdivisions=3&duration=50
+  QUICK_QUERY: seed=0&subdivisions=3&duration=50
 
 jobs:
   build:
@@ -189,7 +189,7 @@ jobs:
           script: |
             echo "| Browser | Parameters | Result | Seconds | Planet pixels | User agent |" >> "$GITHUB_STEP_SUMMARY"
             echo "| --- | --- | --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
-            status=0; python3 web/tests/browser_test.py --browser android-${{ matrix.browser }} --apk fenix.apk --dist dist --query "$QUICK_QUERY" --timeout 600 --out results/android-${{ matrix.browser }}-quick || status=1; python3 web/tests/browser_test.py --browser android-${{ matrix.browser }} --dist dist --query "" --min-updates 1 --timeout 900 --out results/android-${{ matrix.browser }}-default || status=1; exit $status
+            status=0; python3 web/tests/browser_test.py --browser android-${{ matrix.browser }} --apk fenix.apk --dist dist --query "$QUICK_QUERY" --timeout 600 --out results/android-${{ matrix.browser }}-quick || status=1; python3 web/tests/browser_test.py --browser android-${{ matrix.browser }} --dist dist --query "seed=0" --min-updates 1 --timeout 900 --out results/android-${{ matrix.browser }}-default || status=1; exit $status
 
       - uses: actions/upload-artifact@v7
         if: always()

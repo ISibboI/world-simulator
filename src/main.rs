@@ -64,7 +64,8 @@ const EARTH_RADIUS: f64 = 6.371e6;
 #[derive(Parser, Debug, Clone)]
 #[command(version, about)]
 struct Cli {
-    /// Seed for the random number generator.
+    /// Seed for the random number generator. The 3D view (desktop and web) picks a random one
+    /// if none is given; headless runs use 0.
     #[arg(long, default_value_t = 0)]
     seed: u64,
 
@@ -230,10 +231,14 @@ fn main() -> anyhow::Result<()> {
     // Wrong options end the program before the window opens; the window then shows the status
     // banner while the simulation thread builds the initial planet.
     cli.validate()?;
-    // The parameter panel starts from the command line as given.
-    let args = std::env::args_os()
+    // The parameter panel starts from the command line as given, with the random seed chosen
+    // if it gives none.
+    let args: Vec<String> = std::env::args_os()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
+    let args = viewer::with_random_seed(&args);
+    let cli = Cli::try_parse_from(&args)?;
+    info!(seed = cli.seed, "Seed");
     viewer::run(viewer::Launch { cli, args }, simulation_thread_launcher())
 }
 
