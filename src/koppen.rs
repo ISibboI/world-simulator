@@ -681,7 +681,17 @@ mod tests {
     #[test]
     fn a_small_planet_is_classified() {
         use clap::Parser;
-        let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "3"]);
+        // Today's living Earth, the default before #190: the barren default at epoch 0 has no
+        // tropical climate on this coarse mesh at the start.
+        let cli = crate::Cli::parse_from([
+            "world-simulator",
+            "--subdivisions",
+            "3",
+            "--biosphere",
+            "modern",
+            "--epoch",
+            "4",
+        ]);
         let planet = crate::build_planet(&cli).unwrap();
         let classes = classes(&planet);
         for (cell, class) in classes.iter().enumerate() {
