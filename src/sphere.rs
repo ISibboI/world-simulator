@@ -9,6 +9,7 @@ use glam::DVec3;
 ///
 /// Every vertex is a simulation cell. Vertices have five (the original twelve icosahedron
 /// corners) or six neighbours.
+#[derive(Clone)]
 pub struct SphereMesh {
     vertices: Vec<DVec3>,
     neighbors: Vec<Vec<u32>>,

@@ -156,6 +156,11 @@ struct Cli {
     #[arg(long)]
     lake_log_from: Option<f64>,
 
+    /// At every snapshot, run the temperature model again on the same state with lakes as open
+    /// water and as land, and log the difference on the lakes and the land around them (#173).
+    #[arg(long)]
+    lake_climate_contrast: bool,
+
     /// Life on the planet, as far as the parameters see it: `modern` is today's vegetated Earth
     /// with a biogenic ocean, `abiotic` a planet without life (bare land, no transpiration,
     /// braided rivers, no biogenic pelagic sediment). See `presets::Biosphere`.
@@ -1322,6 +1327,27 @@ fn snapshot(
             .join(", "),
     );
 
+    if cli.lake_climate_contrast {
+        let contrast = planet.lake_climate_contrast(10);
+        let show = |name: &str, (cells, water, land): (usize, planet::SurfaceStats, planet::SurfaceStats)| {
+            format!(
+                "{name} {cells} cells: annual {:.1} / {:.1} °C, range {:.1} / {:.1} K, frozen {:.0} / {:.0}%",
+                water.annual,
+                land.annual,
+                water.range,
+                land.range,
+                100.0 * water.frozen,
+                100.0 * land.frozen,
+            )
+        };
+        info!(
+            "    lake climate (open water / land): {} | {} | {} | {}",
+            show("lakes", contrast.lakes),
+            show("large lakes", contrast.large_lakes),
+            show("land next to large lakes", contrast.near),
+            show("land 2-3 cells from them", contrast.around),
+        );
+    }
     info!("    state hash {:016x}", planet.state_hash());
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1445,8 +1471,9 @@ struct PreviousSnapshot {
 /// discharge (m³/yr), longitude (°), the annual mean, January and July surface temperatures
 /// (°C), evaporation or evapotranspiration (m/yr), and January and July precipitation (m/yr),
 /// …, the lake depth (m, relative to the end-of-step surface as the erosion sees it), the plate-local index of the
-/// crust sample shown and the sample surface (m; what the erosion sees with
-/// `erosion.sample_surface`, written whether or not it is on).
+/// crust sample shown, the sample surface (m; what the erosion sees with
+/// `erosion.sample_surface`, written whether or not it is on) and the permanent ice cover (sea
+/// ice, lake ice or ice sheet, 0 to 1).
 #[cfg(not(target_arch = "wasm32"))]
 fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Write;
@@ -1483,7 +1510,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain,ice"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -1510,7 +1537,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
              {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
-             {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1}",
+             {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1},{:.3}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -1565,6 +1592,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
                 .unwrap_or(0.0),
             simulation.owner(cell).local,
             drain[cell as usize],
+            temperature.ice[cell as usize],
         )?;
     }
     file.flush()?;

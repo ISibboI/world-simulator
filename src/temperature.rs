@@ -250,6 +250,11 @@ pub struct TemperatureParams {
     pub years_per_update: usize,
     /// Subdivisions of the coarse icosphere the model runs on.
     pub coarse_subdivisions: u32,
+    /// Whether lakes are open water (#173): a lake column per coarse cell beside the land and
+    /// the ocean column, with the heat capacity of the lake's mixed layer, lake ice and the
+    /// open-water albedo, but no ocean heat transport (see [`TemperatureModel::update`]).
+    /// Otherwise lake cells are land (before #173).
+    pub open_water_lakes: bool,
 }
 
 impl Default for TemperatureParams {
@@ -295,6 +300,7 @@ impl Default for TemperatureParams {
             spin_up_years: 20,
             years_per_update: 2,
             coarse_subdivisions: 4,
+            open_water_lakes: true,
         }
     }
 }
@@ -311,6 +317,10 @@ impl TemperatureParams {
 
     /// Sets a parameter by its field name, for calibration from the command line.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
+        if name == "open_water_lakes" {
+            self.open_water_lakes = value != 0.0;
+            return Ok(());
+        }
         let field = match name {
             "radiation_a" => &mut self.radiation_a,
             "radiation_b" => &mut self.radiation_b,
@@ -368,6 +378,14 @@ const ICE_FREE_START: f64 = 40.0;
 const EARTH_ROTATION: f64 = 7.292e-5;
 /// Specific heat capacity of sea water in J/kg/K.
 const WATER_HEAT_CAPACITY: f64 = 3990.0;
+/// Heat capacity of water per volume in J/m³/K, which turns a mixed-layer depth into a heat
+/// capacity per area (the default [`TemperatureParams::ocean_heat_capacity`] is 50 m of it).
+const WATER_VOLUMETRIC_HEAT_CAPACITY: f64 = 4.18e6;
+/// Freezing and melting point of the fresh water of lakes in °C.
+const LAKE_FREEZING_TEMPERATURE: f64 = 0.0;
+/// Cells with at least this much lake water (m) are lakes, as everywhere else (the view, the
+/// climate classes).
+pub const LAKE_DEPTH: f64 = crate::render::LAKE_DEPTH;
 
 /// Temperature fields on the fine mesh, in °C.
 #[derive(Clone, Debug, Default)]
@@ -380,8 +398,12 @@ pub struct TemperatureFields {
     /// equator), for [`THERMAL_EQUATOR_SECTORS`] sectors of longitude from 180°W eastwards: over a
     /// summer continent it lies further poleward than over the ocean (monsoons).
     pub thermal_equator: Vec<Vec<f64>>,
-    /// Permanent ice cover (sea ice, ice sheets), 0 to 1, as the albedo of the last year saw it.
+    /// Permanent ice cover (sea ice, lake ice, ice sheets), 0 to 1, as the albedo of the last
+    /// year saw it.
     pub ice: Vec<f64>,
+    /// Mean ice cover (0 to 1) of every month on the lake cells, NaN elsewhere; empty unless
+    /// lakes are open water ([`TemperatureParams::open_water_lakes`]).
+    pub monthly_lake_ice: Vec<Vec<f64>>,
     /// Annual mean northward heat transport across the band interfaces in the last year: latitude
     /// (degrees), and the transport by the atmosphere and by the ocean in W per square metre of
     /// the planet's radius squared (multiply by R² for watts).
@@ -416,6 +438,7 @@ impl TemperatureFields {
     }
 }
 
+#[derive(Clone)]
 pub struct TemperatureModel {
     params: TemperatureParams,
     coarse: SphereMesh,
@@ -441,6 +464,17 @@ pub struct TemperatureModel {
     ocean: Vec<f64>,
     /// Surface temperature of the ocean (water or ice) of each coarse cell.
     ocean_surface: Vec<f64>,
+    /// Enthalpy of the lake column of each coarse cell in J/m², as [`Self::ocean`] relative to
+    /// water at the lake's freezing point (see [`TemperatureParams::open_water_lakes`]); also
+    /// where the cell has no lake: the state a lake there would have.
+    lake: Vec<f64>,
+    /// Surface temperature of the lakes (water or ice) of each coarse cell, at sea level (see
+    /// [`TemperatureModel::update`]).
+    lake_surface: Vec<f64>,
+    /// Heat capacity (J/m²/K) and freezing point (°C at sea level) of the lake column of each
+    /// coarse cell in the last update: when the lakes change, the column keeps its temperature,
+    /// not its heat.
+    lake_column: Vec<(f64, f64)>,
     /// Annual mean land temperature of each coarse cell in the previous year, which determines
     /// the ice sheets.
     previous_annual_land: Vec<f64>,
@@ -542,6 +576,8 @@ impl TemperatureModel {
         let count = coarse.len();
         let gyre_model = crate::ocean::GyreModel::new(&coarse, EARTH_RADIUS);
         let ocean_enthalpy = params.ocean_heat_capacity * (15.0 - params.freezing_temperature);
+        let lake_enthalpy = params.ocean_heat_capacity * (15.0 - LAKE_FREEZING_TEMPERATURE);
+        let lake_column = vec![(params.ocean_heat_capacity, LAKE_FREEZING_TEMPERATURE); count];
         Self {
             params,
             coarse,
@@ -555,6 +591,9 @@ impl TemperatureModel {
             land: vec![15.0; count],
             ocean: vec![ocean_enthalpy; count],
             ocean_surface: vec![15.0; count],
+            lake: vec![lake_enthalpy; count],
+            lake_surface: vec![15.0; count],
+            lake_column,
             // The spin-up starts without ice sheets: they form where the land turns out cold
             // enough. Starting from a cold land would put ice on every plateau in the first
             // year, and ice sheets that keep themselves cold would then stay.
@@ -572,11 +611,37 @@ impl TemperatureModel {
         &self.fields
     }
 
+    pub fn params(&self) -> &TemperatureParams {
+        &self.params
+    }
+
+    pub fn params_mut(&mut self) -> &mut TemperatureParams {
+        &mut self.params
+    }
+
     /// Simulates the seasonal cycle for the given surface elevation (in metres, sea level is 0)
     /// of the fine mesh, `time` Myr into the run (for the sun's brightening), and updates the
     /// temperature fields. `precipitation` (m/yr) limits where ice sheets can grow; without it,
     /// 1 m/yr is assumed everywhere.
-    pub fn update(&mut self, elevation: &[f64], precipitation: Option<&[f64]>, time: f64) {
+    ///
+    /// `lake_depth` (m, per fine cell) marks the lakes: cells with water on them that are not
+    /// ocean (elevation ≥ 0, which for a lake is its water surface). With
+    /// [`TemperatureParams::open_water_lakes`], they are open water: each coarse cell has a lake
+    /// column beside its land and ocean, with the physics of the ocean column (mixed layer or
+    /// ice, the same albedos) but the heat capacity of the lakes' mixed layer (their mean depth,
+    /// at most the ocean's mixed layer), fresh water freezing at 0 °C, and no ocean heat
+    /// transport. Like the land, the column works with sea-level temperatures, so it freezes at
+    /// the lapse rate times the mean elevation of its lakes' water surfaces. The surfaces of a
+    /// coarse cell exchange heat through the air in proportion to their area shares, and the
+    /// lakes' share enters the air above the cell, so a large lake gives the land around it a
+    /// maritime climate.
+    pub fn update(
+        &mut self,
+        elevation: &[f64],
+        precipitation: Option<&[f64]>,
+        lake_depth: Option<&[f64]>,
+        time: f64,
+    ) {
         let params = &self.params;
         let orbit = OrbitParams {
             solar_constant: params.solar_constant(time),
@@ -584,24 +649,84 @@ impl TemperatureModel {
         };
         let coarse_count = self.coarse.len();
 
-        // Land fraction of every coarse cell.
+        let is_lake: Vec<bool> = match lake_depth {
+            Some(depth) if params.open_water_lakes => (0..elevation.len())
+                .map(|fine| depth[fine] >= LAKE_DEPTH && elevation[fine] >= 0.0)
+                .collect(),
+            _ => vec![false; elevation.len()],
+        };
+        // Land and lake fractions of every coarse cell; the heat capacity and the freezing point
+        // (at sea level) of its lake column.
+        let mixed_layer_depth = params.ocean_heat_capacity / WATER_VOLUMETRIC_HEAT_CAPACITY;
+        // A shallow lake stores at least the heat of the land around it (the air column, ~2.4 m
+        // of water): the wet ground below it takes part too.
+        let min_lake_depth =
+            (params.land_heat_capacity / WATER_VOLUMETRIC_HEAT_CAPACITY).min(mixed_layer_depth);
         let mut cells = vec![0usize; coarse_count];
         let mut land_cells = vec![0usize; coarse_count];
+        let mut lake_cells = vec![0usize; coarse_count];
+        let mut lake_depth_sum = vec![0.0; coarse_count];
+        let mut lake_height_sum = vec![0.0; coarse_count];
         for (fine, &coarse) in self.fine_to_coarse.iter().enumerate() {
-            cells[coarse as usize] += 1;
-            if elevation[fine] >= 0.0 {
-                land_cells[coarse as usize] += 1;
+            let coarse = coarse as usize;
+            cells[coarse] += 1;
+            if is_lake[fine] {
+                let depth = lake_depth.map_or(0.0, |d| d[fine]);
+                lake_cells[coarse] += 1;
+                lake_depth_sum[coarse] += depth.clamp(min_lake_depth, mixed_layer_depth);
+                lake_height_sum[coarse] += elevation[fine];
+            } else if elevation[fine] >= 0.0 {
+                land_cells[coarse] += 1;
             }
         }
         let land_cells_list: Vec<usize> = (0..elevation.len())
-            .filter(|&fine| elevation[fine] >= 0.0)
+            .filter(|&fine| elevation[fine] >= 0.0 && !is_lake[fine])
             .collect();
         let land_fraction: Vec<f64> = (0..coarse_count)
             .map(|c| land_cells[c] as f64 / cells[c].max(1) as f64)
             .collect();
-        let heat_capacity: Vec<f64> = land_fraction
-            .iter()
-            .map(|&f| f * params.land_heat_capacity + (1.0 - f) * params.ocean_heat_capacity)
+        let lake_fraction: Vec<f64> = (0..coarse_count)
+            .map(|c| lake_cells[c] as f64 / cells[c].max(1) as f64)
+            .collect();
+        // Written so that it is exactly `1 − f` without lakes.
+        let ocean_fraction: Vec<f64> = (0..coarse_count)
+            .map(|c| 1.0 - land_fraction[c] - lake_fraction[c])
+            .collect();
+        // A cell without lakes keeps a virtual lake column (as every cell has an ocean column)
+        // with the ocean's mixed layer at sea level, from which a new lake starts.
+        let lake_heat_capacity: Vec<f64> = (0..coarse_count)
+            .map(|c| {
+                if lake_cells[c] > 0 {
+                    WATER_VOLUMETRIC_HEAT_CAPACITY * lake_depth_sum[c] / lake_cells[c] as f64
+                } else {
+                    params.ocean_heat_capacity
+                }
+            })
+            .collect();
+        let lake_freezing: Vec<f64> = (0..coarse_count)
+            .map(|c| {
+                LAKE_FREEZING_TEMPERATURE
+                    + params.lapse_rate * lake_height_sum[c] / lake_cells[c].max(1) as f64
+            })
+            .collect();
+        if params.open_water_lakes {
+            // A lake column whose lakes changed keeps the temperature of its water (starting at
+            // its freezing point if that is now higher); its ice stays as it is.
+            for c in 0..coarse_count {
+                let (capacity, freezing) = self.lake_column[c];
+                if self.lake[c] >= 0.0 {
+                    let t = freezing + self.lake[c] / capacity;
+                    self.lake[c] = lake_heat_capacity[c] * (t - lake_freezing[c]).max(0.0);
+                }
+                self.lake_column[c] = (lake_heat_capacity[c], lake_freezing[c]);
+            }
+        }
+        let heat_capacity: Vec<f64> = (0..coarse_count)
+            .map(|c| {
+                land_fraction[c] * params.land_heat_capacity
+                    + ocean_fraction[c] * params.ocean_heat_capacity
+                    + lake_fraction[c] * lake_heat_capacity[c]
+            })
             .collect();
 
         // Hexagonal-lattice discretisation of the Laplacian on the unit sphere.
@@ -672,7 +797,7 @@ impl TemperatureModel {
         // metre (kg/m/s, northward), times the width of the ocean.
         let mut band_ocean = vec![0.0; bands];
         for cell in 0..coarse_count {
-            band_ocean[self.band[cell]] += 1.0 - land_fraction[cell];
+            band_ocean[self.band[cell]] += ocean_fraction[cell];
         }
         for band in 0..bands {
             band_ocean[band] /= band_cells[band].max(1) as f64;
@@ -703,8 +828,10 @@ impl TemperatureModel {
         };
         let subduction = [subduction_band(-1.0), subduction_band(1.0)];
         let band_area = 4.0 * PI * EARTH_RADIUS * EARTH_RADIUS / bands as f64;
-        // Wind-driven gyres in the cells that are mostly ocean.
-        let is_ocean: Vec<bool> = land_fraction.iter().map(|&f| f < 0.5).collect();
+        // Wind-driven gyres in the cells that are mostly ocean (not lakes).
+        let is_ocean: Vec<bool> = (0..coarse_count)
+            .map(|c| land_fraction[c] + lake_fraction[c] < 0.5)
+            .collect();
         let gyres = self.gyre_model.solve(
             &self.coarse,
             &is_ocean,
@@ -724,6 +851,9 @@ impl TemperatureModel {
         let mut seasonal_land = vec![vec![0.0; coarse_count]; seasons];
         let mut seasonal_ocean = vec![vec![0.0; coarse_count]; seasons];
         let mut seasonal_mean = vec![vec![0.0; coarse_count]; seasons];
+        let mut seasonal_lake = vec![vec![0.0; coarse_count]; seasons];
+        let mut seasonal_lake_ice = vec![vec![0.0; coarse_count]; seasons];
+        let mut annual_lake_ice = vec![0.0; coarse_count];
         let mut annual_land = vec![0.0; coarse_count];
         let mut annual_sea_ice = vec![0.0; coarse_count];
         let mut annual_gyre_heat = vec![0.0; coarse_count];
@@ -733,6 +863,8 @@ impl TemperatureModel {
                 .iter_mut()
                 .chain(&mut seasonal_ocean)
                 .chain(&mut seasonal_mean)
+                .chain(&mut seasonal_lake)
+                .chain(&mut seasonal_lake_ice)
             {
                 season.fill(0.0);
             }
@@ -740,6 +872,7 @@ impl TemperatureModel {
             ocean_transport_sum.fill(0.0);
             annual_land.fill(0.0);
             annual_sea_ice.fill(0.0);
+            annual_lake_ice.fill(0.0);
             annual_gyre_heat.fill(0.0);
             // Albedo of the land from the ice sheets, which depend on last year's temperatures:
             // the mean over the fine land cells of every coarse cell, each with its own elevation
@@ -760,17 +893,19 @@ impl TemperatureModel {
                 .collect();
             for (season, insolation) in insolation.iter().enumerate() {
                 for _ in 0..params.substeps_per_season {
-                    // The air above every cell: the area mean of its land and ocean surface.
+                    // The air above every cell: the area mean of its land, ocean and lake
+                    // surfaces.
                     for cell in 0..coarse_count {
-                        let f = land_fraction[cell];
-                        mean[cell] = f * self.land[cell] + (1.0 - f) * self.ocean_surface[cell];
+                        mean[cell] = land_fraction[cell] * self.land[cell]
+                            + ocean_fraction[cell] * self.ocean_surface[cell]
+                            + lake_fraction[cell] * self.lake_surface[cell];
                     }
                     // Meridional transport between latitude bands, solved implicitly.
                     // Ocean heat transport of the subtropical cells.
                     band_sst.fill(0.0);
                     for cell in 0..coarse_count {
                         band_sst[self.band[cell]] +=
-                            (1.0 - land_fraction[cell]) * self.ocean_surface[cell];
+                            ocean_fraction[cell] * self.ocean_surface[cell];
                     }
                     for band in 0..bands {
                         band_sst[band] /= (band_ocean[band] * band_cells[band] as f64).max(1e-9);
@@ -815,7 +950,7 @@ impl TemperatureModel {
                     }
                     for cell in 0..coarse_count {
                         let band = self.band[cell];
-                        let ocean_area = (1.0 - land_fraction[cell]) * cell_area;
+                        let ocean_area = ocean_fraction[cell] * cell_area;
                         if is_ocean[cell] {
                             annual_gyre_heat[cell] += gyre_heat[cell] / ocean_area.max(1.0);
                         }
@@ -856,73 +991,94 @@ impl TemperatureModel {
                         let neighbor_sum: f64 = neighbors.iter().map(|&n| mean[n as usize]).sum();
                         let local = coupling * neighbors.len() as f64;
                         let transport = band_flux[self.band[cell]] + coupling * neighbor_sum;
+                        // Heat exchange through the air with the other surfaces of the cell, in
+                        // proportion to their shares (exactly today's land–ocean exchange
+                        // without lakes).
+                        let k = params.land_ocean_exchange;
+                        let (to_land, to_ocean, to_lake) =
+                            (k * f, k * ocean_fraction[cell], k * lake_fraction[cell]);
 
-                        // Land: C dT/dt = Q (1 − α) − OLR + transport + exchange with the ocean.
+                        // Land: C dT/dt = Q (1 − α) − OLR + transport + exchange with the ocean
+                        // and the lakes.
                         let land = self.land[cell];
                         let (a, b) = radiation(land);
-                        let exchange = params.land_ocean_exchange * (1.0 - f);
                         let rate = dt / params.land_heat_capacity;
                         self.land[cell] = (land
                             + rate
                                 * (q * (1.0 - land_albedo[cell]) - a
                                     + transport
-                                    + exchange * self.ocean_surface[cell]))
-                            / (1.0 + rate * (b + local + exchange));
+                                    + to_ocean * self.ocean_surface[cell]
+                                    + to_lake * self.lake_surface[cell]))
+                            / (1.0 + rate * (b + local + to_ocean + to_lake));
 
                         // Ocean column (Wagner & Eisenman, 2015).
-                        let exchange = params.land_ocean_exchange * f;
-                        let enthalpy = self.ocean[cell];
-                        let h = ice_thickness(enthalpy);
-                        let ice_cover = (h / params.ice_albedo_thickness).min(1.0);
-                        let ice_albedo = if self.ocean_surface[cell] >= 0.0 {
-                            params.melting_ice_albedo
-                        } else {
-                            params.sea_ice_albedo
+                        let ocean = WaterColumn {
+                            heat_capacity: params.ocean_heat_capacity,
+                            freezing: params.freezing_temperature,
+                            melting: 0.0,
                         };
-                        let albedo =
-                            ocean_albedo[cell] + (ice_albedo - ocean_albedo[cell]) * ice_cover;
+                        let albedo = ocean.albedo(
+                            params,
+                            ocean_albedo[cell],
+                            self.ocean[cell],
+                            self.ocean_surface[cell],
+                        );
                         let (a, b) = radiation(self.ocean_surface[cell]);
                         // Net heating of the surface: `forcing − damping · T_surface`.
-                        let forcing =
-                            q * (1.0 - albedo) - a + transport + exchange * self.land[cell];
+                        let forcing = q * (1.0 - albedo) - a
+                            + transport
+                            + to_land * self.land[cell]
+                            + to_lake * self.lake_surface[cell];
                         // Heat from the currents reaches the mixed layer, under ice its base.
                         let currents = self.ocean_heat_convergence[cell];
-                        let damping = b + local + exchange;
-                        let (surface, enthalpy) = if enthalpy >= 0.0 {
-                            // Open water: the mixed layer, implicit in its temperature.
-                            let c = params.ocean_heat_capacity;
-                            let t = params.freezing_temperature + enthalpy / c;
-                            let t = (t + dt / c * (forcing + currents)) / (1.0 + dt / c * damping);
-                            // Cooling below the freezing point forms ice instead.
-                            let next = c * (t - params.freezing_temperature);
-                            (t.max(params.freezing_temperature), next)
-                        } else {
-                            // Sea ice: the surface temperature balances conduction through the
-                            // ice with the surface fluxes; it cannot exceed melting (0 °C).
-                            let conductance = params.ice_conductivity / h.max(0.01);
-                            let t = ((conductance * params.freezing_temperature + forcing)
-                                / (conductance + damping))
-                                .min(0.0);
-                            let enthalpy = enthalpy + dt * (forcing - damping * t + currents);
-                            // Thick ice drifts away and melts elsewhere.
-                            let limit = -params.max_ice_thickness * params.ice_latent_heat;
-                            (t, enthalpy.max(limit))
-                        };
-                        self.ocean_surface[cell] = surface;
-                        self.ocean[cell] = enthalpy;
+                        let damping = b + local + to_land + to_lake;
+                        (self.ocean_surface[cell], self.ocean[cell]) =
+                            ocean.step(params, self.ocean[cell], forcing, damping, currents, dt);
+
+                        // Lake column: the same physics without currents, in fresh water.
+                        if params.open_water_lakes {
+                            let lake = WaterColumn {
+                                heat_capacity: lake_heat_capacity[cell],
+                                freezing: lake_freezing[cell],
+                                melting: lake_freezing[cell],
+                            };
+                            let albedo = lake.albedo(
+                                params,
+                                ocean_albedo[cell],
+                                self.lake[cell],
+                                self.lake_surface[cell],
+                            );
+                            let (a, b) = radiation(self.lake_surface[cell]);
+                            let forcing = q * (1.0 - albedo) - a
+                                + transport
+                                + to_land * self.land[cell]
+                                + to_ocean * self.ocean_surface[cell];
+                            let damping = b + local + to_land + to_ocean;
+                            (self.lake_surface[cell], self.lake[cell]) =
+                                lake.step(params, self.lake[cell], forcing, damping, 0.0, dt);
+                        }
                     }
 
                     for cell in 0..coarse_count {
-                        let f = land_fraction[cell];
                         let surface = self.ocean_surface[cell];
                         seasonal_land[season][cell] += self.land[cell] / substeps;
                         seasonal_ocean[season][cell] += surface / substeps;
-                        seasonal_mean[season][cell] +=
-                            (f * self.land[cell] + (1.0 - f) * surface) / substeps;
+                        seasonal_mean[season][cell] += (land_fraction[cell] * self.land[cell]
+                            + ocean_fraction[cell] * surface
+                            + lake_fraction[cell] * self.lake_surface[cell])
+                            / substeps;
                         annual_land[cell] += self.land[cell];
                         annual_sea_ice[cell] += (ice_thickness(self.ocean[cell])
                             / params.ice_albedo_thickness)
                             .min(1.0);
+                        if params.open_water_lakes {
+                            let ice = (ice_thickness(self.lake[cell])
+                                / params.ice_albedo_thickness)
+                                .min(1.0);
+                            seasonal_lake[season][cell] += self.lake_surface[cell] / substeps;
+                            seasonal_lake_ice[season][cell] += ice / substeps;
+                            annual_lake_ice[cell] += ice;
+                        }
                     }
                 }
             }
@@ -934,7 +1090,7 @@ impl TemperatureModel {
                         let (sum, weight) = (0..coarse_count)
                             .filter(|&cell| self.band[cell] == band)
                             .fold((0.0, 0.0), |(sum, weight), cell| {
-                                let w = 1.0 - land_fraction[cell];
+                                let w = ocean_fraction[cell];
                                 (sum + w * season[cell], weight + w)
                             });
                         sum / weight.max(1e-9)
@@ -952,7 +1108,7 @@ impl TemperatureModel {
             let mut band_sea = vec![(0.0, 0.0); bands];
             let mut band_air = vec![(0.0, 0.0); bands];
             for cell in 0..coarse_count {
-                let sea = 1.0 - land_fraction[cell];
+                let sea = ocean_fraction[cell];
                 let band = self.band[cell];
                 band_sea[band].0 += sea * annual(&seasonal_ocean, cell);
                 band_sea[band].1 += sea;
@@ -977,7 +1133,7 @@ impl TemperatureModel {
                 let regional = free_air[lower] * (1.0 - t) + free_air[lower + 1] * t;
                 self.previous_free_air_excess[cell] = regional - self.previous_annual_land[cell];
             }
-            for sea_ice in &mut annual_sea_ice {
+            for sea_ice in annual_sea_ice.iter_mut().chain(&mut annual_lake_ice) {
                 *sea_ice /= steps_per_year;
             }
             for heat in &mut annual_gyre_heat {
@@ -1003,6 +1159,23 @@ impl TemperatureModel {
         let monthly_land = monthly_means(&seasonal_land);
         let monthly_ocean = monthly_means(&seasonal_ocean);
         let monthly_coarse = monthly_means(&seasonal_mean);
+        let monthly_lake = monthly_means(&seasonal_lake);
+        let monthly_lake_ice = monthly_means(&seasonal_lake_ice);
+        // Lake cells interpolate the lake columns of the coarse cells that have lakes (their own
+        // coarse cell always has).
+        let interpolate_lake = |coarse_field: &[f64], fine: usize| {
+            let (sum, weight) = self.interpolation[fine]
+                .iter()
+                .filter(|&&(cell, _)| lake_cells[cell as usize] > 0)
+                .fold((0.0, 0.0), |(sum, weight), &(cell, w)| {
+                    (sum + w * coarse_field[cell as usize], weight + w)
+                });
+            if weight > 0.0 {
+                sum / weight
+            } else {
+                coarse_field[self.fine_to_coarse[fine] as usize]
+            }
+        };
 
         // High ground follows the free troposphere around it in the annual mean (see
         // [`TemperatureParams::free_air_height`]).
@@ -1012,7 +1185,11 @@ impl TemperatureModel {
         };
         // Every fine cell takes the temperature of its own surface type.
         let surface = |fine: usize, month: usize| {
-            if elevation[fine] >= 0.0 {
+            if is_lake[fine] {
+                // The lapse rate alone, as the lake column freezes by it (no free-air shift).
+                interpolate_lake(&monthly_lake[month], fine)
+                    - params.lapse_rate * elevation[fine].max(0.0)
+            } else if elevation[fine] >= 0.0 {
                 lapse(fine, self.interpolate(&monthly_land[month], fine))
             } else {
                 self.interpolate(&monthly_ocean[month], fine)
@@ -1029,11 +1206,13 @@ impl TemperatureModel {
             .map(|fine| monthly.iter().map(|month| month[fine]).sum::<f64>() / 12.0)
             .collect();
 
-        // Ice cover of the fine cells: sea ice (annual mean cover), ice sheets by temperature and
-        // snowfall.
+        // Ice cover of the fine cells: sea ice and lake ice (annual mean cover), ice sheets by
+        // temperature and snowfall.
         let ice = (0..elevation.len())
             .map(|fine| {
-                if elevation[fine] < 0.0 {
+                if is_lake[fine] {
+                    interpolate_lake(&annual_lake_ice, fine)
+                } else if elevation[fine] < 0.0 {
                     self.interpolate(&annual_sea_ice, fine)
                 } else {
                     let t = lapse(fine, self.interpolate(&self.previous_annual_land, fine));
@@ -1042,6 +1221,24 @@ impl TemperatureModel {
                 }
             })
             .collect();
+        let monthly_lake_ice = if params.open_water_lakes {
+            monthly_lake_ice
+                .iter()
+                .map(|month| {
+                    (0..elevation.len())
+                        .map(|fine| {
+                            if is_lake[fine] {
+                                interpolate_lake(month, fine)
+                            } else {
+                                f64::NAN
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let thermal_equator = monthly_coarse
             .iter()
@@ -1083,6 +1280,7 @@ impl TemperatureModel {
             monthly,
             thermal_equator,
             ice,
+            monthly_lake_ice,
             solar_constant: orbit.solar_constant,
             gyre_transport: gyres
                 .streamfunction
@@ -1224,6 +1422,69 @@ fn ice_sheet_cover(t: f64, precipitation: f64, params: &TemperatureParams) -> f6
         * (precipitation / params.ice_sheet_precipitation).clamp(0.0, 1.0)
 }
 
+/// A column of open water or ice after Wagner & Eisenman (2015): its enthalpy (J/m²) is the heat
+/// of the mixed layer above the freezing point (positive, open water) or the latent heat of its
+/// ice (negative). The ocean column and the lake column differ in these parameters only.
+struct WaterColumn {
+    /// Heat capacity of the mixed layer in J/m²/K.
+    heat_capacity: f64,
+    /// Temperature (°C) of the water at which it freezes.
+    freezing: f64,
+    /// Temperature (°C) the ice surface cannot exceed.
+    melting: f64,
+}
+
+impl WaterColumn {
+    /// Planetary albedo of the column with the given enthalpy and last surface temperature, over
+    /// open water of the albedo `open`: towards the sea-ice albedo (melting ice when the surface
+    /// is at the melting point) with the ice cover.
+    fn albedo(&self, params: &TemperatureParams, open: f64, enthalpy: f64, surface: f64) -> f64 {
+        let h = (-enthalpy / params.ice_latent_heat).max(0.0);
+        let ice_cover = (h / params.ice_albedo_thickness).min(1.0);
+        let ice_albedo = if surface >= self.melting {
+            params.melting_ice_albedo
+        } else {
+            params.sea_ice_albedo
+        };
+        open + (ice_albedo - open) * ice_cover
+    }
+
+    /// One implicit time step `dt` (s) of the column under the net surface heating
+    /// `forcing − damping · T_surface` (W/m²) and the heat `currents` (W/m²) delivered to the mixed
+    /// layer (under ice its base). Returns the new surface temperature and enthalpy.
+    fn step(
+        &self,
+        params: &TemperatureParams,
+        enthalpy: f64,
+        forcing: f64,
+        damping: f64,
+        currents: f64,
+        dt: f64,
+    ) -> (f64, f64) {
+        if enthalpy >= 0.0 {
+            // Open water: the mixed layer, implicit in its temperature.
+            let c = self.heat_capacity;
+            let t = self.freezing + enthalpy / c;
+            let t = (t + dt / c * (forcing + currents)) / (1.0 + dt / c * damping);
+            // Cooling below the freezing point forms ice instead.
+            let next = c * (t - self.freezing);
+            (t.max(self.freezing), next)
+        } else {
+            // Ice: the surface temperature balances conduction through the ice with the surface
+            // fluxes; it cannot exceed melting.
+            let h = (-enthalpy / params.ice_latent_heat).max(0.0);
+            let conductance = params.ice_conductivity / h.max(0.01);
+            let t = ((conductance * self.freezing + forcing) / (conductance + damping))
+                .min(self.melting);
+            let enthalpy = enthalpy + dt * (forcing - damping * t + currents);
+            // Thick ice drifts away and melts elsewhere (on a lake: the cap stands in for the
+            // ice that a lake's heat from below would melt).
+            let limit = -params.max_ice_thickness * params.ice_latent_heat;
+            (t, enthalpy.max(limit))
+        }
+    }
+}
+
 /// Linear transition from `warm` to `cold` over ±5 K around `threshold`.
 fn blend(warm: f64, cold: f64, temperature: f64, threshold: f64) -> f64 {
     let coldness = ((threshold + 5.0 - temperature) / 10.0).clamp(0.0, 1.0);
@@ -1295,7 +1556,7 @@ mod tests {
             })
             .collect();
         let mut model = TemperatureModel::new(&mesh, TemperatureParams::default());
-        model.update(&elevation, None, 0.0);
+        model.update(&elevation, None, None, 0.0);
         let fields = model.fields();
 
         let mean_where = |filter: &dyn Fn(f64, f64) -> bool, field: &dyn Fn(usize) -> f64| {
@@ -1384,7 +1645,7 @@ mod tests {
             // Cold enough that the plateau starts under ice.
             model.previous_annual_land.fill(0.0);
         }
-        model.update(&elevation, None, 0.0);
+        model.update(&elevation, None, None, 0.0);
         let fields = model.fields();
         let mean = |filter: &dyn Fn(f64, f64) -> bool, field: &dyn Fn(usize) -> f64| {
             let cells: Vec<usize> = (0..mesh.len())
@@ -1407,6 +1668,177 @@ mod tests {
             }),
             mean(&on_plateau, &|c| fields.ice[c]),
         )
+    }
+
+    /// A continent at 300 m between the latitudes `continent` (|longitude| < 50°) with a lake
+    /// of `depth` m between the latitudes `lake` (|longitude| < 15°; none if `depth` is 0), with
+    /// the given parameters. Returns the mesh's latitude and longitude of every cell, the lake
+    /// depths and the fields.
+    fn lake_climate(
+        params: TemperatureParams,
+        continent: (f64, f64),
+        lake: (f64, f64),
+        depth: f64,
+        lakes_known: bool,
+    ) -> (Vec<(f64, f64)>, Vec<f64>, TemperatureFields) {
+        let mesh = SphereMesh::icosphere(5);
+        let place: Vec<(f64, f64)> = (0..mesh.len() as u32)
+            .map(|cell| {
+                let p = mesh.vertex(cell);
+                (
+                    math::asin(p.z).to_degrees(),
+                    math::atan2(p.y, p.x).to_degrees(),
+                )
+            })
+            .collect();
+        let within = |range: (f64, f64), lat: f64| (range.0..range.1).contains(&lat);
+        let elevation: Vec<f64> = place
+            .iter()
+            .map(|&(lat, lon)| {
+                if within(continent, lat) && lon.abs() < 50.0 {
+                    300.0
+                } else {
+                    -4000.0
+                }
+            })
+            .collect();
+        let lake_depth: Vec<f64> = place
+            .iter()
+            .map(|&(lat, lon)| {
+                if within(lake, lat) && lon.abs() < 15.0 {
+                    depth
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut model = TemperatureModel::new(&mesh, params);
+        model.update(
+            &elevation,
+            None,
+            lakes_known.then_some(&lake_depth[..]),
+            0.0,
+        );
+        (place, lake_depth, model.fields().clone())
+    }
+
+    fn mean_over(cells: &[usize], value: &dyn Fn(usize) -> f64) -> f64 {
+        assert!(!cells.is_empty());
+        cells.iter().map(|&c| value(c)).sum::<f64>() / cells.len() as f64
+    }
+
+    #[test]
+    fn large_lakes_are_open_water_with_a_maritime_climate() {
+        let continent = (25.0, 65.0);
+        let lake = (37.0, 53.0);
+        let run = |params: TemperatureParams, depth: f64| {
+            lake_climate(params, continent, lake, depth, true)
+        };
+        let (place, depth, water) = run(TemperatureParams::default(), 100.0);
+        let off = TemperatureParams {
+            open_water_lakes: false,
+            ..TemperatureParams::default()
+        };
+        let (_, _, land) = run(off, 100.0);
+        let lake_cells: Vec<usize> = (0..place.len()).filter(|&c| depth[c] > 0.0).collect();
+        // Land east and west of the lake, at its latitudes.
+        let shore: Vec<usize> = (0..place.len())
+            .filter(|&c| {
+                let (lat, lon) = place[c];
+                (lake.0..lake.1).contains(&lat) && (16.0..24.0).contains(&lon.abs())
+            })
+            .collect();
+        let range = |fields: &TemperatureFields, cells: &[usize]| {
+            mean_over(cells, &|c| fields.seasonal_range(c))
+        };
+        // The lake has the seasonal inertia of water: a much smaller range than as land.
+        let (lake_water, lake_land) = (range(&water, &lake_cells), range(&land, &lake_cells));
+        assert!(lake_water < 0.6 * lake_land, "{lake_water} {lake_land}");
+        // The land on its shores gets a more maritime climate.
+        let (shore_water, shore_land) = (range(&water, &shore), range(&land, &shore));
+        assert!(shore_water < shore_land - 1.0, "{shore_water} {shore_land}");
+        // A shallow lake follows the seasons more closely than a deep one.
+        let (_, _, shallow) = run(TemperatureParams::default(), 3.0);
+        let lake_shallow = range(&shallow, &lake_cells);
+        assert!(
+            lake_shallow > lake_water + 2.0,
+            "{lake_shallow} {lake_water}"
+        );
+        // Lake ice is reported on the lakes only.
+        assert_eq!(water.monthly_lake_ice.len(), 12);
+        assert!(
+            (0..place.len()).all(|c| water.monthly_lake_ice[0][c].is_nan() == (depth[c] <= 0.0))
+        );
+        assert!(land.monthly_lake_ice.is_empty());
+    }
+
+    #[test]
+    fn a_new_shallow_lake_keeps_the_temperature_of_its_column() {
+        // One year per update, so that the fields show the first months after the lake appears.
+        let params = TemperatureParams {
+            spin_up_years: 2,
+            years_per_update: 1,
+            ..TemperatureParams::default()
+        };
+        let mesh = SphereMesh::icosphere(5);
+        let latitude: Vec<f64> = (0..mesh.len() as u32)
+            .map(|c| math::asin(mesh.vertex(c).z).to_degrees())
+            .collect();
+        let elevation: Vec<f64> = latitude
+            .iter()
+            .map(|&lat| if lat.abs() < 30.0 { 100.0 } else { -4000.0 })
+            .collect();
+        let mut model = TemperatureModel::new(&mesh, params);
+        let none = vec![0.0; mesh.len()];
+        model.update(&elevation, None, Some(&none), 0.0);
+        // A 3 m lake appears on the tropical land: its column (until now one of the ocean's
+        // mixed layer) must not carry 50 m of heat into 3 m of water.
+        let lake: Vec<f64> = latitude
+            .iter()
+            .map(|&lat| if lat.abs() < 10.0 { 3.0 } else { 0.0 })
+            .collect();
+        model.update(&elevation, None, Some(&lake), 0.0);
+        let fields = model.fields();
+        let hottest = (0..mesh.len())
+            .filter(|&c| lake[c] > 0.0)
+            .flat_map(|c| fields.monthly.iter().map(move |month| month[c]))
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(hottest < 40.0, "{hottest}");
+    }
+
+    #[test]
+    fn high_latitude_lakes_freeze_in_winter() {
+        let lake = (62.0, 70.0);
+        let (place, depth, fields) =
+            lake_climate(TemperatureParams::default(), (50.0, 80.0), lake, 50.0, true);
+        let lake_cells: Vec<usize> = (0..place.len()).filter(|&c| depth[c] > 0.0).collect();
+        let ice = |month: usize| mean_over(&lake_cells, &|c| fields.monthly_lake_ice[month][c]);
+        // Frozen in the northern winter (month 1: February), open in late summer (August).
+        assert!(ice(1) > 0.9, "{}", ice(1));
+        assert!(ice(7) < 0.5, "{}", ice(7));
+    }
+
+    #[test]
+    fn without_lakes_the_lake_columns_change_nothing() {
+        let continent = (25.0, 65.0);
+        let off = TemperatureParams {
+            open_water_lakes: false,
+            ..TemperatureParams::default()
+        };
+        let (_, _, on) = lake_climate(
+            TemperatureParams::default(),
+            continent,
+            (0.0, 0.0),
+            0.0,
+            true,
+        );
+        let (_, _, unknown) = lake_climate(off.clone(), continent, (37.0, 53.0), 100.0, true);
+        let (_, _, old) = lake_climate(off, continent, (37.0, 53.0), 100.0, false);
+        for fields in [&on, &unknown] {
+            assert_eq!(fields.annual_mean, old.annual_mean);
+            assert_eq!(fields.monthly, old.monthly);
+            assert_eq!(fields.ice, old.ice);
+        }
     }
 
     fn without_free_air() -> TemperatureParams {
@@ -1475,7 +1907,7 @@ mod tests {
                 ..TemperatureParams::default()
             };
             let mut model = TemperatureModel::new(&mesh, params);
-            model.update(&elevation, None, 0.0);
+            model.update(&elevation, None, None, 0.0);
             let fields = model.fields();
             let cells: Vec<usize> = (0..mesh.len())
                 .filter(|&c| mesh.vertex(c as u32).z.abs() > math::sin(70f64.to_radians()))
@@ -1492,7 +1924,7 @@ mod tests {
         let mesh = SphereMesh::icosphere(4);
         let elevation = vec![-4000.0; mesh.len()];
         let mut model = TemperatureModel::new(&mesh, TemperatureParams::default());
-        model.update(&elevation, None, 0.0);
+        model.update(&elevation, None, None, 0.0);
         let fields = model.fields();
         let mean_where = |filter: &dyn Fn(f64) -> bool, field: &dyn Fn(usize) -> f64| {
             let cells: Vec<usize> = (0..mesh.len())
@@ -1560,7 +1992,7 @@ mod probe {
                 model.params.orbit.solar_constant = 1361.0 * percent as f64 / 100.0;
                 model.spun_up = false;
                 model.params.spin_up_years = 40;
-                model.update(&elevation, Some(&precipitation), 0.0);
+                model.update(&elevation, Some(&precipitation), None, 0.0);
                 let f = model.fields();
                 let global = f.annual_mean.iter().sum::<f64>() / f.annual_mean.len() as f64;
                 let ice = f.ice.iter().filter(|&&i| i > 0.5).count() as f64 / f.ice.len() as f64;
