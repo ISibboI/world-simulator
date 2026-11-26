@@ -54,10 +54,9 @@ struct VertexInput {
     @location(6) coast: f32,
     // The plates of the triangle's corners (xyz) and this vertex's corner (w).
     @location(7) plates: vec4<u32>,
-    // The squeeze of the relief noise along the strike of a mountain belt, σ ŝŝᵀ in the world
-    // frame: xx, yy, zz and 1 for the ocean (`strike`); xy, yz, zx (`strike_shear`).
-    @location(8) strike: vec4<f32>,
-    @location(9) strike_shear: vec4<f32>,
+    // Per corner of the triangle: the strike of a mountain belt (snorm8 xyz, world frame), the
+    // squeeze of the relief noise along it (bits 24–30, 0 to 0.75) and the ocean (bit 31).
+    @location(8) ridges: vec3<u32>,
 };
 
 struct VertexOutput {
@@ -73,8 +72,7 @@ struct VertexOutput {
     // Barycentric coordinates (xyz) and the coast value (w).
     @location(6) corner_coast: vec4<f32>,
     @location(7) @interpolate(flat) plates: vec3<u32>,
-    @location(8) strike: vec4<f32>,
-    @location(9) strike_shear: vec3<f32>,
+    @location(8) @interpolate(flat) ridges: vec3<u32>,
 };
 
 @vertex
@@ -95,8 +93,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
         input.coast,
     );
     output.plates = input.plates.xyz;
-    output.strike = input.strike;
-    output.strike_shear = input.strike_shear.xyz;
+    output.ridges = input.ridges;
     return output;
 }
 
@@ -183,6 +180,17 @@ fn noise(x: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(value, derivative);
 }
 
+// The signed byte `byte` (0 to 2) of `word` in [-1, 1] (snorm8; GLSL ES 3.00 has no
+// unpackSnorm4x8).
+fn snorm8(word: u32, byte: u32) -> f32 {
+    return max(f32(bitcast<i32>(word << (24u - 8u * byte)) >> 24u) / 127.0, -1.0);
+}
+
+// The squeeze of a corner's relief noise along its strike.
+fn corner_squeeze(word: u32) -> f32 {
+    return f32((word >> 24u) & 127u) * (0.75 / 127.0);
+}
+
 // Fractal sum of `octaves` (fractional: the last one fades in) octaves of noise at `x`: value
 // (x) and gradient with respect to `x` (yzw), scaled so that the value has a standard deviation
 // of about 0.4 (|value| > 1 in about 1% of the pixels; the raw sum's is about 0.15).
@@ -243,22 +251,39 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let n_shape = clamp(shape.x, -1.0, 1.0);
     let n_pattern = clamp(pattern, -1.0, 1.0);
 
-    // Mountain ridges along the strike of a belt (with the bump relief, Medium and High): the
-    // noise squeezed along the strike, by the interpolated tensor σ ŝŝᵀ of the corners (ridges
-    // up to four times as long as wide). The squeeze is about the cell centre, where ŝ is
-    // tangent, and the tensor is sign-free, so the flanks and the crest of a range agree.
+    // Mountain ridges along the strike of a belt (with the bump relief, Medium and High): each
+    // corner with a strike has its own noise field, squeezed along its strike (ridges up to
+    // four times as long as wide), the others share `shape`; the fields are blended by the
+    // squared barycentric weights. A corner's field is fixed by its cell, so the blend is
+    // continuous across the triangles' edges; neighbouring corners of a belt have nearly the
+    // same field, so the blend keeps its contrast there.
     var relief = shape;
-    let squeeze = mat3x3<f32>(
-        vec3<f32>(input.strike.x, input.strike_shear.x, input.strike_shear.z),
-        vec3<f32>(input.strike_shear.x, input.strike.y, input.strike_shear.y),
-        vec3<f32>(input.strike_shear.z, input.strike_shear.y, input.strike.z),
+    let squeezes = vec3<f32>(
+        corner_squeeze(input.ridges.x),
+        corner_squeeze(input.ridges.y),
+        corner_squeeze(input.ridges.z),
     );
-    if detail.settings.z > 0.0 && input.strike.x + input.strike.y + input.strike.z > 0.01 {
-        // M y = y − R⁻¹ (S (R y)), with R y = base · up in the world.
-        let y = anchor * base - rotate(inverse, squeeze * (up * base));
-        let n = fbm(y, octaves);
-        // The gradient with respect to the unsqueezed point: M is symmetric.
-        relief = vec4<f32>(n.x, n.yzw - rotate(inverse, squeeze * rotate(orientation, n.yzw)));
+    if detail.settings.z > 0.0 && max(squeezes.x, max(squeezes.y, squeezes.z)) > 0.0 {
+        let y = anchor * base;
+        let w = b * b;
+        var sum = vec4<f32>(0.0);
+        for (var j = 0; j < 3; j++) {
+            if w[j] <= 0.0 {
+                continue;
+            }
+            if squeezes[j] > 0.0 {
+                let word = input.ridges[j];
+                let strike = vec3<f32>(snorm8(word, 0u), snorm8(word, 1u), snorm8(word, 2u));
+                let along = rotate(inverse, normalize(strike));
+                let n = fbm(y - squeezes[j] * dot(y, along) * along, octaves);
+                // The gradient with respect to `y`: the squeeze is symmetric.
+                let gradient = n.yzw - squeezes[j] * dot(n.yzw, along) * along;
+                sum += w[j] * vec4<f32>(n.x, gradient);
+            } else {
+                sum += w[j] * shape;
+            }
+        }
+        relief = sum / (w.x + w.y + w.z);
     }
     // The height the bump relief implies, on which the snow lies first: the noise, or on High
     // −|noise| (its crests where the noise crosses zero), recentred and scaled to the same
@@ -279,9 +304,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let snow_cover = input.plants.a;
     // (Two independent patterns mixed by t keep their spread when divided by
     // sqrt(t² + (1 − t)²).)
-    let rugged = input.water.a;
+    // (Low draws no relief, and its pattern is the relief's noise itself.)
+    let rugged = select(0.0, input.water.a, detail.settings.z > 0.0);
     var n_snow = mix(n_pattern, height, rugged) * inverseSqrt(1.0 - 2.0 * rugged * (1.0 - rugged));
-    let sea = input.strike.w;
+    let sea = dot(b, vec3<f32>(input.ridges >> vec3<u32>(31u)));
     if sea > 0.0 && snow_cover > 0.01 && snow_cover < 0.99 {
         // Floes and leads finer than the cells' pattern: from the second octave on.
         let floes = clamp(

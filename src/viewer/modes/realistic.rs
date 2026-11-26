@@ -529,13 +529,14 @@ pub fn detail_vertices(data: &ModeData, faces: &[[u32; 3]]) -> Vec<DetailVertex>
     let gradients: Vec<glam::DVec3> = (0..data.cells.len())
         .map(|cell| surface_gradient(data, cell))
         .collect();
-    let tensors: Vec<[f32; 6]> = (0..data.cells.len())
+    let corners: Vec<u32> = (0..data.cells.len())
         .map(|cell| {
-            if own[cell].relief > 0.0 {
-                strike_tensor(data, &gradients, cell, own[cell].relief)
+            let (strike, squeeze) = if own[cell].relief > 0.0 {
+                strike(data, &gradients, cell, own[cell].relief)
             } else {
-                [0.0; 6]
-            }
+                ([0.0; 3], 0.0)
+            };
+            pack_corner(strike, squeeze, own[cell].ocean)
         })
         .collect();
     let unorm = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -547,10 +548,10 @@ pub fn detail_vertices(data: &ModeData, faces: &[[u32; 3]]) -> Vec<DetailVertex>
     let mut vertices = Vec::with_capacity(faces.len() * 3);
     for &face in faces {
         let plates = face.map(plate);
+        let ridges = face.map(|cell| corners[cell as usize]);
         for (corner, &cell) in face.iter().enumerate() {
             let layers = &layers[cell as usize];
             let vertex = &data.vertices[cell as usize];
-            let t = tensors[cell as usize];
             vertices.push(DetailVertex {
                 position: vertex.position,
                 normal: vertex.normal,
@@ -560,14 +561,7 @@ pub fn detail_vertices(data: &ModeData, faces: &[[u32; 3]]) -> Vec<DetailVertex>
                 water: color(layers.water, layers.relief),
                 coast: coasts[cell as usize],
                 plates: [plates[0], plates[1], plates[2], corner as u16],
-                strike: [
-                    t[0],
-                    t[1],
-                    t[2],
-                    if own[cell as usize].ocean { 1.0 } else { 0.0 },
-                ]
-                .map(snorm8),
-                strike_shear: [t[3], t[4], t[5], 0.0].map(snorm8),
+                ridges,
             });
         }
     }
@@ -605,13 +599,13 @@ fn coast_value(data: &ModeData, layers: &[Layers], cell: usize) -> f32 {
     height.max(floor)
 }
 
-/// The cells with the air temperatures over lakes whose floor is below sea level. The climate
-/// gives such cells the surface temperature of the ocean (it knows only land above sea level),
-/// which would keep a lake inside a frozen continent open in winter; they take the mean of
-/// their neighbours above sea level instead (spread inwards over a few rings for large lakes).
+/// The cells with the air temperatures over land below sea level: lakes whose floor is below
+/// sea level and dry closed depressions. The climate gives such cells the surface temperature
+/// of the ocean (it knows only land above sea level), which would keep a lake inside a frozen
+/// continent open in winter; they take the mean of their neighbours above sea level instead
+/// (spread inwards over up to 8 rings; cells with no such land in reach keep their own).
 fn lake_air<'a>(data: &ModeData<'a>) -> std::borrow::Cow<'a, [CellInfo]> {
-    let low_lake =
-        |cell: &CellInfo| matches!(cell.water_body(), WaterBody::Lake(_)) && cell.elevation < 0.0;
+    let low_lake = |cell: &CellInfo| !cell.is_sea() && cell.elevation < 0.0;
     if !data.cells.iter().any(low_lake) {
         return std::borrow::Cow::Borrowed(data.cells);
     }
@@ -726,21 +720,22 @@ fn surface_gradient(data: &ModeData, cell: usize) -> glam::DVec3 {
     (east * gx + north * gy) / (crate::EARTH_RADIUS / 1000.0)
 }
 
-/// How the bump relief of a land cell lines up along the strike of a mountain belt: the
-/// squeeze of the noise along the strike, `σ ŝŝᵀ` (a symmetric matrix in the world frame;
-/// `σ = 1 − 1/k` for ridges `k` times as long as wide, `k` up to 4).
+/// How the bump relief of a land cell lines up along the strike of a mountain belt: the strike
+/// `ŝ` (a unit tangent vector in the world frame; its sign does not matter) and the squeeze of
+/// the noise along it, `σ = 1 − 1/k` for ridges `k` times as long as wide (`k` up to 4, σ up to
+/// 0.75).
 ///
 /// The strike runs across the slope of the surface. It comes from the structure tensor of the
 /// surface gradients over the cell and its neighbours (`Σ ∇h ∇hᵀ`), which is sign-free, so that
 /// the two flanks of a range agree and its crest, where the gradient vanishes, takes the
 /// direction of its flanks. The strength grows with the slope along the principal direction
 /// (`STRIKE_SLOPE`), the coherence of the directions `(λ₁ − λ₂)/(λ₁ + λ₂)` and the ruggedness.
-fn strike_tensor(
+fn strike(
     data: &ModeData,
     gradients: &[glam::DVec3],
     cell: usize,
     ruggedness: f32,
-) -> [f32; 6] {
+) -> ([f32; 3], f32) {
     let up = data.mesh.vertex(cell as u32);
     let (east, north) = tangent_basis(up);
     let (mut a, mut b, mut d) = (0.0, 0.0, 0.0);
@@ -757,14 +752,14 @@ fn strike_tensor(
     let spread = (0.25 * (a - d) * (a - d) + b * b).sqrt();
     let (major, minor) = (mean + spread, mean - spread);
     if !(major > 1e-12) {
-        return [0.0; 6];
+        return ([0.0; 3], 0.0);
     }
     let coherence = (major - minor) / (major + minor);
     let slope = (major / count).sqrt();
     let strength =
         smoothstep(STRIKE_SLOPE.0, STRIKE_SLOPE.1, slope as f32) * coherence as f32 * ruggedness;
     if !(strength > 0.0) {
-        return [0.0; 6];
+        return ([0.0; 3], 0.0);
     }
     // The principal direction (the slope), and the strike across it.
     let (x, y) = if (major - a).abs() > (major - d).abs() {
@@ -773,9 +768,10 @@ fn strike_tensor(
         (major - d, b)
     };
     let strike = (east * -y + north * x).normalize_or_zero().as_vec3();
-    let squeeze = 1.0 - 1.0 / (1.0 + 3.0 * strength);
-    let [sx, sy, sz] = strike.to_array();
-    [sx * sx, sy * sy, sz * sz, sx * sy, sy * sz, sz * sx].map(|value| squeeze * value)
+    if strike == glam::Vec3::ZERO {
+        return ([0.0; 3], 0.0);
+    }
+    (strike.to_array(), 1.0 - 1.0 / (1.0 + 3.0 * strength))
 }
 
 /// East and north at a point of the unit sphere (any orthonormal tangent pair at the poles).
@@ -789,9 +785,20 @@ fn tangent_basis(up: glam::DVec3) -> (glam::DVec3, glam::DVec3) {
     (east, up.cross(east))
 }
 
-/// A value in [-1, 1] as snorm8.
-fn snorm8(value: f32) -> i8 {
-    (value.clamp(-1.0, 1.0) * 127.0).round() as i8
+/// The most squeeze of the relief noise along a strike (ridges four times as long as wide).
+const MAX_SQUEEZE: f32 = 0.75;
+
+/// Packs a corner's strike (snorm8 x, y, z in bits 0–23), the squeeze along it (bits 24–30, in
+/// steps of `MAX_SQUEEZE / 127`) and whether the cell is ocean (bit 31), as `realistic.wgsl`
+/// unpacks them.
+fn pack_corner(strike: [f32; 3], squeeze: f32, ocean: bool) -> u32 {
+    let snorm = |value: f32| u32::from((value.clamp(-1.0, 1.0) * 127.0).round() as i8 as u8);
+    let squeeze = (squeeze / MAX_SQUEEZE * 127.0).round().clamp(0.0, 127.0) as u32;
+    snorm(strike[0])
+        | snorm(strike[1]) << 8
+        | snorm(strike[2]) << 16
+        | squeeze << 24
+        | u32::from(ocean) << 31
 }
 
 /// The realistic mode's uniforms for the detail: the plates' orientations and the settings of
@@ -879,8 +886,9 @@ mod tests {
         };
         let layers_lake = layers(&lake, Period::Annual, false, false);
         assert!(layers_lake.water_cell);
-        assert!(close(layers_lake.water, mix(LAKE_SHALLOW, LAKE_DEEP, 0.0)) == false);
-        assert!(brightness(layers_lake.water) < brightness(LAKE_SHALLOW));
+        // 40 m: between the shallow and the deep colour, fresh.
+        let t = (40.0f32 / LAKE_SHALLOW_DEPTH).ln() / (LAKE_DEEP_DEPTH / LAKE_SHALLOW_DEPTH).ln();
+        assert!(close(layers_lake.water, mix(LAKE_SHALLOW, LAKE_DEEP, t)));
         assert_eq!(layers_lake.relief, 0.0);
         // Below sea level outside depressions: the ocean.
         assert!(layers(&cell(-150.0, 20.0, 0.0, 0.0), Period::Annual, false, false).water_cell);
@@ -1137,15 +1145,13 @@ mod tests {
             if latitude(cell).abs() > 50.0 {
                 continue;
             }
-            let t = strike_tensor(&data, &gradients, cell as usize, 1.0);
-            // σ ŝŝᵀ: the squeeze is the trace, the strike's north share t_zz / σ.
-            let squeeze = t[0] + t[1] + t[2];
+            let (t, squeeze) = strike(&data, &gradients, cell as usize, 1.0);
             let lon = longitude(cell).abs();
             if lon < 4.0 {
                 // Along the belt wherever it lines up (ŝ_z² = cos² of the latitude for a
                 // meridian).
                 if squeeze > 0.05 {
-                    let north = t[2] / squeeze;
+                    let north = t[2] * t[2];
                     let meridian = latitude(cell).to_radians().cos().powi(2) as f32;
                     assert!(north > 0.8 * meridian, "{lon}: {t:?}");
                 }
@@ -1223,6 +1229,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn corners_pack_as_the_shader_unpacks() {
+        let word = pack_corner([0.6, -1.0, 0.0], 0.5, true);
+        // The shader: bitcast<i32>(word << (24 − 8 k)) >> 24 per byte.
+        let byte = |k: u32| ((word << (24 - 8 * k)) as i32 >> 24) as f32 / 127.0;
+        assert!((byte(0) - 0.6).abs() < 0.01);
+        assert_eq!(byte(1), -1.0);
+        assert_eq!(byte(2), 0.0);
+        let squeeze = ((word >> 24) & 127) as f32 / 127.0 * MAX_SQUEEZE;
+        assert!((squeeze - 0.5).abs() < 0.005);
+        assert_eq!(word >> 31, 1);
+        assert_eq!(pack_corner([0.0; 3], 0.0, false), 0);
+    }
+
+    #[test]
+    fn closed_lakes_have_no_outflow() {
+        use super::super::super::plate_colors::PlateColors;
+        use super::super::super::{Fields, plate_infos};
+        use clap::Parser;
+        let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "3"]);
+        let planet = crate::build_planet(&cli).unwrap();
+        let mesh = planet.tectonics().mesh();
+        let plates = plate_infos(&planet);
+        // Two lakes of two cells each: in one the water flows to an exit without a receiver,
+        // in the other it spills to the land beyond.
+        let slot = |from: u32, to: u32| mesh.neighbors(from).iter().position(|&n| n == to);
+        let a = 0;
+        let a2 = mesh.neighbors(a)[0];
+        let b = (0..mesh.len() as u32)
+            .find(|&cell| mesh.vertex(cell).dot(mesh.vertex(a)) < -0.5)
+            .unwrap();
+        let b2 = mesh.neighbors(b)[0];
+        let beyond = *mesh
+            .neighbors(b2)
+            .iter()
+            .find(|&&n| n != b && !mesh.neighbors(b).contains(&n))
+            .unwrap();
+        let lake = |receiver: Option<usize>| CellInfo {
+            drainage: CellInfo::drainage_bits(receiver, false, true, 20.0),
+            lake_depth: 20.0,
+            ..cell_at(100.0)
+        };
+        let cells: Vec<CellInfo> = (0..mesh.len() as u32)
+            .map(|cell| match cell {
+                c if c == a => lake(slot(a, a2)),
+                c if c == a2 => lake(None),
+                c if c == b => lake(slot(b, b2)),
+                c if c == b2 => lake(slot(b2, beyond)),
+                _ => cell_at(300.0),
+            })
+            .collect();
+        let vertices = super::super::super::surface_vertices(mesh, &cells, 1.0, 1e11);
+        let (plate_colors, fields) = (PlateColors::default(), Fields::default());
+        let options = OptionValues::defaults(Realistic.options());
+        let data = ModeData {
+            mesh,
+            vertices: &vertices,
+            cells: &cells,
+            plates: &plates,
+            plate_colors: &plate_colors,
+            fields: &fields,
+            arrow_cells: &[],
+            arrow_spacing: 0.1,
+            options: &options,
+            abiotic: false,
+        };
+        let closed = closed_lakes(&data);
+        assert!(closed[a as usize] && closed[a2 as usize]);
+        assert!(!closed[b as usize] && !closed[b2 as usize]);
+        assert_eq!(closed.iter().filter(|&&c| c).count(), 2);
+    }
+
     fn cell_at(elevation: f32) -> CellInfo {
         cell(elevation, 10.0, 1.0, 1.0)
     }
@@ -1287,7 +1365,7 @@ mod tests {
                     assert!(vertex.coast >= 0.55 - 1e-6, "{}", vertex.coast);
                 }
                 // The ocean flag of the corner.
-                assert_eq!(vertex.strike[3] == 127, layers.ocean);
+                assert_eq!(vertex.ridges[corner] >> 31 == 1, layers.ocean);
             }
             if triangle[0].coast.signum() != triangle[1].coast.signum() {
                 coasts += 1;
