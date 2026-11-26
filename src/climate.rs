@@ -1192,9 +1192,10 @@ pub struct ColumnSaturation {
     offset: f64,
     /// Scale height of water vapour in m.
     scale_height: f64,
-    /// `a` and `r₀` of the rain law.
+    /// `a` of the rain law.
     sensitivity: f64,
-    reference: f64,
+    /// `ln r₀`.
+    log_reference: f64,
 }
 
 impl ColumnSaturation {
@@ -1210,7 +1211,7 @@ impl ColumnSaturation {
             offset: math::ln(column * law.rate) - law.sensitivity * law.reference,
             scale_height,
             sensitivity: law.sensitivity,
-            reference: law.reference,
+            log_reference: math::ln(law.reference),
         })
     }
 
@@ -1231,15 +1232,15 @@ impl ColumnSaturation {
         // The saturated column shrinks over high ground: ln W_sat drops by z / H.
         let offset = self.offset - elevation.max(0.0) / self.scale_height - math::ln(target);
         // First guess: the root with ln r frozen at the reference humidity (it varies slowly).
-        let mut humidity =
-            ((-offset - math::ln(self.reference)) / self.sensitivity).clamp(0.05, 2.0);
+        let mut humidity = ((-offset - self.log_reference) / self.sensitivity).clamp(0.05, 2.0);
         for _ in 0..20 {
             let below_cap = humidity < 2.0;
             let residual = math::ln(humidity) + offset + self.sensitivity * humidity.min(2.0);
             let slope = 1.0 / humidity + if below_cap { self.sensitivity } else { 0.0 };
             let step = residual / slope;
             humidity = (humidity - step).clamp(1e-3, 50.0);
-            if step.abs() < 1e-6 {
+            // (Newton converges quadratically: the error after a step of 1e-4 is ~1e-8.)
+            if step.abs() < 1e-4 {
                 break;
             }
         }

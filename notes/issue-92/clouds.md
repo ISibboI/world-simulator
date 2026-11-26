@@ -234,7 +234,27 @@ Not adopted:
 
 ## 9. Code review (independent agent, after the implementation)
 
-CODE_REVIEW
+No high-severity findings. The reviewer confirmed that with the switch off every cloud term is
+exactly 0 or 1 (the surface is drawn as before), the uniformity of the derivatives, the vertex
+and uniform layouts, the guards against NaN, the exposure cap, the geometry of shadow, swirl and
+horizon dip, and the inversion.
+
+Fixed:
+- **Shadow seams:** where no offset shadow is drawn, the ground's light used the cloud's
+  transmission with the limb's increased cover; now the cell's own cover (no extra noise).
+- **CPU cost:** no allocation per cell in the neighbour smoothing; the latitudes once per
+  update; the saturated column once per latitude bin (the column temperature is zonal), with
+  one logarithm per Newton step from a close first guess.
+- Tests: the cap on cloud plus ground is now a sweep over a port of the composition; the tops
+  are tested on the layers; fractional octaves in the cover test.
+- The loop bound and stale comments.
+
+Not changed:
+- the ambient fill of *Sun + ambient* and *Camera* can lift a cloud a few per cent above the
+  knee, as it already does fresh snow (atmosphere.md);
+- the swirl's Jacobian is left out of the field's gradient, so the anti-aliasing and relief can
+  be off by up to ~2× where the swirl is strongest (no artefacts seen);
+- High costs the most (§6); the default stays Medium.
 
 ## 10. Limits (accepted)
 

@@ -1174,13 +1174,16 @@ fn zonal_mean(bins: &[u8], value: impl Fn(usize) -> Option<f64>) -> Vec<f64> {
             count[usize::from(bin)] += 1.0;
         }
     }
-    // Gaussian smoothing with a width of 3 bins (3°).
+    // Gaussian smoothing with a width of 3 bins (3°), over ±9 bins.
+    let weights: [f64; 19] = std::array::from_fn(|i| {
+        let d = (i as f64 - 9.0) / 3.0;
+        (-0.5 * d * d).exp()
+    });
     (0..LATITUDE_BINS)
         .map(|b| {
             let (mut s, mut c) = (0.0, 0.0);
             for other in b.saturating_sub(9)..(b + 10).min(LATITUDE_BINS) {
-                let d = (other as f64 - b as f64) / 3.0;
-                let w = (-0.5 * d * d).exp();
+                let w = weights[other + 9 - b];
                 s += w * sum[other];
                 c += w * count[other];
             }

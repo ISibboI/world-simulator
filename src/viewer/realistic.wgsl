@@ -109,6 +109,10 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 const PI: f32 = 3.14159265;
 // Reflectance of water at normal incidence (refractive index 1.33).
 const WATER_F0: f32 = 0.02;
+// Whether this variant of the shader draws clouds: the view compiles a second pipeline with
+// `false` (`renderer::REALISTIC_SHADER_WITHOUT_CLOUDS`), so that the clouds' code costs nothing
+// while they are off, also where a branch on the uniform would not skip it cheaply.
+const CLOUDS_COMPILED: bool = true;
 // Most octaves of the noise.
 const MAX_OCTAVES: i32 = 6;
 // Scale of the fractal sum (see `fbm`).
@@ -401,7 +405,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var cloud_top = 0.0;
     var shadow_tau = 0.0;
     let cell_clouds = input.clouds;
-    if detail.clouds.x > 0.0 && cell_clouds.x > 0.002 {
+    if CLOUDS_COMPILED && detail.clouds.x > 0.0 && cell_clouds.x > 0.002 {
         let mu0 = dot(up, l);
         cloud_top = cell_clouds.w * 16.0 * CLOUD_KM;
         // A cloud top sees the sun until it is this far (radians) below the horizon.
