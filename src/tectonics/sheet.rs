@@ -367,7 +367,8 @@ struct Mixture {
     felsic: f64,
     metasediment: f64,
     sediment: f64,
-    cohort: f64,
+    /// Cohort amounts (rock-equivalent m, `[mixed, lifo]`, see [`Cohort`]).
+    cohort: [f64; 2],
     orogenic: f64,
     orogeny: f64,
     reheated: f64,
@@ -398,7 +399,9 @@ impl Mixture {
         self.metasediment += mass * crust.metasediment;
         let sediment = crust.sediment * share;
         self.sediment += sediment;
-        self.cohort += sediment * crust.cohort;
+        let cohort = crust.cohort.amounts(sediment);
+        self.cohort[0] += cohort[0];
+        self.cohort[1] += cohort[1];
         self.orogenic += mass * crust.orogenic;
         self.orogeny = self.orogeny.max(crust.orogeny);
         self.reheated = self.reheated.max(crust.reheated);
@@ -429,9 +432,12 @@ impl Mixture {
             orogenic: 0.0,
             reheated: self.reheated,
             cohort: if self.sediment > 0.0 {
-                self.cohort / self.sediment
+                Cohort {
+                    mixed: self.cohort[0] / self.sediment,
+                    lifo: self.cohort[1] / self.sediment,
+                }
             } else {
-                0.0
+                Cohort::NONE
             },
         };
         crust.metasediment = crust.metasediment.min(crust.felsic);

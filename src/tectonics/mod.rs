@@ -37,6 +37,7 @@
 
 mod boundaries;
 mod breakup;
+mod cover;
 mod crust;
 mod deformation;
 mod display;
@@ -55,6 +56,7 @@ mod weak_zones;
 
 pub use boundaries::{GapStatistics, TrenchSediment};
 pub use breakup::{BreakupParams, BreakupStatistics, SectionRecord};
+pub use cover::{CohortMasses, CoverBudget, CoverMasses, CoverTerm};
 pub use crust::*;
 pub use deformation::MIN_BAND_STRENGTH;
 pub use display::BoundaryClass;
@@ -656,7 +658,13 @@ const FILL_PASSES: usize = 8;
 /// same mass, and erosion thins the bedrock from the top (never below zero). Returns the
 /// applied change of the areal mass and the requested one (they differ only when the bedrock
 /// runs out).
-fn apply_surface_change(crust: &mut Crust, thickness: f64, sediment: f64) -> (f64, f64) {
+fn apply_surface_change(
+    crust: &mut Crust,
+    thickness: f64,
+    sediment: f64,
+    cover: &mut CoverBudget,
+) -> (f64, f64) {
+    let column = *crust;
     let before = crust.mass();
     let expected = thickness * crust.density + sediment * SEDIMENT_ROCK_DENSITY;
     let new_sediment = crust.sediment + sediment;
@@ -666,12 +674,13 @@ fn apply_surface_change(crust: &mut Crust, thickness: f64, sediment: f64) -> (f6
     }
     if sediment > 0.0 {
         // New deposits are new rock: they do not belong to the cover cohort.
-        crust.add_sediment(sediment, 0.0);
+        crust.add_sediment(sediment, Cohort::NONE);
     } else {
-        crust.sediment = new_sediment.max(0.0);
+        crust.remove_sediment_to(new_sediment.max(0.0));
     }
     // Erosion removes crust from the top; deposition never adds crystalline crust.
     crust.thin_from_top(new_thickness.max(0.0));
+    cover.record_change(CoverTerm::Surface, &column, crust);
     (crust.mass() - before, expected)
 }
 
@@ -734,6 +743,10 @@ pub struct Simulation {
     /// Changes of the felsic crust and sediment masses so far (areal mass summed over cells, see
     /// [`Simulation::felsic_and_sediment`]) per phase of the step.
     material_budget: MaterialBudget,
+    /// Budget of the continental cover and the cover cohort by process (see [`CoverBudget`]).
+    cover_budget: CoverBudget,
+    /// The [`CoverMasses`] the cover budget starts from.
+    cover_start: CoverMasses,
     /// Sea level as an offset of dry elevations (m) relative to the datum of the isostasy, set
     /// so that the ocean holds [`TectonicParams::ocean_volume`].
     sea_level: f64,
@@ -834,7 +847,7 @@ impl Simulation {
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
                     reheated: NO_REHEATING,
-                    cohort: 0.0,
+                    cohort: Cohort::NONE,
                 }
             } else {
                 new_oceanic_crust(-ocean_age[cell])
@@ -921,6 +934,8 @@ impl Simulation {
             collision_inflow: 0.0,
             metamorphosed: (0.0, 0.0),
             material_budget: MaterialBudget::default(),
+            cover_budget: CoverBudget::default(),
+            cover_start: [0.0; 3],
             sea_level: 0.0,
             lake_water: 0.0,
             initial_sea_level: 0.0,
@@ -943,6 +958,7 @@ impl Simulation {
             simulation.add_initial_sediment(seed, &is_continental, &plate_of_cell);
         }
         simulation.ledger = MassLedger::new(simulation.total_mass());
+        simulation.start_cover_budget(0..3);
         simulation.sea_level = simulation.solve_sea_level();
         simulation.initial_sea_level = simulation.sea_level;
         // Initial subduction zones have fully developed slabs.
@@ -1508,13 +1524,16 @@ impl Simulation {
                 if mass <= 0.0 {
                     continue;
                 }
-                crust.sediment -= mass / SEDIMENT_ROCK_DENSITY;
+                let before = *crust;
+                crust.remove_sediment_to(crust.sediment - mass / SEDIMENT_ROCK_DENSITY);
                 crust.add_crust(
                     mass / METASEDIMENT_DENSITY,
                     METASEDIMENT_DENSITY,
                     (1.0, tracked),
                     max_thickness,
                 );
+                self.cover_budget
+                    .record_change(CoverTerm::Metamorphism, &before, crust);
                 converted[usize::from(!continental)] += mass;
             }
         }
@@ -1620,7 +1639,8 @@ impl Simulation {
                 residual[if sediment_mass > 0.0 { 1 } else { 2 }] += sediment_mass;
                 extra_cells[plate][class] += sample.cells - 1;
             }
-            let (applied, expected) = apply_surface_change(crust, thickness, sediment);
+            let (applied, expected) =
+                apply_surface_change(crust, thickness, sediment, &mut self.cover_budget);
             change += applied;
             clamped += (expected - applied).abs();
         }
@@ -1736,6 +1756,7 @@ impl Simulation {
                         crust,
                         parts[0] * share[0] / crust.density,
                         (parts[1] * share[1] + parts[2] * share[2]) / SEDIMENT_ROCK_DENSITY,
+                        &mut self.cover_budget,
                     );
                     change += applied;
                     clamped += (expected - applied).abs();
@@ -1763,6 +1784,7 @@ impl Simulation {
                         crust,
                         sample.bedrock_mass * keep[0] / crust.density,
                         sediment_mass * sediment_keep / SEDIMENT_ROCK_DENSITY,
+                        &mut self.cover_budget,
                     );
                     change += applied;
                     clamped += (expected - applied).abs();
@@ -1800,38 +1822,6 @@ impl Simulation {
         let sea_level = self.solve_sea_level();
         self.sea_level_budget.metamorphism += sea_level - self.sea_level;
         self.sea_level = sea_level;
-    }
-
-    /// Starts tracking the continental sedimentary cover as a cohort (see [`Crust::cohort`]):
-    /// all sediment now on crust whose basement is of continental origin belongs to it, nothing
-    /// else does. Returns the cohort's mass in Gt.
-    pub fn start_cover_cohort(&mut self) -> f64 {
-        for crust in self
-            .plates
-            .iter_mut()
-            .flat_map(|plate| plate.crust.iter_mut().flatten())
-        {
-            crust.cohort = f64::from(u8::from(crust.basement().is_continental_origin()));
-        }
-        self.cover_cohort().0
-    }
-
-    /// Mass (Gt, all samples including hidden ones) of the cover cohort (see
-    /// [`Simulation::start_cover_cohort`]) still on crust whose basement is of continental
-    /// origin, and still sediment anywhere.
-    pub fn cover_cohort(&self) -> (f64, f64) {
-        let cell_area =
-            4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
-        let to_gt = cell_area * SEDIMENT_ROCK_DENSITY / 1e12;
-        let mut masses = (0.0, 0.0);
-        for crust in self.plates.iter().flat_map(|p| p.crust.iter().flatten()) {
-            let mass = crust.sediment * crust.cohort * to_gt;
-            if crust.basement().is_continental_origin() {
-                masses.0 += mass;
-            }
-            masses.1 += mass;
-        }
-        masses
     }
 
     /// The changes of the sea level so far per process, and the remainder of the actual change
@@ -2003,7 +1993,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         // Normal continental crust stands a few hundred metres above sea level, doubly
         // thickened crust forms high plateaus like Tibet, thinned crust forms shelves.
@@ -2030,7 +2020,7 @@ mod tests {
                         orogeny: NO_OROGENY,
                         orogenic: 0.0,
                         reheated: NO_REHEATING,
-                        cohort: 0.0,
+                        cohort: Cohort::NONE,
                     };
                     let elevation = crust.dry_elevation(0.0);
                     // At least 0.5 m per 100 m of crust (the thermal uplift fading out over the
@@ -2061,7 +2051,7 @@ mod tests {
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
                     reheated: NO_REHEATING,
-                    cohort: 0.0,
+                    cohort: Cohort::NONE,
                 };
                 assert!(arc.buoyancy(0.0) > new_oceanic_crust(0.0).buoyancy(0.0));
             }
@@ -2080,7 +2070,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         assert!(
             (continent(0.0).surface_elevation(0.0, 0.0)
@@ -2103,7 +2093,7 @@ mod tests {
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
                 reheated: NO_REHEATING,
-                cohort: 0.0,
+                cohort: Cohort::NONE,
             };
             let removed = 10.0;
             let thinner = Crust {
@@ -2135,7 +2125,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         assert!(!eroded.is_oceanic());
         assert!(!eroded.is_continental());
@@ -2250,6 +2240,65 @@ mod tests {
         let ledger = simulation.ledger.checked(simulation.total_mass());
         assert!(ledger.new_sea_floor > 0.0);
         assert!(ledger.subducted_oceanic < 0.0);
+    }
+
+    /// The cover budget's recorded terms account for the whole change of the cover and of
+    /// both cohort tracers by surface processes and metamorphism (#35); during tectonic steps
+    /// the sinks at trenches only remove, and the youngest-first cohort stays at least as large
+    /// as the well-mixed one.
+    #[test]
+    fn cover_budget_records_surface_changes_and_metamorphism() {
+        let mut simulation = simulation(3);
+        simulation.step(1.0);
+        simulation.start_cover_cohort();
+        let cells = simulation.mesh.len();
+        for step in 0..30 {
+            let sites_before = [
+                CoverTerm::Subducted,
+                CoverTerm::Accreted,
+                CoverTerm::Collision,
+            ]
+            .map(|term| simulation.cover_budget.term(term));
+            simulation.step(1.0);
+            for (term, before) in [
+                CoverTerm::Subducted,
+                CoverTerm::Accreted,
+                CoverTerm::Collision,
+            ]
+            .into_iter()
+            .zip(sites_before)
+            {
+                let after = simulation.cover_budget.term(term);
+                assert!((0..3).all(|i| after[i] <= before[i] + 1e-9), "{term:?}");
+            }
+            // Erosion and deposition, deep enough on some cells for metamorphism.
+            let thickness: Vec<f64> = (0..cells).map(|c| -((c % 7) as f64) * 10.0).collect();
+            let sediment: Vec<f64> = (0..cells)
+                .map(|c| match c % 9 {
+                    0 => 3000.0,
+                    1..=4 => -40.0 * (c % 5) as f64,
+                    _ => 20.0,
+                })
+                .collect();
+            let masses = simulation.cover_masses();
+            let recorded = simulation.cover_budget.total();
+            simulation.apply_surface_changes(&thickness, &sediment, SurfaceSeaLevel::default());
+            let change = simulation.cover_masses();
+            let recorded_change = simulation.cover_budget.total();
+            for i in 0..3 {
+                let actual = change[i] - masses[i];
+                let booked = recorded_change[i] - recorded[i];
+                assert!(
+                    (actual - booked).abs() <= 1e-9 * masses[0],
+                    "step {step}, mass {i}: changed {actual}, recorded {booked}"
+                );
+            }
+            let left = simulation.cover_cohort();
+            assert!(left.anywhere[1] >= left.anywhere[0] - 1e-6 * left.anywhere[0].max(1.0));
+        }
+        let budget = simulation.cover_budget();
+        assert!(budget.term(CoverTerm::Surface)[1] < 0.0);
+        assert!(budget.term(CoverTerm::Metamorphism)[0] < 0.0);
     }
 
     /// Two neighbours of cell 0 on its plate.

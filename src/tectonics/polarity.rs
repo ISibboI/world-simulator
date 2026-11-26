@@ -820,7 +820,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         }
     }
 
@@ -1004,7 +1004,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         let other_side = (DVec3::X - DVec3::Y * math::tan(1.5 * RADIUS)).normalize();
         polarities.contact(
@@ -1047,7 +1047,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         for _ in 0..100 {
             polarities.contact((0, continent), (1, ocean(50.0)), DVec3::X, 0.0, &rotations);

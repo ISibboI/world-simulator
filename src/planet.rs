@@ -9,7 +9,7 @@ use crate::climate::{Climate, ClimateParams, WaterCycle};
 use crate::erosion::{
     CrustClass, ErosionParams, Hydrology, Surface, SurfaceWater, WaveErosion, erode,
 };
-use crate::tectonics::{Crust, Simulation, Statistics};
+use crate::tectonics::{CohortMasses, CoverBudget, CoverMasses, Crust, Simulation, Statistics};
 use crate::temperature::{TemperatureFields, TemperatureModel, TemperatureParams};
 
 pub struct Planet {
@@ -44,10 +44,12 @@ pub struct Planet {
     /// Sediment that surface processes removed from and added to cells of crust of continental
     /// origin so far (rock-equivalent thickness over one cell, summed; net per cell and step).
     cover_turnover: CoverTurnover,
+    /// Where the material eroded from continental crust went so far (Gt, see [`CoverExport`]).
+    cover_export: CoverExport,
     /// When to start tracking the continental cover as a cohort (Myr), and once started, the
-    /// time and the cohort's initial mass (Gt).
+    /// time, the cohort's initial mass (Gt) and the budgets at the start.
     cover_cohort_time: f64,
-    cover_cohort: Option<(f64, f64)>,
+    cover_cohort: Option<(f64, f64, CoverBudget, CoverExport)>,
     /// Changes of the area of closed depressions below sea level between steps, summed (cells).
     inland_change: f64,
     /// Cells that the last erosion step saw as ocean on the sample surface but not on the
@@ -55,15 +57,124 @@ pub struct Planet {
     ocean_mismatch: usize,
 }
 
-/// The continental cover of [`CoverCohort::start`] and how much of it is left (Gt).
+/// The continental cover of [`CoverCohort::start`] and how much of it is left (Gt), per tracer
+/// (`[well mixed, youngest first]`, see [`crate::tectonics::Cohort`]).
 #[derive(Clone, Copy, Debug)]
 pub struct CoverCohort {
     pub start: f64,
     pub initial: f64,
-    /// Left as sediment on crust whose basement is of continental origin.
-    pub on_continents: f64,
-    /// Left as sediment anywhere.
-    pub anywhere: f64,
+    /// Left as sediment on crust whose basement is of continental origin, and anywhere.
+    pub left: CohortMasses,
+    /// The budget of the cover and the cohort since the start (Gt, see [`CoverBudget`]).
+    pub budget: CoverBudget,
+    /// Where the material eroded from continental crust went since the start, with the cohort's
+    /// share of it (Gt, see [`CoverExport`]).
+    pub export: CoverExport,
+}
+
+/// Where the material eroded from crust of continental origin went (#35), as Gt summed over the
+/// erosion steps. Erosion and deposition are net per cell and step (a lower bound of the gross
+/// turnover), and a step's load is not traced from cell to cell, so the destinations are those of
+/// all continental denudation of the step together.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CoverExport {
+    /// Denudation of continental crust: sediment removed from its cells plus bedrock eroded on
+    /// them.
+    pub denudation: f64,
+    /// The sediment part of [`Self::denudation`]: reworked cover.
+    pub reworked: f64,
+    /// Where it went ([`EXPORT_DESTINATIONS`]), by the surface at the start of the step: deposits
+    /// on continental crust above sea level outside closed depressions, in closed depressions
+    /// (lakes, endorheic and dry basins, also those the step fills), and
+    /// in the ocean (flooded continental crust: shelves, epicontinental seas); and the net gain of
+    /// all other crust (the ocean basins: transitional and oceanic crust, including the little
+    /// land on it). They sum to [`Self::denudation`] because erosion conserves mass; the net
+    /// gain is negative where non-continental land sheds more onto continental crust than it
+    /// receives.
+    pub to: [f64; 4],
+    /// The cohort removed by surface processes per tracer (`[well mixed, youngest first]`), split
+    /// per step in proportion to the step's deposits ([`Self::to`], the net gain counted where
+    /// positive).
+    pub cohort_to: [[f64; 4]; 2],
+}
+
+/// Names of the destinations of [`CoverExport::to`].
+pub const EXPORT_DESTINATIONS: [&str; 4] = [
+    "continental land",
+    "closed depressions",
+    "flooded continental crust",
+    "ocean basins (net)",
+];
+
+impl CoverExport {
+    /// The change from `earlier` to this.
+    pub fn since(&self, earlier: &Self) -> Self {
+        let mut to = self.to;
+        let mut cohort_to = self.cohort_to;
+        for (i, to) in to.iter_mut().enumerate() {
+            *to -= earlier.to[i];
+            for tracer in 0..2 {
+                cohort_to[tracer][i] -= earlier.cohort_to[tracer][i];
+            }
+        }
+        Self {
+            denudation: self.denudation - earlier.denudation,
+            reworked: self.reworked - earlier.reworked,
+            to,
+            cohort_to,
+        }
+    }
+
+    /// Adds the export of one erosion step: per cell its class, its change of sediment and of
+    /// bedrock (as mass, kg/m²) and whether it was ocean or in a closed depression; `to_gt`
+    /// converts summed areal masses to Gt.
+    fn add_step(
+        &mut self,
+        cells: impl Iterator<Item = (bool, f64, f64, bool, bool)>,
+        to_gt: f64,
+    ) -> [f64; 4] {
+        let (mut denudation, mut reworked, mut to) = (0.0, 0.0, [0.0; 4]);
+        for (continental, sediment, bedrock, ocean, depression) in cells {
+            if continental {
+                denudation += (-sediment).max(0.0) + (-bedrock).max(0.0);
+                reworked += (-sediment).max(0.0);
+                let destination = if ocean {
+                    2
+                } else if depression {
+                    1
+                } else {
+                    0
+                };
+                to[destination] += sediment.max(0.0) + bedrock.max(0.0);
+            } else {
+                to[3] += sediment + bedrock;
+            }
+        }
+        self.denudation += denudation * to_gt;
+        self.reworked += reworked * to_gt;
+        for (sum, to) in self.to.iter_mut().zip(to) {
+            *sum += to * to_gt;
+        }
+        to
+    }
+
+    /// Splits the cohort removed in a step (`removed`, Gt per tracer) over the step's
+    /// destinations `to` (positive parts; all on continental land if there were none).
+    fn add_cohort(&mut self, removed: [f64; 2], to: [f64; 4]) {
+        let weights = to.map(|to| to.max(0.0));
+        let total: f64 = weights.iter().sum();
+        for (tracer, removed) in removed.into_iter().enumerate() {
+            for (destination, weight) in weights.iter().enumerate() {
+                self.cohort_to[tracer][destination] += if total > 0.0 {
+                    removed * weight / total
+                } else if destination == 0 {
+                    removed
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
 }
 
 /// Gross sediment turnover on crust of continental origin (the continental sedimentary cover)
@@ -142,6 +253,12 @@ pub struct PlanetStatistics {
     pub cover_turnover: CoverTurnover,
     /// The tracked cohort of continental cover, once started.
     pub cover_cohort: Option<CoverCohort>,
+    /// Where the material eroded from continental crust went so far (Gt).
+    pub cover_export: CoverExport,
+    /// The budget of the continental cover and the cohort by process so far (Gt), and the
+    /// masses now (Gt; see [`crate::tectonics::CoverMasses`]).
+    pub cover_budget: CoverBudget,
+    pub cover_masses: CoverMasses,
     /// Fraction of the surface that is ocean, and that lies below sea level (the ocean and
     /// closed depressions, see [`crate::sea`]).
     pub ocean_fraction: f64,
@@ -270,6 +387,7 @@ impl Planet {
             wave_erosion: WaveErosion::default(),
             sediment_delivered: 0.0,
             cover_turnover: CoverTurnover::default(),
+            cover_export: CoverExport::default(),
             cover_cohort_time: f64::INFINITY,
             cover_cohort: None,
             inland_change: 0.0,
@@ -501,12 +619,13 @@ impl Planet {
             } else {
                 &elevation
             };
+            let bedrock_density = self.tectonics.bedrock_densities();
             let result = erode(
                 self.tectonics.mesh(),
                 &Surface {
                     elevation: surface,
                     sediment: &self.tectonics.sediment_thicknesses(),
-                    bedrock_density: &self.tectonics.bedrock_densities(),
+                    bedrock_density: &bedrock_density,
                     bedrock_isostatic_density: &self.tectonics.bedrock_isostatic_densities(),
                     dense_crust: &self.tectonics.dense_crust_thicknesses(),
                     precipitation: &self.precipitation,
@@ -560,10 +679,32 @@ impl Planet {
             } else {
                 0
             };
+            let cell_area = self.cell_area();
+            let to = self.cover_export.add_step(
+                (0..class.len()).map(|cell| {
+                    (
+                        class[cell] == CrustClass::Continental,
+                        result.sediment_delta[cell] * crate::isostasy::SEDIMENT_ROCK_DENSITY,
+                        result.bedrock_delta[cell] * bedrock_density[cell],
+                        result.water.ocean[cell],
+                        result.water.depression_at_start[cell],
+                    )
+                }),
+                cell_area / 1e12,
+            );
+            let cohort_before = self.tectonics.cover_cohort_eroded();
             self.tectonics.apply_surface_changes(
                 &result.bedrock_delta,
                 &result.sediment_delta,
                 result.sea_level_change,
+            );
+            let cohort_after = self.tectonics.cover_cohort_eroded();
+            self.cover_export.add_cohort(
+                [
+                    cohort_after[0] - cohort_before[0],
+                    cohort_after[1] - cohort_before[1],
+                ],
+                to,
             );
             // The lakes' water comes from the ocean.
             self.tectonics.set_lake_water(result.hydrology.lake_volume);
@@ -596,7 +737,6 @@ impl Planet {
             wave.cliff_bedrock += result.wave.cliff_bedrock;
             wave.reworked += result.wave.reworked;
             wave.stayed += result.wave.stayed;
-            let cell_area = self.cell_area();
             self.sediment_deposition = result.deposited.map(|d| d * cell_area / dt_years);
         }
         if self.erosion.is_none() {
@@ -609,7 +749,12 @@ impl Planet {
         }
         if self.cover_cohort.is_none() && self.tectonics.time() >= self.cover_cohort_time - 1e-9 {
             let mass = self.tectonics.start_cover_cohort();
-            self.cover_cohort = Some((self.tectonics.time(), mass));
+            self.cover_cohort = Some((
+                self.tectonics.time(),
+                mass,
+                self.tectonics.cover_budget(),
+                self.cover_export,
+            ));
         }
         debug!(
             ?tectonics_time,
@@ -879,15 +1024,18 @@ impl Planet {
             },
             sediment_delivered: self.sediment_delivered * crate::isostasy::SEDIMENT_ROCK_DENSITY
                 / 1e12,
-            cover_cohort: self.cover_cohort.map(|(start, initial)| {
-                let (on_continents, anywhere) = self.tectonics.cover_cohort();
-                CoverCohort {
+            cover_cohort: self
+                .cover_cohort
+                .map(|(start, initial, budget, export)| CoverCohort {
                     start,
                     initial,
-                    on_continents,
-                    anywhere,
-                }
-            }),
+                    left: self.tectonics.cover_cohort(),
+                    budget: self.tectonics.cover_budget().since(&budget),
+                    export: self.cover_export.since(&export),
+                }),
+            cover_export: self.cover_export,
+            cover_budget: self.tectonics.cover_budget(),
+            cover_masses: self.tectonics.cover_masses_gt(),
             cover_turnover: {
                 let to_gt = cell_area * crate::isostasy::SEDIMENT_ROCK_DENSITY / 1e12;
                 CoverTurnover {
@@ -1009,4 +1157,74 @@ fn climate_elevations(
         }
     }
     elevation
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sphere::SphereMesh;
+    use crate::tectonics::{CoverTerm, TectonicParams};
+
+    const RADIUS: f64 = 6.371e6;
+
+    /// The cover's export split and budget close (#35): the destinations of the continental
+    /// denudation add up to it, the budget terms to the change of the masses, and the cohort's
+    /// fate to its initial mass.
+    #[test]
+    fn cover_export_and_budget_close() {
+        let simulation = Simulation::new(SphereMesh::icosphere(4), 8, TectonicParams::default(), 5);
+        let start = simulation.cover_masses_gt();
+        let mut planet = Planet::new(
+            simulation,
+            ClimateParams::default(),
+            TemperatureParams::default(),
+            Some(ErosionParams {
+                planet_radius: RADIUS,
+                ..ErosionParams::default()
+            }),
+            RADIUS,
+        );
+        planet.track_cover_cohort_from(4.0);
+        for _ in 0..9 {
+            planet.step(1.0);
+        }
+        let statistics = planet.statistics();
+        let close = |a: f64, b: f64, scale: f64| (a - b).abs() <= 1e-9 * scale;
+
+        let export = &statistics.cover_export;
+        assert!(export.denudation > 0.0 && export.reworked > 0.0);
+        assert!(close(
+            export.to.iter().sum::<f64>(),
+            export.denudation,
+            export.denudation
+        ));
+
+        let masses = statistics.cover_masses;
+        let total = statistics.cover_budget.total();
+        assert!(close(masses[0] - start[0], total[0], masses[0]));
+        // The cohort only started later: its tracers were empty before.
+        assert_eq!(start[1..], [0.0, 0.0]);
+
+        let cohort = statistics.cover_cohort.expect("the cohort started");
+        assert!(cohort.initial > 0.0);
+        for tracer in 0..2 {
+            // Now = initial + the budget since the start.
+            assert!(close(
+                cohort.left.anywhere[tracer],
+                cohort.initial + cohort.budget.total()[1 + tracer],
+                cohort.initial
+            ));
+            // What surface processes removed is split over the destinations.
+            let eroded: f64 = cohort.export.cohort_to[tracer].iter().sum();
+            assert!(eroded >= 0.0);
+            assert!(close(
+                eroded,
+                -cohort.budget.term(CoverTerm::Surface)[1 + tracer],
+                cohort.initial
+            ));
+        }
+        // Youngest first keeps at least as much as well mixed.
+        assert!(cohort.left.on_continents[1] >= cohort.left.on_continents[0] - 1e-9);
+        assert!(cohort.left.on_continents[0] < cohort.initial);
+    }
 }

@@ -46,11 +46,14 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::erosion::WaveErosion;
-use crate::planet::{CoverTurnover, Planet, PlanetStatistics};
+use crate::planet::{
+    CoverCohort, CoverExport, CoverTurnover, EXPORT_DESTINATIONS, Planet, PlanetStatistics,
+};
 use crate::presets::{Biosphere, Epoch, Parameters};
 use crate::sphere::SphereMesh;
 use crate::tectonics::{
-    InitialConfiguration, MassLedger, MaterialBudget, SeaLevelBudget, Simulation, TrenchSediment,
+    CoverBudget, CoverTerm, InitialConfiguration, MassLedger, MaterialBudget, SeaLevelBudget,
+    Simulation, TrenchSediment,
 };
 
 /// The planet radius in metres; used for erosion, climate and to report linear speeds.
@@ -913,6 +916,9 @@ fn snapshot(
         wave_erosion: previous_wave,
         sediment_delivered: previous_delivered,
         cover_turnover: previous_cover,
+        cover_export: previous_export,
+        cover_budget: previous_cover_budget,
+        cover_masses: previous_cover_masses,
         sea_level_budget: previous_sea_level,
         metamorphosed: previous_metamorphosed,
     }) = previous_ledger.as_ref()
@@ -1003,22 +1009,14 @@ fn snapshot(
             rate(cover.deposited, previous_cover.deposited),
             std::f64::consts::LN_2 * cover_stock / (cover_eroded + cover_burial).max(1e-9) / 1e6,
         );
+        log_cover_export(
+            &planet_statistics.cover_export.since(previous_export),
+            &planet_statistics.cover_budget.since(previous_cover_budget),
+            planet_statistics.cover_masses[0] - previous_cover_masses[0],
+            years,
+        );
         if let Some(cohort) = &planet_statistics.cover_cohort {
-            let elapsed = statistics.time - cohort.start;
-            let left = cohort.on_continents / cohort.initial.max(1e-9);
-            info!(
-                "    cover cohort of {:.0} Myr: {:.3e} Gt, {:.1}% left on continental crust \
-                 ({:.1}% as sediment anywhere), preservation half-life {:.0} Myr",
-                cohort.start,
-                cohort.initial,
-                100.0 * left,
-                100.0 * cohort.anywhere / cohort.initial.max(1e-9),
-                if elapsed > 0.0 && left < 1.0 {
-                    elapsed * std::f64::consts::LN_2 / -math::ln(left.max(1e-12))
-                } else {
-                    f64::INFINITY
-                },
-            );
+            log_cover_cohort(cohort, statistics.time);
         }
         info!(
             "    collision stacking (Gt/yr): {:.1} stacked, {:.1} carried in by convergence",
@@ -1088,6 +1086,9 @@ fn snapshot(
         wave_erosion: planet_statistics.wave_erosion,
         sediment_delivered: planet_statistics.sediment_delivered,
         cover_turnover: planet_statistics.cover_turnover,
+        cover_export: planet_statistics.cover_export,
+        cover_budget: planet_statistics.cover_budget,
+        cover_masses: planet_statistics.cover_masses,
     });
     let segments = &statistics.segment_events;
     info!(
@@ -1516,6 +1517,106 @@ fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Res
     Ok(())
 }
 
+/// Logs where the material eroded from continental crust went, and the budget of the
+/// continental cover by process, over the interval since the last snapshot (#35).
+fn log_cover_export(export: &CoverExport, budget: &CoverBudget, stock_change: f64, years: f64) {
+    let share = |part: f64| 100.0 * part / export.denudation.max(1e-12);
+    let destinations: Vec<String> = EXPORT_DESTINATIONS
+        .iter()
+        .zip(export.to)
+        .map(|(name, to)| format!("{name} {:.0}%", share(to)))
+        .collect();
+    info!(
+        "    continental denudation {:.2} Gt/yr ({:.0}% reworked cover, net per cell and step): {} \
+         | unaccounted {:+.1e} Gt/yr",
+        export.denudation / years,
+        share(export.reworked),
+        destinations.join(", "),
+        (export.denudation - export.to.iter().sum::<f64>()) / years,
+    );
+    let terms: Vec<String> = CoverTerm::ALL
+        .iter()
+        .map(|&term| format!("{} {:+.2}", term.name(), budget.term(term)[0] / years))
+        .filter(|part| !part.ends_with(" +0.00") && !part.ends_with(" -0.00"))
+        .collect();
+    info!(
+        "    continental cover budget (Gt/yr; other tectonics is the rest of the stock change): \
+         {} | stock change {:+.2}",
+        terms.join(", "),
+        stock_change / years,
+    );
+}
+
+/// Logs what is left of the cover cohort, its preservation half-life under both tracers (a lower
+/// and an upper bound), and where the rest went (#34, #35).
+fn log_cover_cohort(cohort: &CoverCohort, time: f64) {
+    let elapsed = time - cohort.start;
+    let initial = cohort.initial.max(1e-9);
+    let half_life = |left: f64| {
+        let left = left / initial;
+        if elapsed > 0.0 && left < 1.0 {
+            elapsed * std::f64::consts::LN_2 / -math::ln(left.max(1e-12))
+        } else {
+            f64::INFINITY
+        }
+    };
+    let [mixed, lifo] = cohort.left.on_continents;
+    info!(
+        "    cover cohort of {:.0} Myr: {:.3e} Gt, left on continental crust {:.1}% well mixed, \
+         {:.1}% youngest first ({:.1}% / {:.1}% as sediment anywhere) | preservation half-life \
+         {:.0} Myr (well mixed, lower bound) to {:.0} Myr (youngest first, upper bound)",
+        cohort.start,
+        cohort.initial,
+        100.0 * mixed / initial,
+        100.0 * lifo / initial,
+        100.0 * cohort.left.anywhere[0] / initial,
+        100.0 * cohort.left.anywhere[1] / initial,
+        half_life(mixed),
+        half_life(lifo),
+    );
+    for (tracer, name) in ["well mixed", "youngest first"].into_iter().enumerate() {
+        let fate = cohort_fate(cohort, tracer);
+        let parts: Vec<String> = fate
+            .iter()
+            .map(|(name, mass)| format!("{name} {:.1}", 100.0 * mass / initial))
+            .collect();
+        info!(
+            "    cover cohort fate ({name}, % of it; other tectonics is the rest): {}",
+            parts.join(", "),
+        );
+    }
+}
+
+/// Where the cover cohort is now, under the tracer `tracer` (0 well mixed, 1 youngest first),
+/// in Gt: it sums to the cohort's initial mass.
+fn cohort_fate(cohort: &CoverCohort, tracer: usize) -> Vec<(&'static str, f64)> {
+    let removed = |term: CoverTerm| -cohort.budget.term(term)[1 + tracer];
+    let left = &cohort.left;
+    let mut fate = vec![
+        ("on continental crust", left.on_continents[tracer]),
+        (
+            "sediment on other crust",
+            left.anywhere[tracer] - left.on_continents[tracer],
+        ),
+    ];
+    let names = [
+        "eroded to continental land",
+        "eroded to closed depressions",
+        "eroded to flooded continental crust",
+        "eroded to ocean basins",
+    ];
+    fate.extend(names.into_iter().zip(cohort.export.cohort_to[tracer]));
+    fate.extend([
+        ("metamorphosed", removed(CoverTerm::Metamorphism)),
+        ("subducted", removed(CoverTerm::Subducted)),
+        ("accreted", removed(CoverTerm::Accreted)),
+        ("collision", removed(CoverTerm::Collision)),
+        ("subduction erosion", removed(CoverTerm::SubductionErosion)),
+        ("other tectonics", removed(CoverTerm::Other)),
+    ]);
+    fate
+}
+
 /// Logs the rates of change of felsic crust and sediment per step phase since the last snapshot.
 fn log_material_budget(
     budget: &MaterialBudget,
@@ -1571,6 +1672,9 @@ struct PreviousSnapshot {
     wave_erosion: WaveErosion,
     sediment_delivered: f64,
     cover_turnover: CoverTurnover,
+    cover_export: CoverExport,
+    cover_budget: CoverBudget,
+    cover_masses: [f64; 3],
 }
 
 /// Writes one CSV row per cell: latitude (°), surface elevation (m), rock-equivalent and bulk

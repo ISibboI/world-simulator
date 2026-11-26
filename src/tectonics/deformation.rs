@@ -155,7 +155,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         }
     }
 

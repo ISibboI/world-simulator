@@ -2166,7 +2166,7 @@ mod tests {
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
                     reheated: NO_REHEATING,
-                    cohort: 0.0,
+                    cohort: Cohort::NONE,
                 }
             } else {
                 new_oceanic_crust(-ocean_age)
@@ -2378,7 +2378,7 @@ mod tests {
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
                     reheated: NO_REHEATING,
-                    cohort: 0.0,
+                    cohort: Cohort::NONE,
                 }
             } else {
                 new_oceanic_crust(-250.0)
@@ -2441,7 +2441,7 @@ mod tests {
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
                     reheated: NO_REHEATING,
-                    cohort: 0.0,
+                    cohort: Cohort::NONE,
                 }
             });
         }
@@ -2707,7 +2707,7 @@ mod tests {
                     orogeny: if suture { -500.0 } else { NO_OROGENY },
                     orogenic: if suture { 1.0 } else { 0.0 },
                     reheated: NO_REHEATING,
-                    cohort: 0.0,
+                    cohort: Cohort::NONE,
                 });
             }
             let caps: Vec<u32> = (0..simulation.mesh.len() as u32)
@@ -2837,7 +2837,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         let micro = |r: DVec3| r.x > 0.8 && r.z < 0.0 && r.z > -0.12;
         for (local, crust) in simulation.plates[0].crust.iter_mut().enumerate() {
@@ -2977,7 +2977,7 @@ mod tests {
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
                     reheated: NO_REHEATING,
-                    cohort: 0.0,
+                    cohort: Cohort::NONE,
                 };
             }
         }

@@ -483,7 +483,7 @@ mod tests {
             orogeny: 400.0,
             orogenic: 1.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         // A sample of an orogenic belt spread over sea floor: the mixtures stay oceanic or
         // transitional and unweakened.
