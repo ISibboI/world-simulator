@@ -435,13 +435,15 @@ fn layers(cell: &CellInfo, season: Period, abiotic: bool, closed_lake: bool) -> 
         (mix(MELTING_SEA_ICE, SEA_ICE, cold), cover)
     } else if let WaterBody::Lake(depth) = body {
         // Lakes ice over in their own way: not from the climate's `ice`, which is sea ice
-        // below sea level and the snowfall-limited ice sheet above it. All year where the
-        // annual mean is far below freezing; in a cold month by its temperature. The ice is
+        // below sea level and the snowfall-limited ice sheet above it. In the annual state where
+        // the annual mean is far below freezing; in a month by its temperature, or where even
+        // the warmest month freezes. The ice is
         // snow-covered where snow falls, grey and bare where it does not.
-        let perennial = smoothstep(-10.0, -20.0, annual_temperature);
         let frozen = match season {
-            Period::Annual => perennial,
-            _ => perennial.max(lake_ice(temperature, depth)),
+            // Frozen most of the year.
+            Period::Annual => smoothstep(-10.0, -20.0, annual_temperature),
+            // Frozen in the month, or all year where even the warmest month freezes.
+            _ => lake_ice(temperature, depth).max(smoothstep(0.0, -5.0, warmest)),
         };
         let snowy = smoothstep(0.02, 0.15, precipitation);
         (mix(BARE_LAKE_ICE, LAKE_ICE, snowy), frozen)
@@ -1044,6 +1046,13 @@ mod tests {
             layers(&cold, Period::January, false, false).snow,
             LAKE_ICE
         ));
+        // A subarctic lake (annual −14 °C) thaws in a +10 °C July.
+        let mut arctic = lake(7.0, 0.4);
+        arctic.temperature = -14.0;
+        arctic.temperature_january = -33.0;
+        arctic.temperature_july = 10.0;
+        assert_eq!(layers(&arctic, Period::July, false, false).snow_cover, 0.0);
+        assert_eq!(layers(&arctic, Period::January, false, false).snow_cover, 1.0);
         // Deep lakes freeze later than shallow ones.
         assert!(lake_ice(-5.0, 300.0) < lake_ice(-5.0, 5.0));
         assert_eq!(lake_ice(0.0, 5.0), 0.0);
