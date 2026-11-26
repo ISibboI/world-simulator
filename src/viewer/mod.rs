@@ -72,6 +72,7 @@ pub use modes::{
 };
 use overlay::OverlayBuilder;
 use pace::{HintAction, Pace};
+pub use parameters::with_random_seed;
 use parameters::{ParameterPanel, SimulationStatus};
 #[cfg(target_arch = "wasm32")]
 pub use parameters::{has_option, with_default};
