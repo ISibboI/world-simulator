@@ -30,10 +30,12 @@ def seed_data(d, mesh_cache={}):
 
 def summarise(label, base, t0, t1):
     rows, counts, narrow_counts, episodes, ov_n, ov_c, big = [], [], [], [], [], [], []
+    per_seed = []
     for d in sorted(glob.glob(os.path.join(base, 'seed-*'))):
         if not os.path.exists(os.path.join(d, 'plate_maps.csv')):
             continue
         snaps, sections = seed_data(d)
+        first = len(narrow_counts)
         dt = snaps[1][0] - snaps[0][0] if len(snaps) > 1 else 10
         open_ep = {}
         for t, table in snaps:
@@ -55,6 +57,8 @@ def summarise(label, base, t0, t1):
                     s = sections.get((t, p))
                     if s is not None and m['area'] >= 0.005:
                         (ov_n if is_narrow(m) else ov_c).append(float(s['overload']))
+        if len(narrow_counts) > first:
+            per_seed.append(st.mean(narrow_counts[first:]))
         for p, start in open_ep.items():
             if start <= t1:
                 episodes.append((snaps[-1][0] + dt - start, 'open'))
@@ -65,7 +69,7 @@ def summarise(label, base, t0, t1):
         v = sorted(v); return v[min(len(v) - 1, int(f * len(v)))] if v else float('nan')
     print(f"== {label} ({t0:.0f}-{t1:.0f} Myr, {len(counts)} maps)")
     print(f"plates >= 0.2%: {st.mean(counts):.1f}, >= 1%: {st.mean(big):.1f} per map; "
-          f"narrow plates (>= 0.5%) per map {st.mean(narrow_counts):.2f}")
+          f"narrow plates (>= 0.5%) per map {st.mean(narrow_counts):.2f} (seeds {min(per_seed):.2f}-{max(per_seed):.2f})")
     print(f"plates >= 0.5%: aspect median {st.median(m['aspect'] for m in sel):.1f} p90 {q([m['aspect'] for m in sel], .9):.1f}; "
           f"bend median {st.median(m['bend'] for m in sel):.2f} p90 {q([m['bend'] for m in sel], .9):.2f}; "
           f"with a neck <= 2: {sum(1 for m in sel if m['neck'] is not None and m['neck'] <= 2)/len(sel)*100:.1f}%; "
