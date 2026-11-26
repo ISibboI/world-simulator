@@ -9,14 +9,20 @@ Stage 4 of [plan.md](plan.md) §10, adapted to Sebastian's decisions (§0):
 - Topographic stays the start-up mode;
 - nothing but the sun, its glow and its glint may over-expose.
 
-The plan was reviewed by an independent agent before the implementation (§6). Its main findings
-changed the design: a mean-preserving sea-ice rule, a strike *tensor* instead of per-corner
-noise fields, a structure tensor for the crests, and several lake fixes.
+Two independent agents reviewed the work:
+- the **plan**, before the implementation (§6). It led to a mean-preserving sea-ice rule, a
+  sign-free structure tensor for the strike, and several lake fixes;
+- the **code**, afterwards (§6b). It found that an interpolated squeeze tensor cancels, so the
+  ridges use per-corner noise fields.
 
-**No frame change, no codec change.** Everything comes from fields the frames already hold
-(elevation, lake depth, drainage bits, temperatures and precipitation of the year, January and
-July, the annual ice cover, moisture). The detail vertex grows from 52 to 60 bytes (+8 bytes:
-the strike tensor and an ocean flag): 14.7 MB at 6 subdivisions (was 12.8), 3.7 MB at 5 (was 3.2).
+**No frame change, no codec change.** Everything comes from fields the frames already hold:
+- elevation, lake depth and the drainage bits;
+- temperatures and precipitation of the year, January and July;
+- the annual ice cover and the moisture.
+
+The detail vertex grows from 52 to 64 bytes (+12 bytes: the strike, the squeeze and the ocean
+flag of the triangle's three corners): 15.7 MB at 6 subdivisions (was 12.8), 3.9 MB at 5
+(was 3.2).
 
 ## 1. What stages 1–3 did, and what was wrong
 
@@ -103,22 +109,59 @@ The frames suffice: a belt's strike is perpendicular to the slope of the surface
     smoothed: a 4 km range 400 km wide measures ~5–10 m/km at 220 km cells),
   - times the coherence `(λ₁ − λ₂)/(λ₁ + λ₂)`,
   - times the ruggedness.
-- **Vertex:** the squeeze tensor `σ ŝŝᵀ` (σ = 1 − 1/k, ridges up to k = 4 times as long as
-  wide) in the world frame as 6 snorm8 values, plus the ocean flag. It is interpolated like any
-  attribute.
-- **Shader** (Medium and High; Low has no bump): where the tensor is non-zero, the relief noise
-  is evaluated at `M y` with `M = I − R⁻¹ S R`, its gradient `M ∇n`. Here y is the point in the
-  plate frame, R the plate's rotation and S the interpolated tensor. `ŝ` is tangent at its cell
-  centre, so the squeeze acts about the cell centre and `y·ŝ` stays below about one cycle of
-  the first octave within a triangle. Interpolating the tensor therefore shears the noise by at
-  most about a cycle where strikes really disagree, and nowhere else. One extra fBm, only in
-  orogen pixels. The coastline keeps the isotropic noise.
-- On a real state (seed 2, 130 Myr, 5 subdivisions) 280 of ~2600 land cells line up, with a
-  median squeeze of 0.03, a 90th percentile of 0.37 and a maximum of 0.71: only the steep belts.
+- **Vertex:** like the plates, every vertex carries the data of **all three corners** of its
+  triangle, `ridges: [u32; 3]`. Per corner:
+  - the strike `ŝ` as snorm8 x, y, z (world frame, sign-free);
+  - the squeeze `σ = 1 − 1/k` in 7 bits (ridges up to k = 5 times as long as wide);
+  - the ocean flag (for the sea-ice frame, §3).
+
+  These pass to the fragment shader as one flat `vec3<u32>` varying, unpacked with shifts
+  (GLSL ES 3.00 has no `unpackSnorm4x8`).
+- **Shader** (Medium and High; Low has no bump): in a triangle with an oriented corner, each such
+  corner `j` evaluates the relief fBm at `y − σ_j (y·ŝ_j) ŝ_j`, with gradient `M_j ∇n`. Here y is
+  the point in the plate frame and `ŝ_j` the strike rotated into it. The other corners share the
+  isotropic field. The fields are blended with the squared barycentric weights. A corner's field
+  is fixed by its cell, so the blend is continuous across edges. Neighbouring corners of a belt
+  have almost the same field, so the blend keeps its contrast there. The coastline keeps the
+  isotropic noise. Cost: up to three extra fBm, only in orogen pixels.
+- On a real state (seed 2, 130 Myr, 5 subdivisions), about 280 of ~2600 land cells line up:
+  only the steep belts. The strength is
+  - the slope term,
+  - times the root of the coherence,
+  - times the ruggedness (full from one half).
+
+  The first version (k ≤ 4, linear in coherence and ruggedness) squeezed only weakly: a median
+  σ of 0.03 and a 90th percentile of 0.37, barely visible. The final one is stronger.
+- The effect is modest at the fixed camera distance: ridges are about one cell wide, a few
+  pixels. Close-ups show the relief of belts streaked along the range instead of mottled.
 
 ## 5. Frame times
 
-FRAME_TIMES
+Median frame time while dragging (the method of stages 2–3), 1280×800, 5 subdivisions,
+Realistic with the Sun light. Both renderers run on the CPU, so these are worst cases and only
+the ratios matter; on real GPUs, phones included, this is far below a frame.
+
+| | Low | Medium | High |
+|---|---|---|---|
+| Desktop, llvmpipe (2 threads, MSAA 4×), default view (seed 0, 10 Myr), before | 100.6 ms | 124.9 ms | 128.1 ms |
+| after | 102.6 ms (+2%) | 127.4 ms (+2%) | 130.0 ms (+1.5%) |
+| Desktop, orogen and ice in view (seed 2, 130 Myr), before | 97.6 ms | 121.6 ms | 123.5 ms |
+| after | 100.4 ms (+3%) | 128.4 ms (+6%) | 131.5 ms (+6%) |
+| Web, chromium with SwiftShader (WebGL2), default view, before | 395 ms | 482 ms | 492 ms |
+| after | 445 ms (+13%) | 514 ms (+7%) | 534 ms (+9%) |
+
+- The cost is the oriented relief in orogen pixels (up to three extra fBm on Medium/High), the
+  world-frame floe pattern in pixels of partial sea ice, and the extra flat varying with its
+  unpacking.
+- SwiftShader pays relatively more, also on Low, which has no ridges: the default view has a
+  broad partial sea-ice zone (an extra fBm there), and the integer varying and bit unpacking
+  cost more there. Stage 3 added +23–33% on the same renderer.
+- The web numbers need a local build with DEBUG logging and frames up to 2 s counted (the
+  frame-time log drops intervals over 0.5 s as idle). Neither change is committed.
+- On the CPU, the detail mesh now also gets the gradients, the structure tensor, the
+  closed-lake walk and the lake air. The display refresh took 13–16 ms before and 14–17 ms
+  after: about +1 ms at 5 subdivisions. It runs only when a new frame or option arrives, not
+  while dragging.
 
 ## 6. Plan review (independent agent, before the implementation)
 
@@ -126,10 +169,13 @@ Adopted:
 - the July sea ice vanished with a temperature rule, because melting ice sits at 0 °C. Now
   winter/summer from the annual cover;
 - `Σ bᵢ nᵢ / sqrt(Σ bᵢ²)` over per-corner noise fields inflates the relief up to √3 where the
-  fields agree. Replaced by one fBm with an interpolated squeeze tensor (cheaper, no
-  renormalisation);
-- a strike vector cancels at the crest. Now the sign-free tensor, from the structure tensor
-  over the neighbours, so crests get oriented;
+  fields agree. Now normalised by the sum of the weights, `Σ bᵢ² nᵢ / Σ bᵢ²`. The reviewer
+  suggested an interpolated squeeze tensor instead. That was implemented first, but the code
+  review (§6b) showed it cancels: each corner's strike is tangent at its own centre, so the
+  interpolated squeeze of a coherent belt vanishes inside the triangle. Back to per-corner
+  fields;
+- the strike from one gradient cancels at the crest. Now the sign-free structure tensor over
+  the neighbours, so crests get oriented;
 - the snow height on High is −|n|, recentred;
 - sub-cell lakes on land had the ocean's colour;
 - lake ice came too early and was white without snow;
@@ -137,10 +183,26 @@ Adopted:
 - playas were capped at half a cell;
 - mixes of independent patterns are renormalised.
 
-Not adopted:
+Not adopted from the plan review:
 - a per-corner plate frame for the ridges, to remove the plate seam. The seam was accepted in
   stage 2 (`detail.md`). It still cuts across ridges where a belt is a plate boundary;
 - depth-dependent freezing beyond the simple shift above.
+
+## 6b. Code review (independent agent, after the implementation)
+
+Fixed:
+- **High:** the interpolated squeeze tensor cancelled inside every triangle of a coherent belt,
+  while the gradient was still squeezed, so the shading and the snow disagreed. Replaced by
+  per-corner fields (§4).
+- snorm8 quantisation of the tensor leaked into a shift of up to 0.4 cycles, with a seam at
+  the threshold. Gone with the per-corner fields: the strike is a direction, and a corner
+  without a strike uses exactly the isotropic field.
+- **Low:** its snow pattern is the negated relief noise, so mixing in the relief height
+  cancelled it at mid ruggedness. Low no longer mixes the relief into the snow.
+- `lake_air` now also gives dry depressions below sea level the air of the land around (salt
+  flats, snow).
+- Tests added: `closed_lakes` (closed against spilling lakes) and the shader's bit unpacking;
+  the lake colour test is exact.
 
 ## 7. Grid limits and proxies (accepted)
 
@@ -169,4 +231,39 @@ Unit tests (`modes/realistic.rs`):
 
 ## 9. Screenshots ([water-ice/](water-ice/))
 
-SCREENSHOTS
+5 subdivisions; `desktop-*` with llvmpipe at 1280×800.
+
+- `desktop-lakes.png`: seed 2 at 130 Myr, Sun, Detail Medium. A large rift lake (49 m deep in
+  its middle) in the northern continent. It is dark like deep lakes on Earth, a little greener
+  than the ocean, with stage 2's sub-cell shorelines.
+- `desktop-lake-seasons.png`: the lake in the annual state, January and July (3× crops). It
+  stays open in January: the air around it is 0 to +5 °C. To the west, land snow in January.
+  At the top, a snow-capped range whose snow lies on the ridge crests.
+- `desktop-lake-ice-jan-jul.png`: seed 1 at 120 Myr, a polar continent (Camera light).
+  - In **January**, a lake at 74°N (7 m deep, January −33 °C) is frozen under snow and the
+    ring of snow is closed.
+  - In **July** (+10.6 °C) the lake is open (the dark patch in the right half of the ring),
+    and the sea ice to the left breaks into floes.
+  - The cold desert in the centre gets no snow (too dry). The grey blocks in the January
+    snow are snow-covered forest, whose colour changes per cell. Both come from stage 1
+    (unchanged, the same in the stage 3 build).
+- `desktop-snow-sea-ice-jan-jul.png`: seed 0 at 300 Myr, looking down on the north pole
+  (Camera light). In **January** the pack is closed, with a marginal zone of floes, and the
+  land is under snow. In **July** a loose summer pack remains (the annual cover split
+  winter/summer, §3), and the snow is gone.
+- `desktop-sea-ice-edge.png`: the January ice edge (3×). The floes come from a world-frame
+  pattern one octave finer than the cells, so the edge stays put between frames while the
+  plates move.
+- `desktop-north-january-sun.png`: the same view with the Sun in January: the Arctic in polar
+  night.
+- `desktop-orogen-before-after.png`: seed 2 at 130 Myr, Detail High, Camera light, 2.3×
+  crops of the south-western belt.
+  - Before (stage 3, left): mottled relief.
+  - After (right): the relief is streaked along the range (NNE–SSW), and the ice cap is
+    smoother (ice sheets bury 60% of the bump).
+
+  At this camera distance a ridge is a few pixels wide, so the effect is modest.
+- `web-desktop.png`, `web-phone.png`, `web-phone-legend.png`: the web version (chromium,
+  SwiftShader WebGL2) at 1280×800 and at phone width (390×844), seed 2 at 130 Myr. On the
+  phone the panels start collapsed. With the legend open, the four new swatches (sea ice,
+  lake, saline lake, salt flat) wrap into the existing rows.

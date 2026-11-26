@@ -42,7 +42,11 @@ starts.
    centres (coasts, snow and tree lines, colour variation, bump relief), octaves limited by the
    pixel footprint (on-the-fly LOD), Detail option Low/Medium/High. Topographic stays the
    start-up mode (Sebastian on #157).
-5. Then stage 3 onwards of §10 (with stage 0's plate frames), adapted to the decisions: no
+5. **Stage 3, atmosphere** ([atmosphere.md](atmosphere.md)) and **stage 4, water and ice**
+   ([water-ice.md](water-ice.md)): lakes by depth and salinity, salt flats, lake and sea
+   ice of the season, snow on the relief, ridges along mountain belts; no rivers; no frame
+   change.
+6. Then stage 5 onwards of §10 (with stage 0's plate frames), adapted to the decisions: no
    relief exaggeration in the realistic mode, LOD for the detail, no rivers, Season option,
    clouds later, stars only if they make sense.
 
