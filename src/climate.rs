@@ -1183,6 +1183,43 @@ fn saturation_column(t: f64, lapse_rate: f64) -> (f64, f64) {
     (density * scale_height, scale_height)
 }
 
+/// The column relative humidity `r = W / W_sat` at which the rain law of `params` gives the
+/// precipitation `precipitation` (m/yr), for a column of the free-troposphere temperature
+/// `column_temperature` (°C, the zonal mean of the sea-level temperature, as the water cycle
+/// uses it) above a surface `elevation` m high: the inverse of [`RainLaw::rate`] with
+/// `W = r W_sat`. The rate grows monotonically with `r`, so Newton's method from the reference
+/// humidity converges in a few steps. The realistic view's clouds (#92) use it. NaN inputs give
+/// NaN.
+pub fn column_relative_humidity(
+    precipitation: f64,
+    column_temperature: f64,
+    elevation: f64,
+    params: &ClimateParams,
+) -> f64 {
+    if !(precipitation.is_finite() && column_temperature.is_finite() && elevation.is_finite()) {
+        return f64::NAN;
+    }
+    let law = RainLaw::new(params);
+    let (column, scale_height) = saturation_column(column_temperature, params.lapse_rate);
+    let saturation = column * math::exp(-elevation.max(0.0) / scale_height);
+    // kg/m²/s; at least a trace, so that the logarithm below stays finite.
+    let target = precipitation.max(1e-4) * WATER_DENSITY / SECONDS_PER_YEAR;
+    // Solve ln P(r) = ln target: ln P is concave in r and grows with it, so Newton's method on
+    // the logarithm converges monotonically from the reference humidity.
+    let mut humidity = law.reference;
+    for _ in 0..12 {
+        let (rate, derivative) = law.rate(humidity * saturation, saturation);
+        // d ln P / dr = (dP/dW · W_sat) / P.
+        let slope = derivative * saturation / rate.max(1e-30);
+        let step = (math::ln(target) - math::ln(rate.max(1e-30))) / slope.max(1e-9);
+        humidity = (humidity + step).clamp(1e-3, 2.0);
+        if step.abs() < 1e-6 {
+            break;
+        }
+    }
+    humidity
+}
+
 /// Zonal-mean low-level wind (eastward, poleward) in m/s at a latitude (degrees, positive) of the
 /// circulation, i.e. measured from the ITCZ. Representative of Earth's moisture-carrying lower
 /// troposphere: trade winds converging on the ITCZ (Hadley cell), westerlies with a weak
@@ -1353,6 +1390,38 @@ mod tests {
         assert!(humid > 1.5 && humid < 1.6, "{humid}");
         let arid = budyko_runoff(0.1, 2.0, 2.6);
         assert!(arid < 0.001, "{arid}");
+    }
+
+    #[test]
+    fn column_relative_humidity_inverts_the_rain_law() {
+        // Forward: the precipitation of a column at humidity r (as the budget computes it, with
+        // the saturation column over high ground), then back.
+        let params = ClimateParams::default();
+        let law = RainLaw::new(&params);
+        for &(t, elevation) in &[(27.0, 0.0), (10.0, 0.0), (-20.0, 0.0), (5.0, 3000.0)] {
+            let (column, scale_height) = saturation_column(t, params.lapse_rate);
+            let saturation = column * math::exp(-elevation / scale_height);
+            for &r in &[0.4, 0.6, 0.7, 0.8, 0.95, 1.2] {
+                let (rate, _) = law.rate(r * saturation, saturation);
+                let precipitation = rate * SECONDS_PER_YEAR / WATER_DENSITY;
+                let back = column_relative_humidity(precipitation, t, elevation, &params);
+                assert!(
+                    (back - r).abs() < 1e-4,
+                    "{t} °C, {elevation} m: {r} -> {back}"
+                );
+            }
+        }
+        // More rain at the same saturation means a more humid column; no rain a dry one.
+        let wet = column_relative_humidity(2.0, 25.0, 0.0, &params);
+        let dry = column_relative_humidity(0.1, 25.0, 0.0, &params);
+        assert!(wet > dry);
+        assert!(column_relative_humidity(0.0, 25.0, 0.0, &params) < dry);
+        // The same rain over high ground (a smaller saturated column) is more humid.
+        assert!(
+            column_relative_humidity(0.5, 10.0, 2000.0, &params)
+                > column_relative_humidity(0.5, 10.0, 0.0, &params)
+        );
+        assert!(column_relative_humidity(f64::NAN, 25.0, 0.0, &params).is_nan());
     }
 
     #[test]

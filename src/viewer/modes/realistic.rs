@@ -39,6 +39,8 @@ pub const SEASON: usize = 1;
 pub const DETAIL: usize = 2;
 /// Index of the atmosphere switch.
 pub const ATMOSPHERE: usize = 3;
+/// Index of the clouds switch.
+pub const CLOUDS: usize = 4;
 
 const OPTIONS: &[ModeOption] = &[
     ModeOption {
@@ -68,6 +70,14 @@ const OPTIONS: &[ModeOption] = &[
                 of light around the planet when the sun is behind it",
         kind: OptionKind::Switch { default: true },
     },
+    ModeOption {
+        label: "Clouds",
+        hover: "Clouds derived from the simulated climate (the simulation has no clouds): \
+                fronts and polar stratus where the air is humid, towering storms where it is \
+                warm and wet (the tropical rain belt), stratocumulus over cold subtropical \
+                seas; with the season. A decoration: their pattern is noise",
+        kind: OptionKind::Switch { default: false },
+    },
 ];
 
 /// The detail level of the realistic mode.
@@ -96,6 +106,16 @@ impl Quality {
             Quality::Low => (2.0, 0.0, false),
             Quality::Medium => (4.0, 0.2, false),
             Quality::High => (6.0, 0.2, true),
+        }
+    }
+
+    /// The clouds: the most octaves after the pressure field, whether the cloud tops have
+    /// relief, and whether the clouds cast shadows.
+    fn cloud_settings(self) -> (f32, bool, bool) {
+        match self {
+            Quality::Low => (2.0, false, false),
+            Quality::Medium => (4.0, true, false),
+            Quality::High => (6.0, true, true),
         }
     }
 }
@@ -153,7 +173,7 @@ impl RenderMode for Realistic {
         OPTIONS
     }
 
-    fn legend(&self, _options: &OptionValues, data: Option<&ModeData>) -> Legend {
+    fn legend(&self, options: &OptionValues, data: Option<&ModeData>) -> Legend {
         let abiotic = data.is_some_and(|data| data.abiotic);
         let swatch = |albedo: [f32; 3], label: &'static str| {
             Swatch::fill(albedo.map(|c| (srgb(c) * 255.0).round() as u8), label)
@@ -169,6 +189,10 @@ impl RenderMode for Realistic {
             swatch(SALT_FLAT, "Salt flat"),
             swatch(ROCK, "Rock"),
         ];
+        let clouds = options.is_on(CLOUDS);
+        if clouds {
+            swatches.push(swatch([0.75; 3], "Cloud"));
+        }
         if !abiotic {
             swatches.extend([
                 swatch(STEPPE, "Steppe"),
@@ -177,16 +201,25 @@ impl RenderMode for Realistic {
                 swatch(TUNDRA, "Tundra"),
             ]);
         }
-        Legend {
-            description: "The planet in space, lit by the simulation's sun: surface colours \
+        let mut description = String::from(
+            "The planet in space, lit by the simulation's sun: surface colours \
                           derived from the simulated climate (vegetation from rain and warmth, \
                           none without life), relief and atmosphere true to scale, sun glint on \
                           the water. Lakes darken with depth, closed lakes in dry climates are \
                           saline and dry basins have salt flats; the seasons bring snow, lake \
                           and sea ice; mountain relief runs along the ranges. \
                           The view adapts to the light like an eye: after the sun goes behind \
-                          the planet or out of view, more stars appear over a few seconds."
-                .into(),
+                          the planet or out of view, more stars appear over a few seconds.",
+        );
+        if clouds {
+            description.push_str(
+                " Clouds are a decoration derived from the climate (the simulation has none): \
+                 their amount and type follow the humidity, rain and warmth of the season; their \
+                 pattern is noise fixed in space.",
+            );
+        }
+        Legend {
+            description: description.into(),
             scale: None,
             swatches,
             arrows: Vec::new(),
@@ -557,6 +590,14 @@ pub fn detail_vertices(data: &ModeData, faces: &[[u32; 3]]) -> Vec<DetailVertex>
             water: color(layers.water, layers.relief),
         })
         .collect();
+    let clouds: Vec<[u8; 4]> = if data.options.is_on(CLOUDS) {
+        cloud_layers(data, season)
+            .iter()
+            .map(CloudLayer::encode)
+            .collect()
+    } else {
+        vec![[0; 4]; data.cells.len()]
+    };
     let plate = |cell: u32| data.cells[cell as usize].plate.min(u32::from(u16::MAX)) as u16;
     let mut vertices = Vec::with_capacity(faces.len() * 3);
     for &face in faces {
@@ -575,6 +616,7 @@ pub fn detail_vertices(data: &ModeData, faces: &[[u32; 3]]) -> Vec<DetailVertex>
                 coast: coasts[cell as usize],
                 plates: [plates[0], plates[1], plates[2], corner as u16],
                 ridges,
+                clouds: clouds[cell as usize],
             });
         }
     }
@@ -861,6 +903,289 @@ fn pack_corner(strike: [f32; 3], squeeze: f32, ocean: bool) -> u32 {
         | u32::from(ocean) << 31
 }
 
+/// The clouds of a cell, from its climate (see [`cloud_layer`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CloudLayer {
+    /// Share of the sky covered, 0 to 1.
+    pub cover: f32,
+    /// How convective the clouds are: small, crisp-edged elements (cumulus, 1) rather than
+    /// smooth sheets (0).
+    pub convective: f32,
+    /// Mean optical depth of the cloudy part.
+    pub depth: f32,
+    /// Height of the cloud tops in km (above sea level from [`cloud_layer`], above the ground
+    /// from [`cloud_layers`]).
+    pub top: f32,
+}
+
+impl CloudLayer {
+    pub const CLEAR: CloudLayer = CloudLayer {
+        cover: 0.0,
+        convective: 0.0,
+        depth: 0.0,
+        top: 0.0,
+    };
+
+    /// The mean of `layers`: the mean cover, and the convective share, optical depth and top
+    /// height weighted by the cover (clear for none).
+    fn mean(layers: &[CloudLayer]) -> CloudLayer {
+        let cover: f32 = layers.iter().map(|layer| layer.cover).sum();
+        if layers.is_empty() || cover <= 0.0 {
+            return CloudLayer::CLEAR;
+        }
+        let weighted = |pick: fn(&CloudLayer) -> f32| {
+            layers
+                .iter()
+                .map(|layer| layer.cover * pick(layer))
+                .sum::<f32>()
+                / cover
+        };
+        CloudLayer {
+            cover: cover / layers.len() as f32,
+            convective: weighted(|layer| layer.convective),
+            depth: weighted(|layer| layer.depth),
+            top: weighted(|layer| layer.top),
+        }
+    }
+
+    /// As the shader reads it (`DetailVertex::clouds`); `top` is above the ground there.
+    fn encode(&self) -> [u8; 4] {
+        [
+            unorm(self.cover),
+            unorm(self.convective),
+            unorm(self.depth / 64.0),
+            unorm(self.top / 16.0),
+        ]
+    }
+}
+
+/// Column relative humidity from which large-scale clouds form, and at which the sky is
+/// overcast (the smoothstep of [`cloud_layer`]).
+const CLOUD_HUMIDITY: (f32, f32) = (0.64, 0.9);
+/// Column temperatures (°C) over which deep convection sets in; the precipitation (m/yr) from
+/// which it forms, and the scale of its cover's growth with more.
+const CONVECTION_WARMTH: (f32, f32) = (18.0, 26.0);
+const CONVECTIVE_RAIN: (f32, f32) = (0.5, 1.2);
+/// Shallow (trade) cumulus: its cover, and the column temperatures (°C) over which it forms.
+const SHALLOW_CUMULUS: f32 = 0.25;
+const SHALLOW_WARMTH: (f32, f32) = (10.0, 20.0);
+/// Marine stratocumulus: the most cover of a deck, and the cold anomaly of the sea surface
+/// (K below the zonal mean of the ocean) and the excess of evaporation over precipitation
+/// (m/yr, subsidence) over which it forms.
+const STRATOCUMULUS: f32 = 0.8;
+const STRATOCUMULUS_COLD: (f32, f32) = (1.0, 5.0);
+const STRATOCUMULUS_DRY: (f32, f32) = (0.1, 0.6);
+
+/// The inputs of [`cloud_layer`] for a cell.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CloudClimate {
+    /// Column relative humidity (see [`crate::climate::column_relative_humidity`]).
+    pub humidity: f32,
+    /// Temperature of the free troposphere (°C): the zonal mean of the sea-level temperature.
+    pub column_temperature: f32,
+    /// Precipitation in m/yr.
+    pub precipitation: f32,
+    /// How moist the surface is for shallow cumulus: 1 over the ocean, from the moisture index
+    /// over land.
+    pub moist: f32,
+    /// The cover of a stratocumulus deck (see [`STRATOCUMULUS`]).
+    pub stratocumulus: f32,
+}
+
+/// The clouds of a cell from four regimes, combined with random overlap:
+///
+/// - **large-scale cloud** (fronts, polar stratus, monsoon decks) from the column relative
+///   humidity: smooth sheets, optical depth 6–20 and tops 4–8 km (thicker and higher in warmer
+///   columns, so that cold polar clouds are thin);
+/// - **deep convection** where the column is warm and it rains a lot: clusters of bright towers,
+///   optical depth 40, tops 12 km;
+/// - **shallow (trade) cumulus** in warm columns over moist surfaces: small, thin clouds,
+///   optical depth 5, tops 2 km;
+/// - **marine stratocumulus** over cold subtropical seas: cellular decks, optical depth 12,
+///   tops 1.5 km.
+///
+/// The type (the convective share of the shader: small, crisp-edged elements rather than
+/// sheets), the optical depth and the height of the tops are the regimes' mixed by their covers.
+pub fn cloud_layer(climate: &CloudClimate) -> CloudLayer {
+    let CloudClimate {
+        humidity,
+        column_temperature,
+        precipitation,
+        moist,
+        stratocumulus,
+    } = *climate;
+    if !(humidity.is_finite() && column_temperature.is_finite() && precipitation.is_finite()) {
+        return CloudLayer::CLEAR;
+    }
+    let large_scale = smoothstep(CLOUD_HUMIDITY.0, CLOUD_HUMIDITY.1, humidity);
+    let deep = smoothstep(CONVECTION_WARMTH.0, CONVECTION_WARMTH.1, column_temperature)
+        * (1.0 - (-(precipitation - CONVECTIVE_RAIN.0).max(0.0) / CONVECTIVE_RAIN.1).exp());
+    let shallow = SHALLOW_CUMULUS
+        * smoothstep(SHALLOW_WARMTH.0, SHALLOW_WARMTH.1, column_temperature)
+        * if moist.is_finite() {
+            moist.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    let stratocumulus = if stratocumulus.is_finite() {
+        stratocumulus.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let covers = [large_scale, deep, shallow, stratocumulus];
+    let cover = 1.0 - covers.iter().map(|c| 1.0 - c).product::<f32>();
+    let sum: f32 = covers.iter().sum();
+    if cover <= 0.0 || sum <= 0.0 {
+        return CloudLayer::CLEAR;
+    }
+    let warm = smoothstep(-20.0, 15.0, column_temperature);
+    let mixed = |values: [f32; 4]| (0..4).map(|i| covers[i] * values[i]).sum::<f32>() / sum;
+    CloudLayer {
+        cover,
+        convective: mixed([0.0, 0.5, 1.0, 0.7]),
+        depth: mixed([6.0 + 14.0 * warm, 40.0, 5.0, 12.0]),
+        top: mixed([4.0 + 4.0 * warm, 12.0, 2.0, 1.5]),
+    }
+}
+
+/// The clouds of every cell in a season (all clear where the climate is unknown).
+///
+/// The column temperature is the zonal mean of the sea-level temperature, as the water cycle
+/// uses it for the saturation of the column; the cold anomaly of the sea surface is against the
+/// zonal mean of the ocean. Months the water cycle did not solve fall back to the year.
+pub fn cloud_layers(data: &ModeData, season: Period) -> Vec<CloudLayer> {
+    let layers = match season {
+        // The model's annual precipitation is the mean of its months, each with its own
+        // saturation: the mean of the clouds of January and July, rather than the clouds of the
+        // mean.
+        Period::Annual => {
+            let january = month_cloud_layers(data, Period::January);
+            let july = month_cloud_layers(data, Period::July);
+            january
+                .iter()
+                .zip(&july)
+                .map(|(a, b)| CloudLayer::mean(&[*a, *b]))
+                .collect()
+        }
+        _ => month_cloud_layers(data, season),
+    };
+    // Clouds are smoother than the cells: one pass of averaging over the neighbours, so that
+    // their edges do not trace the triangles where the cover jumps between cells.
+    (0..layers.len())
+        .map(|cell| {
+            let neighbours = data.mesh.neighbors(cell as u32);
+            let around = CloudLayer::mean(
+                &neighbours
+                    .iter()
+                    .map(|&n| layers[n as usize])
+                    .collect::<Vec<_>>(),
+            );
+            let mut layer = CloudLayer::mean(&[layers[cell], around]);
+            // The tops at least 1 km above the ground (the heights are above sea level).
+            if layer.cover > 0.0 {
+                let ground = data.cells[cell].elevation.max(0.0) / 1000.0;
+                layer.top = (layer.top - ground).max(1.0);
+            }
+            layer
+        })
+        .collect()
+}
+
+/// The clouds of every cell in a month (or the year from its annual means).
+fn month_cloud_layers(data: &ModeData, season: Period) -> Vec<CloudLayer> {
+    let params = crate::climate::ClimateParams::default();
+    let cells = data.cells;
+    let latitudes: Vec<f64> = (0..cells.len())
+        .map(|cell| data.mesh.vertex(cell as u32).z.clamp(-1.0, 1.0).asin())
+        .collect();
+    let temperature = |cell: &CellInfo| {
+        let t = season.temperature(cell);
+        if t.is_finite() { t } else { cell.temperature }
+    };
+    let pick = |value: f32, fallback: f32| if value.is_finite() { value } else { fallback };
+    let column = zonal_mean(&latitudes, |cell| {
+        let info = &cells[cell];
+        Some(f64::from(temperature(info)) + params.lapse_rate * f64::from(info.elevation.max(0.0)))
+    });
+    let ocean = zonal_mean(&latitudes, |cell| {
+        let info = &cells[cell];
+        info.is_sea().then(|| f64::from(temperature(info)))
+    });
+    cells
+        .iter()
+        .enumerate()
+        .map(|(cell, info)| {
+            let precipitation = pick(season.precipitation(info), info.precipitation);
+            let humidity = crate::climate::column_relative_humidity(
+                f64::from(precipitation),
+                column[cell],
+                f64::from(info.elevation),
+                &params,
+            ) as f32;
+            let stratocumulus = if info.is_sea() {
+                let anomaly = temperature(info) - ocean[cell] as f32;
+                let evaporation = pick(season.evaporation(info), info.evaporation);
+                STRATOCUMULUS
+                    * smoothstep(STRATOCUMULUS_COLD.0, STRATOCUMULUS_COLD.1, -anomaly)
+                    * smoothstep(
+                        STRATOCUMULUS_DRY.0,
+                        STRATOCUMULUS_DRY.1,
+                        evaporation - precipitation,
+                    )
+            } else {
+                0.0
+            };
+            let moist = if info.is_water() {
+                1.0
+            } else {
+                smoothstep(0.3, 0.8, moisture_index(info))
+            };
+            cloud_layer(&CloudClimate {
+                humidity,
+                column_temperature: column[cell] as f32,
+                precipitation,
+                moist,
+                stratocumulus,
+            })
+        })
+        .collect()
+}
+
+/// The zonal mean of `value` (cells without one left out) at the latitude (radians) of every
+/// cell, in 1° bins smoothed over a few degrees like the water cycle's (`climate.rs`); NaN in
+/// latitudes without values.
+fn zonal_mean(latitudes: &[f64], value: impl Fn(usize) -> Option<f64>) -> Vec<f64> {
+    const BINS: usize = 180;
+    let bin = |latitude: f64| {
+        (((latitude.to_degrees() + 90.0) / 180.0 * BINS as f64) as usize).min(BINS - 1)
+    };
+    let mut sum = [0.0; BINS];
+    let mut count = [0.0; BINS];
+    for (cell, &latitude) in latitudes.iter().enumerate() {
+        if let Some(value) = value(cell).filter(|value| value.is_finite()) {
+            sum[bin(latitude)] += value;
+            count[bin(latitude)] += 1.0;
+        }
+    }
+    // Gaussian smoothing with a width of 3 bins (3°).
+    let smoothed: Vec<f64> = (0..BINS)
+        .map(|b| {
+            let (mut s, mut c) = (0.0, 0.0);
+            for other in b.saturating_sub(9)..(b + 10).min(BINS) {
+                let d = (other as f64 - b as f64) / 3.0;
+                let w = (-0.5 * d * d).exp();
+                s += w * sum[other];
+                c += w * count[other];
+            }
+            if c > 1e-9 { s / c } else { f64::NAN }
+        })
+        .collect();
+    latitudes
+        .iter()
+        .map(|&latitude| smoothed[bin(latitude)])
+        .collect()
+}
+
 /// The realistic mode's uniforms for the detail: the plates' orientations and the settings of
 /// the chosen quality.
 pub fn detail_uniforms(data: &ModeData) -> DetailUniforms {
@@ -878,8 +1203,23 @@ pub fn detail_uniforms(data: &ModeData) -> DetailUniforms {
             bump,
             f32::from(u8::from(ridged)),
         ],
+        clouds: if data.options.is_on(CLOUDS) {
+            let (octaves, relief, shadows) = Quality::of(data.options).cloud_settings();
+            [
+                octaves,
+                CLOUD_FREQUENCY,
+                f32::from(u8::from(relief)),
+                f32::from(u8::from(shadows)),
+            ]
+        } else {
+            [0.0; 4]
+        },
     }
 }
+
+/// Frequency of the clouds' first octave after the pressure field, in cycles per planet radius
+/// (a wavelength of ~1000 km; see `clouds.wgsl`).
+const CLOUD_FREQUENCY: f32 = 6.0;
 
 /// Roughness (GGX α) of a water surface under a wind of `speed` m/s: the root of the mean
 /// square slope of the waves, `0.003 + 0.00512 U` (Cox & Munk, 1954).
@@ -1519,6 +1859,323 @@ mod tests {
         let before = q.inverse() * p;
         let after = (r * q).inverse() * (r * p);
         assert!((before - after).length() < 1e-6);
+    }
+
+    /// Runs `check` on the mode data of a small planet (3 subdivisions) whose cells `edit` has
+    /// changed, with `options`.
+    fn with_planet(
+        edit: impl FnOnce(&mut [CellInfo], &crate::sphere::SphereMesh),
+        options: &OptionValues,
+        check: impl FnOnce(&ModeData),
+    ) {
+        use super::super::super::plate_colors::PlateColors;
+        use super::super::super::{Fields, plate_infos, surface_vertices};
+        use clap::Parser;
+        let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "3"]);
+        let planet = crate::build_planet(&cli).unwrap();
+        let mut cells = super::super::super::cell_infos(&planet);
+        let mesh = planet.tectonics().mesh();
+        edit(&mut cells, mesh);
+        let plates = plate_infos(&planet);
+        let vertices = surface_vertices(mesh, &cells, 1.0, 1e11);
+        let plate_colors = PlateColors::default();
+        let fields = Fields::default();
+        let data = ModeData {
+            mesh,
+            vertices: &vertices,
+            cells: &cells,
+            plates: &plates,
+            plate_colors: &plate_colors,
+            fields: &fields,
+            arrow_cells: &[],
+            arrow_spacing: 0.1,
+            options,
+            abiotic: false,
+        };
+        check(&data);
+    }
+
+    fn clouds_on() -> OptionValues {
+        let mut options = OptionValues::defaults(Realistic.options());
+        options.set(CLOUDS, 1);
+        options
+    }
+
+    #[test]
+    fn cloud_regimes() {
+        let climate = |humidity, column_temperature, precipitation, moist, stratocumulus| {
+            cloud_layer(&CloudClimate {
+                humidity,
+                column_temperature,
+                precipitation,
+                moist,
+                stratocumulus,
+            })
+        };
+        // A dry subtropical desert: almost clear.
+        let desert = climate(0.5, 24.0, 0.05, 0.0, 0.0);
+        assert!(desert.cover < 0.05, "{desert:?}");
+        // A wet storm track: overcast with sheets of cloud.
+        let storm_track = climate(0.85, 6.0, 1.0, 1.0, 0.0);
+        assert!(storm_track.cover > 0.8, "{storm_track:?}");
+        assert!(storm_track.convective < 0.15, "{storm_track:?}");
+        assert!(storm_track.top >= 4.0 && storm_track.top <= 8.0);
+        // The tropical rain belt: mostly convective, thick, high tops.
+        let itcz = climate(0.69, 27.0, 2.5, 1.0, 0.0);
+        assert!(itcz.cover > 0.7, "{itcz:?}");
+        assert!(
+            itcz.convective > 0.4 && itcz.depth > 25.0 && itcz.top > 9.0,
+            "{itcz:?}"
+        );
+        // The trades over the ocean: broken, thin, low cumulus.
+        let trades = climate(0.63, 24.0, 0.5, 1.0, 0.0);
+        assert!(trades.cover > 0.15 && trades.cover < 0.5, "{trades:?}");
+        assert!(trades.convective > 0.7 && trades.depth < 12.0, "{trades:?}");
+        // A stratocumulus deck adds cover, low tops.
+        let deck = climate(0.55, 22.0, 0.1, 1.0, 0.8);
+        assert!(deck.cover > 0.8 && deck.top < 2.5, "{deck:?}");
+        // Cold polar cloud is thin.
+        let polar = climate(0.85, -25.0, 0.2, 1.0, 0.0);
+        assert!(polar.cover > 0.8 && polar.depth < 8.0, "{polar:?}");
+        // Unknown climate: no clouds.
+        assert_eq!(climate(f32::NAN, 10.0, 1.0, 1.0, 0.0), CloudLayer::CLEAR);
+        assert_eq!(climate(0.8, f32::NAN, 1.0, 1.0, 0.0), CloudLayer::CLEAR);
+        // Encoded for the shader within its ranges.
+        let [cover, convective, depth, top] = itcz.encode();
+        assert_eq!(cover, unorm(itcz.cover));
+        assert!(convective > 100 && depth > 0 && top > 128);
+    }
+
+    #[test]
+    fn clouds_follow_the_rain_belt_through_the_year() {
+        // A synthetic zonal climate: an ocean planet whose rain belt lies at 10°S in January and
+        // 10°N in July, dry subtropics, wet storm tracks at 50°.
+        let belt = |latitude: f32, centre: f32| {
+            0.3 + 2.5 * (-((latitude - centre) / 8.0).powi(2)).exp()
+                + 0.9 * (-((latitude.abs() - 50.0) / 10.0).powi(2)).exp()
+        };
+        let edit = |cells: &mut [CellInfo], mesh: &crate::sphere::SphereMesh| {
+            for (index, cell) in cells.iter_mut().enumerate() {
+                let latitude = mesh.vertex(index as u32).z.asin().to_degrees() as f32;
+                let temperature = 28.0 - 0.006 * latitude * latitude;
+                *cell = CellInfo {
+                    elevation: -4000.0,
+                    temperature,
+                    temperature_january: temperature,
+                    temperature_july: temperature,
+                    precipitation: 0.5 * (belt(latitude, -10.0) + belt(latitude, 10.0)),
+                    precipitation_january: belt(latitude, -10.0),
+                    precipitation_july: belt(latitude, 10.0),
+                    evaporation: 1.0,
+                    evaporation_january: 1.0,
+                    evaporation_july: 1.0,
+                    ..*cell
+                };
+            }
+        };
+        with_planet(edit, &clouds_on(), |data| {
+            let band = |layers: &[CloudLayer], from: f64, to: f64| {
+                let (mut sum, mut count) = (0.0, 0.0);
+                for (index, layer) in layers.iter().enumerate() {
+                    let latitude = data.mesh.vertex(index as u32).z.asin().to_degrees();
+                    if latitude >= from && latitude < to {
+                        sum += layer.cover;
+                        count += 1.0;
+                    }
+                }
+                sum / count
+            };
+            let january = cloud_layers(data, Period::January);
+            let july = cloud_layers(data, Period::July);
+            let year = cloud_layers(data, Period::Annual);
+            assert!(band(&january, -15.0, -5.0) > band(&january, 5.0, 15.0) + 0.1);
+            assert!(band(&july, 5.0, 15.0) > band(&july, -15.0, -5.0) + 0.1);
+            // The subtropics are clearer than the rain belt and the storm tracks.
+            assert!(band(&january, 20.0, 35.0) < band(&january, -15.0, -5.0) - 0.2);
+            assert!(band(&january, 20.0, 35.0) < band(&january, 40.0, 60.0));
+            // The year is the mean of January and July (before the smoothing, which is linear).
+            let mean = 0.5 * (band(&january, -15.0, 15.0) + band(&july, -15.0, 15.0));
+            assert!((band(&year, -15.0, 15.0) - mean).abs() < 0.03);
+        });
+    }
+
+    #[test]
+    fn clouds_only_with_the_switch() {
+        let faces = |data: &ModeData| detail_vertices(data, data.mesh.faces());
+        let options = OptionValues::defaults(Realistic.options());
+        assert!(!options.is_on(CLOUDS));
+        with_planet(
+            |_, _| {},
+            &options,
+            |data| {
+                assert!(faces(data).iter().all(|vertex| vertex.clouds == [0; 4]));
+                assert_eq!(detail_uniforms(data).clouds, [0.0; 4]);
+            },
+        );
+        with_planet(
+            |_, _| {},
+            &clouds_on(),
+            |data| {
+                let vertices = faces(data);
+                let cloudy = vertices
+                    .iter()
+                    .filter(|vertex| vertex.clouds[0] > 0)
+                    .count();
+                assert!(
+                    cloudy > vertices.len() / 2,
+                    "{cloudy} of {}",
+                    vertices.len()
+                );
+                // The tops lie at least 1 km above the ground.
+                for (triangle, face) in vertices.chunks(3).zip(data.mesh.faces()) {
+                    for (vertex, &cell) in triangle.iter().zip(face) {
+                        if vertex.clouds[0] > 0 {
+                            assert!(f32::from(vertex.clouds[3]) / 255.0 * 16.0 >= 0.99);
+                            let _ = cell;
+                        }
+                    }
+                }
+                let uniforms = detail_uniforms(data);
+                assert_eq!(uniforms.clouds[0], 4.0);
+                assert_eq!(uniforms.clouds[1], CLOUD_FREQUENCY);
+            },
+        );
+        // Without a climate (NaN fields): no clouds.
+        let unknown = |cells: &mut [CellInfo], _: &crate::sphere::SphereMesh| {
+            for cell in cells {
+                cell.precipitation = f32::NAN;
+                cell.precipitation_january = f32::NAN;
+                cell.precipitation_july = f32::NAN;
+                cell.temperature = f32::NAN;
+                cell.temperature_january = f32::NAN;
+                cell.temperature_july = f32::NAN;
+            }
+        };
+        with_planet(unknown, &clouds_on(), |data| {
+            for season in [Period::Annual, Period::January, Period::July] {
+                assert!(
+                    cloud_layers(data, season)
+                        .iter()
+                        .all(|layer| *layer == CloudLayer::CLEAR)
+                );
+            }
+        });
+    }
+
+    /// The value of `realistic.wgsl`'s gradient noise (a port for the tests).
+    fn shader_noise(x: [f32; 3]) -> f32 {
+        let gradient = |p: [i32; 3]| {
+            let mut v = p.map(|c| {
+                (c as u32)
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223)
+            });
+            let mix = |v: &mut [u32; 3]| {
+                v[0] = v[0].wrapping_add(v[1].wrapping_mul(v[2]));
+                v[1] = v[1].wrapping_add(v[2].wrapping_mul(v[0]));
+                v[2] = v[2].wrapping_add(v[0].wrapping_mul(v[1]));
+            };
+            mix(&mut v);
+            for c in &mut v {
+                *c ^= *c >> 16;
+            }
+            mix(&mut v);
+            v.map(|c| (c >> 8) as f32 / 8_388_608.0 - 1.0)
+        };
+        let i = x.map(f32::floor);
+        let f = [0, 1, 2].map(|k| x[k] - i[k]);
+        let u = f.map(|f| f * f * f * (f * (f * 6.0 - 15.0) + 10.0));
+        let mut value = 0.0;
+        for corner in 0..8 {
+            let o = [corner & 1, (corner >> 1) & 1, (corner >> 2) & 1];
+            let g = gradient([0, 1, 2].map(|k| i[k] as i32 + o[k]));
+            let d: f32 = (0..3).map(|k| g[k] * (f[k] - o[k] as f32)).sum();
+            let weight: f32 = (0..3)
+                .map(|k| if o[k] == 1 { u[k] } else { 1.0 - u[k] })
+                .product();
+            value += weight * d;
+        }
+        value
+    }
+
+    /// A constant of `clouds.wgsl`.
+    fn cloud_constant(name: &str) -> f32 {
+        let source = include_str!("../clouds.wgsl");
+        let start = format!("const {name}: f32 = ");
+        let line = source
+            .lines()
+            .find_map(|line| line.strip_prefix(&start))
+            .unwrap_or_else(|| panic!("{name}"));
+        line.trim_end_matches(';').parse().unwrap()
+    }
+
+    #[test]
+    fn the_cloud_cover_does_not_depend_on_the_level_of_detail() {
+        // The share of points where `cloud_field` (without its swirl) exceeds the threshold of a
+        // cover is the cover, for any number of octaves and both kinds of spectrum: the sum is
+        // normalised by the amplitudes it summed, and the threshold is the normal quantile.
+        let deviation = cloud_constant("NOISE_DEVIATION");
+        let pressure_weight = cloud_constant("CLOUD_PRESSURE_WEIGHT");
+        let pressure_frequency = cloud_constant("CLOUD_PRESSURE_FREQUENCY");
+        let zonal = cloud_constant("CLOUD_ZONAL");
+        assert!(include_str!("../clouds.wgsl").contains("return 0.5513 * log(p / (1.0 - p));"));
+        let quantile = |p: f32| 0.5513 * (p / (1.0 - p)).ln();
+        let points: Vec<[f32; 3]> = (0..20_000)
+            .map(|i| {
+                // A Fibonacci lattice on the sphere.
+                let z = 1.0 - (2.0 * i as f32 + 1.0) / 20_000.0;
+                let angle = i as f32 * 2.399_963;
+                let r = (1.0 - z * z).sqrt();
+                [r * angle.cos(), r * angle.sin(), z * zonal]
+            })
+            .collect();
+        for octaves in [1, 2, 4, 6] {
+            for (persistence, synoptic) in [(0.5, 1.0), (1.2, 0.1)] {
+                let field = |q: &[f32; 3]| {
+                    let w = pressure_weight * synoptic;
+                    let pressure = shader_noise([
+                        q[0] * pressure_frequency + 3.7,
+                        q[1] * pressure_frequency - 1.3,
+                        q[2] * pressure_frequency + 8.9,
+                    ]);
+                    let mut sum = -w * pressure / deviation;
+                    let mut variance = w * w;
+                    let (mut amplitude, mut frequency) = (1.0, CLOUD_FREQUENCY);
+                    for octave in 0..octaves {
+                        let offset = octave as f32 * 5.17 - 11.0;
+                        sum +=
+                            amplitude * shader_noise(q.map(|c| c * frequency + offset)) / deviation;
+                        variance += amplitude * amplitude;
+                        amplitude *= persistence;
+                        frequency *= 2.0;
+                    }
+                    sum / variance.sqrt()
+                };
+                let values: Vec<f32> = points.iter().map(field).collect();
+                for cover in [0.1, 0.3, 0.5, 0.7, 0.9] {
+                    let threshold = -quantile(cover);
+                    let share = values.iter().filter(|&&v| v > threshold).count() as f32
+                        / values.len() as f32;
+                    // (Within 0.06: the pressure field has only a few dozen lows and highs
+                    // on the sphere, whose mean is not quite zero.)
+                    assert!(
+                        (share - cover).abs() < 0.06,
+                        "{octaves} octaves, persistence {persistence}: {cover} -> {share}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clouds_stay_below_the_knee() {
+        // No cloud, nor a cloud with the ground beneath it, is brighter than the shoulder's knee
+        // (the brightest surface): the exposure's cap holds with the clouds.
+        let knee = crate::viewer::atmosphere::SHOULDER_KNEE as f32;
+        assert_eq!(cloud_constant("CLOUD_KNEE"), knee);
+        assert!(cloud_constant("CLOUD_MAX_REFLECTANCE") < knee);
+        let shader = include_str!("../realistic.wgsl");
+        assert!(shader.contains("seen = min(seen, max(CLOUD_KNEE - cloud_reflection, 0.0)"));
     }
 
     #[test]

@@ -82,6 +82,10 @@ pub struct DetailVertex {
     /// in the world frame), the squeeze of the relief noise along it (bits 24–30) and whether
     /// the cell is ocean (bit 31; its ice is anchored to the world, not to the plate).
     pub ridges: [u32; 3],
+    /// The clouds of the cell: cover, convective share, mean optical depth of the cloudy part
+    /// / 64 and cloud-top height / 16 km (all zero with the clouds off; see
+    /// `modes::realistic::cloud_layer`).
+    pub clouds: [u8; 4],
 }
 
 /// The realistic mode's second uniform buffer: the orientation of every plate (a quaternion
@@ -94,6 +98,10 @@ pub struct DetailUniforms {
     /// spacing), the most octaves (`y`), the strength of the bump relief (`z`, 0 for none) and
     /// whether mountains use ridged noise (`w`, 0 or 1).
     pub detail: [f32; 4],
+    /// The clouds: the most octaves of their pattern after the first (`x`, 0 without clouds),
+    /// the frequency of that octave in cycles per planet radius (`y`), whether the cloud tops have
+    /// relief (`z`, 0 or 1) and whether the clouds cast shadows (`w`).
+    pub clouds: [f32; 4],
 }
 
 /// The realistic mode's de-indexed mesh and its uniforms; uploaded when its id changes.
@@ -358,7 +366,7 @@ fn detail_pipeline(
                 attributes: &wgpu::vertex_attr_array![
                     0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4, 3 => Unorm8x4,
                     4 => Unorm8x4, 5 => Unorm8x4, 6 => Float32, 7 => Uint16x4,
-                    8 => Uint32x3
+                    8 => Uint32x3, 9 => Unorm8x4
                 ],
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -445,7 +453,8 @@ fn overlay_pipeline(
 /// (`atmosphere.wgsl`, see [`super::atmosphere`]) they share (WGSL has no includes).
 const REALISTIC_SHADER: &str = concat!(
     include_str!("atmosphere.wgsl"),
-    include_str!("realistic.wgsl")
+    include_str!("realistic.wgsl"),
+    include_str!("clouds.wgsl")
 );
 const SKY_SHADER: &str = concat!(include_str!("atmosphere.wgsl"), include_str!("sky.wgsl"));
 
@@ -810,6 +819,18 @@ mod tests {
                 .and_then(|mut writer| writer.write().map(|_| ()))
                 .unwrap_or_else(|error| panic!("{name} {}: {error:?}", entry_point.name));
                 assert!(output.contains("#version 300 es"), "{name}");
+                // WebGL2 guarantees 15 vectors between the stages
+                // (MAX_VARYING_VECTORS, one location each here).
+                if entry_point.stage == naga::ShaderStage::Vertex {
+                    let varyings = output
+                        .lines()
+                        .filter(|line| line.contains(" out ") && line.contains("_vs2fs_location"))
+                        .count();
+                    assert!(varyings <= 15, "{name}: {varyings} varyings");
+                    if name == "realistic.wgsl" {
+                        assert_eq!(varyings, 10, "{output}");
+                    }
+                }
             }
         }
     }
