@@ -78,6 +78,12 @@ pub struct DetailVertex {
     pub coast: f32,
     /// The plates of the triangle's three corners, and the corner of this vertex (0 to 2).
     pub plates: [u16; 4],
+    /// How the bump relief lines up along the strike of a mountain belt: the squeeze of the
+    /// noise along the strike `σ ŝŝᵀ` (world frame, snorm8): xx, yy, zz and 1 for an ocean cell
+    /// (whose ice is anchored to the world, not to the plate) or 0 (`strike`); xy, yz, zx and 0
+    /// (`strike_shear`).
+    pub strike: [i8; 4],
+    pub strike_shear: [i8; 4],
 }
 
 /// The realistic mode's second uniform buffer: the orientation of every plate (a quaternion
@@ -353,7 +359,8 @@ fn detail_pipeline(
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![
                     0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4, 3 => Unorm8x4,
-                    4 => Unorm8x4, 5 => Unorm8x4, 6 => Float32, 7 => Uint16x4
+                    4 => Unorm8x4, 5 => Unorm8x4, 6 => Float32, 7 => Uint16x4,
+                    8 => Snorm8x4, 9 => Snorm8x4
                 ],
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
