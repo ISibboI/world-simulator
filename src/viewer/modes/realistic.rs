@@ -961,7 +961,7 @@ impl CloudLayer {
 
 /// Column relative humidity from which large-scale clouds form, and at which the sky is
 /// overcast (the smoothstep of [`cloud_layer`]).
-const CLOUD_HUMIDITY: (f32, f32) = (0.64, 0.9);
+const CLOUD_HUMIDITY: (f32, f32) = (0.62, 0.86);
 /// Column temperatures (°C) over which deep convection sets in; the precipitation (m/yr) from
 /// which it forms, and the scale of its cover's growth with more.
 const CONVECTION_WARMTH: (f32, f32) = (18.0, 26.0);
