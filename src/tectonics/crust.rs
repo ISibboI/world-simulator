@@ -95,10 +95,50 @@ pub struct Crust {
     /// [`Crust::birth`]. Where samples are mixed it takes the latest of the contributors (like
     /// `birth` in healed gaps); a sample receiving crust from a merging plate keeps its own.
     pub reheated: f64,
-    /// Diagnostic tracer: the mass fraction of the sediment that belongs to the tracked cohort
-    /// of continental cover (see `Simulation::start_cover_cohort`). Mixed by mass where
-    /// sediment is added; removal takes it in proportion (a well-mixed column).
-    pub cohort: f64,
+    /// Diagnostic tracers of the tracked cohort of continental cover (see
+    /// `Simulation::start_cover_cohort` and [`Cohort`]). Nothing in the simulation reads them.
+    pub cohort: Cohort,
+}
+
+/// Diagnostic tracers of the cover cohort (#34, #35): the mass fraction of a sample's sediment
+/// that belongs to the tracked cohort of continental cover, under two assumptions about the order
+/// in which a column loses its sediment. Both mix by mass where sediment is added or moved
+/// sideways (a lateral share of a column is a vertical slice of it, so both keep their fraction),
+/// and new deposits are new rock, which carries neither. They differ only where sediment is
+/// removed from a column (erosion, subduction erosion, burial metamorphism, scraping at
+/// trenches):
+/// - [`Cohort::mixed`]: removal takes the cohort in proportion (a well-mixed column). The cohort
+///   goes faster than in any layered column, so its preservation half-life is a **lower
+///   bound**.
+/// - [`Cohort::lifo`]: removal takes everything deposited after the cohort first (youngest
+///   first, last in first out), and the cohort only once the column is stripped below it. The
+///   cohort goes as late as the removed masses allow, so its half-life is an **upper bound**.
+///   Burial metamorphism, which physically converts the bottom of a column, is youngest first
+///   here as well, to keep it a bound.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Cohort {
+    pub mixed: f64,
+    pub lifo: f64,
+}
+
+impl Cohort {
+    /// Sediment outside the cohort (all new deposits).
+    pub const NONE: Self = Self {
+        mixed: 0.0,
+        lifo: 0.0,
+    };
+
+    /// Sediment that all belongs to the cohort.
+    pub const ALL: Self = Self {
+        mixed: 1.0,
+        lifo: 1.0,
+    };
+
+    /// Both fractions times `sediment`: the cohort's rock-equivalent thickness in a column of
+    /// `sediment` metres, as `[mixed, lifo]`.
+    pub fn amounts(self, sediment: f64) -> [f64; 2] {
+        [sediment * self.mixed, sediment * self.lifo]
+    }
 }
 
 /// [`Crust::orogeny`] of crust that never went through an orogeny in the simulation.
@@ -341,14 +381,34 @@ impl Crust {
         };
     }
 
-    /// Adds `sediment` (rock-equivalent m) carrying the cohort fraction `cohort` (see
+    /// Adds `sediment` (rock-equivalent m) carrying the cohort fractions `cohort` (see
     /// [`Crust::cohort`]).
-    pub(crate) fn add_sediment(&mut self, sediment: f64, cohort: f64) {
+    pub(crate) fn add_sediment(&mut self, sediment: f64, cohort: Cohort) {
         let total = self.sediment + sediment;
         if total > 0.0 {
-            self.cohort = (self.sediment * self.cohort + sediment * cohort) / total;
+            self.cohort = Cohort {
+                mixed: (self.sediment * self.cohort.mixed + sediment * cohort.mixed) / total,
+                lifo: (self.sediment * self.cohort.lifo + sediment * cohort.lifo) / total,
+            };
         }
         self.sediment = total;
+    }
+
+    /// Lowers the sediment to `sediment` (rock-equivalent m, not more than now) by removing it
+    /// from the column, and updates the cohort tracers (see [`Cohort`]): the well-mixed one keeps
+    /// its fraction, the youngest-first one loses the cohort only below the removed part.
+    /// Returns the cohort amounts removed (rock-equivalent m, `[mixed, lifo]`).
+    pub(crate) fn remove_sediment_to(&mut self, sediment: f64) -> [f64; 2] {
+        let before = self.cohort.amounts(self.sediment);
+        let tagged = before[1].min(sediment.max(0.0));
+        self.sediment = sediment;
+        self.cohort.lifo = if sediment > 0.0 {
+            (tagged / sediment).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let after = self.cohort.amounts(self.sediment.max(0.0));
+        [before[0] - after[0], before[1] - after[1]]
     }
 
     /// Areal mass (kg/m²) of the felsic part of the crystalline crust.
@@ -461,7 +521,7 @@ pub(super) fn new_oceanic_crust(time: f64) -> Crust {
         orogeny: NO_OROGENY,
         orogenic: 0.0,
         reheated: NO_REHEATING,
-        cohort: 0.0,
+        cohort: Cohort::NONE,
     }
 }
 
@@ -490,7 +550,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         // A share of an old belt mixed in: the latest orogeny, a part of the lithosphere.
         crust.mix_orogeny(-500.0, 0.2);
@@ -553,7 +613,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         assert!(!margin.resists_subduction());
         margin.add_crust(8000.0, METASEDIMENT_DENSITY, (1.0, 1.0), 75_000.0);
@@ -581,7 +641,7 @@ mod tests {
             orogeny: 200.0,
             orogenic: 1.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         let mut mixed = belt;
         mixed.mix_orogeny(400.0, 0.3);
@@ -609,7 +669,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         assert!(!margin.resists_subduction() && !margin.is_continental_origin());
         let wedged = Crust {

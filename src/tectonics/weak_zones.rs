@@ -583,7 +583,7 @@ mod tests {
                         orogeny: if belt { -400.0 } else { NO_OROGENY },
                         orogenic: if belt { orogenic } else { 0.0 },
                         reheated: NO_REHEATING,
-                        cohort: 0.0,
+                        cohort: Cohort::NONE,
                     };
                 }
             }
@@ -661,7 +661,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         let rifted = Crust {
             thickness: 20e3,
@@ -693,7 +693,7 @@ mod tests {
             orogeny: if orogenic > 0.0 { -400.0 } else { NO_OROGENY },
             orogenic,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         let strength = |orogenic: f64| lithosphere_strength(&craton(orogenic), 0.0);
         assert_eq!(strength(0.0), 1.0);
@@ -779,7 +779,7 @@ mod tests {
             orogeny: -200.0,
             orogenic: math::exp(-1.0f64),
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         let healed = 1.0 - (1.0 - SUTURE_WEAKENING) * math::exp(-1.0f64);
         assert!((lithosphere_strength(&belt, 0.0) - healed).abs() < 1e-12);

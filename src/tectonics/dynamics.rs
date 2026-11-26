@@ -1072,7 +1072,7 @@ mod tests {
                             orogeny: NO_OROGENY,
                             orogenic: 0.0,
                             reheated: NO_REHEATING,
-                            cohort: 0.0,
+                            cohort: Cohort::NONE,
                         }
                     } else {
                         new_oceanic_crust(-100.0)
@@ -1618,7 +1618,7 @@ mod tests {
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
                     reheated: NO_REHEATING,
-                    cohort: 0.0,
+                    cohort: Cohort::NONE,
                 };
             }
         }
@@ -1748,7 +1748,7 @@ mod tests {
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
                 reheated: NO_REHEATING,
-                cohort: 0.0,
+                cohort: Cohort::NONE,
             };
         }
         simulation.split_plate(0, DVec3::Z).unwrap();

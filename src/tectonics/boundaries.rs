@@ -210,6 +210,7 @@ impl Simulation {
             matching_scratch,
             matching_statistics,
             trench_sediment,
+            cover_budget,
             ..
         } = self;
         let time = *time;
@@ -376,6 +377,12 @@ impl Simulation {
                     .entry(pair_key(winner.plate, contact.loser.plate))
                     .or_default() += 1;
                 ledger.record(Term::CollisionConsumed, -loser_crust.mass());
+                cover_budget.record_removal(
+                    CoverTerm::Collision,
+                    &loser_crust,
+                    0.0,
+                    loser_crust.sediment,
+                );
                 let thickness = loser_crust.thickness + sediment_mass / METASEDIMENT_DENSITY;
                 additions.push(CrustAddition {
                     cell: contact.cell,
@@ -390,7 +397,7 @@ impl Simulation {
                     metasediment: 0.0,
                     kind: AdditionKind::Collision,
                     sediment: 0.0,
-                    cohort: 0.0,
+                    cohort: Cohort::NONE,
                 });
             } else {
                 // Subduction: the lower plate's crust and most of its sediment sink into the
@@ -435,7 +442,7 @@ impl Simulation {
                     metasediment: 0.0,
                     kind: AdditionKind::Arc,
                     sediment: 0.0,
-                    cohort: 0.0,
+                    cohort: Cohort::NONE,
                 });
                 // At accretionary margins (thick trench fill, slow convergence; see
                 // `Simulation::update_slab_lengths`) the sediment above a décollement is scraped
@@ -467,6 +474,19 @@ impl Simulation {
                     0.0
                 };
                 let accreted_sediment = accreted_column.min(loser_crust.sediment);
+                // The décollement scrapes off the top of the column; the rest is subducted.
+                cover_budget.record_removal(
+                    CoverTerm::Accreted,
+                    &loser_crust,
+                    0.0,
+                    accreted_sediment,
+                );
+                cover_budget.record_removal(
+                    CoverTerm::Subducted,
+                    &loser_crust,
+                    accreted_sediment,
+                    loser_crust.sediment,
+                );
                 let accreted_mass = accreted_column * SEDIMENT_ROCK_DENSITY;
                 trench_sediment.record(
                     &loser_crust,
@@ -489,7 +509,7 @@ impl Simulation {
                         metasediment: 0.0,
                         kind: AdditionKind::Accretion,
                         sediment: 0.0,
-                        cohort: 0.0,
+                        cohort: Cohort::NONE,
                     });
                 }
                 if !accretionary {
@@ -507,13 +527,15 @@ impl Simulation {
             {
                 let before = crust.mass();
                 let mut amount = params.subduction_erosion;
+                let column = *crust;
                 let from_sediment = amount.min(crust.sediment);
-                crust.sediment -= from_sediment;
+                crust.remove_sediment_to(crust.sediment - from_sediment);
                 amount -= from_sediment;
                 crust.thin_from_below(
                     (crust.thickness - amount).max(crust.thickness.min(OCEANIC_THICKNESS)),
                 );
                 ledger.record(Term::SubductionErosion, crust.mass() - before);
+                cover_budget.record_change(CoverTerm::SubductionErosion, &column, crust);
             }
         }
 
@@ -1276,7 +1298,7 @@ fn stretch_rift(
         return false;
     }
     let (mut thickness, mut mass, mut felsic, mut sediment) = (0.0, 0.0, 0.0, 0.0);
-    let (mut metasediment, mut cohort) = (0.0, 0.0);
+    let (mut metasediment, mut cohort) = (0.0, [0.0; 2]);
     // Mass-weighted thickness and thermal fraction of the donors after stretching (repeated
     // stretching compounds in the donors).
     let (mut donor_thickness, mut donor_heat) = (0.0, 0.0);
@@ -1304,7 +1326,9 @@ fn stretch_rift(
         donor_thickness += given * crust.density * (crust.thickness - given);
         donor_heat += given * crust.density * fraction;
         sediment += crust.sediment * share;
-        cohort += crust.sediment * share * crust.cohort;
+        let given_cohort = crust.cohort.amounts(crust.sediment * share);
+        cohort[0] += given_cohort[0];
+        cohort[1] += given_cohort[1];
         crust.thickness -= given;
         crust.sediment -= crust.sediment * share;
     }
@@ -1321,7 +1345,10 @@ fn stretch_rift(
         orogeny: NO_OROGENY,
         orogenic: 0.0,
         reheated,
-        cohort: cohort / sediment.max(1e-9),
+        cohort: Cohort {
+            mixed: cohort[0] / sediment.max(1e-9),
+            lifo: cohort[1] / sediment.max(1e-9),
+        },
     };
     crust.mix_orogeny(orogeny, orogenic / mass.max(1e-9));
     plate.crust[local as usize] = Some(crust);
@@ -1378,7 +1405,7 @@ fn heal_gap(
     // oceanic crust ancient).
     let share = 1.0 / (neighbors.len() + 1) as f64;
     let (mut thickness, mut mass, mut sediment, mut felsic) = (0.0, 0.0, 0.0, 0.0);
-    let (mut metasediment, mut cohort) = (0.0, 0.0);
+    let (mut metasediment, mut cohort) = (0.0, [0.0; 2]);
     let mut birth = f64::NEG_INFINITY;
     let (mut orogeny, mut orogenic) = (NO_OROGENY, 0.0);
     let mut reheated = NO_REHEATING;
@@ -1396,7 +1423,9 @@ fn heal_gap(
         metasediment += given * crust.density * crust.metasediment;
         birth = birth.max(crust.birth);
         sediment += crust.sediment * share;
-        cohort += crust.sediment * share * crust.cohort;
+        let given_cohort = crust.cohort.amounts(crust.sediment * share);
+        cohort[0] += given_cohort[0];
+        cohort[1] += given_cohort[1];
         crust.thickness -= given;
         crust.sediment -= crust.sediment * share;
     }
@@ -1410,7 +1439,10 @@ fn heal_gap(
         orogeny: NO_OROGENY,
         orogenic: 0.0,
         reheated,
-        cohort: cohort / sediment.max(1e-9),
+        cohort: Cohort {
+            mixed: cohort[0] / sediment.max(1e-9),
+            lifo: cohort[1] / sediment.max(1e-9),
+        },
     };
     crust.mix_orogeny(orogeny, orogenic / mass.max(1e-9));
     plate.crust[local as usize] = Some(crust);
@@ -1433,9 +1465,9 @@ pub(super) struct CrustAddition {
     metasediment: f64,
     kind: AdditionKind,
     /// Sediment (rock-equivalent m over one cell) moved along with the crust, and its cohort
-    /// fraction (see [`Crust::cohort`]).
+    /// fractions (see [`Crust::cohort`]).
     sediment: f64,
-    cohort: f64,
+    cohort: Cohort,
 }
 
 /// Where added crust comes from; decides its distribution and its ledger term.
@@ -1534,7 +1566,7 @@ mod tests {
                             orogeny: NO_OROGENY,
                             orogenic: 0.0,
                             reheated: NO_REHEATING,
-                            cohort: 0.0,
+                            cohort: Cohort::NONE,
                         };
                         assert!(crust.resists_subduction() && !crust.is_continental());
                     } else if plate == 1 && continental_upper_plate && z < 0.3 {
@@ -1548,7 +1580,7 @@ mod tests {
                             orogeny: NO_OROGENY,
                             orogenic: 0.0,
                             reheated: NO_REHEATING,
-                            cohort: 0.0,
+                            cohort: Cohort::NONE,
                         };
                     }
                 }
@@ -1601,7 +1633,7 @@ mod tests {
             orogeny: 400.0,
             orogenic: 1.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         }
     }
 
@@ -1735,7 +1767,7 @@ mod tests {
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
                 reheated: NO_REHEATING,
-                cohort: 0.0,
+                cohort: Cohort::NONE,
             };
         }
         if let Some(upper) = upper {
@@ -1772,7 +1804,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         assert!(!arc.is_oceanic() && !arc.resists_subduction());
         // Most of it: after the segment flips (sustained arrival), the arc plate subducts.
@@ -1792,7 +1824,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         };
         let ledger = wedged_margin_arriving_at_a_trench(Some(continent));
         assert_eq!(ledger.subducted_transitional, 0.0, "{ledger:?}");
@@ -1831,7 +1863,7 @@ mod tests {
             metasediment: 0.0,
             kind: AdditionKind::Arc,
             sediment: 0.0,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         }]);
         // Nothing on the trench cell (amagmatic forearc), most one ring behind it.
         assert_eq!(thickness(&simulation, cell), before[cell as usize]);
@@ -1870,7 +1902,7 @@ mod tests {
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
                 reheated: NO_REHEATING,
-                cohort: 0.0,
+                cohort: Cohort::NONE,
             };
         }
         simulation
@@ -2019,7 +2051,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             sediment: 0.0,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
             kind: AdditionKind::Collision,
         }]);
         let crust = simulation.plates[0].crust[cell as usize].unwrap();
@@ -2053,7 +2085,7 @@ mod tests {
             felsic: 1.0,
             metasediment: 0.0,
             sediment: 0.0,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
             kind: AdditionKind::Collision,
         }
     }
@@ -2337,7 +2369,7 @@ mod tests {
             orogeny: NO_OROGENY,
             orogenic: 0.0,
             reheated: NO_REHEATING,
-            cohort: 0.0,
+            cohort: Cohort::NONE,
         });
         simulation.crustal_flow(5.0);
         assert_eq!(simulation.surface_crust(cell).thickness, 70_000.0);
@@ -2793,7 +2825,7 @@ mod tests {
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
                 reheated: NO_REHEATING,
-                cohort: 0.0,
+                cohort: Cohort::NONE,
             };
         }
         for _ in 0..20 {
