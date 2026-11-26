@@ -1,6 +1,8 @@
 //! The planet: tectonics coupled with the water cycle and erosion.
 
 use crate::math;
+use std::time::Duration;
+
 use web_time::Instant;
 
 use tracing::{debug, debug_span};
@@ -9,7 +11,9 @@ use crate::climate::{Climate, ClimateParams, WaterCycle};
 use crate::erosion::{
     CrustClass, ErosionParams, Hydrology, Surface, SurfaceWater, WaveErosion, erode,
 };
-use crate::tectonics::{CohortMasses, CoverBudget, CoverMasses, Crust, Simulation, Statistics};
+use crate::tectonics::{
+    CohortMasses, CoverBudget, CoverMasses, Crust, Simulation, Statistics, TectonicStep,
+};
 use crate::temperature::{TemperatureFields, TemperatureModel, TemperatureParams};
 
 pub struct Planet {
@@ -55,6 +59,55 @@ pub struct Planet {
     /// Cells that the last erosion step saw as ocean on the sample surface but not on the
     /// per-cell surface, or the other way round (#112 b; zero without it).
     ocean_mismatch: usize,
+}
+
+/// A step of the planet in progress (see [`Planet::begin_step`]): which part comes next, and what
+/// the later parts need from the earlier ones.
+pub struct StepInProgress {
+    dt: f64,
+    part: StepPart,
+    span: tracing::Span,
+    /// Time spent in the tectonics, the climate and the erosion, for the debug log.
+    times: [Duration; 3],
+}
+
+impl StepPart {
+    /// For the log.
+    fn name(&self) -> &'static str {
+        match self {
+            StepPart::TectonicsStart => "tectonics start",
+            StepPart::Substeps(_) => "tectonic substep",
+            StepPart::TectonicsEnd(_) => "tectonics end",
+            StepPart::Temperature => "temperature",
+            StepPart::WaterCycle { .. } => "water cycle",
+            StepPart::Erosion { .. } => "erosion",
+            StepPart::Done => "done",
+        }
+    }
+}
+
+/// The next part of a step.
+enum StepPart {
+    /// The plate velocities, the deformation and the number of substeps.
+    TectonicsStart,
+    /// The next tectonic substep.
+    Substeps(TectonicStep),
+    /// Crustal flow, plate events, mantle and sea level.
+    TectonicsEnd(TectonicStep),
+    /// The ocean of the new topography and the temperature.
+    Temperature,
+    /// The water cycle on the climate's view of the surface.
+    WaterCycle {
+        elevation: Vec<f64>,
+        seeds: Vec<usize>,
+        view: Vec<f64>,
+    },
+    /// The erosion (or only the ocean, without erosion).
+    Erosion {
+        elevation: Vec<f64>,
+        seeds: Vec<usize>,
+    },
+    Done,
 }
 
 /// The continental cover of [`CoverCohort::start`] and how much of it is left (Gt), per tracer
@@ -574,40 +627,120 @@ impl Planet {
         hash
     }
 
-    /// Advances the planet by `dt` Myr: plate motion first, then one erosion step.
+    /// Advances the planet by `dt` Myr: plate motion first, then the climate and one erosion
+    /// step. The same as [`Planet::begin_step`] and [`Planet::continue_step`] until it is
+    /// complete (which the simulation runs use).
+    #[cfg(test)]
     pub fn step(&mut self, dt: f64) {
-        let _span = debug_span!("step", time = self.tectonics.time() + dt).entered();
-        let start = Instant::now();
-        self.tectonics.step(dt);
-        let tectonics_time = start.elapsed();
+        let mut step = self.begin_step(dt);
+        while !self.continue_step(&mut step) {}
+    }
 
+    /// Starts a step of `dt` Myr, to be taken part by part with [`Planet::continue_step`], so
+    /// that a caller can stop between the parts (to pause the simulation, #116). Nothing is
+    /// computed yet.
+    pub fn begin_step(&self, dt: f64) -> StepInProgress {
+        StepInProgress {
+            dt,
+            part: StepPart::TectonicsStart,
+            span: debug_span!("step", time = self.tectonics.time() + dt),
+            times: [Duration::ZERO; 3],
+        }
+    }
+
+    /// Takes the next part of `step` and returns whether the step is complete. Between the
+    /// parts the planet is in a consistent state, but part-way through the step (its time too):
+    /// it can be read (e.g. hashed), but should not be shown as a state of the simulation.
+    /// Taking the parts with anything else in between gives the same result as
+    /// [`Planet::step`].
+    pub fn continue_step(&mut self, step: &mut StepInProgress) -> bool {
+        let span = step.span.clone();
+        let _entered = span.enter();
         let start = Instant::now();
-        let elevation = self.tectonics.surface_elevations();
-        // Ice sheets depend on last step's snowfall.
-        // The seas of this topography, for the climate and the erosion.
-        let seeds = crate::sea::ocean_seeds(
-            self.tectonics.mesh(),
-            &elevation,
-            -crate::sea::SILL_TOLERANCE,
-            self.tectonics.min_sea_fraction(),
-        );
+        let name = step.part.name();
+        let (next, phase) = match std::mem::replace(&mut step.part, StepPart::Done) {
+            StepPart::TectonicsStart => (StepPart::Substeps(self.tectonics.begin_step(step.dt)), 0),
+            StepPart::Substeps(mut tectonic) => {
+                self.tectonics.next_substep(&mut tectonic);
+                if tectonic.substeps_left() > 0 {
+                    (StepPart::Substeps(tectonic), 0)
+                } else {
+                    (StepPart::TectonicsEnd(tectonic), 0)
+                }
+            }
+            StepPart::TectonicsEnd(tectonic) => {
+                self.tectonics.end_step(tectonic);
+                (StepPart::Temperature, 0)
+            }
+            StepPart::Temperature => {
+                let elevation = self.tectonics.surface_elevations();
+                // Ice sheets depend on last step's snowfall.
+                // The seas of this topography, for the climate and the erosion.
+                let seeds = crate::sea::ocean_seeds(
+                    self.tectonics.mesh(),
+                    &elevation,
+                    -crate::sea::SILL_TOLERANCE,
+                    self.tectonics.min_sea_fraction(),
+                );
+                let open = open_sills(&self.erosion);
+                // Lakes of the last erosion step, at their water surface if they are open water.
+                let lakes = self
+                    .temperature
+                    .params()
+                    .open_water_lakes
+                    .then_some(&self.water);
+                let view =
+                    climate_elevations(self.tectonics.mesh(), &elevation, &seeds, open, lakes);
+                self.temperature.update(
+                    &view,
+                    Some(&self.precipitation),
+                    lakes.map(|water| &water.lake_depth[..]),
+                    self.tectonics.time(),
+                );
+                (
+                    StepPart::WaterCycle {
+                        elevation,
+                        seeds,
+                        view,
+                    },
+                    1,
+                )
+            }
+            StepPart::WaterCycle {
+                elevation,
+                seeds,
+                view,
+            } => {
+                self.update_water_cycle(&view);
+                (StepPart::Erosion { elevation, seeds }, 1)
+            }
+            StepPart::Erosion { elevation, seeds } => {
+                self.erode_step(step.dt, &elevation, &seeds);
+                (StepPart::Done, 2)
+            }
+            StepPart::Done => (StepPart::Done, 2),
+        };
+        let elapsed = start.elapsed();
+        tracing::trace!(part = name, ?elapsed, "Part of the step");
+        step.times[phase] += elapsed;
+        step.part = next;
+        let done = matches!(step.part, StepPart::Done);
+        if done {
+            let [tectonics_time, climate_time, erosion_time] = step.times;
+            debug!(
+                ?tectonics_time,
+                ?climate_time,
+                ?erosion_time,
+                "Step finished"
+            );
+        }
+        done
+    }
+
+    /// The erosion of a step (or only the ocean without erosion), and the bookkeeping after it,
+    /// on the surface `elevation` with the ocean `seeds` of the step's climate.
+    fn erode_step(&mut self, dt: f64, elevation: &[f64], seeds: &[usize]) {
         let open = open_sills(&self.erosion);
-        // Lakes of the last erosion step, at their water surface if they are open water.
-        let lakes = self
-            .temperature
-            .params()
-            .open_water_lakes
-            .then_some(&self.water);
-        let view = climate_elevations(self.tectonics.mesh(), &elevation, &seeds, open, lakes);
-        self.temperature.update(
-            &view,
-            Some(&self.precipitation),
-            lakes.map(|water| &water.lake_depth[..]),
-            self.tectonics.time(),
-        );
-        self.update_water_cycle(&view);
-        let climate_time = start.elapsed();
-
         if let Some(params) = &self.erosion {
             let dt_years = dt * 1e6;
             let (plate, class) = self.plates_and_classes();
@@ -617,7 +750,7 @@ impl Planet {
                 sample_surface = self.tectonics.sample_surface_elevations();
                 &sample_surface
             } else {
-                &elevation
+                elevation
             };
             let bedrock_density = self.tectonics.bedrock_densities();
             let result = erode(
@@ -634,7 +767,7 @@ impl Planet {
                     plate: &plate,
                     class: &class,
                     ocean_volume: self.tectonics.ocean_volume(),
-                    ocean_seeds: &seeds,
+                    ocean_seeds: seeds,
                     water_volume: self.tectonics.water_volume(),
                     previous_lakes: &self
                         .water
@@ -663,7 +796,7 @@ impl Planet {
             self.ocean_mismatch = if params.sample_surface {
                 let per_cell = crate::sea::ocean_from(
                     self.tectonics.mesh(),
-                    &elevation,
+                    elevation,
                     seeds.iter().copied(),
                     open,
                 );
@@ -742,7 +875,7 @@ impl Planet {
         if self.erosion.is_none() {
             self.water = SurfaceWater::ocean_only(crate::sea::ocean_from(
                 self.tectonics.mesh(),
-                &elevation,
+                elevation,
                 seeds.iter().copied(),
                 open,
             ));
@@ -756,12 +889,6 @@ impl Planet {
                 self.cover_export,
             ));
         }
-        debug!(
-            ?tectonics_time,
-            ?climate_time,
-            erosion_time = ?start.elapsed() - climate_time,
-            "Step finished"
-        );
     }
 
     /// The plate and the [`CrustClass`] of every cell.
@@ -1166,6 +1293,46 @@ mod tests {
     use crate::tectonics::{CoverTerm, TectonicParams};
 
     const RADIUS: f64 = 6.371e6;
+
+    fn small_planet() -> Planet {
+        let simulation = Simulation::new(SphereMesh::icosphere(3), 6, TectonicParams::default(), 2);
+        Planet::new(
+            simulation,
+            ClimateParams::default(),
+            TemperatureParams::default(),
+            Some(ErosionParams {
+                planet_radius: RADIUS,
+                ..ErosionParams::default()
+            }),
+            RADIUS,
+        )
+    }
+
+    /// A step taken part by part with reads in between (as by a simulation paused inside a
+    /// step, #116) ends as one taken at once.
+    #[test]
+    fn steps_taken_in_parts_end_alike() {
+        let mut whole = small_planet();
+        let mut parts = small_planet();
+        let mut counts = Vec::new();
+        for _ in 0..3 {
+            whole.step(1.0);
+            let mut step = parts.begin_step(1.0);
+            let mut count = 1;
+            while !parts.continue_step(&mut step) {
+                // What a paused simulation may do in between.
+                parts.state_hash();
+                parts.statistics();
+                crate::viewer::cell_infos(&parts);
+                count += 1;
+            }
+            counts.push(count);
+        }
+        assert_eq!(parts.state_hash(), whole.state_hash());
+        assert_eq!(parts.tectonics().time(), 3.0);
+        // Tectonics start, at least one substep, tectonics end, temperature, water, erosion.
+        assert!(counts.iter().all(|&count| count >= 6), "{counts:?}");
+    }
 
     /// The cover's export split and budget close (#35): the destinations of the continental
     /// denudation add up to it, the budget terms to the change of the masses, and the cohort's

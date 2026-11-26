@@ -11,6 +11,7 @@ mod isostasy;
 mod koppen;
 mod math;
 mod ocean;
+mod pausing;
 mod planet;
 mod presets;
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -260,9 +261,9 @@ fn main() -> anyhow::Result<()> {
 
 /// Starts the simulations of the 3D view on a thread each, which builds its planet and runs
 /// it. A restarted simulation first waits for the previous thread to end, so only one
-/// simulation runs at a time. The previous simulation stops after its current step, because the
-/// view no longer receives its updates; a finished one, which waits for requests of other
-/// fields, ends when the view drops its control.
+/// simulation runs at a time. The previous simulation stops after the current part of its step
+/// (see [`pausing`]), as it is cancelled and the view no longer receives its updates; a finished
+/// one, which waits for requests of other fields, ends when the view drops its control.
 #[cfg(not(target_arch = "wasm32"))]
 fn simulation_thread_launcher() -> viewer::StartSimulation {
     use viewer::SimulationEvent;
@@ -276,12 +277,12 @@ fn simulation_thread_launcher() -> viewer::StartSimulation {
             let _ = self.0.send(Request::Layers(layers));
         }
 
-        fn set_paused(&mut self, paused: bool) {
-            let _ = self.0.send(Request::Paused(paused));
+        fn set_paused(&mut self, paused: bool, request: u64) {
+            let _ = self.0.send(Request::Paused(paused, request));
         }
 
-        fn step(&mut self) {
-            let _ = self.0.send(Request::Step);
+        fn step(&mut self, request: u64) {
+            let _ = self.0.send(Request::Step(request));
         }
     }
 
@@ -338,17 +339,20 @@ fn simulation_thread_launcher() -> viewer::StartSimulation {
 enum Request {
     /// Send these extra fields from now on.
     Layers(viewer::Layers),
-    Paused(bool),
-    /// Take one step while paused.
-    Step,
+    /// Pause or resume (with the number of the request, see [`pausing`]).
+    Paused(bool, u64),
+    /// Take one step while paused (see [`pausing::Pausing::step`]).
+    Step(u64),
 }
 
 /// Runs one simulation of the 3D view, from building its planet on. It stops early once
 /// `cancelled` is set or the view no longer receives its updates. The updates carry the extra
-/// fields last requested through `requests` (at first those of the render mode of `cli`). While
-/// paused, the thread waits after sending a state for requests: new fields (the state is sent
-/// again with them), a step, or to resume. Once the run is complete, the final state is sent
-/// again whenever new fields are requested, until the view drops the sender.
+/// fields last requested through `requests` (at first those of the render mode of `cli`). The run
+/// goes part by part and reads the requests after every part (see [`pausing`]): while paused, the
+/// thread reports where it stopped and waits for requests: new fields (the state is sent again
+/// with them if the thread stopped between steps), a step, or to resume. Once the run is
+/// complete, the final state is sent again whenever new fields are requested, until the view
+/// drops the sender.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_simulation_thread(
     cli: &Cli,
@@ -357,6 +361,7 @@ fn run_simulation_thread(
     wake_up: &dyn Fn(),
     requests: &std::sync::mpsc::Receiver<Request>,
 ) -> anyhow::Result<()> {
+    use crate::pausing::{Pausing, Tick};
     use viewer::{Fields, MeshUpdate, SimulationEvent, SurfaceUpdate};
 
     if events.send(SimulationEvent::Generating).is_ok() {
@@ -405,53 +410,75 @@ fn run_simulation_thread(
         ControlFlow::Continue(())
     };
     let mut layers = cli.render_mode.layers();
-    let mut paused = false;
-    let mut steps = 0u32;
-    // Whether the next step follows a pause, so that its time says nothing about the pace.
-    let mut after_pause = false;
-    let planet = simulate(
-        planet,
-        cli,
-        |planet: &Planet, step_time: Option<Duration>| {
-            // The requests that came during the step; new fields come with this update.
-            while let Ok(request) = requests.try_recv() {
-                match request {
-                    Request::Layers(requested) => layers = requested,
-                    Request::Paused(value) => paused = value,
-                    Request::Step => steps += u32::from(paused),
+    let mut pausing = Pausing::default();
+    let mut run = Run::new(planet, cli)?;
+    if publish(&run.planet, None, layers).is_break() {
+        info!("Simulation stopped at the start");
+        return Ok(());
+    }
+    // Takes a request; new fields come with the current state at once if it is between steps
+    // (inside a step, the view builds them from the last state until the step is complete).
+    type Publish<'a> = dyn FnMut(&Planet, Option<Duration>, viewer::Layers) -> ControlFlow<()> + 'a;
+    fn take(
+        request: Request,
+        run: &Run,
+        pausing: &mut Pausing,
+        layers: &mut viewer::Layers,
+        publish: &mut Publish,
+    ) -> ControlFlow<()> {
+        match request {
+            Request::Layers(requested) => {
+                let new = requested.0 & !layers.0 != 0;
+                *layers = requested;
+                if new && !run.in_step() {
+                    return publish(&run.planet, None, *layers);
                 }
             }
-            let step_time = step_time.filter(|_| !std::mem::take(&mut after_pause));
-            publish(planet, step_time, layers)?;
-            // The last state is not held: the run ends (and writes its last snapshot).
-            let last = is_last_step(planet.tectonics().time(), cli.duration, cli.dt);
-            while paused && steps == 0 && !last {
-                after_pause = true;
-                if cancelled.load(Ordering::Relaxed) {
-                    return ControlFlow::Break(());
+            Request::Paused(value, number) => pausing.set_paused(value, number),
+            Request::Step(number) => pausing.step(number),
+        }
+        ControlFlow::Continue(())
+    }
+    // Part by part, reading the requests after every part.
+    let stopped = 'run: loop {
+        while let Ok(request) = requests.try_recv() {
+            if take(request, &run, &mut pausing, &mut layers, &mut publish).is_break() {
+                break 'run true;
+            }
+        }
+        if cancelled.load(Ordering::Relaxed) {
+            break true;
+        }
+        match pausing.tick(&mut run, cli) {
+            Tick::Part => {}
+            Tick::Step(step_time) => {
+                if publish(&run.planet, step_time, layers).is_break() {
+                    break true;
+                }
+                run.finish_step(cli)?;
+            }
+            Tick::Halt(halt) => {
+                if events.send(SimulationEvent::Halted(halt)).is_ok() {
+                    wake_up();
                 }
                 // Fails once the view dropped its control (a restart or the window closed).
                 let Ok(request) = requests.recv() else {
-                    return ControlFlow::Break(());
+                    break true;
                 };
-                match request {
-                    Request::Layers(requested) => {
-                        let new = requested.0 & !layers.0 != 0;
-                        layers = requested;
-                        if new {
-                            publish(planet, None, layers)?;
-                        }
-                    }
-                    Request::Paused(value) => paused = value,
-                    Request::Step => steps += 1,
+                if take(request, &run, &mut pausing, &mut layers, &mut publish).is_break() {
+                    break true;
                 }
             }
-            steps = steps.saturating_sub(1);
-            ControlFlow::Continue(())
-        },
-    )?;
-    // The run is complete (or stopped): the final state again for every request of new
-    // fields, until the view drops the sender (a restart or the window closed).
+            Tick::Complete => break false,
+        }
+    };
+    if stopped {
+        info!(time = run.planet.tectonics().time(), "Simulation stopped");
+        return Ok(());
+    }
+    run.log_finished();
+    // The run is complete: the final state again for every request of new fields, until the
+    // view drops the sender (a restart or the window closed).
     while let Ok(request) = requests.recv() {
         if cancelled.load(Ordering::Relaxed) {
             break;
@@ -461,7 +488,7 @@ fn run_simulation_thread(
         };
         let new = requested.0 & !layers.0 != 0;
         layers = requested;
-        if new && publish(&planet, None, layers).is_break() {
+        if new && publish(&run.planet, None, layers).is_break() {
             break;
         }
     }
@@ -613,6 +640,8 @@ struct Run {
     start: Instant,
     previous_ledger: Option<PreviousSnapshot>,
     previous_update: Instant,
+    /// The step in progress, if a part of it was taken.
+    current: Option<planet::StepInProgress>,
 }
 
 impl Run {
@@ -649,19 +678,49 @@ impl Run {
             start,
             previous_ledger,
             previous_update: Instant::now(),
+            current: None,
         })
     }
 
     /// Takes the next step and returns the time since the previous one (or since the start),
     /// or `None` if the run is complete.
     fn advance(&mut self, cli: &Cli) -> Option<Duration> {
-        if self.step >= self.steps {
-            return None;
+        loop {
+            if let Some(step_time) = self.advance_part(cli)? {
+                return Some(step_time);
+            }
+        }
+    }
+
+    /// Takes the next part of a step (see [`planet::Planet::continue_step`]), starting the next
+    /// step if none is in progress. Returns `None` if the run is complete, `Some(None)` if the
+    /// step is not complete yet, and once it is, the time since the previous step (or since the
+    /// start).
+    fn advance_part(&mut self, cli: &Cli) -> Option<Option<Duration>> {
+        let mut step = match self.current.take() {
+            Some(step) => step,
+            None if self.is_complete() => return None,
+            None => self.planet.begin_step(cli.dt),
+        };
+        if !self.planet.continue_step(&mut step) {
+            self.current = Some(step);
+            return Some(None);
         }
         self.step += 1;
-        self.planet.step(cli.dt);
         let now = Instant::now();
-        Some(now - std::mem::replace(&mut self.previous_update, now))
+        Some(Some(
+            now - std::mem::replace(&mut self.previous_update, now),
+        ))
+    }
+
+    /// Whether a step is in progress: the planet is part-way through it.
+    fn in_step(&self) -> bool {
+        self.current.is_some()
+    }
+
+    /// Whether the last step was taken.
+    fn is_complete(&self) -> bool {
+        self.step >= self.steps
     }
 
     /// Writes the snapshot of the step just taken if one is due; after the step's update.

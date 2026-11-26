@@ -23,16 +23,18 @@
 //! Updates also carry the extra fields of the render mode ([`viewer::Layer`]s, each as a
 //! transferred `Float32Array` buffer under its key): at first those of the mode in the
 //! worker's query, then those the page requests with `{ layers }` (the bits of
-//! [`viewer::Layers`]). The worker runs one step at a time (scheduled with `setTimeout`) so that
-//! such messages reach it between steps; it then sends its current state again with the new
-//! fields at once, also after the run is complete.
+//! [`viewer::Layers`]). The worker runs the parts of its steps in tasks of about [`YIELD_AFTER`]
+//! (scheduled with `setTimeout`) so that such messages reach it in between; between steps it then
+//! sends its current state again with the new fields at once, also after the run is complete.
 //!
 //! The render mode is remembered like the subdivisions: the URL's `render-mode` wins over the
 //! one in the local storage (stored when the user picks a mode), which wins over the default.
 //! Picking a mode puts it into the page URL at once, without a restart.
 //!
-//! The time bar pauses the worker with `{ paused: true/false }` and asks for one step while paused
-//! with `{ step: true }`; both take effect between steps. The page keeps the frame history of the
+//! The time bar pauses the worker with `{ paused: true/false, request }` and asks for one step
+//! while paused with `{ step: true, request }`; both take effect at the next boundary between
+//! the parts of a step (see [`crate::pausing`]), and the worker answers a pause with
+//! `{ halted: true, request, in_step }` once it stopped. The page keeps the frame history of the
 //! run in IndexedDB ([`frames`]).
 //!
 //! The page records its state as `data-` attributes of its root element (see [`mark`]), for the
@@ -65,6 +67,7 @@ use crate::viewer::{
 };
 
 mod frames;
+use crate::pausing::{Halt, Pausing, Tick};
 use crate::{Cli, Run, build_planet};
 
 /// Id of the canvas in `web/index.html`.
@@ -289,8 +292,17 @@ struct WorkerControl(web_sys::Worker);
 
 impl WorkerControl {
     fn send(&self, key: &str, value: &JsValue) {
+        self.send_request(key, value, None);
+    }
+
+    /// Sends `{ key: value }`, with the number of a pause or step request (see
+    /// [`SimulationControl::set_paused`]).
+    fn send_request(&self, key: &str, value: &JsValue, request: Option<u64>) {
         let message = js_sys::Object::new();
         set(&message, key, value);
+        if let Some(request) = request {
+            set(&message, "request", &(request as f64).into());
+        }
         // A terminated worker ignores messages.
         if let Err(error) = self.0.post_message(&message) {
             error!("Could not send the request to the simulation worker: {error:?}");
@@ -303,12 +315,12 @@ impl SimulationControl for WorkerControl {
         self.send("layers", &layers.0.into());
     }
 
-    fn set_paused(&mut self, paused: bool) {
-        self.send("paused", &paused.into());
+    fn set_paused(&mut self, paused: bool, request: u64) {
+        self.send_request("paused", &paused.into(), Some(request));
     }
 
-    fn step(&mut self) {
-        self.send("step", &true.into());
+    fn step(&mut self, request: u64) {
+        self.send_request("step", &true.into(), Some(request));
     }
 }
 
@@ -318,9 +330,9 @@ struct NoControl;
 impl SimulationControl for NoControl {
     fn request_layers(&mut self, _layers: Layers) {}
 
-    fn set_paused(&mut self, _paused: bool) {}
+    fn set_paused(&mut self, _paused: bool, _request: u64) {}
 
-    fn step(&mut self) {}
+    fn step(&mut self, _request: u64) {}
 }
 
 /// Starts the 3D view on the page and the simulation worker.
@@ -538,6 +550,14 @@ fn start_worker(
                 send(SimulationEvent::Generating);
                 return;
             }
+            if get(&data, "halted").is_truthy() {
+                let halt = Halt {
+                    request: get(&data, "request").as_f64().unwrap_or_default() as u64,
+                    in_step: get(&data, "in_step").is_truthy(),
+                };
+                send(SimulationEvent::Halted(halt));
+                return;
+            }
             let (Some(time), Ok(cell_buffer), Ok(plate_buffer)) = (
                 get(&data, "time").as_f64(),
                 get(&data, "cells").dyn_into::<js_sys::ArrayBuffer>(),
@@ -644,7 +664,7 @@ fn start_worker(
     })
 }
 
-/// The simulation of the worker, between steps.
+/// The simulation of the worker, between parts of its steps.
 struct WorkerState {
     scope: web_sys::DedicatedWorkerGlobalScope,
     cli: Cli,
@@ -654,24 +674,22 @@ struct WorkerState {
     first_update: bool,
     /// Encodes the states into the frames of the page's history.
     encoder: FrameEncoder,
-    /// Paused by the page, the steps it asked for meanwhile, and whether the step loop is
-    /// stopped (to be scheduled again on resume or a step).
-    paused: bool,
-    steps: u32,
+    /// Pause and step requests of the page.
+    pausing: Pausing,
+    /// The part loop is not scheduled: stopped for a pause (to be scheduled again on resume or
+    /// a step), or the run is complete or failed.
     stopped: bool,
-    /// The next step follows a pause: its time says nothing about the pace.
-    after_pause: bool,
-    /// The run is complete.
     complete: bool,
 }
 
 impl WorkerState {
-    /// Sends the current state to the page, with the requested layers.
+    /// Sends the current state to the page, with the requested layers; only between steps (see
+    /// [`crate::pausing`]).
     fn publish(&mut self, step_time: Option<std::time::Duration>) {
+        debug_assert!(!self.run.in_step(), "a state in the middle of a step");
         let planet = &self.run.planet;
         let message = js_sys::Object::new();
         set(&message, "time", &planet.tectonics().time().into());
-        let step_time = step_time.filter(|_| !std::mem::take(&mut self.after_pause));
         if let Some(step_time) = step_time {
             set(&message, "step_seconds", &step_time.as_secs_f64().into());
         }
@@ -723,11 +741,13 @@ impl WorkerState {
         }
     }
 
-    /// Takes a request of the page: new layers come with the current state at once.
+    /// Takes a request of the page: new layers come with the current state at once if the run
+    /// is between steps (inside a step, the page builds them from the last state until the step
+    /// is complete).
     fn request(&mut self, layers: Layers) {
         let new = layers.0 & !self.layers.0 != 0;
         self.layers = layers;
-        if new {
+        if new && !self.run.in_step() {
             let start = web_time::Instant::now();
             self.publish(None);
             // The time of this extra update does not count into the next step's.
@@ -736,19 +756,14 @@ impl WorkerState {
     }
 }
 
-/// Takes a pause or step request of the page, and schedules the step loop again if it stopped
+/// Takes a pause or step request of the page, and schedules the part loop again if it stopped
 /// for a pause and may go on.
-fn control(state: &Rc<RefCell<WorkerState>>, paused: Option<bool>, step: bool) {
+fn control(state: &Rc<RefCell<WorkerState>>, request: impl FnOnce(&mut Pausing)) {
     let restart = {
         let mut worker = state.borrow_mut();
-        if let Some(paused) = paused {
-            worker.paused = paused;
-        }
-        if step && worker.paused {
-            worker.steps += 1;
-        }
-        let go = !worker.paused || worker.steps > 0;
-        if go && worker.stopped && !worker.complete {
+        let worker = &mut *worker;
+        request(&mut worker.pausing);
+        if worker.stopped && !worker.complete && !worker.pausing.holds(&worker.run) {
             worker.stopped = false;
             true
         } else {
@@ -756,7 +771,7 @@ fn control(state: &Rc<RefCell<WorkerState>>, paused: Option<bool>, step: bool) {
         }
     };
     if restart {
-        schedule_step(state.clone());
+        schedule_parts(state.clone());
     }
 }
 
@@ -770,45 +785,58 @@ fn report_failure(scope: &web_sys::DedicatedWorkerGlobalScope, error: &anyhow::E
     }
 }
 
-/// Takes the next step in a later task of the worker, so that messages of the page are handled
-/// in between, sends its state, and schedules the step after it.
-fn schedule_step(state: Rc<RefCell<WorkerState>>) {
+/// How long the worker computes parts of steps before it lets messages of the page in (a pause
+/// takes effect at the next part boundary after it): it yields after every part that took
+/// longer, which is most at 5 or more subdivisions. Shorter would cost more time in the ≥ 4 ms
+/// that browsers wait before nested timeouts.
+const YIELD_AFTER: std::time::Duration = std::time::Duration::from_millis(30);
+
+/// Takes the next parts of the run in a later task of the worker, so that messages of the page
+/// are handled in between, sends the state after every step, and schedules the next parts.
+fn schedule_parts(state: Rc<RefCell<WorkerState>>) {
     let scope = state.borrow().scope.clone();
     let callback = Closure::once_into_js(move || {
+        let start = web_time::Instant::now();
         let more = {
             let mut guard = state.borrow_mut();
             let worker = &mut *guard;
-            // A run paused after its last step still ends (`advance` returns `None`).
-            let last = worker.run.step >= worker.run.steps;
-            if worker.paused && !last {
-                if worker.steps == 0 {
-                    // Scheduled again on resume or a step (see `WorkerState::control`).
-                    worker.stopped = true;
-                    worker.after_pause = true;
-                    return;
-                }
-                worker.steps -= 1;
-            }
-            match worker.run.advance(&worker.cli) {
-                Some(step_time) => {
-                    worker.publish(Some(step_time));
-                    match worker.run.finish_step(&worker.cli) {
-                        Ok(()) => true,
-                        Err(error) => {
+            loop {
+                match worker.pausing.tick(&mut worker.run, &worker.cli) {
+                    Tick::Part => {}
+                    Tick::Step(step_time) => {
+                        worker.publish(step_time);
+                        if let Err(error) = worker.run.finish_step(&worker.cli) {
                             report_failure(&worker.scope, &error);
-                            false
+                            worker.complete = true;
+                            break false;
                         }
                     }
+                    Tick::Halt(halt) => {
+                        let message = js_sys::Object::new();
+                        set(&message, "halted", &true.into());
+                        set(&message, "request", &(halt.request as f64).into());
+                        set(&message, "in_step", &halt.in_step.into());
+                        if let Err(error) = worker.scope.post_message(&message) {
+                            error!("Could not report the pause to the page: {error:?}");
+                        }
+                        // Scheduled again on resume or a step (see `control`).
+                        worker.stopped = true;
+                        break false;
+                    }
+                    Tick::Complete => {
+                        worker.run.log_finished();
+                        worker.complete = true;
+                        worker.stopped = true;
+                        break false;
+                    }
                 }
-                None => {
-                    worker.run.log_finished();
-                    worker.complete = true;
-                    false
+                if start.elapsed() >= YIELD_AFTER {
+                    break true;
                 }
             }
         };
         if more {
-            schedule_step(state);
+            schedule_parts(state);
         }
     });
     if let Err(error) =
@@ -821,7 +849,9 @@ fn schedule_step(state: Rc<RefCell<WorkerState>>) {
 /// Runs the simulation in the worker, sending the surface to the page after every step. The
 /// parameters come with its URL, a restart terminates it and starts a new worker; the messages
 /// from the page are requests for other fields (`{ layers }`), to pause or resume
-/// (`{ paused }`) and for one step while paused (`{ step }`), handled between steps.
+/// (`{ paused, request }`) and for one step while paused (`{ step, request }`), handled between
+/// the parts of the steps (see [`crate::pausing`]). Stopped for a pause, it says so with
+/// `{ halted: true, request, in_step }`.
 fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()> {
     let search = without_worker_files(&scope.location().search());
     let Launch { cli, .. } = parse_query(&search)?;
@@ -841,10 +871,8 @@ fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()>
         layers,
         first_update: true,
         encoder: FrameEncoder::default(),
-        paused: false,
-        steps: 0,
+        pausing: Pausing::default(),
         stopped: false,
-        after_pause: false,
         complete: false,
     }));
     state.borrow_mut().publish(None);
@@ -855,9 +883,11 @@ fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()>
             if let Some(bits) = get(&data, "layers").as_f64() {
                 requests.borrow_mut().request(Layers(bits as u32));
             } else if let Some(paused) = get(&data, "paused").as_bool() {
-                control(&requests, Some(paused), false);
+                let request = get(&data, "request").as_f64().unwrap_or_default() as u64;
+                control(&requests, |pausing| pausing.set_paused(paused, request));
             } else if get(&data, "step").is_truthy() {
-                control(&requests, None, true);
+                let request = get(&data, "request").as_f64().unwrap_or_default() as u64;
+                control(&requests, |pausing| pausing.step(request));
             } else {
                 error!("Unexpected message from the page");
             }
@@ -865,6 +895,6 @@ fn run_worker(scope: &web_sys::DedicatedWorkerGlobalScope) -> anyhow::Result<()>
     scope.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
     // The worker lives as long as the handler.
     on_message.forget();
-    schedule_step(state);
+    schedule_parts(state);
     Ok(())
 }
