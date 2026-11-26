@@ -78,7 +78,9 @@ realistic`, clouds off, camera light, at 30 Myr; a large lake system at 40–50�
 - Cell info in July over a lake the model freezes in January (cover 0.17, Jan +0.3 °C):
   "lake, 736 m deep, ice in Jan".
   ![Cell info](realistic-july-after-cell-info.png)
-- Web, phone size (390×844): see `web-phone.png`.
+- Web, phone size (390×844), legend open: the new "Lake ice" swatch and text fit; panels and
+  touch layout unchanged.
+  ![Web phone](web-phone.png)
 
 ## Caveats
 
