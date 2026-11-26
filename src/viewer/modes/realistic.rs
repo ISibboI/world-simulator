@@ -1052,7 +1052,10 @@ mod tests {
         arctic.temperature_january = -33.0;
         arctic.temperature_july = 10.0;
         assert_eq!(layers(&arctic, Period::July, false, false).snow_cover, 0.0);
-        assert_eq!(layers(&arctic, Period::January, false, false).snow_cover, 1.0);
+        assert_eq!(
+            layers(&arctic, Period::January, false, false).snow_cover,
+            1.0
+        );
         // Deep lakes freeze later than shallow ones.
         assert!(lake_ice(-5.0, 300.0) < lake_ice(-5.0, 5.0));
         assert_eq!(lake_ice(0.0, 5.0), 0.0);
