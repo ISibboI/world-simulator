@@ -920,7 +920,10 @@ impl Viewer {
         });
         if self.viewing.is_none() {
             // The first state of a simulation, the newest state sent again with the fields of a
-            // new mode and an asked-for step show at once; others at the pace of the view.
+            // new mode and an asked-for step show at once; others at the pace of the view. A
+            // state that is not due yet makes the view fall behind: it walks on through the
+            // recorded frames from the shown one, every state in turn, and is live again once it
+            // catches up (Live or End jumps to the newest at once).
             let now = web_time::Instant::now();
             let first = update.mesh.is_some();
             let resent = !first && !newer;
@@ -930,10 +933,27 @@ impl Viewer {
                 }
                 self.live_pending = false;
                 self.show(update.time, update.cells, update.plates, update.fields);
+            } else if let Some(index) = self.recorded_index(self.shown_time) {
+                self.viewing = Some(index);
+                self.shown_frame = Some(index);
+                self.walk.fall_behind();
             } else {
+                // The shown state was not recorded (the history is full): the newest state at
+                // the next tick.
                 self.live_pending = true;
             }
         }
+    }
+
+    /// The recorded frame of the state at `time`, if it was recorded.
+    fn recorded_index(&self, time: f64) -> Option<usize> {
+        let history = self.history.as_ref()?;
+        (0..history.len())
+            .rev()
+            .map(|index| (index, history.time(index)))
+            .take_while(|(_, frame)| frame.is_some_and(|frame| frame >= time))
+            .find(|(_, frame)| *frame == Some(time))
+            .map(|(index, _)| index)
     }
 
     /// Takes the mesh of a new simulation.

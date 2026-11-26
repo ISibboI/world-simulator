@@ -6,9 +6,11 @@
 //! Play and pause act on the view only (issue #120): pausing freezes the view on its frame while
 //! the simulation goes on and the slider keeps growing; playing walks forward through the
 //! recorded frames until the newest, and then follows the simulation live. Either way the view
-//! changes at most [`VIEW_RATE`] times per second (see [`Walk`]); live, it then shows the newest
-//! state at each tick, skipping the states in between, so that it stays live. The user's own
-//! moves (slider, ←, →, End, Live) show at once. The simulation has a button of its own (the
+//! changes at most [`VIEW_RATE`] times per second (see [`Walk`]) and shows every state in turn:
+//! when the simulation is quicker, a live view falls behind and walks on through the recorded
+//! frames ("· live" then shows how far the simulation is ahead), live again once it catches up.
+//! The user's own moves (slider, ←, →, End, Live) show at once; Live and End jump to the newest
+//! state. The simulation has a button of its own (the
 //! cog), drawn pressed while the simulation is paused; the time is then shown in the warning
 //! colour. Stepping forward on the newest frame while the simulation is paused computes one more
 //! step. Keys (when no text field has focus and no drop-down list is open): space plays or pauses
@@ -145,6 +147,12 @@ impl Walk {
     pub fn play(&mut self) {
         self.playing = true;
         self.last = None;
+    }
+
+    /// A live view fell behind the simulation: it walks on at its pace, the next frame one
+    /// interval after the shown one.
+    pub fn fall_behind(&mut self) {
+        self.playing = true;
     }
 
     /// Stops walking through the recorded frames (the pace of a live view goes on).
@@ -734,6 +742,10 @@ mod tests {
         assert_eq!(walk.wait(start + interval * 2, true), None);
         // A live view keeps the pace.
         assert_eq!(walk.due_in(start + interval / 2), interval / 2);
+        // A live view that falls behind walks on one interval after its shown frame.
+        walk.fall_behind();
+        assert_eq!(walk.wait(start + interval / 2, true), Some(interval / 2));
+        walk.stop();
         // Playing again starts at once, not after a stale interval.
         walk.shown(start);
         walk.play();

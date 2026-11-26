@@ -87,3 +87,25 @@ Two findings were accepted as they are:
 - The slider/label mismatch of up to 1 s while live.
 - A step asked for just after pausing can take one tick, if a state that was already on its way
   is taken as the step.
+
+## PR #177 follow-up 2: live falls behind (Sebastian: "when live, don't jump ahead")
+- This replaces the "newest state at each tick" rule above. A live view shows **every** state
+  in turn, at most `Walk::rate` (1) per second.
+- When a new state arrives before its tick, the view **falls behind**. It holds the recorded
+  frame on screen and walks on through the recorded frames at the same rate, exactly like Play
+  from a paused frame. Once it catches up with the newest state it is live again.
+- What the UI shows:
+  - **Live:** the view is on the newest state. The label shows the time, and the Live button
+    is greyed out.
+  - **Behind:** the label shows "X Myr · live Y". Live and End are enabled and jump to the
+    newest state at once; the view then falls behind again if the simulation is quicker.
+  - ⏸ still pauses the view where it is.
+- If the history is full, the state on screen may not be recorded. The view then shows the
+  newest state at the next tick, the only fallback left.
+- Tests:
+  - Desktop, live from the start: 16 → 17 → 17 → 18 → 19 → 19 Myr in shots 0.7 s apart, while
+    the simulation went 116 → 142. Live jumped to 194 at once (`desktop-behind.png`).
+  - Web desktop and phone: the same behaviour (`web-desktop-behind.png`,
+    `web-phone-behind.png`). Under software rendering the web view managed a little under
+    1 frame/s.
+  - fmt, clippy (native and wasm32), doc and the full test suite (485) are clean.
