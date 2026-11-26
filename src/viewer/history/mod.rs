@@ -262,7 +262,8 @@ impl History {
     }
 
     /// Forgets the requests: the view no longer shows past frames. A read in progress
-    /// completes, only as a checkpoint.
+    /// completes, only as a checkpoint; the checkpoints stay (bounded, see [`CHECKPOINT_BYTES`]),
+    /// for the next visit to the past.
     pub fn cancel(&mut self) {
         self.wanted = None;
         self.ready = None;
@@ -360,6 +361,12 @@ impl History {
             Ok(state) if !stale => self.ready = Some(Ok(frame(read.target, &state))),
             Ok(_) => {}
             Err(error) => {
+                // A write that failed during the read took the frame (or its base) with it.
+                let error = if self.frames[read.target].lost {
+                    "this frame could not be stored".to_owned()
+                } else {
+                    error
+                };
                 tracing::error!(
                     frame = read.target,
                     "Could not read a frame of the history: {error}"
@@ -376,6 +383,7 @@ impl History {
     /// Decodes the frames of a read, keeps its checkpoints and returns the state of its last
     /// frame.
     fn decode(&mut self, read: Read, frames: &[Vec<u8>]) -> Result<State, String> {
+        let size = |state: &State| state.planes.size() + state.plates.len() * codec::PLATE_BYTES;
         if frames.len() != read.target + 1 - read.from {
             return Err("frames missing".to_owned());
         }
@@ -393,7 +401,9 @@ impl History {
         let mut state: Option<State> = None;
         for (index, encoded) in (read.from..).zip(frames) {
             let decoded = codec::decode(encoded, state.as_ref().or(base))?;
-            if (index - read.key).is_multiple_of(CHECKPOINT) && index != read.target {
+            // Within the budget with the frame itself (large meshes keep fewer checkpoints).
+            let fits = (kept.len() + 2) * size(&decoded) <= CHECKPOINT_BYTES;
+            if fits && (index - read.key).is_multiple_of(CHECKPOINT) && index != read.target {
                 kept.push((index, decoded.clone()));
             }
             state = Some(decoded);
@@ -413,7 +423,6 @@ impl History {
         self.checkpoints.sort_by_key(|(index, _)| *index);
         self.checkpoints.dedup_by_key(|(index, _)| *index);
         // The guard for large meshes: the farthest from this frame go first.
-        let size = |state: &State| state.planes.size() + state.plates.len() * codec::PLATE_BYTES;
         while self.checkpoints.len() > 1
             && self
                 .checkpoints
@@ -639,6 +648,8 @@ mod tests {
         pending: Option<Range<usize>>,
         done: Option<Result<Vec<Vec<u8>>, String>>,
         ranges: Vec<Range<usize>>,
+        /// The first frame whose write failed, as the store reports it.
+        failed: Option<usize>,
     }
 
     struct Slow(MemoryStore, Rc<RefCell<Reads>>);
@@ -665,7 +676,7 @@ mod tests {
             reads.done.take()
         }
         fn failed_write(&mut self) -> Option<usize> {
-            None
+            self.1.borrow().failed
         }
         fn capacity(&self) -> u64 {
             u64::MAX
@@ -675,13 +686,19 @@ mod tests {
         }
     }
 
-    /// A history of `steps` frames of 50 cells in a [`Slow`] store.
-    fn slow(steps: usize, instant: bool) -> (History, Rc<RefCell<Reads>>) {
+    /// An empty history in a [`Slow`] store.
+    fn slow_store(instant: bool) -> (History, Rc<RefCell<Reads>>) {
         let reads = Rc::new(RefCell::new(Reads {
             instant,
             ..Reads::default()
         }));
-        let mut history = History::new(Box::new(Slow(MemoryStore::new(u64::MAX), reads.clone())));
+        let history = History::new(Box::new(Slow(MemoryStore::new(u64::MAX), reads.clone())));
+        (history, reads)
+    }
+
+    /// A history of `steps` frames of 50 cells in a [`Slow`] store.
+    fn slow(steps: usize, instant: bool) -> (History, Rc<RefCell<Reads>>) {
+        let (mut history, reads) = slow_store(instant);
         record(&mut history, steps, 50, false);
         (history, reads)
     }
@@ -751,6 +768,63 @@ mod tests {
         complete(&reads);
         assert_eq!(history.poll().unwrap().unwrap().index, 9);
         assert!(history.poll().is_none());
+    }
+
+    #[test]
+    fn checkpoints_follow_forced_keyframes() {
+        // Keyframes off the cadence of `KEY_INTERVAL` (a frame lost on the way to the view).
+        let (mut history, reads) = slow_store(true);
+        let mut encoder = FrameEncoder::default();
+        let steps = 2 * KEY_INTERVAL + 9;
+        for step in 0..steps {
+            if step == 13 || step == KEY_INTERVAL + 20 {
+                encoder.force_keyframe();
+            }
+            let frame = encoder.encode(step as f64, &cells(50, step), &[]).unwrap();
+            assert!(history.record(frame));
+        }
+        let keys: Vec<usize> = (0..steps).filter(|&i| history.frames[i].key).collect();
+        assert_eq!(keys, [0, 13, 38, 45]);
+        for index in (0..steps).rev().chain(0..steps) {
+            let frame = show(&mut history, index);
+            assert_eq!(bytes(&frame.cells), quantised(&cells(50, index)), "{index}");
+        }
+        // Every read starts at a keyframe or right after a checkpoint of its interval.
+        for range in &reads.borrow().ranges {
+            let key = keys.iter().rev().find(|&&key| key <= range.start).unwrap();
+            assert!(
+                range.start == *key
+                    || (range.start - 1 - key).is_multiple_of(CHECKPOINT)
+                    || range.len() == 1,
+                "{range:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_write_drops_the_checkpoints_from_it_on() {
+        let (mut history, reads) = slow(10, false);
+        history.request(8);
+        complete(&reads);
+        assert_eq!(history.poll().unwrap().unwrap().index, 8);
+        // Reading 9 on checkpoint 8 when the write of 6 turns out to have failed.
+        history.request(9);
+        reads.borrow_mut().failed = Some(6);
+        complete(&reads);
+        assert_eq!(
+            history.poll().unwrap().unwrap_err(),
+            "this frame could not be stored"
+        );
+        assert!(history.checkpoints.iter().all(|(index, _)| *index < 6));
+        history.request(7);
+        assert!(history.poll().unwrap().is_err());
+        history.request(5);
+        if reads.borrow().pending.is_some() {
+            complete(&reads);
+        }
+        let frame = history.poll().unwrap().unwrap();
+        assert_eq!(frame.index, 5);
+        assert_eq!(bytes(&frame.cells), quantised(&cells(50, 5)));
     }
 
     #[test]
