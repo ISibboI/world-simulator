@@ -9,6 +9,20 @@ new planet with a random seed; the parameter panel shows it, and the web page pu
 URL, so a reload or a shared link makes the same planet. `--headless` runs use seed 0 unless
 given one.
 
+By default a run starts with a **barren planet at the earliest start** (#190): `--epoch 0` and
+`--biosphere abiotic`, i.e. 4.0 Ga, a sun at 74% of today's brightness and a planet without life
+(bare land, no transpiration, braided rivers, no biogenic pelagic sediment). The greenhouse
+forcing offsets the faint sun at the start and then stays fixed while the sun brightens, so long
+runs warm (there is no carbon cycle yet). Today's living Earth, the default before #190, is
+`--biosphere modern --epoch 4` (URL `?biosphere=modern&epoch=4`).
+
+`--epoch` (URL `epoch=`) sets the time of the planet's history at the start of a run, in Gyr
+counted forwards: `0` is the earliest start (4.0 Ga, once the planet has cooled enough for plates
+and oceans; the default), `0.5` the Archean (3.5 Ga), `4` today and up to `9.43` the future,
+before the sun leaves the main sequence. It sets the brightness of the sun and the default
+greenhouse forcing. Until #150 it counted backwards (Gyr before present); old values `x` are now
+`4 − x`. `--biosphere` (URL `biosphere=`) is `abiotic` (the default) or `modern`.
+
 ## Supported browsers
 
 The web version supports these platforms and browsers (current versions):

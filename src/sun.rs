@@ -1,8 +1,9 @@
 //! The sun of the planet: a Sun-like star that brightens on the main sequence (#92).
 //!
 //! [`Sun::at_age`] gives the state of the star at any age from its zero-age main sequence (the
-//! planet's first oceans and plates form a few hundred Myr later) to 10 Gyr, about 5.4 Gyr after
-//! today and before it leaves the main sequence for the subgiant and red-giant branches:
+//! earliest start of a simulation, epoch 0, is [`EPOCH_ZERO_AGE`] = 0.57 Gyr later) to 10 Gyr,
+//! about 5.4 Gyr after today and before it leaves the main sequence for the subgiant and
+//! red-giant branches:
 //!
 //! - **luminosity** from Gough (1981), `L(t) = L₀ / (1 + 0.4 (1 − t/t₀))`, which the climate
 //!   already uses for its solar constant ([`crate::presets::Epoch`]): 0.71 L₀ at the zero age,
@@ -20,6 +21,12 @@
 //! time. Both take the age of the sun from [`age_of_run`], the one place that converts the
 //! epoch (`--epoch`) and the simulated time to the age of the sun. Sources and checks:
 //! `notes/issue-92/sun.md`, `notes/issue-149/`.
+//!
+//! **Epochs** (#150) count forwards in Gyr: epoch 0 is the earliest start of a simulation, when
+//! the planet has cooled enough for plates and oceans, [`EPOCH_ZERO_AGE`] = 0.57 Gyr after the
+//! sun's zero age (4.0 Ga, the end of the Hadean on Earth); [`PRESENT_EPOCH`] (4.0) is today, and
+//! [`MAX_EPOCH`] (9.43) the end of the sun model, before the sun leaves the main sequence. See
+//! `notes/issue-150/plan.md`. A run starts at epoch 0 unless `--epoch` says otherwise (#190).
 
 use glam::DVec3;
 
@@ -40,6 +47,16 @@ pub const ASTRONOMICAL_UNIT: f64 = 1.495_978_707e11;
 /// The oldest age in Gyr the model describes; older ages give this state. The Sun leaves the
 /// main sequence at 10–11 Gyr (Schröder & Smith, 2008), where these fits end.
 pub const MAX_AGE: f64 = 10.0;
+/// The epoch of today: the time in Gyr from the earliest start of a simulation (epoch 0) to the
+/// present, 4.0 Ga (the oldest preserved crust, the Acasta Gneiss, is 4.03 Gyr old; Bowring &
+/// Williams, 1999).
+pub const PRESENT_EPOCH: f64 = 4.0;
+/// The earliest start of a simulation, epoch 0 (4.0 Ga), and the default start of a run (#190).
+pub const EARLIEST_EPOCH: f64 = 0.0;
+/// The age of the sun in Gyr at epoch 0, the earliest start of a simulation.
+pub const EPOCH_ZERO_AGE: f64 = SOLAR_AGE - PRESENT_EPOCH;
+/// The latest epoch, at the end of the sun model ([`MAX_AGE`]): 9.43.
+pub const MAX_EPOCH: f64 = MAX_AGE - EPOCH_ZERO_AGE;
 
 /// Effective temperature (K) of the solar model of Schröder & Smith (2008) by age (Gyr): zero
 /// age, today (the IAU value instead of their 5774 K), the hottest point and 10 Gyr.
@@ -56,11 +73,16 @@ pub fn solar_constant(age: f64) -> f64 {
     PRESENT_SOLAR_CONSTANT / (1.0 + 0.4 * (1.0 - age / SOLAR_AGE))
 }
 
-/// The age of the sun in Gyr in a run that started `epoch` Gyr before present (`--epoch`),
-/// `time` Myr into the run. The only place that converts the epoch and the simulated time to the
-/// sun's age; not clamped (see [`Sun::at_age`] and [`brightening`]).
+/// The age of the sun in Gyr in a run that started at `epoch` (`--epoch`, Gyr after the
+/// earliest start; see the module documentation), `time` Myr into the run. The only place that
+/// converts the epoch and the simulated time to the sun's age; not clamped (see [`Sun::at_age`]
+/// and [`brightening`]).
+///
+/// Computed through the time before present, `PRESENT_EPOCH − epoch` (exact for the usual
+/// epochs, e.g. 0.5 → 3.5 Ga), as before #150, so that a run keeps its results bit for bit
+/// under the new numbering of its epoch.
 pub fn age_of_run(epoch: f64, time: f64) -> f64 {
-    SOLAR_AGE - epoch + time / 1000.0
+    SOLAR_AGE - (PRESENT_EPOCH - epoch) + time / 1000.0
 }
 
 /// The factor by which the sun is brighter at the age `age` (Gyr) than at `start`, both clamped
@@ -102,10 +124,9 @@ impl Sun {
         }
     }
 
-    /// The sun of a run that started `before_present` Gyr ago (`--epoch`), `time` Myr into the
-    /// run.
-    pub fn of_run(before_present: f64, time: f64) -> Self {
-        Self::at_age(age_of_run(before_present, time))
+    /// The sun of a run that started at `epoch` (`--epoch`), `time` Myr into the run.
+    pub fn of_run(epoch: f64, time: f64) -> Self {
+        Self::at_age(age_of_run(epoch, time))
     }
 
     /// Angular radius of the disc in radians, seen from `distance` (relative to the semi-major
@@ -207,8 +228,8 @@ mod tests {
         let today = brightening(SOLAR_AGE, SOLAR_AGE + 0.1);
         assert!((1.008..1.010).contains(&today), "{today}");
         assert_eq!(brightening(9.0, 12.0), brightening(9.0, MAX_AGE));
-        assert_eq!(age_of_run(0.0, 0.0), SOLAR_AGE);
-        assert!((age_of_run(3.5, 1000.0) - (SOLAR_AGE - 2.5)).abs() < 1e-12);
+        assert_eq!(age_of_run(PRESENT_EPOCH, 0.0), SOLAR_AGE);
+        assert!((age_of_run(0.5, 1000.0) - (SOLAR_AGE - 2.5)).abs() < 1e-12);
     }
 
     #[test]
@@ -252,10 +273,27 @@ mod tests {
 
     #[test]
     fn a_run_ages_the_sun_with_simulated_time() {
-        // `--epoch 3.5` and 500 Myr into the run: 1.57 Gyr old.
-        let sun = Sun::of_run(3.5, 500.0);
+        // `--epoch 0.5` (3.5 Ga) and 500 Myr into the run: 1.57 Gyr old.
+        let sun = Sun::of_run(0.5, 500.0);
         assert!((sun.age - 1.57).abs() < 1e-12);
-        assert_eq!(Sun::of_run(0.0, 0.0), Sun::at_age(SOLAR_AGE));
+        assert_eq!(Sun::of_run(PRESENT_EPOCH, 0.0), Sun::at_age(SOLAR_AGE));
+    }
+
+    #[test]
+    fn epochs_count_forwards_from_the_earliest_start() {
+        assert!((EPOCH_ZERO_AGE - 0.57).abs() < 1e-12);
+        assert!((MAX_EPOCH - 9.43).abs() < 1e-12);
+        assert_eq!(age_of_run(0.0, 0.0), EPOCH_ZERO_AGE);
+        assert!((age_of_run(MAX_EPOCH, 0.0) - MAX_AGE).abs() < 1e-12);
+        // The former numbering (Gyr before present) gives the same age bit for bit.
+        for (epoch, before_present) in [(0.5, 3.5), (0.0, 4.0), (PRESENT_EPOCH, 0.0), (2.0, 2.0)] {
+            assert_eq!(
+                age_of_run(epoch, 250.0).to_bits(),
+                (SOLAR_AGE - before_present + 250.0 / 1000.0).to_bits()
+            );
+        }
+        // Later epochs: older suns.
+        assert!(Sun::of_run(1.0, 0.0).luminosity < Sun::of_run(5.0, 0.0).luminosity);
     }
 
     #[test]
