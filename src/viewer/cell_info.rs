@@ -724,7 +724,7 @@ pub struct Row {
 
 /// The labels of the rows, always all of them in this order, so that the widget does not
 /// change its layout from cell to cell.
-pub const ROW_LABELS: [&str; 23] = [
+pub const ROW_LABELS: [&str; 24] = [
     "Position",
     "Elevation",
     "Surface",
@@ -736,6 +736,7 @@ pub const ROW_LABELS: [&str; 23] = [
     "Orogeny",
     "Strength",
     "Earthquakes",
+    "Century quake",
     "Volcanism",
     "Temperature",
     "Jan / Jul",
@@ -794,7 +795,7 @@ pub fn format_rows(
     longitude: f64,
 ) -> Vec<Row> {
     let land = !info.is_sea();
-    let values: [Option<String>; 23] = [
+    let values: [Option<String>; 24] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
         Some(format_surface(info)),
@@ -836,6 +837,7 @@ pub fn format_rows(
         }),
         format_strength(info),
         format_seismicity(info),
+        century_quake(info),
         format_magma(info),
         format_temperature(info.temperature),
         (info.temperature_january.is_finite() || info.temperature_july.is_finite()).then(|| {
@@ -967,9 +969,8 @@ const QUIET_SEISMICITY: f32 = 1e10;
 /// Magma supply below this (mm/yr) is shown as none.
 const NO_MAGMA: f32 = 1e-3;
 
-/// The estimated seismic moment rate of a cell and its main source (#110), with the magnitude
-/// of one earthquake that would release a century of it in 100 × 100 km:
-/// "subduction, 2.0·10¹⁴ N·m/yr/km², ≈ Mw 7.9 per century".
+/// The estimated seismic moment rate of a cell and its main source (#110):
+/// "subduction, 2.0·10¹⁴ N·m/yr/km²".
 fn format_seismicity(info: &CellInfo) -> Option<String> {
     let rate = info.seismicity;
     if !(rate.is_finite() && rate >= QUIET_SEISMICITY) {
@@ -977,15 +978,25 @@ fn format_seismicity(info: &CellInfo) -> Option<String> {
     }
     let exponent = rate.log10().floor();
     let mantissa = rate / 10f32.powf(exponent);
-    // Hanks & Kanamori: Mw = ⅔ (log₁₀ M₀ − 9.1), M₀ in N·m.
-    let magnitude = 2.0 / 3.0 * ((rate * 1e4 * 100.0).log10() - 9.1);
     let source = info
         .seismic_source()
         .map_or(String::new(), |source| format!("{}, ", source.label()));
     Some(format!(
-        "{source}{mantissa:.1}·{} N·m/yr/km², ≈ Mw {magnitude:.1} per century",
+        "{source}{mantissa:.1}·{} N·m/yr/km²",
         super::modes::power_of_ten(exponent as i32)
     ))
+}
+
+/// The magnitude of one earthquake that would release a century of a cell's seismic moment in
+/// 100 × 100 km (about a cell at the default resolution), as an intuition for the rate:
+/// "Mw 7.9 per 100 × 100 km".
+fn century_quake(info: &CellInfo) -> Option<String> {
+    let rate = info.seismicity;
+    (rate.is_finite() && rate >= QUIET_SEISMICITY).then(|| {
+        // Hanks & Kanamori (1979): Mw = ⅔ (log₁₀ M₀ − 9.1), M₀ in N·m.
+        let magnitude = 2.0 / 3.0 * ((rate * 1e4 * 100.0).log10() - 9.1);
+        format!("Mw {magnitude:.1} per 100 × 100 km")
+    })
 }
 
 /// The estimated magma supply of a cell and its main source: "arc, 0.15 mm/yr".
@@ -1364,6 +1375,17 @@ mod tests {
         assert_eq!(row(&rows, "Crust").unwrap(), "continental, 35.2 km");
         assert_eq!(row(&rows, "Lithosphere age").unwrap(), "old (≥ 1000 Myr)");
         assert_eq!(row(&rows, "Sediment").unwrap(), "774 m (512 m as rock)");
+        // The activity of the test cell (#110): 2·10¹⁴ N·m yr⁻¹ km⁻² releases 2·10²⁰ N·m per
+        // century in 10⁴ km², one Mw 7.5 earthquake.
+        assert_eq!(
+            row(&rows, "Earthquakes").unwrap(),
+            "subduction, 2.0·10¹⁴ N·m/yr/km²"
+        );
+        assert_eq!(
+            row(&rows, "Century quake").unwrap(),
+            "Mw 7.5 per 100 × 100 km"
+        );
+        assert_eq!(row(&rows, "Volcanism").unwrap(), "arc, 0.150 mm/yr");
         assert_eq!(format_thickness(12_345.0), "12.3 km");
         assert_eq!(format_thickness(999.0), "999 m");
         assert_eq!(row(&rows, "Orogeny").unwrap(), "25%, last 88 Myr ago");
