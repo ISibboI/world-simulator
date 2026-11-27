@@ -35,9 +35,14 @@ Method: [plan.md](plan.md) (with the review response at its end; review in
 
 The ridge estimate (47.5 km³/yr) matches the model's own production of new sea floor over the
 last 10 Myr of the run (53 km³/yr of 7 km crust, from the mass ledger), so the estimate is
-faithful to the model. That the model makes ~2× Earth's sea floor (and releases ~2–3× Earth's
-seismic moment, mostly at faster trenches) is a property of the tectonics at that time, not of
-this view. At 5 subdivisions (60 Myr, the first check) the totals were 2.0 × 10²² N·m/yr and
+faithful to the model. The model turns over ~2× Earth's sea floor at that time: it makes
+~6.8 km²/yr at its ridges and, by the subduction moment (2.6 × 10²² N·m/yr at 18 km coupling and
+14° dip), consumes about as much at its trenches (Earth ~3.4 km²/yr). Its mean plate speed is
+Earth-like (3.4 cm/yr), so the cause is more active boundary length (ridges and trenches) rather
+than faster plates; the global moment rate and magma supply follow from that turnover. Applied to
+Earth's rates the method itself gives ~1.2 × 10²² N·m/yr, at the top of the observed range (the
+megathrust coupling of Bird & Kagan includes great earthquakes). A property of the tectonics, not
+of this view. At 5 subdivisions (60 Myr, the first check) the totals were 2.0 × 10²² N·m/yr and
 36 km³/yr.
 
 Cells: at 300 Myr, 22 % of the cells have any seismicity; the strongest 1 % exceed
@@ -52,9 +57,11 @@ State hashes: identical to the base branch (seed 3, 5 subdivisions, 40 Myr: `348
 Desktop (5 subdivisions, seed 3, 150 Myr):
 - [Earthquakes with the cell widget](desktop-earthquakes.png): subduction zones dark red,
   collision and deforming belts red, ridges and transforms orange, quiet plate interiors grey.
-  The pattern is Earth's: a "Ring of Fire" of the trenches around the closing ocean, a broad
-  belt of distributed seismicity through deforming continental crust (as the Alpine–Himalayan
-  belt), and thin lines of weak seismicity along the ridges.
+  The pattern is Earth's at plate boundaries: a "Ring of Fire" of the trenches around the closing
+  ocean, belts of distributed seismicity through deforming continental crust (as the
+  Alpine–Himalayan belt), and lines of weak seismicity along the ridges. Unlike Earth, much of
+  the continental area shows moderate seismicity, especially at the web's 4 subdivisions (see
+  the caveats).
 - [Volcanism](desktop-volcanism.png): ridges brightest (most magma, but almost all of it at
   depth and under water), arcs as narrower bands behind the trenches, hotspots as round spots.
 - [Both, with the planet panel](desktop-both.png): arc volcanoes 1–2 cells behind the
@@ -65,7 +72,9 @@ Phone (web, 390 × 844, 4 subdivisions, light theme):
 - [Earthquakes with the legend](phone-earthquakes-legend.png), [Both](phone-both.png),
   [cell widget](phone-cell.png). The switcher's three choices fit one and a half rows; the
   cell widget's activity rows fit the phone width (the magnitude got a row of its own,
-  "Century quake", so that no row is cut off).
+  "Century quake", so that no row is cut off). The mode adds no new kind of widget: its options
+  are the switcher's choice buttons and switch, which get touch-sized targets on coarse pointers
+  like every other mode's (the screenshots are from a fine-pointer browser).
 
 ## Caveats (also on the PR)
 
@@ -76,9 +85,22 @@ Phone (web, 390 × 844, 4 subdivisions, light theme):
   length. A cell at a triple junction keeps only the motion of the boundary that decides its
   class.
 - Oceanic transforms: Bird & Kagan's coupling drops 7× at 4 cm/yr; the map shows that step.
-- Distributed deformation: at 4–5 subdivisions whole continental interiors can show moderate
-  seismicity (10¹²–10¹³), because #182's sheet deforms them at 10⁻¹⁶–10⁻¹⁵ s⁻¹; strain rates
-  below 10⁻¹⁷ s⁻¹ are left out (stable interiors, no intraplate seismicity is estimated).
+- Distributed deformation: much of the continental area shows moderate seismicity
+  (10¹²–10¹³ N·m yr⁻¹ km⁻², Tibet-like), most at the web's 4 subdivisions, because #182's sheet
+  deforms it at 10⁻¹⁶–10⁻¹⁵ s⁻¹. The view shows that faithfully; whether the sheet's background
+  strain is too high is a question for the sheet, not for this view. Strain rates below
+  10⁻¹⁷ s⁻¹ are left out (stable interiors; no intraplate seismicity is estimated).
+- "Century quake" (one earthquake that would release a century of moment in 100 × 100 km) is an
+  intuition aid, not a forecast; with coarser cells the boundary moment spreads wider and it
+  reads ~0.4 lower at 4 subdivisions.
+- Arc magma also reaches the trench cells themselves: the arc profile skips the trench cell of
+  each contact (ring 0), but its neighbours along the trench are one ring away. The model grows
+  its arc crust the same way (the view copies its spreading), so about a third of the arc's
+  magma sits on the trench line ([cell widget](desktop-earthquakes.png): "arc, 0.04 mm/yr" at an
+  overriding trench cell). Sub-grid (#64).
+- Oblique trenches: their strike-slip part uses the transform coupling of the crust (13 km on
+  slow oceanic plates), as Bird & Kagan split oblique motion. In "Both", a hotspot whose cells a
+  ridge dominates gets no marker.
 - No intermediate and deep (intraslab) earthquakes; no back-arc spreading; no arcs at diffuse
   convergent zones (the model only grows arc crust there for overlaps the velocity solve did
   not see converging).
@@ -88,6 +110,13 @@ Phone (web, 390 × 844, 4 subdivisions, light theme):
 - Magma supply includes intrusions; only ~10–20 % erupts, and at ridges almost all of it under
   water, so the volcanism scale is not a map of volcanoes; "Both" therefore marks arcs,
   hotspots and rifts, not ridges.
+
+## Independent evaluation
+
+[evaluation.md](evaluation.md): no must-fix items. Its "should" items are addressed above (the
+cause of the high moment rate, the continental seismicity, the touch sizes) and by a fresh
+desktop screenshot of the cell widget (a subduction cell: 3.4·10¹⁴ N·m/yr/km², Mw 7.6 per
+100 × 100 km).
 
 ## Frames
 

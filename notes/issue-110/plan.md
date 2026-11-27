@@ -154,11 +154,12 @@ not used.
 
 - Option "Show": **Earthquakes** (default) / **Volcanism** / **Both**; switch "Plate boundaries"
   (the Plates mode's lines, default off).
-- Earthquakes: ṁ on a sequential log scale (pale yellow → orange → red → dark purple), classes
-  per decade (very low … very high). Cells without activity: neutral pale greys, darker for the
+- Earthquakes: ṁ on a continuous sequential log scale (YlOrRd: pale yellow → orange → red →
+  dark red), ticks every two decades. Cells without activity: neutral pale greys, darker for the
   ocean than for land, so the geography stays readable; coastlines drawn. Unlit, so the colours
   match the legend.
-- Volcanism: magma supply on its own log scale (pale → orange-red → dark red), 10⁻³–10 mm/yr.
+- Volcanism: magma supply on its own log scale (PuRd: pale lilac → magenta → dark red, apart from
+  the earthquake colours), 10⁻³–10 mm/yr.
 - Both: the earthquake colours, plus volcano markers (small triangles with a dark border) at
   volcanic cells above 10⁻² mm/yr, thinned to one per ~1.5 arrow spacings, coloured by the
   dominant volcanic source (Okabe–Ito: arc, ridge, hotspot, rift). Legend lists both.
