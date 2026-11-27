@@ -757,6 +757,9 @@ impl Escape {
             );
             water_used = gases.water_used();
             hydrogen_flux += gases.state().hydrogen_flux;
+            // The diffusion limit of the step's gases (the water's share used the last step's).
+            let f_total = water + gases.hydrogen_equivalent();
+            diffusion_limit = 2.0 * params.diffusion_limit * f_total / (1.0 + f_total);
             gas_state = Some(*gases.state());
         }
         self.state = EscapeState {

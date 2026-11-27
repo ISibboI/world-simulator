@@ -34,10 +34,10 @@ pub struct Planet {
     escape: Escape,
     /// Cells within [`EscapeParams::tropics_latitude`], whose ocean sets the cold trap.
     tropical_cells: Vec<bool>,
-    /// The greenhouse forcing of the start (W/m²; all gases) and the part of it that the
-    /// reduced gases (#202) had then, while they are simulated.
+    /// The greenhouse forcing of the start (W/m²; all gases), and without the carbon cycle the
+    /// CO₂'s share of it: the start's less the reduced gases' (#202) at the end of the ramp-up.
     start_forcing: f64,
-    start_gas_forcing: f64,
+    held_co2_forcing: f64,
     /// `None` disables erosion.
     erosion: Option<ErosionParams>,
     planet_radius: f64,
@@ -491,7 +491,7 @@ impl Planet {
             escape,
             tropical_cells,
             start_forcing,
-            start_gas_forcing,
+            held_co2_forcing: start_forcing - start_gas_forcing,
             erosion,
             planet_radius,
             precipitation: vec![0.0; cell_count],
@@ -1132,7 +1132,12 @@ impl Planet {
                 );
                 self.carbon.forcing()
             } else {
-                self.start_forcing - self.start_gas_forcing
+                // As the carbon cycle's hold: the CO₂ makes up the gases until the tectonics
+                // has settled, then stays.
+                if self.ramp_up.is_running() {
+                    self.held_co2_forcing = self.start_forcing - gas_forcing;
+                }
+                self.held_co2_forcing
             };
             self.temperature.params_mut().greenhouse_forcing = co2_forcing + gas_forcing;
         }
