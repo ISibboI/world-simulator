@@ -795,6 +795,23 @@ pub struct Simulation {
     last_section_analysis: f64,
 }
 
+/// A tectonic step in progress (see [`Simulation::begin_step`]).
+#[derive(Debug, Clone)]
+pub struct TectonicStep {
+    dt: f64,
+    substeps: usize,
+    done: usize,
+    /// Felsic crust and sediment at the start, for the material budget.
+    start: (f64, f64),
+}
+
+impl TectonicStep {
+    /// Substeps still to take.
+    pub fn substeps_left(&self) -> usize {
+        self.substeps - self.done
+    }
+}
+
 impl Simulation {
     pub fn new(mesh: SphereMesh, plate_count: usize, params: TectonicParams, seed: u64) -> Self {
         let mut owned_rng = ChaCha8Rng::seed_from_u64(seed);
@@ -1093,8 +1110,22 @@ impl Simulation {
     }
 
     /// Advances the simulation by `dt` Myr, splitting it into substeps such that no cell moves
-    /// more than [`TectonicParams::max_substep_movement`] cell spacings per substep.
+    /// more than [`TectonicParams::max_substep_movement`] cell spacings per substep. The same as
+    /// [`Simulation::begin_step`], [`Simulation::next_substep`] and [`Simulation::end_step`] (which
+    /// the planet uses).
+    #[cfg(test)]
     pub fn step(&mut self, dt: f64) {
+        let mut step = self.begin_step(dt);
+        while step.substeps_left() > 0 {
+            self.next_substep(&mut step);
+        }
+        self.end_step(step);
+    }
+
+    /// Starts a step of `dt` Myr (the substeps as in `Simulation::step`), which then takes
+    /// [`Simulation::next_substep`] for every substep and [`Simulation::end_step`]. Between these
+    /// parts the state is consistent, but the time is part-way through the step.
+    pub fn begin_step(&mut self, dt: f64) -> TectonicStep {
         let mantle_velocity = self
             .mantle
             .velocities(&self.mesh, self.params.planet_radius);
@@ -1114,10 +1145,25 @@ impl Simulation {
         let max_substep_angle = self.params.max_substep_movement * self.mesh.mean_edge_angle();
         let substeps = (max_angle / max_substep_angle).ceil().max(1.0) as usize;
         tracing::trace!(substeps, "Tectonic step");
-        let start = self.felsic_and_sediment();
-        for _ in 0..substeps {
-            self.substep(dt / substeps as f64);
+        TectonicStep {
+            dt,
+            substeps,
+            done: 0,
+            start: self.felsic_and_sediment(),
         }
+    }
+
+    /// Takes the next substep of `step`.
+    pub fn next_substep(&mut self, step: &mut TectonicStep) {
+        debug_assert!(step.substeps_left() > 0);
+        self.substep(step.dt / step.substeps as f64);
+        step.done += 1;
+    }
+
+    /// Ends `step` after its substeps: crustal flow, plate events, the mantle and the sea level.
+    pub fn end_step(&mut self, step: TectonicStep) {
+        debug_assert_eq!(step.substeps_left(), 0);
+        let TectonicStep { dt, start, .. } = step;
         let after_substeps = self.felsic_and_sediment();
         let rotations = self.rotations();
         self.polarities
