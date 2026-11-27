@@ -45,6 +45,7 @@ mod dynamics;
 mod events;
 mod generation;
 mod initial_sediment;
+mod kernels;
 mod ledger;
 mod mantle;
 mod matching;
@@ -60,7 +61,9 @@ pub use cover::{CohortMasses, CoverBudget, CoverMasses, CoverTerm};
 pub use crust::*;
 pub use deformation::MIN_BAND_STRENGTH;
 pub use display::BoundaryClass;
-pub use events::{EventCounts, PlateEventParams, WEAK_BELT_THRESHOLD};
+pub use events::{
+    EventCounts, PLUME_SPLIT_DISTANCES, PlateEventParams, SplitCause, WEAK_BELT_THRESHOLD,
+};
 pub use generation::InitialConfiguration;
 pub use initial_sediment::{InitialSedimentParams, PlatformEmplacement};
 pub use ledger::MassLedger;
@@ -68,7 +71,9 @@ pub use mantle::{MantleParams, Plume};
 pub use matching::{MatchingParams, MatchingStatistics};
 pub use sheet::{SheetParams, SheetStatistics};
 pub use statistics::*;
-pub use weak_zones::{MIN_STRENGTH, combine_strength, orogenic_strength, thermal_strength};
+pub use weak_zones::{
+    MIN_STRENGTH, combine_strength, fabric_strength, orogenic_strength, thermal_strength,
+};
 
 use boundaries::{METASEDIMENT_DENSITY, ResolvedBoundaries, pair_key};
 use generation::*;
@@ -250,6 +255,19 @@ pub struct TectonicParams {
     pub slab_decay_time: f64,
     /// Ridge push per metre of ridge in N/m.
     pub ridge_push: f64,
+    /// Factor on the load of the plume swells' potential energy in the deforming plates and
+    /// in the breakup analysis (1 = physical, 0 disables it; for ablations, #51; see
+    /// `MantleFlow::plume_swell_gradient`).
+    pub swell_load: f64,
+    /// Depth-integrated strength of lithosphere above a plume head that supplies magma,
+    /// relative to its strength without, for opening (dyking): magma-assisted rifting needs
+    /// about an order of magnitude less tectonic force than amagmatic rifting of thick
+    /// lithosphere (Buck 2004, 2006; Bialas, Buck & Qin 2010). 1 disables it (for ablations;
+    /// see `weak_zones::magma_weakening`, #51).
+    pub magma_weakening: f64,
+    /// Factor on the extension fabric that stretching marks (1 = physical, 0: no fabric; for
+    /// ablations; see [`Crust::rifted`], #54).
+    pub rift_fabric: f64,
     /// Oceanic crust up to this age in Myr at a divergent boundary counts as a ridge flank.
     pub ridge_age: f64,
     /// Basal drag coefficient `c` in Pa·s/m: shear stress per relative velocity between plate
@@ -357,6 +375,9 @@ impl Default for TectonicParams {
             min_slab_length: 20e3,
             slab_sinking_speed: 10.0,
             ridge_push: 3e12,
+            swell_load: 1.0,
+            magma_weakening: 0.1,
+            rift_fabric: 1.0,
             ridge_age: 20.0,
             basal_drag: 1e15,
             continental_drag_factor: 4.0,
@@ -461,6 +482,9 @@ impl TectonicParams {
             "continental_interior_thickness" => &mut self.continental_interior_thickness,
             "continental_margin_width" => &mut self.continental_margin_width,
             "ridge_push" => &mut self.ridge_push,
+            "swell_load" => &mut self.swell_load,
+            "magma_weakening" => &mut self.magma_weakening,
+            "rift_fabric" => &mut self.rift_fabric,
             "arc_crust_per_subduction" => &mut self.arc_crust_per_subduction,
             "subduction_erosion" => &mut self.subduction_erosion,
             "oceanic_arc_felsic" => &mut self.oceanic_arc_felsic,
@@ -483,7 +507,6 @@ impl TectonicParams {
                 &mut self.events.boundary_initiation_waiting_time
             }
             "events.initiation_age_contrast" => &mut self.events.initiation_age_contrast,
-            "events.min_oceanic_rift_area" => &mut self.events.min_oceanic_rift_area,
             "events.rift_continent_radius" => &mut self.events.rift_continent_radius,
             "events.suture_time" => &mut self.events.suture_time,
             "events.suture_convergence" => &mut self.events.suture_convergence,
@@ -867,6 +890,7 @@ impl Simulation {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    rifted: 0.0,
                     reheated: NO_REHEATING,
                     cohort: Cohort::NONE,
                 }
@@ -1231,13 +1255,7 @@ impl Simulation {
         self.mantle.step(dt, &subduction, &slabs, &mut self.rng);
         if self.mantle.needs_priming() {
             // The first solve's trenches fill the mantle's memory (#213).
-            self.mantle.prime(
-                dt,
-                &subduction,
-                &slabs,
-                self.params.events.rift_delay,
-                &mut self.rng,
-            );
+            self.mantle.prime(dt, &subduction, &slabs, &mut self.rng);
         }
 
         let sea_level = self.solve_sea_level();
@@ -2079,6 +2097,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -2106,6 +2125,7 @@ mod tests {
                         metasediment: 0.0,
                         orogeny: NO_OROGENY,
                         orogenic: 0.0,
+                        rifted: 0.0,
                         reheated: NO_REHEATING,
                         cohort: Cohort::NONE,
                     };
@@ -2137,6 +2157,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    rifted: 0.0,
                     reheated: NO_REHEATING,
                     cohort: Cohort::NONE,
                 };
@@ -2156,6 +2177,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -2179,6 +2201,7 @@ mod tests {
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
+                rifted: 0.0,
                 reheated: NO_REHEATING,
                 cohort: Cohort::NONE,
             };
@@ -2211,6 +2234,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };

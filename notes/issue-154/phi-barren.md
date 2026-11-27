@@ -117,6 +117,26 @@ prescribed start climate.
     because of the 2× degassing), as a soundness check;
   - narrowing `phi_range` from 10³ to that band.
 
+## Decision (Sebastian, 2026-11-27)
+
+"Phi should be calibrated, but clamped to the range you proposed." Implemented:
+
+- The calibrated φ is clamped to **0.3–3** (`carbon.phi_min = 0.3`, `carbon.phi_max = 3`; they
+  replace `phi_range`). 0.3 rather than 1/3, because the band is the rounded plausible range of
+  §2, not a symmetric factor. Where the clamp binds, a warning names the balancing φ and the
+  clamped one.
+- At a clamped φ the sinks do not balance the sources at the start's CO₂. The CO₂ is still held
+  for the 150-Myr window, so the forcing is continuous at its end; afterwards the implicit step
+  moves the CO₂ (within a few feedback times) to where the sinks balance. The carbon balance is
+  conserved exactly as before; the clamp only changes a constant of the laws.
+- A fixed `--set carbon.phi=X` is not clamped.
+- The same band holds for the modern preset, derived separately in [phi-modern.md](phi-modern.md)
+  (Sebastian: the clamp should be realistic for each preset).
+- The barren default (0.95–1.6) never reaches the clamp: bit-identical. The modern runs
+  (3.5–8.2) are clamped to 3; see [results.md](results.md#clamped-φ-modern-runs).
+
+"No minimum CO₂ for plants": no plant CO₂ floor follow-up.
+
 ## Sources
 
 Values marked "secondary" were checked through abstracts or citing papers only.

@@ -56,6 +56,9 @@ fn add_crystalline(receiver: &mut Crust, thickness: f64, crust: &Crust) {
     let orogenic = (receiver.thickness * receiver.density * receiver.orogenic
         + thickness * crust.density * crust.orogenic)
         / mass.max(1e-9);
+    let rifted = (receiver.thickness * receiver.density * receiver.rifted
+        + thickness * crust.density * crust.rifted)
+        / mass.max(1e-9);
     receiver.felsic =
         (receiver.felsic_mass() + thickness * crust.density * crust.felsic) / mass.max(1e-9);
     receiver.metasediment = (receiver.metasediment_mass()
@@ -63,7 +66,7 @@ fn add_crystalline(receiver: &mut Crust, thickness: f64, crust: &Crust) {
         / mass.max(1e-9);
     receiver.thickness += thickness;
     receiver.density = mass / receiver.thickness.max(1e-9);
-    receiver.mix_orogeny(crust.orogeny, orogenic);
+    receiver.mix_orogeny(crust.orogeny, orogenic, rifted);
 }
 
 /// Adds `crust` to the sample of `plate` at `target` and its neighbours with crust in equal
@@ -296,6 +299,8 @@ impl Simulation {
                 sheet.split_timer = 0.0;
                 sheet.pending_breakup = None;
                 sheet.breakup_timer = 0.0;
+                sheet.rift_timer = 0.0;
+                sheet.rift_plume = None;
                 sheet
             },
         };
@@ -306,6 +311,12 @@ impl Simulation {
         // Its sections change: the time it was overloaded starts again.
         self.plates[plate as usize].sheet.pending_breakup = None;
         self.plates[plate as usize].sheet.breakup_timer = 0.0;
+        // A propagating plume rift goes on in the part above its plume (#51).
+        let rift = (
+            self.plates[plate as usize].sheet.rift_timer,
+            self.plates[plate as usize].sheet.rift_plume.take(),
+        );
+        self.plates[plate as usize].sheet.rift_timer = 0.0;
         let new_index = self.plates.len() as u32;
         self.plates.push(new_plate);
 
@@ -314,6 +325,14 @@ impl Simulation {
                 && self.plates[plate as usize].crust[owner.local as usize].is_none()
             {
                 owner.plate = new_index;
+            }
+        }
+        if let (timer, Some((plume, reach))) = rift {
+            let owner = self.owners[self.mesh.nearest(plume) as usize].plate;
+            if owner == plate || owner == new_index {
+                let sheet = &mut self.plates[owner as usize].sheet;
+                sheet.rift_timer = timer;
+                sheet.rift_plume = Some((plume, reach));
             }
         }
 
@@ -353,6 +372,15 @@ impl Simulation {
         self.plates[into as usize].tracked = None;
         self.plates[into as usize].sheet.pending_breakup = None;
         self.plates[into as usize].sheet.breakup_timer = 0.0;
+        // A propagating plume rift goes on in the merged plate (the longer one of the two).
+        let absorbed_rift = (
+            self.plates[absorbed as usize].sheet.rift_timer,
+            self.plates[absorbed as usize].sheet.rift_plume,
+        );
+        let sheet = &mut self.plates[into as usize].sheet;
+        if absorbed_rift.0 > sheet.rift_timer {
+            (sheet.rift_timer, sheet.rift_plume) = absorbed_rift;
+        }
         let to_into =
             self.plates[into as usize].rotation.inverse() * self.plates[absorbed as usize].rotation;
         let cell_count = self.mesh.len();
@@ -482,6 +510,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: 400.0,
             orogenic: 1.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -498,6 +527,7 @@ mod tests {
             plate.crust[vertex as usize] = Some(Crust {
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
+                rifted: 0.0,
                 reheated: NO_REHEATING,
                 ..suture
             });

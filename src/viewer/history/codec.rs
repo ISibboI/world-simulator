@@ -2,8 +2,8 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (55 bytes per cell
-//! instead of 140, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (57 bytes per cell
+//! instead of 148, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
@@ -44,7 +44,7 @@ impl Code {
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 35] = [
+const CHANNELS: [Code; 38] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -80,6 +80,9 @@ const CHANNELS: [Code; 35] = [
     Code::Root(8.0),
     // Ice share.
     Code::Share,
+    // Lake ice of January and July (shares; NaN off the lakes, so zero in the deltas there).
+    Code::Share,
+    Code::Share,
     // Discharge: 0.6 % relative (the widget shows 3 digits), up to 10^38 m³/yr.
     Code::Logarithmic(1.0 / 170.0),
     // Lake depth: 0.1 % relative (1 mm at 1 m); whether a depression holds a lake is a bit of
@@ -102,6 +105,8 @@ const CHANNELS: [Code; 35] = [
     Code::Signed8(0.25),
     Code::Signed8(0.25),
     Code::Signed8(0.25),
+    // Extension fabric share.
+    Code::Share,
     // Plate (clamped to 16 bits), the low 16 bits of the flags, the drainage and the climate
     // class. The flags take 9 bits, so most of their high byte is zero and costs next to nothing
     // after the delta and lz4.
@@ -112,10 +117,10 @@ const CHANNELS: [Code; 35] = [
 ];
 
 /// The channels of the integer attributes: plate, flags, drainage and climate class.
-const PLATE: usize = 31;
-const FLAGS: usize = 32;
-const DRAINAGE: usize = 33;
-const CLIMATE_CLASS: usize = 34;
+const PLATE: usize = 34;
+const FLAGS: usize = 35;
+const DRAINAGE: usize = 36;
+const CLIMATE_CLASS: usize = 37;
 
 /// The value of an integer channel of a cell.
 fn integer(channel: usize, cell: &CellInfo) -> u16 {
@@ -161,6 +166,8 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.evaporation_january,
         cell.evaporation_july,
         cell.ice,
+        cell.lake_ice_january,
+        cell.lake_ice_july,
         cell.discharge,
         cell.lake_depth,
         cell.current_east,
@@ -173,6 +180,7 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.wind_january_north,
         cell.wind_july_east,
         cell.wind_july_north,
+        cell.rifted,
         0.0,
         0.0,
         0.0,
@@ -356,18 +364,21 @@ impl Planes {
                     evaporation_january: value(16),
                     evaporation_july: value(17),
                     ice: value(18),
-                    discharge: value(19),
-                    lake_depth: value(20),
-                    current_east: value(21),
-                    current_north: value(22),
-                    streamfunction: value(23),
-                    gyre_heating: value(24),
-                    wind_east: value(25),
-                    wind_north: value(26),
-                    wind_january_east: value(27),
-                    wind_january_north: value(28),
-                    wind_july_east: value(29),
-                    wind_july_north: value(30),
+                    lake_ice_january: value(19),
+                    lake_ice_july: value(20),
+                    discharge: value(21),
+                    lake_depth: value(22),
+                    current_east: value(23),
+                    current_north: value(24),
+                    streamfunction: value(25),
+                    gyre_heating: value(26),
+                    wind_east: value(27),
+                    wind_north: value(28),
+                    wind_january_east: value(29),
+                    wind_january_north: value(30),
+                    wind_july_east: value(31),
+                    wind_july_north: value(32),
+                    rifted: value(33),
                     climate_class: u32::from(values[CLIMATE_CLASS]),
                     plate: u32::from(values[PLATE]),
                     flags: u32::from(values[FLAGS]),
@@ -395,7 +406,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 11;
+const VERSION: u8 = 13;
 /// Bytes per plate: its rotation (angular velocity), id and orientation.
 pub const PLATE_BYTES: usize = 32;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -534,6 +545,7 @@ mod tests {
             age: x * 0.1 + time,
             sediment: x * 0.5,
             orogenic: (x * 0.01).fract(),
+            rifted: (x * 0.017).fract(),
             since_orogeny: if index.is_multiple_of(3) {
                 f32::NAN
             } else {
@@ -560,6 +572,17 @@ mod tests {
                 (x * 0.07).sin().abs() * 3.0
             },
             ice: if index.is_multiple_of(5) { 1.0 } else { 0.0 },
+            // Lake ice on a third of the cells (NaN on the others), with partial covers.
+            lake_ice_january: if index.is_multiple_of(3) {
+                (x * 0.017 + time * 0.01).fract()
+            } else {
+                f32::NAN
+            },
+            lake_ice_july: if index.is_multiple_of(3) {
+                (x * 0.029 + time * 0.01).fract() * 0.5
+            } else {
+                f32::NAN
+            },
             discharge: if index.is_multiple_of(7) {
                 0.0
             } else {
@@ -617,6 +640,7 @@ mod tests {
             (original.age, decoded.age, 0.125),
             (original.sediment, decoded.sediment, 0.5),
             (original.orogenic, decoded.orogenic, 0.5 / 254.0),
+            (original.rifted, decoded.rifted, 0.5 / 254.0),
             (original.since_orogeny, decoded.since_orogeny, 0.125),
             (
                 original.strength_thermal,
@@ -668,6 +692,12 @@ mod tests {
                 root_tolerance(original.evaporation_july),
             ),
             (original.ice, decoded.ice, 0.5 / 254.0),
+            (
+                original.lake_ice_january,
+                decoded.lake_ice_january,
+                0.5 / 254.0,
+            ),
+            (original.lake_ice_july, decoded.lake_ice_july, 0.5 / 254.0),
             // A full step: small negative values keep their sign (one step below zero).
             (original.current_east, decoded.current_east, 0.05),
             (original.current_north, decoded.current_north, 0.05),
@@ -732,7 +762,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 55);
+        assert_eq!(BYTES_PER_CELL, 58);
     }
 
     #[test]

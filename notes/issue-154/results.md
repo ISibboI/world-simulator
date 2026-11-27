@@ -198,3 +198,34 @@ confirmed the numbers, conservation and stability, and found:
 - Grid: at ~110 km cells the erosion that supplies the land weathering is net per cell and
   step (a lower bound of the gross turnover), and the sea-floor production jumps when cells
   open; the 3-Myr smoothing of the tectonic rates takes the worst of that out.
+
+## Clamped φ (modern runs)
+
+Sebastian (2026-11-27): φ stays calibrated but clamped to its plausible range, 0.3–3 for both
+presets ([phi-barren.md](phi-barren.md), [phi-modern.md](phi-modern.md)). Commit `f7090f6`, 4 seeds
+(0–3) × 1000 Myr, `--duration 1000 --biosphere modern --epoch 4`, through `runs` (GitHub).
+
+- **Barren default unchanged:** seeds 0 and 1 × 200 Myr give the same state hash at every
+  snapshot as `afc4046` (φ 0.95–1.6 never reaches the clamp).
+- **Modern: the clamp binds in every seed.** The balancing φ is 5.57, 5.07, 5.47 and 3.87; the
+  warning names it and the clamped 3.
+
+| seed | balancing φ | forcing step at 150 Myr (W/m²) | peak pCO₂ (time) | pCO₂ at 1000 Myr | T at 150 / 300 / 1000 Myr (°C) | ice at 1000 Myr |
+|---|---|---|---|---|---|---|
+| 0 | 5.57 | +4.0 | 1080 ppm (250 Myr) | 76 ppm | 18.0 / 22.0 / 20.4 | 5.6% |
+| 1 | 5.07 | +3.9 | 1210 ppm (266 Myr) | 151 ppm | 17.6 / 22.6 / 24.5 | 2.7% |
+| 2 | 5.47 | +6.4 | 1590 ppm (229 Myr) | 151 ppm | 14.7 / 21.2 / 23.5 | 3.7% |
+| 3 | 3.87 | +1.3 | 1010 ppm (195 Myr) | 81 ppm | 15.7 / 20.9 / 22.2 | 4.1% |
+
+- **Behaviour.** The CO₂ is held for 150 Myr. In the first step after the window it jumps
+  +1.3 to +6.4 W/m² (the modern reservoir is only ~0.3 Myr of degassing), then rises to
+  3.6–5.7× today's CO₂ at 195–266 Myr, where land and seafloor weathering at φ = 3 balance
+  the spun-up degassing. After that the brightening sun draws it down to 75–150 ppm at
+  1000 Myr.
+- **Climate.** The mean at 1000 Myr is 22.7 °C, against 20.8 with the unclamped φ (8 seeds) and
+  25.5 without the cycle. The warming 150 → 1000 Myr is +6.2 K, against +4.3 and +8.9. That is
+  warmer because the CO₂ settles where the realistic laws balance the model's degassing, which
+  is ~2× Earth's.
+- **No blow-up.** Sources and sinks agree to the log's rounding in every step after the jump. The
+  exogenic carbon changes by the integral of sources minus sinks to ~1.5 × 10⁻⁵ of the gross
+  throughput (log rounding). The clamp only changes a constant of the laws.

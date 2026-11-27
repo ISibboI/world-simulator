@@ -910,9 +910,9 @@ fn snapshot(
     );
     info!(
         "    trenches {:.0} km, ridges {:.0} km, collisions {:.0} km ({:.0} converging, {:.0} diverging) | slab pull {:.2e} N, ridge push {:.2e} N | \
-         rifts {}, initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
-         blocked splits {}, terranes {} ({} cells, {} slab break-offs) | continental contacts made by rifts {:.0} km ({:.0} far), by initiations {:.0} km ({:.0} far) | \
-         splits along weak zones {} ({} cut again, {} along the coast, {} rifts through the plume head; rift boundaries on sutures {:.0}% of their continental cells vs {:.0}% of the rifted plates), along great circles {}, boundary deviation from a great circle: rifts {:.0} km, initiations {:.0} km | \
+         initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
+         blocked splits {}, terranes {} ({} cells, {} slab break-offs) | continental contacts made by initiations {:.0} km ({:.0} far) | \
+         initiation splits along weak zones {} ({} cut again, {} along the coast), along great circles {}, boundary deviation from a great circle {:.0} km | \
          fracture-zone initiations {}, failed initiations (no division/overriding/subducting part too small) {}/{}/{}, \
          undone initiations (suture/capture/piece/terrane) {}/{}/{}/{}",
         statistics.trench_length,
@@ -922,7 +922,6 @@ fn snapshot(
         statistics.collision_diverging_length,
         statistics.slab_pull,
         statistics.ridge_push,
-        statistics.events.rifts,
         statistics.events.initiations,
         statistics.events.breakups,
         statistics.events.induced_subductions,
@@ -938,23 +937,13 @@ fn snapshot(
         statistics.events.terrane_accretions,
         statistics.events.accreted_terrane_cells,
         statistics.events.slab_breakoffs,
-        statistics.events.rift_contact_km,
-        statistics.events.rift_far_contact_km,
         statistics.events.initiation_contact_km,
         statistics.events.initiation_far_contact_km,
         statistics.events.weak_zone_splits,
         statistics.events.recut_splits,
         statistics.events.coastal_splits,
-        statistics.events.head_rifts,
-        100.0 * statistics.events.rift_suture_cells[0] as f64
-            / statistics.events.rift_suture_cells[1].max(1) as f64,
-        100.0 * statistics.events.rift_suture_cells[2] as f64
-            / statistics.events.rift_suture_cells[3].max(1) as f64,
         statistics.events.great_circle_splits,
-        statistics.events.split_deviation_km[0]
-            / statistics.events.measured_splits[0].max(1) as f64,
-        statistics.events.split_deviation_km[1]
-            / statistics.events.measured_splits[1].max(1) as f64,
+        statistics.events.split_deviation_km / statistics.events.measured_splits.max(1) as f64,
         statistics.events.fracture_zone_initiations,
         statistics.events.failed_initiation_reasons[0],
         statistics.events.failed_initiation_reasons[1],
@@ -965,22 +954,72 @@ fn snapshot(
         statistics.events.undone_initiations[3],
     );
     let events = &statistics.events;
-    info!(
-        "    rift belts (continental cells, boundary/plates): ever marked {}/{} of {}/{}, orogenic weakening {:.1}/{:.1}, weak (≥ {}) {}/{} | \
-         plume rifts failed {}, break vs plate motion |cos| {:.3} over {} rifts",
-        events.rift_suture_cells[0],
-        events.rift_suture_cells[2],
-        events.rift_suture_cells[1],
-        events.rift_suture_cells[3],
-        events.rift_orogenic[0],
-        events.rift_orogenic[1],
-        tectonics::WEAK_BELT_THRESHOLD,
-        events.rift_weak_cells[0],
-        events.rift_weak_cells[1],
-        events.failed_plume_rifts,
-        events.rift_motion_alignment.0 / events.rift_motion_alignment.1.max(1) as f64,
-        events.rift_motion_alignment.1,
-    );
+    {
+        let tallies: Vec<String> = tectonics::SplitCause::ALL
+            .iter()
+            .zip(&events.splits_by_cause)
+            .map(|(cause, tally)| {
+                format!(
+                    "{} {} ({}/{} at plumes, {}/{} at antipodes, mean distance {:.3}/{:.3} rad; \
+                     boundary {}/{}/{}/{}, plates {}/{}/{}/{})",
+                    cause.name(),
+                    tally.count,
+                    tally.near_plume[0],
+                    tally.near_plume[1],
+                    tally.near_antipode[0],
+                    tally.near_antipode[1],
+                    tally.plume_distance / tally.count.max(1) as f64,
+                    tally.antipode_distance / tally.count.max(1) as f64,
+                    tally.boundary[0],
+                    tally.boundary[1],
+                    tally.boundary[2],
+                    tally.boundary[3],
+                    tally.plates[0],
+                    tally.plates[1],
+                    tally.plates[2],
+                    tally.plates[3],
+                )
+            })
+            .collect();
+        info!(
+            "    splits by cause (within {:.3}/{:.3} rad of a plume; continental cells all/belts/fabric/interior fabric): {}",
+            tectonics::PLUME_SPLIT_DISTANCES[0],
+            tectonics::PLUME_SPLIT_DISTANCES[1],
+            tallies.join(" | "),
+        );
+    }
+    {
+        // Extension fabric (#54): continental cells marked at least as much as a weak belt,
+        // near coasts and margins or deep inside continents (failed rifts, aulacogens).
+        let (mut continental, mut margin, mut interior, mut sum) = (0usize, 0usize, 0usize, 0.0);
+        for cell in 0..simulation.mesh().len() as u32 {
+            let crust = simulation.surface_crust(cell);
+            if !crust.is_continental_origin() {
+                continue;
+            }
+            continental += 1;
+            sum += crust.rifted;
+            if crust.rifted >= tectonics::WEAK_BELT_THRESHOLD {
+                if simulation.deep_in_continent(cell) {
+                    interior += 1;
+                } else {
+                    margin += 1;
+                }
+            }
+        }
+        let sheet = simulation.sheet_statistics();
+        info!(
+            "    extension fabric: mean {:.3} on continental crust, ≥ {} on {:.1}% near margins and \
+             {:.1}% deep inside continents (of the continental cells) | sheet shortening on fabric \
+             {:.1}% of {:.3e}",
+            sum / continental.max(1) as f64,
+            tectonics::WEAK_BELT_THRESHOLD,
+            100.0 * margin as f64 / continental.max(1) as f64,
+            100.0 * interior as f64 / continental.max(1) as f64,
+            100.0 * sheet.shortening.1 / sheet.shortening.0.max(f64::MIN_POSITIVE),
+            sheet.shortening.0,
+        );
+    }
     log_sediment_reservoirs(&planet_statistics);
     {
         let field = simulation.dynamic_topography();
@@ -1284,14 +1323,23 @@ fn snapshot(
     let breakup = simulation.breakup_statistics();
     info!(
         "    breakup by stress: {} plates broken ({} cells; {} opening, {} closing, the others \
-         sliding), {} plates overloaded at the last analysis (largest overload {:.2}), {:.1} s",
+         sliding; {} through a plume), plume sections by overload (< 0.25, < 0.5, < 1, ≥ 1) {:?}, \
+         {} plates overloaded at the last analysis (largest overload {:.2}), {:.1} s | plume \
+         rifts {} (by the plume's age at onset < 20, < 50, < 100, older: {:?}), rift sections by \
+         overload {:?}, {} plates with a propagating rift",
         breakup.splits,
         breakup.split_cells,
         breakup.opening_splits,
         breakup.closing_splits,
+        breakup.plume_splits,
+        breakup.plume_overloads,
         breakup.overloaded,
         breakup.max_overload,
         breakup.seconds,
+        breakup.rift_splits,
+        breakup.rift_onsets,
+        breakup.rift_overloads,
+        breakup.propagating,
     );
     info!(
         "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
@@ -1605,13 +1653,14 @@ fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Res
         writeln!(
             file,
             "time,plate,cells,overload,level_overload,cut_overload,length_km,piece_cells,\
-             strength,piece_continental,opening,residual,timer"
+             strength,piece_continental,opening,residual,timer,through_plume,plume_overload,\
+             rift_overload,rift_timer,rift_reach_km"
         )?;
     }
     for record in simulation.section_records() {
         writeln!(
             file,
-            "{},{},{},{:.4},{:.4},{:.4},{:.0},{},{:.3},{:.3},{:.3},{:.3},{}",
+            "{},{},{},{:.4},{:.4},{:.4},{:.0},{},{:.3},{:.3},{:.3},{:.3},{},{},{:.4},{:.4},{},{:.0}",
             simulation.time(),
             record.plate_id,
             record.cells,
@@ -1625,6 +1674,11 @@ fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Res
             record.opening,
             record.residual,
             record.timer,
+            u8::from(record.through_plume),
+            record.plume_overload,
+            record.rift_overload,
+            record.rift_timer,
+            record.rift_reach_km,
         )?;
     }
     Ok(())
@@ -1836,7 +1890,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain,ice"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,rifted,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain,ice"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -1862,7 +1916,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
         writeln!(
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
-             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
+             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
              {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1},{:.3}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
@@ -1891,6 +1945,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             },
             simulation.dynamic_topography()[cell as usize],
             crust.orogenic,
+            crust.rifted,
             crust.strength_age(simulation.time()).min(1e4),
             simulation.lithosphere_strength(cell),
             u8::from(marine),
