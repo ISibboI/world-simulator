@@ -43,17 +43,22 @@ def parse(log):
                 cur.update(sheet_splits=int(m[1]))
         if "splits by cause" in line:
             for cause in CAUSES:
-                m = re.search(re.escape(cause) + r" (\d+) \((\d+)/(\d+) at plumes, (\d+)/(\d+) at antipodes, mean distance ([\d.]+)/([\d.]+) rad; boundary ([\d/]+), plates ([\d/]+)\)", line)
+                pattern = "plume (?:rule|rift)" if cause == "plume rule" else re.escape(cause)
+                m = re.search(pattern + r" (\d+) \((\d+)/(\d+) at plumes, (\d+)/(\d+) at antipodes, mean distance ([\d.]+)/([\d.]+) rad; boundary ([\d/]+), plates ([\d/]+)\)", line)
                 if m:
                     cur[cause] = dict(count=int(m[1]), near=(int(m[2]), int(m[3])), anti=(int(m[4]), int(m[5])),
                                       dist=float(m[6]) * int(m[1]), antidist=float(m[7]) * int(m[1]),
                                       boundary=[int(x) for x in m[8].split("/")], plates=[int(x) for x in m[9].split("/")])
-        m = re.search(r"breakup by stress: (\d+) plates broken \((\d+) cells; (\d+) opening, (\d+) closing, the others sliding(?:; (\d+) through a plume\), plume sections by overload \(< 0.25, < 0.5, < 1, ≥ 1\) \[(\d+), (\d+), (\d+), (\d+)\])?.*?, ([\d.]+) s$", line.strip())
+        m = re.search(r"breakup by stress: (\d+) plates broken \((\d+) cells; (\d+) opening, (\d+) closing, the others sliding(?:; (\d+) through a plume\), plume sections by overload \(< 0.25, < 0.5, < 1, ≥ 1\) \[(\d+), (\d+), (\d+), (\d+)\])?.*?, ([\d.]+) s(?: \|.*)?$", line.strip())
         if m:
             cur.update(breakups=int(m[1]), opening=int(m[3]), closing=int(m[4]),
                        plume_splits=int(m[5]) if m[5] else 0,
                        plume_overloads=[int(m[i]) for i in range(6, 10)] if m[6] else [0, 0, 0, 0],
                        breakup_seconds=float(m[10]))
+        m = re.search(r"plume rifts (\d+) \(by the plume's age at onset < 20, < 50, < 100, older: \[(\d+), (\d+), (\d+), (\d+)\]\), rift sections by overload \[(\d+), (\d+), (\d+), (\d+)\], (\d+) plates with a propagating rift", line)
+        if m:
+            cur.update(rift_splits=int(m[1]), rift_onsets=[int(m[i]) for i in range(2, 6)],
+                       rift_overloads=[int(m[i]) for i in range(6, 10)], propagating=int(m[10]))
         m = re.search(r"extension fabric: mean ([\d.]+) on continental crust, ≥ [\d.]+ on ([\d.]+)% near margins and ([\d.]+)% deep inside continents.*shortening on fabric ([\d.]+)% of ([\d.e+-]+)", line)
         if m:
             cur.update(fabric_mean=float(m[1]), fabric_margin=float(m[2]), fabric_interior=float(m[3]),
@@ -108,6 +113,20 @@ def metrics(snaps, a, b):
     out["splits ≤1000 km of antipode /100Myr"] = rate(snaps, anti(1), a, b)
     out["opening breakups ≤500 km of plume /100Myr"] = rate(snaps, lambda s: cause(s, "stress opening", "near", 0), a, b)
     out["breakups through plume sections /100Myr"] = rate(snaps, lambda s: s.get("plume_splits", 0), a, b)
+    out["propagated plume rifts /100Myr"] = rate(snaps, lambda s: s.get("rift_splits", 0), a, b)
+    for k, name in enumerate(["< 20", "20–50", "50–100", "≥ 100"]):
+        out[f"plume rifts, plume age at onset {name} Myr (count)"] = (
+            (lambda sa, sb: (sb.get("rift_onsets", [0] * 4)[k] - sa.get("rift_onsets", [0] * 4)[k]) if sa and sb else float("nan"))(at(snaps, a), at(snaps, min(b, max(x["t"] for x in snaps)))))
+    def rift_share(k):
+        sa, sb = at(snaps, a), at(snaps, min(b, max(x["t"] for x in snaps)))
+        if not sa or not sb or "rift_overloads" not in sb:
+            return float("nan")
+        d = [y - x for x, y in zip(sa.get("rift_overloads", [0] * 4), sb["rift_overloads"])]
+        return 100 * d[k] / sum(d) if sum(d) else float("nan")
+    out["rift sections S_rift ≥ 1 (% of analyses)"] = rift_share(3)
+    out["rift sections S_rift 0.5–1 (%)"] = rift_share(2)
+    out["plates with a propagating rift"] = window_mean(snaps, "propagating", a, b)
+    out["largest plate max in window"] = max((s["largest_plate"] for s in snaps if a <= s["t"] <= b), default=float("nan"))
     out["births /100Myr"] = rate(snaps, lambda s: s["born"], a, b)
     out["deaths /100Myr"] = rate(snaps, lambda s: s["gone"], a, b)
     for key in ["plates", "largest_plate", "continental", "cont_origin", "land", "land_mean", "flooded", "thick50",

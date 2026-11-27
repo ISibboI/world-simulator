@@ -327,12 +327,12 @@ impl Simulation {
                 owner.plate = new_index;
             }
         }
-        if let (timer, Some(plume)) = rift {
+        if let (timer, Some((plume, reach))) = rift {
             let owner = self.owners[self.mesh.nearest(plume) as usize].plate;
             if owner == plate || owner == new_index {
                 let sheet = &mut self.plates[owner as usize].sheet;
                 sheet.rift_timer = timer;
-                sheet.rift_plume = Some(plume);
+                sheet.rift_plume = Some((plume, reach));
             }
         }
 

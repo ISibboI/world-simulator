@@ -190,7 +190,8 @@ pub struct SectionRecord {
     pub plume_overload: f64,
     /// The overload of the best section through a plume as a magma-fed rift (see
     /// [`Simulation::plume_sections`]; 0 if none), how long (Myr) the plate's rift has
-    /// propagated, and how far (km) it has to propagate from the plume's magma footprint.
+    /// propagated, and how far (km) it has to propagate from the plume's magma footprint (set at
+    /// the rift's onset).
     pub rift_overload: f64,
     pub rift_timer: f64,
     pub rift_reach_km: f64,
@@ -650,25 +651,32 @@ impl Simulation {
             }
             let propagating = rift.filter(|rift| rift.overload >= 1.0 && params.propagation > 0.0);
             if let Some(rift) = propagating {
-                // A rift from another plume starts anew.
-                if plate
+                // A rift from another plume starts anew. The rift's path is set where it
+                // starts: the distance it has to run is the one at its onset, not that of
+                // later sections as the plate drifts over the plume.
+                let same = plate
                     .sheet
                     .rift_plume
-                    .is_some_and(|plume| plume.dot(rift.plume) <= math::cos(rift.radius))
-                {
-                    plate.sheet.rift_timer = 0.0;
-                }
+                    .filter(|&(plume, _)| plume.dot(rift.plume) > math::cos(rift.radius));
+                let reach = match same {
+                    Some((_, reach)) if plate.sheet.rift_timer > 0.0 => reach,
+                    _ => {
+                        plate.sheet.rift_timer = 0.0;
+                        rift.reach
+                    }
+                };
                 statistics.propagating += 1;
                 plate.sheet.rift_timer += dt;
-                plate.sheet.rift_plume = Some(rift.plume);
+                plate.sheet.rift_plume = Some((rift.plume, reach));
             } else {
                 plate.sheet.rift_timer = (plate.sheet.rift_timer - dt).max(0.0);
                 if plate.sheet.rift_timer == 0.0 {
                     plate.sheet.rift_plume = None;
                 }
             }
-            let crossed = propagating.filter(|rift| {
-                let crossing = (rift.reach * radius / 1e3 / params.propagation).max(params.time);
+            let crossed = propagating.filter(|_| {
+                let reach = plate.sheet.rift_plume.map_or(0.0, |(_, reach)| reach);
+                let crossing = (reach * radius / 1e3 / params.propagation).max(params.time);
                 plate.sheet.rift_timer >= crossing - 1e-9
             });
             let due = if overloaded && plate.sheet.breakup_timer >= params.time - 1e-9 {
@@ -717,7 +725,14 @@ impl Simulation {
                     plume_overload: section.plume_overload,
                     rift_overload: rift.map_or(0.0, |rift| rift.overload),
                     rift_timer: plate.sheet.rift_timer,
-                    rift_reach_km: rift.map_or(0.0, |rift| rift.reach * radius / 1e3),
+                    rift_reach_km: plate
+                        .sheet
+                        .rift_plume
+                        .map(|(_, reach)| reach)
+                        .or(rift.map(|rift| rift.reach))
+                        .unwrap_or(0.0)
+                        * radius
+                        / 1e3,
                     residual,
                     timer: plate.sheet.breakup_timer,
                 });

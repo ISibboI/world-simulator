@@ -215,9 +215,10 @@ pub(super) struct PlateSheet {
     /// the plate's best rift through a plume has propagated (#51, see [`super::breakup`]).
     pub(super) breakup_rift: bool,
     pub(super) rift_timer: f64,
-    /// The plume (its cell's position) of that rift, and the plume's age (Myr) when the rift of
-    /// the pending breakup started.
-    pub(super) rift_plume: Option<DVec3>,
+    /// The plume (its cell's position) of that rift and the distance (rad) the rift has to run
+    /// from the plume's magma footprint, set at its onset; the plume's age (Myr) when the rift
+    /// of the pending breakup started.
+    pub(super) rift_plume: Option<(DVec3, f64)>,
     pub(super) rift_onset_age: f64,
 }
 
