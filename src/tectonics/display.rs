@@ -96,6 +96,12 @@ pub struct BoundaryMap {
     /// within [`super::TectonicParams::rift_width`] of a rift on its plate (the zone the rift
     /// stretches). Both are counted in rings of cells over the plate.
     pub band: Vec<bool>,
+    /// Per cell: the motion across the boundary that decided its class, in cm/yr: the
+    /// convergence (normal to the boundary, positive where the plates converge, negative where
+    /// they open) and the strike-slip rate (along it), of the material on either side (plate
+    /// rotations and the deformation of the lithosphere). Zero inside plates. For the activity
+    /// estimate (see [`Simulation::activity`]).
+    pub motion: Vec<[f64; 2]>,
 }
 
 impl Simulation {
@@ -111,6 +117,8 @@ impl Simulation {
         let rotations = self.rotations();
         let cell_count = self.mesh.len();
         let mut classes: Vec<Option<BoundaryClass>> = vec![None; cell_count];
+        let mut motion = vec![[0.0f64; 2]; cell_count];
+        let cm_per_year = 1.0 / per_cm_yr;
         let spacing = params.planet_radius * self.mesh.mean_edge_angle();
         let collision_rings = super::deformation::band_rings(params.collision_band_width, spacing);
         // As the rift stretching (`Simulation::resolve_ownership`).
@@ -187,6 +195,23 @@ impl Simulation {
                 (.., kinematic) => kinematic,
             };
             let slot = &mut classes[cell as usize];
+            // The motion of the boundary that decides the class; of the faster one between
+            // boundaries of the same class.
+            let rates = [
+                relative.dot(boundary.normal) * cm_per_year,
+                strike_slip * cm_per_year,
+            ];
+            let speed = |[normal, slip]: [f64; 2]| normal * normal + slip * slip;
+            let replaces = match *slot {
+                None => true,
+                Some(previous) => {
+                    class < previous
+                        || (class == previous && speed(rates) > speed(motion[cell as usize]))
+                }
+            };
+            if replaces {
+                motion[cell as usize] = rates;
+            }
             *slot = Some(slot.map_or(class, |previous| previous.min(class)));
         }
 
@@ -222,7 +247,11 @@ impl Simulation {
                 }
             }
         }
-        BoundaryMap { classes, band }
+        BoundaryMap {
+            classes,
+            band,
+            motion,
+        }
     }
 }
 

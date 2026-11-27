@@ -35,6 +35,7 @@
 //! initiation at old passive margins, and disappear by subduction, suturing after continental
 //! collisions, or capture of tiny plates by a neighbour ([`events`]).
 
+mod activity;
 mod boundaries;
 mod breakup;
 mod cover;
@@ -55,12 +56,13 @@ mod statistics;
 mod topology;
 mod weak_zones;
 
+pub use activity::{SeismicSource, VolcanicSource};
 pub use boundaries::{GapStatistics, TrenchSediment};
 pub use breakup::{BreakupParams, BreakupStatistics, SectionRecord};
 pub use cover::{CohortMasses, CoverBudget, CoverMasses, CoverTerm};
 pub use crust::*;
 pub use deformation::MIN_BAND_STRENGTH;
-pub use display::BoundaryClass;
+pub use display::{BoundaryClass, BoundaryMap};
 pub use events::{
     EventCounts, PLUME_SPLIT_DISTANCES, PlateEventParams, SplitCause, WEAK_BELT_THRESHOLD,
 };

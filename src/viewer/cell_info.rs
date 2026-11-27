@@ -6,12 +6,12 @@ use eframe::egui;
 use glam::DVec3;
 
 use crate::planet::Planet;
-use crate::tectonics::{self, BoundaryClass};
+use crate::tectonics::{self, BoundaryClass, SeismicSource, VolcanicSource};
 
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 148 bytes per cell, 6.1 MB
+/// buffer (to the page on the web) and read back without parsing: 164 bytes per cell, 6.7 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -106,6 +106,16 @@ pub struct CellInfo {
     /// (#102): the receiver ([`CellInfo::RECEIVER_MASK`]), [`CellInfo::OCEAN`],
     /// [`CellInfo::DEPRESSION`] and [`CellInfo::LAKE`]. The frame history keeps the low 8 bits.
     pub drainage: u32,
+    /// Estimated long-term seismic moment rate in N·m yr⁻¹ km⁻² (#110, see
+    /// [`crate::tectonics::Simulation::activity`]).
+    pub seismicity: f32,
+    /// Estimated long-term magma supply in mm/yr (as a layer over the cell; intrusions
+    /// included).
+    pub magma_supply: f32,
+    /// The dominant sources of [`CellInfo::seismicity`] (bits 0 to 3, the code of a
+    /// [`SeismicSource`], 0 for none) and of [`CellInfo::magma_supply`] (bits 4 to 7, a
+    /// [`VolcanicSource`]).
+    pub activity: u32,
 }
 
 /// What water a cell holds (see [`CellInfo::water_body`]).
@@ -243,6 +253,22 @@ impl CellInfo {
 
     pub fn is_continental(&self) -> bool {
         self.flags & Self::CONTINENTAL != 0
+    }
+
+    /// The bits of [`CellInfo::activity`].
+    pub fn activity_bits(seismic: Option<SeismicSource>, volcanic: Option<VolcanicSource>) -> u32 {
+        u32::from(seismic.map_or(0, SeismicSource::code))
+            | u32::from(volcanic.map_or(0, VolcanicSource::code)) << 4
+    }
+
+    /// What causes most of the cell's earthquakes, if it has any.
+    pub fn seismic_source(&self) -> Option<SeismicSource> {
+        SeismicSource::from_code((self.activity & 0xF) as u8)
+    }
+
+    /// What supplies most of the cell's magma, if it has any.
+    pub fn volcanic_source(&self) -> Option<VolcanicSource> {
+        VolcanicSource::from_code((self.activity >> 4 & 0xF) as u8)
     }
 
     /// What the plate boundary at the cell does, if the cell is at one.
@@ -507,6 +533,7 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
     let time = simulation.time();
     let temperature = planet.temperature();
     let boundaries = simulation.boundary_map();
+    let activity = simulation.activity(&boundaries);
     let field = |values: &[f64], cell: usize| values.get(cell).map_or(f32::NAN, |&v| v as f32);
     let month = |month: usize, cell: usize| {
         temperature
@@ -638,6 +665,12 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                     0
                 },
                 drainage: water_bits(index),
+                seismicity: activity.seismicity[index] as f32,
+                magma_supply: activity.magma[index] as f32,
+                activity: CellInfo::activity_bits(
+                    activity.seismic_source[index],
+                    activity.volcanic_source[index],
+                ),
             }
         })
         .collect()
@@ -691,7 +724,7 @@ pub struct Row {
 
 /// The labels of the rows, always all of them in this order, so that the widget does not
 /// change its layout from cell to cell.
-pub const ROW_LABELS: [&str; 21] = [
+pub const ROW_LABELS: [&str; 23] = [
     "Position",
     "Elevation",
     "Surface",
@@ -702,6 +735,8 @@ pub const ROW_LABELS: [&str; 21] = [
     "Sediment",
     "Orogeny",
     "Strength",
+    "Earthquakes",
+    "Volcanism",
     "Temperature",
     "Jan / Jul",
     "Precipitation",
@@ -759,7 +794,7 @@ pub fn format_rows(
     longitude: f64,
 ) -> Vec<Row> {
     let land = !info.is_sea();
-    let values: [Option<String>; 21] = [
+    let values: [Option<String>; 23] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
         Some(format_surface(info)),
@@ -800,6 +835,8 @@ pub fn format_rows(
             )
         }),
         format_strength(info),
+        format_seismicity(info),
+        format_magma(info),
         format_temperature(info.temperature),
         (info.temperature_january.is_finite() || info.temperature_july.is_finite()).then(|| {
             let month = |t| format_temperature(t).unwrap_or_else(|| NOT_APPLICABLE.to_owned());
@@ -922,6 +959,45 @@ fn format_strength(info: &CellInfo) -> Option<String> {
             None => format!("{strength:.2} (full)"),
         }
     })
+}
+
+/// Seismic moment rates below this (N·m yr⁻¹ km⁻²) are shown as quiet, as in the tectonic
+/// activity mode.
+const QUIET_SEISMICITY: f32 = 1e10;
+/// Magma supply below this (mm/yr) is shown as none.
+const NO_MAGMA: f32 = 1e-3;
+
+/// The estimated seismic moment rate of a cell and its main source (#110), with the magnitude
+/// of one earthquake that would release a century of it in 100 × 100 km:
+/// "subduction, 2.0·10¹⁴ N·m/yr/km², ≈ Mw 7.9 per century".
+fn format_seismicity(info: &CellInfo) -> Option<String> {
+    let rate = info.seismicity;
+    if !(rate.is_finite() && rate >= QUIET_SEISMICITY) {
+        return None;
+    }
+    let exponent = rate.log10().floor();
+    let mantissa = rate / 10f32.powf(exponent);
+    // Hanks & Kanamori: Mw = ⅔ (log₁₀ M₀ − 9.1), M₀ in N·m.
+    let magnitude = 2.0 / 3.0 * ((rate * 1e4 * 100.0).log10() - 9.1);
+    let source = info
+        .seismic_source()
+        .map_or(String::new(), |source| format!("{}, ", source.label()));
+    Some(format!(
+        "{source}{mantissa:.1}·{} N·m/yr/km², ≈ Mw {magnitude:.1} per century",
+        super::modes::power_of_ten(exponent as i32)
+    ))
+}
+
+/// The estimated magma supply of a cell and its main source: "arc, 0.15 mm/yr".
+fn format_magma(info: &CellInfo) -> Option<String> {
+    let supply = info.magma_supply;
+    if !(supply.is_finite() && supply >= NO_MAGMA) {
+        return None;
+    }
+    let source = info
+        .volcanic_source()
+        .map_or(String::new(), |source| format!("{}, ", source.label()));
+    Some(format!("{source}{} mm/yr", significant(f64::from(supply))))
 }
 
 /// Annual precipitation minus evaporation, with the evaporation: "+312 mm/yr (evap. 500)".
@@ -1221,6 +1297,12 @@ mod tests {
             plate: 7,
             flags: CellInfo::CONTINENTAL | CellInfo::FELSIC,
             drainage: CellInfo::NO_RECEIVER,
+            seismicity: 2.0e14,
+            magma_supply: 0.15,
+            activity: CellInfo::activity_bits(
+                Some(SeismicSource::Subduction),
+                Some(VolcanicSource::Arc),
+            ),
         }
     }
 
@@ -1575,7 +1657,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 152);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 164);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 

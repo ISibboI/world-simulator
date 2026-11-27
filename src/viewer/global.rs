@@ -18,7 +18,7 @@ use super::{CellInfo, PlateInfo};
 use crate::planet::Planet;
 
 /// The `f32` values of [`GlobalStatus::to_bytes`].
-const FLOATS: usize = 17;
+const FLOATS: usize = 19;
 
 /// The global state of a state of the planet (see the module documentation). Means over cells
 /// are area-weighted, since the cells of the mesh have nearly equal areas.
@@ -70,6 +70,10 @@ pub struct GlobalStatus {
     /// air (partial pressure, bar); NaN without the escape (#210, #212).
     pub water_lost: f32,
     pub oxygen: f32,
+    /// Estimated long-term seismic moment rate of the whole planet (N·m/yr) and magma supply
+    /// (km³/yr, intrusions included), the sums of the cells' (#110).
+    pub seismic_moment: f32,
+    pub magma_supply: f32,
 }
 
 impl GlobalStatus {
@@ -102,6 +106,8 @@ impl GlobalStatus {
                 sums.land += (f64::from(cell.precipitation), 1);
             }
             sums.continental += usize::from(cell.is_continental());
+            sums.seismic += f64::from(cell.seismicity);
+            sums.magma += f64::from(cell.magma_supply);
             if let Some(plate) = plates.get(cell.plate as usize) {
                 plate_cells[cell.plate as usize] += 1;
                 let rotation = glam::Vec3::from(plate.rotation).as_dvec3();
@@ -144,6 +150,9 @@ impl GlobalStatus {
                 (escape.water_lost / crate::carbon::SEA_WATER_DENSITY / area) as f32
             }),
             oxygen: escape.map_or(f32::NAN, |escape| escape.oxygen_pressure as f32),
+            // N·m yr⁻¹ km⁻² × km²; mm/yr × km² = 10⁻⁶ km³/yr.
+            seismic_moment: (sums.seismic * cell_area / 1e6) as f32,
+            magma_supply: (sums.magma * cell_area / 1e6 * 1e-6) as f32,
         }
     }
 
@@ -199,6 +208,8 @@ impl GlobalStatus {
             plate_speed: float(14),
             water_lost: float(15),
             oxygen: float(16),
+            seismic_moment: float(17),
+            magma_supply: float(18),
             plates: count(0),
             large_plates: count(1),
         })
@@ -224,6 +235,8 @@ impl GlobalStatus {
             self.plate_speed,
             self.water_lost,
             self.oxygen,
+            self.seismic_moment,
+            self.magma_supply,
         ]
     }
 
@@ -612,6 +625,33 @@ fn planet_rows(ui: &mut egui::Ui, view: &PlanetView, narrow: bool) {
                 "Mean surface speed of the plates over the whole surface.",
             );
             ui.end_row();
+            row(
+                ui,
+                "Seismic moment",
+                value(global.seismic_moment, |moment| {
+                    let exponent = moment.max(1.0).log10().floor();
+                    format!(
+                        "{:.1}·{} N·m/yr",
+                        moment / 10f32.powf(exponent),
+                        super::modes::power_of_ten(exponent as i32)
+                    )
+                }),
+                "Estimated long-term seismic moment rate of the planet, from the plate \
+                 boundaries and the deforming lithosphere (see the Tectonic activity mode). \
+                 Earth: about 10²² N·m/yr, mostly at subduction zones.",
+            );
+            spark(ui, |g| g.seismic_moment);
+            ui.end_row();
+            row(
+                ui,
+                "Magma supply",
+                value(global.magma_supply, |supply| format!("{supply:.1} km³/yr")),
+                "Estimated long-term magma supply of ridges, arcs, hotspots and rifts, \
+                 intrusions included (see the Tectonic activity mode). Earth: about 25–30 \
+                 km³/yr, three quarters of it at the ridges.",
+            );
+            spark(ui, |g| g.magma_supply);
+            ui.end_row();
         });
 }
 
@@ -724,6 +764,9 @@ struct Sums {
     ice: usize,
     continental: usize,
     speed: f64,
+    /// Seismic moment rate (N·m yr⁻¹ km⁻²) and magma supply (mm/yr) summed over the cells.
+    seismic: f64,
+    magma: f64,
 }
 
 /// A sum and a count.
@@ -773,6 +816,8 @@ pub(super) fn example() -> GlobalStatus {
         plate_speed: 4.1,
         water_lost: 0.8,
         oxygen: 2e-9,
+        seismic_moment: 8.5e21,
+        magma_supply: 21.3,
     }
 }
 

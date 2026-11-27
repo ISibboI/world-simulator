@@ -31,11 +31,13 @@ pub mod realistic;
 mod sediment;
 mod strength;
 pub mod switcher;
+mod tectonic_activity;
 mod temperature;
 mod topographic;
 mod wind;
 
 pub use sediment::bulk as bulk_sediment;
+pub use tectonic_activity::power_of_ten;
 
 use clap::ValueEnum;
 use glam::Vec3;
@@ -78,6 +80,8 @@ pub enum RenderModeId {
     Sediment,
     /// Lithosphere strength: weak zones and what weakens them.
     LithosphereStrength,
+    /// Estimated seismic and volcanic activity: earthquakes and magma supply.
+    TectonicActivity,
     /// Rivers, drainage basins, endorheic areas and lakes.
     Hydrology,
     /// Köppen–Geiger climate classes of land.
@@ -100,6 +104,7 @@ impl RenderModeId {
             RenderModeId::Crust => &crust::Crust,
             RenderModeId::Sediment => &sediment::Sediment,
             RenderModeId::LithosphereStrength => &strength::LithosphereStrength,
+            RenderModeId::TectonicActivity => &tectonic_activity::TectonicActivity,
             RenderModeId::Hydrology => &hydrology::Hydrology,
             RenderModeId::Climate => &climate::Climate,
         }
@@ -131,6 +136,7 @@ impl RenderModeId {
             RenderModeId::Crust => "crust",
             RenderModeId::Sediment => "sediment",
             RenderModeId::LithosphereStrength => "lithosphere-strength",
+            RenderModeId::TectonicActivity => "tectonic-activity",
             RenderModeId::Hydrology => "hydrology",
             RenderModeId::Climate => "climate",
         }
@@ -472,6 +478,8 @@ pub enum SwatchShape {
     Teeth,
     /// Dark dots on a background of this colour, as a stippled area.
     Dots,
+    /// A triangle marker of this colour with a light border, as volcanoes.
+    Triangle,
     /// A row of small squares of these colours (the colour of the swatch is not used), as for
     /// categories whose colours have no meaning of their own.
     Palette(Vec<[u8; 3]>),
