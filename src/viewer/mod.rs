@@ -150,6 +150,9 @@ pub enum SimulationEvent {
     Surface(SurfaceUpdate),
     /// The simulation failed with this message.
     Failed(String),
+    /// The simulation stopped for a pause, inside a step or between steps (see
+    /// [`crate::pausing`]).
+    Halted(crate::pausing::Halt),
 }
 
 /// A simulation to start: its options and the command-line arguments they came from (starting
@@ -279,18 +282,27 @@ pub type StartSimulation = Box<
 /// The view's line to a running simulation.
 pub trait SimulationControl {
     /// Asks the simulation to send these extra fields with its updates from now on. A
-    /// simulation sends its current state again with them if they include new ones, as soon
-    /// as it can (the web worker between steps, or at once once it has finished; the desktop
-    /// thread with its next step, which comes as soon), so that a new mode does not wait long.
+    /// simulation sends its current state again with them if they include new ones: at once if
+    /// it is between steps (also once it has finished), else with the step in progress (a
+    /// paused one only once the step is complete). Until then the view builds them from the shown
+    /// state, as for past frames.
     fn request_layers(&mut self, layers: Layers);
 
-    /// Pauses the simulation after its current step, or resumes it. The step after a pause is
-    /// sent without its time (`SurfaceUpdate::step_seconds`), which includes the pause.
-    fn set_paused(&mut self, paused: bool);
+    /// Pauses the simulation at the next point where its state is consistent, inside a step or
+    /// between steps (it then reports [`SimulationEvent::Halted`]), or resumes it. The step after
+    /// a pause is sent without its time (`SurfaceUpdate::step_seconds`), which includes the
+    /// pause. `request` numbers the requests of the view (pause, resume and step), so that it can
+    /// tell which one a [`SimulationEvent::Halted`] answers.
+    fn set_paused(&mut self, paused: bool, request: u64);
 
-    /// Takes one step while paused, and stays paused.
-    fn step(&mut self);
+    /// Takes one step while paused, and stays paused: the next step, or the rest of the current
+    /// one if the simulation stopped (or is stopping) inside a step.
+    fn step(&mut self, request: u64);
 }
+
+/// How long the view waits for the simulation to stop after a pause before it says that it is
+/// pausing.
+const PAUSING_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Opens the store of the frame history of a new run; the callback wakes the view when a read
 /// completes. Called on every start of a simulation.
@@ -491,6 +503,12 @@ struct Viewer {
     /// Whether the user paused the simulation, and asked for a step that has not arrived.
     paused: bool,
     step_pending: bool,
+    /// The number of the latest request to the simulation (pause, resume, step), when the latest
+    /// pause or step was asked for, and where the simulation stopped since (inside a step or
+    /// not), if it answered the latest request (see [`SimulationControl::set_paused`]).
+    requests: u64,
+    request_time: Option<web_time::Instant>,
+    halted: Option<bool>,
     /// Options of the running simulation for building the surface: relief exaggeration, river
     /// threshold, and the time step (Myr).
     exaggeration: f64,
@@ -498,7 +516,7 @@ struct Viewer {
     /// Whether the running simulation has no life (`--biosphere abiotic`).
     abiotic: bool,
     dt: f64,
-    /// The epoch of the running simulation (Gyr before present), for the sun.
+    /// The epoch of the running simulation (`--epoch`), for the sun.
     epoch: f64,
     /// Simulated time (Myr) of the displayed state, for the age of the sun.
     shown_time: f64,
@@ -669,6 +687,9 @@ impl Viewer {
             frame_error: None,
             paused: false,
             step_pending: false,
+            requests: 0,
+            request_time: None,
+            halted: None,
             exaggeration: initial.cli.exaggeration,
             abiotic: initial.cli.biosphere == crate::presets::Biosphere::Abiotic,
             river_threshold: initial.cli.river_threshold,
@@ -762,6 +783,8 @@ impl Viewer {
         self.frame_error = None;
         self.paused = false;
         self.step_pending = false;
+        self.request_time = None;
+        self.halted = None;
         self.failure = None;
         self.runs += 1;
         self.generating = false;
@@ -782,15 +805,24 @@ impl Viewer {
         let exaggeration = self.shown_exaggeration();
         self.mode = mode;
         self.display_outdated = true;
+        let layers = mode.mode().layers();
+        // Fields the shown state lacks are rebuilt from its cells and plates, as for past frames,
+        // until the simulation sends them (between steps, see `SimulationControl::request_layers`):
+        // a simulation paused inside a step sends none.
+        let missing = self.fields.layers().0 & layers.0 != layers.0;
         // The realistic mode shows the relief true to scale: rebuild the surface.
-        if self.shown_exaggeration() != exaggeration
+        if (self.shown_exaggeration() != exaggeration || missing)
             && let Some(picking) = &self.picking
             && !picking.cells.is_empty()
         {
             let (cells, plates) = (picking.cells.clone(), picking.plates.clone());
-            self.show(self.shown_time, cells, plates, self.fields.clone());
+            let fields = if missing {
+                Fields::from_frame(&picking.mesh, &cells, &plates)
+            } else {
+                self.fields.clone()
+            };
+            self.show(self.shown_time, cells, plates, fields);
         }
-        let layers = mode.mode().layers();
         if layers != self.requested {
             self.requested = layers;
             if let Some(control) = &mut self.control {
@@ -905,6 +937,9 @@ impl Viewer {
         let asked = newer && self.step_pending;
         if newer {
             self.step_pending = false;
+            // The simulation stops after the step it was asked for; "pausing" only if it does
+            // not report it soon (it writes the step's snapshot first).
+            self.request_time = Some(web_time::Instant::now());
         }
         self.time = Some(update.time);
         self.pace.record(update.step_seconds);
@@ -1234,8 +1269,11 @@ impl Viewer {
                     self.step_pending = false;
                 }
                 tracing::info!(paused = self.paused, "Simulation paused");
+                self.requests += 1;
+                self.halted = None;
+                self.request_time = self.paused.then(web_time::Instant::now);
                 if let Some(control) = &mut self.control {
-                    control.set_paused(self.paused);
+                    control.set_paused(self.paused, self.requests);
                 }
             }
             TimeAction::Back => {
@@ -1252,8 +1290,11 @@ impl Viewer {
                     // On the newest frame (live or paused on it): show the step when it comes.
                     self.go_live();
                     self.step_pending = true;
+                    self.requests += 1;
+                    self.halted = None;
+                    self.request_time = Some(web_time::Instant::now());
                     if let Some(control) = &mut self.control {
-                        control.step();
+                        control.step(self.requests);
                     }
                 } else if self.viewing.is_some() {
                     // Paused on the newest frame: follow the simulation again.
@@ -1265,6 +1306,32 @@ impl Viewer {
                 self.view(index);
             }
             TimeAction::Live => self.go_live(),
+        }
+    }
+
+    /// What the paused simulation is doing, for the time bar: "pausing" only once the
+    /// simulation has not answered for [`PAUSING_DELAY`] (it usually answers at once).
+    fn simulation_status(&self, ctx: &egui::Context) -> Option<timeline::Status> {
+        if !self.paused || self.finished() {
+            return None;
+        }
+        if self.step_pending {
+            return Some(timeline::Status::Stepping);
+        }
+        match self.halted {
+            Some(true) => Some(timeline::Status::MidStep),
+            Some(false) => None,
+            None => {
+                let waited = self
+                    .request_time
+                    .map_or(PAUSING_DELAY, |time| time.elapsed());
+                if waited >= PAUSING_DELAY {
+                    Some(timeline::Status::Pausing)
+                } else {
+                    ctx.request_repaint_after(PAUSING_DELAY - waited);
+                    None
+                }
+            }
         }
     }
 
@@ -1305,6 +1372,7 @@ impl Viewer {
             paused: self.paused,
             finished: self.finished(),
             step_pending: self.step_pending,
+            status: self.simulation_status(ctx),
             loading: self.viewing.is_some() && history.is_loading(),
             error: self.frame_error.as_deref(),
             about,
@@ -1564,6 +1632,13 @@ impl eframe::App for Viewer {
                 SimulationEvent::Surface(update) => self.receive(update),
                 SimulationEvent::Generating => self.generating = true,
                 SimulationEvent::Failed(message) => self.failure = Some(message),
+                SimulationEvent::Halted(halt) => {
+                    tracing::info!(?halt, "Simulation halted");
+                    // Not if a later request overtook it.
+                    if self.paused && halt.request == self.requests {
+                        self.halted = Some(halt.in_step);
+                    }
+                }
             }
             updated = true;
         }

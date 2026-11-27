@@ -14,8 +14,13 @@
 //! cog), drawn pressed while the simulation is paused; the time is then shown in the warning
 //! colour. Stepping forward on the newest frame while the simulation is paused computes one more
 //! step. Keys (when no text field has focus and no drop-down list is open): space plays or pauses
-//! the view, P pauses or resumes the simulation, ← and → step, End goes live. While paused, the
-//! desktop simulation writes the snapshot of its paused step only on resume.
+//! the view, P pauses or resumes the simulation, ← and → step, End goes live.
+//!
+//! The simulation stops at the next point where its state is consistent, inside a step or between
+//! steps (#116, see `crate::pausing`). The time says what the paused simulation is doing
+//! ([`Status`]): "pausing…" while it has not stopped yet (only after a moment, as it usually stops
+//! at once), "mid-step" when it stopped inside a step (→ then finishes that step), "stepping…"
+//! while it computes a step asked for. The collapsed strip shows it on a line below the time.
 //!
 //! On wide screens the bar is one row; on narrow ones (phones) the slider gets a row of its own
 //! below the buttons, and the time too if it does not fit beside them (see [`rows`]). On touch
@@ -65,12 +70,53 @@ pub struct TimelineView<'a> {
     pub finished: bool,
     /// A step was requested and has not arrived.
     pub step_pending: bool,
+    /// What the paused simulation is doing, if the user should know.
+    pub status: Option<Status>,
     /// A past frame is being read.
     pub loading: bool,
     /// Why the shown past frame could not be read, if it could not.
     pub error: Option<&'a str>,
     /// A line about the history for the tooltip of the slider.
     pub about: String,
+}
+
+/// What the paused simulation is doing (#116): the simulation stops at the next point of a step
+/// where its state is consistent, which can take a moment on a slow device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    /// It has not stopped yet.
+    Pausing,
+    /// It stopped inside a step: the view shows the state before it; → finishes it.
+    MidStep,
+    /// It computes the step asked for (or the rest of the current one).
+    Stepping,
+}
+
+impl Status {
+    /// The words shown after the time.
+    fn text(self) -> &'static str {
+        match self {
+            Status::Pausing => "pausing…",
+            Status::MidStep => "mid-step",
+            Status::Stepping => "stepping…",
+        }
+    }
+
+    fn tip(self) -> &'static str {
+        match self {
+            Status::Pausing => {
+                "Pausing: the simulation stops at the next point where its state is consistent"
+            }
+            Status::MidStep => {
+                "The simulation is paused in the middle of a step; the view shows the state \
+                 before it. → finishes the step"
+            }
+            Status::Stepping => "Computing the step",
+        }
+    }
+
+    /// The longest of the texts.
+    const LONGEST: &str = "stepping…";
 }
 
 /// What the user asked for.
@@ -200,14 +246,20 @@ pub fn can_step_forward(view: &TimelineView) -> bool {
     }
 }
 
-/// "123 Myr", or "123 Myr · live 456" for a past frame.
-pub fn time_text(view: &TimelineView) -> String {
+/// "123 Myr", or "123 Myr · live 456" for a past frame, followed by what the paused simulation
+/// does (after `separator`).
+pub fn time_text(view: &TimelineView, separator: &str) -> String {
     let shown = (view.time_of)(view.position).unwrap_or(view.live_time);
-    if view.live {
+    let mut text = if view.live {
         format!("{:.0} Myr", view.live_shown)
     } else {
         format!("{shown:.0} Myr · live {:.0}", view.live_time)
+    };
+    if let Some(status) = view.status {
+        text.push_str(separator);
+        text.push_str(status.text());
     }
+    text
 }
 
 /// The narrowest slider worth showing next to the buttons, in points.
@@ -225,10 +277,20 @@ enum Rows {
     Three,
 }
 
-/// The longest time text the bar may show until the simulation goes on: a past frame's (#121).
+/// The longest time text the bar may show until the simulation goes on: a past frame's (#121),
+/// with the longest status (also while running, so that the slider keeps its width when the
+/// simulation is paused).
 fn longest_time_text(view: &TimelineView) -> String {
-    format!("{0:.0} Myr · live {0:.0}", view.live_time)
+    format!(
+        "{0:.0} Myr · live {0:.0}{BAR_SEPARATOR}{1}",
+        view.live_time,
+        Status::LONGEST
+    )
 }
+
+/// Between the time and the status in the bar; the collapsed strip puts the status on a line
+/// of its own, as it has no room on phones.
+const BAR_SEPARATOR: &str = " · ";
 
 /// The layout for a bar with `inner` points of width, buttons and time text of the given widths
 /// and `spacing` points between widgets. The one-row layout is chosen by the width of the
@@ -355,7 +417,7 @@ fn show_strip(
                         }
                         play_button(ui, view, action);
                         simulation_button(ui, view, action);
-                        time_label(ui, view, time_text(view));
+                        time_label(ui, view, time_text(view, "\n"));
                         if view.error.is_some() {
                             ui.colored_label(ui.visuals().error_fg_color, "⚠")
                                 .on_hover_text(view.error.unwrap_or_default());
@@ -386,7 +448,7 @@ fn show_bar(
             egui::Frame::window(ui.style()).show(ui, |ui| {
                 let inner = width - 2.0 * ui.spacing().window_margin.leftf();
                 ui.set_width(inner);
-                let text = time_text(view);
+                let text = time_text(view, BAR_SEPARATOR);
                 let width = text_width(ui, &text);
                 let longest = text_width(ui, &longest_time_text(view)).max(width);
                 let rows = rows(
@@ -631,7 +693,9 @@ fn buttons(
     }
     play_button(ui, view, action);
     let forward_tip = if view.live || view.position + 1 >= view.positions {
-        if view.paused && !view.finished {
+        if view.status == Some(Status::MidStep) {
+            "Finish the current step (→)"
+        } else if view.paused && !view.finished {
             "Compute one more step (→)"
         } else {
             "Follow the simulation again (→)"
@@ -674,7 +738,9 @@ fn time_label(ui: &mut egui::Ui, view: &TimelineView, text: String) {
         text = text.weak();
     }
     let label = ui.label(text);
-    if paused {
+    if let Some(status) = view.status {
+        label.on_hover_text(status.tip());
+    } else if paused {
         label.on_hover_text("The simulation is paused");
     }
 }
@@ -730,6 +796,7 @@ mod tests {
             paused: false,
             finished: false,
             step_pending: false,
+            status: None,
             loading: false,
             error: None,
             about: String::new(),
@@ -753,13 +820,15 @@ mod tests {
         view.live = false;
         view.position = 3;
         assert!(can_step_forward(&view));
-        assert_eq!(time_text(&view), "3 Myr · live 9");
+        assert_eq!(time_text(&view, BAR_SEPARATOR), "3 Myr · live 9");
         // Paused on the newest frame: forward goes live.
         view.position = 9;
         assert!(can_step_forward(&view));
         view.live = true;
         view.position = 9;
-        assert_eq!(time_text(&view), "9 Myr");
+        assert_eq!(time_text(&view, BAR_SEPARATOR), "9 Myr");
+        view.status = Some(Status::MidStep);
+        assert_eq!(time_text(&view, "\n"), "9 Myr\nmid-step");
     }
 
     #[test]
