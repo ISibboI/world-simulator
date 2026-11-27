@@ -458,7 +458,7 @@ impl Simulation {
     }
 
     /// Area of each plate as a fraction of the surface.
-    fn plate_area_fractions(&self) -> Vec<f64> {
+    pub(super) fn plate_area_fractions(&self) -> Vec<f64> {
         let mut area = vec![0.0; self.plates.len()];
         for owner in &self.owners {
             area[owner.plate as usize] += 1.0;

@@ -8,6 +8,7 @@ use web_time::Instant;
 use tracing::{debug, debug_span, info};
 
 use crate::carbon::{CarbonCycle, CarbonParams, CarbonState, LandCell, StepInput};
+use crate::ramp_up::{RampUp, RampUpParams, RampUpStatus};
 use crate::climate::{Climate, ClimateParams, WaterCycle};
 use crate::erosion::{
     CrustClass, ErosionParams, Hydrology, Surface, SurfaceWater, WaveErosion, erode,
@@ -23,6 +24,8 @@ pub struct Planet {
     temperature: TemperatureModel,
     /// The carbon cycle, which sets the greenhouse forcing (#154).
     carbon: CarbonCycle,
+    /// The ramp-up phase, during which the carbon cycle holds the CO₂ (#213).
+    ramp_up: RampUp,
     /// Cells poleward of [`CarbonParams::deep_water_latitude`], whose ocean sets the bottom
     /// water temperature.
     deep_water_cells: Vec<bool>,
@@ -430,6 +433,8 @@ impl Planet {
             4.0 * std::f64::consts::PI * planet_radius * planet_radius,
         );
         carbon.start(tectonics.carbon_drivers());
+        let ramp_up = RampUp::new(RampUpParams::default());
+        carbon.set_calibration_span(ramp_up.params().window);
         let mut temperature = TemperatureModel::new(tectonics.mesh(), temperature);
         let elevation = tectonics.surface_elevations();
         let seeds = crate::sea::ocean_seeds(
@@ -453,6 +458,7 @@ impl Planet {
             climate,
             temperature,
             carbon,
+            ramp_up,
             deep_water_cells,
             erosion,
             planet_radius,
@@ -481,6 +487,22 @@ impl Planet {
     /// measure how long it is preserved (see [`Simulation::start_cover_cohort`]).
     pub fn track_cover_cohort_from(&mut self, time: f64) {
         self.cover_cohort_time = time;
+    }
+
+    /// Replaces the parameters of the ramp-up phase; before the first step.
+    pub fn set_ramp_up(&mut self, params: RampUpParams) {
+        self.carbon.set_calibration_span(params.window);
+        self.ramp_up = RampUp::new(params);
+    }
+
+    /// Whether the ramp-up phase runs or when it ended (#213).
+    pub fn ramp_up_status(&self) -> RampUpStatus {
+        self.ramp_up.status()
+    }
+
+    /// Whether the carbon cycle holds the CO₂ of the start (during the ramp-up phase).
+    pub fn holds_co2(&self) -> bool {
+        self.carbon.holds_co2()
     }
 
     pub fn tectonics(&self) -> &Simulation {
@@ -988,6 +1010,8 @@ impl Planet {
         let sunlight_change = (params.solar_constant(time + dt) - params.solar_constant(time))
             * (1.0 - crate::presets::BOND_ALBEDO)
             / 4.0;
+        let holds_co2 = self.carbon.holds_co2();
+        self.ramp_up.log_start(holds_co2.then_some("CO₂"));
         let forcing = self.carbon.step(&StepInput {
             years: dt * 1e6,
             drivers: self.tectonics.carbon_drivers(),
@@ -1002,6 +1026,21 @@ impl Planet {
             self.temperature.params_mut().greenhouse_forcing = forcing;
         }
         info!(time = %format_args!("{time:.1}"), "{}", self.carbon.state().summary());
+        // The step that ends the phase is the last of the calibration.
+        if self.ramp_up.observe(
+            time,
+            dt * 1e6,
+            self.tectonics.effective_plate_count(),
+            self.carbon.tectonic_degassing(),
+        ) {
+            self.carbon.end_hold();
+            if holds_co2 {
+                info!(
+                    phi = self.carbon.state().phi,
+                    "The carbon cycle sets the CO₂ from now on"
+                );
+            }
+        }
     }
 
     /// The plate and the [`CrustClass`] of every cell.

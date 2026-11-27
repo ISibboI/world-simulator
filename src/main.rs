@@ -17,6 +17,7 @@ mod planet;
 mod presets;
 #[cfg(any(test, target_arch = "wasm32"))]
 mod query;
+mod ramp_up;
 mod render;
 mod sea;
 mod sparse;
@@ -78,8 +79,10 @@ struct Cli {
     #[arg(long, default_value_t = DEFAULT_SUBDIVISIONS)]
     subdivisions: u32,
 
-    /// Number of tectonic plates.
-    #[arg(long, default_value_t = 12)]
+    /// Number of tectonic plates at the start, with the model's steady size distribution (a few
+    /// large and many small plates): about the model's steady plate count, so that the plate
+    /// count neither ramps up nor overshoots (#213).
+    #[arg(long, default_value_t = 25)]
     plates: usize,
 
     /// Fraction of the surface initially covered by continental crust.
@@ -417,6 +420,7 @@ fn run_simulation_thread(
             mesh: std::mem::take(&mut first_update).then(|| Arc::new(MeshUpdate::of(planet))),
             step_seconds: step_time.map(|time| time.as_secs_f64()),
             fields,
+            global: viewer::GlobalStatus::of(planet),
         };
         // Sending fails once the view started another simulation or was closed.
         if events.send(SimulationEvent::Surface(update)).is_err() {
@@ -626,6 +630,7 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
         climate,
         temperature,
         carbon,
+        ramp_up,
     } = parameters;
     let simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
     let erosion = (!cli.no_erosion).then_some(erosion);
@@ -637,6 +642,7 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
         erosion,
         EARTH_RADIUS,
     );
+    planet.set_ramp_up(ramp_up);
     planet.track_cover_cohort_from(cli.cover_cohort);
     Ok(planet)
 }

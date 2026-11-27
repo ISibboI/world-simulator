@@ -28,6 +28,7 @@ use crate::carbon::CarbonParams;
 use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
 use crate::math;
+use crate::ramp_up::RampUpParams;
 use crate::sun::{self, MAX_EPOCH, PRESENT_EPOCH, PRESENT_SOLAR_CONSTANT};
 use crate::tectonics::TectonicParams;
 use crate::temperature::TemperatureParams;
@@ -282,6 +283,7 @@ pub struct Parameters {
     pub climate: ClimateParams,
     pub temperature: TemperatureParams,
     pub carbon: CarbonParams,
+    pub ramp_up: RampUpParams,
 }
 
 impl Parameters {
@@ -296,6 +298,7 @@ impl Parameters {
             climate: ClimateParams::default(),
             temperature: TemperatureParams::default(),
             carbon: CarbonParams::default(),
+            ramp_up: RampUpParams::default(),
         };
         biosphere.apply(
             &mut parameters.tectonics,
@@ -308,10 +311,12 @@ impl Parameters {
         parameters
     }
 
-    /// Overrides one parameter: `erosion.`, `climate.`, `temperature.` and `carbon.` select
-    /// those parameters, anything else is a tectonic parameter.
+    /// Overrides one parameter: `erosion.`, `climate.`, `temperature.`, `carbon.` and
+    /// `ramp_up.` select those parameters, anything else is a tectonic parameter.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
-        if let Some(name) = name.strip_prefix("carbon.") {
+        if let Some(name) = name.strip_prefix("ramp_up.") {
+            self.ramp_up.set(name, value)
+        } else if let Some(name) = name.strip_prefix("carbon.") {
             self.carbon.set(name, value)
         } else if let Some(name) = name.strip_prefix("erosion.") {
             self.erosion.set(name, value)
@@ -353,6 +358,7 @@ mod tests {
             climate: ClimateParams::default(),
             temperature: TemperatureParams::default(),
             carbon: CarbonParams::default(),
+            ramp_up: RampUpParams::default(),
         }
     }
 

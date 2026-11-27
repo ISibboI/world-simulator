@@ -305,13 +305,50 @@ pub(super) fn continents(
     is_continental
 }
 
+/// The shape of the steady plate-size distribution of the model (#213): the plate of rank `r`
+/// (from 0) of `n` covers a share ∝ `exp(−(r/n)^PLATE_SIZE_STRETCH / PLATE_SIZE_SCALE)`. Fitted
+/// to the rank–area distribution of the 8-seed base runs at 300–1000 Myr (28 plates: the
+/// largest ~20%, 18 above 1%, ten small ones of 0.1–1%; `notes/issue-213/results.md`): a few
+/// large plates and many small ones, like Earth's (Bird 2003), whose ranks fall off faster than
+/// any power law over the large plates and slower over the small ones.
+const PLATE_SIZE_STRETCH: f64 = 0.85;
+const PLATE_SIZE_SCALE: f64 = 0.224;
+
+/// Smallest target share of a plate: above the size below which tiny plates are captured by a
+/// neighbour (0.3%), so that no generated plate disappears at once.
+const MIN_PLATE_SHARE: f64 = 0.004;
+
+/// Target area shares of `plate_count` plates, largest first (before their random scatter):
+/// the model's steady distribution ([`PLATE_SIZE_STRETCH`]), each with a log-normal scatter of
+/// 25%, at least [`MIN_PLATE_SHARE`] or two cells, normalised to the whole sphere.
+fn target_areas(plate_count: usize, cell_count: usize, rng: &mut impl Rng) -> Vec<f64> {
+    let n = plate_count.max(1) as f64;
+    let mut targets: Vec<f64> = (0..plate_count)
+        .map(|rank| {
+            let x = math::powf(rank as f64 / n, PLATE_SIZE_STRETCH) / PLATE_SIZE_SCALE;
+            math::exp(-x + 0.25 * standard_normal(rng))
+        })
+        .collect();
+    let floor = MIN_PLATE_SHARE
+        .max(2.0 / cell_count.max(1) as f64)
+        .min(1.0 / n);
+    for _ in 0..4 {
+        let total: f64 = targets.iter().sum();
+        targets.iter_mut().for_each(|t| *t = (*t / total).max(floor));
+    }
+    let total: f64 = targets.iter().sum();
+    targets.iter_mut().for_each(|t| *t /= total);
+    targets
+}
+
 /// Partitions the sphere into `plate_count` connected plates: noise-warped, additively
 /// weighted Voronoi regions around random centres (the score of a plate at a cell is the
 /// great-circle angle from the warped cell position to the plate's centre minus the plate's
 /// weight). The regions are built by a priority flood from the centres in order of the score,
 /// so that every plate is connected and owns its centre. The weights are adjusted until the
-/// plate areas approach power-law target areas (Zipf-like ranks with random scatter: a few
-/// large and several small plates, Bird 2003, Morra et al. 2013).
+/// plate areas approach the target areas of the model's steady size distribution with random
+/// scatter ([`target_areas`]: a few large and many small plates, Bird 2003, Morra et al.
+/// 2013).
 ///
 /// A plate spreads through continental crust that it has reached with a lower score (by
 /// [`CONTINENT_COHESION`]), so that continents mostly lie within one plate and plate boundaries
@@ -326,11 +363,7 @@ pub(super) fn plate_partition(
 ) -> Vec<u32> {
     let cell_count = mesh.len();
     let plate_count = plate_count.min(cell_count).max(1);
-    let mut targets: Vec<f64> = (0..plate_count)
-        .map(|rank| math::powf(rank as f64 + 1.0, -0.9) * math::exp(0.25 * standard_normal(rng)))
-        .collect();
-    let total: f64 = targets.iter().sum();
-    targets.iter_mut().for_each(|t| *t /= total);
+    let targets = target_areas(plate_count, cell_count, rng);
     // Angular radius of a spherical cap covering `fraction` of the sphere.
     let cap_radius = |fraction: f64| math::acos(1.0 - 2.0 * fraction.clamp(0.0, 1.0));
     let warp = Warp::new(rng, 1.5, 0.35, 4);
@@ -609,29 +642,36 @@ mod tests {
 
     #[test]
     fn plates_are_connected_and_vary_in_size() {
-        let mesh = SphereMesh::icosphere(5);
-        let plate_count = 12;
-        let mut ratios = Vec::new();
-        for seed in 0..6 {
-            let is_continental = generate(&mesh, seed, InitialConfiguration::Dispersed);
-            let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            let plate_of_cell = plate_partition(&mesh, plate_count, &is_continental, &mut rng);
-            let mut sizes = Vec::new();
-            for plate in 0..plate_count as u32 {
-                let parts = components(&mesh, |cell| plate_of_cell[cell as usize] == plate);
-                assert_eq!(parts.len(), 1, "seed {seed} plate {plate}");
-                sizes.push(parts[0].len());
+        // The web's resolution (5) and the coarse one of quick runs (4).
+        for subdivisions in [5, 4] {
+            let mesh = SphereMesh::icosphere(subdivisions);
+            let plate_count = 25;
+            let (mut largest, mut small) = (Vec::new(), Vec::new());
+            for seed in 0..6 {
+                let is_continental = generate(&mesh, seed, InitialConfiguration::Dispersed);
+                let mut rng = ChaCha8Rng::seed_from_u64(seed);
+                let plate_of_cell = plate_partition(&mesh, plate_count, &is_continental, &mut rng);
+                let mut sizes = Vec::new();
+                for plate in 0..plate_count as u32 {
+                    let parts = components(&mesh, |cell| plate_of_cell[cell as usize] == plate);
+                    assert_eq!(parts.len(), 1, "seed {seed} plate {plate}");
+                    // None is below the capture size (0.3%).
+                    assert!(
+                        parts[0].len() as f64 >= 0.003 * mesh.len() as f64,
+                        "{subdivisions} seed {seed}: {}",
+                        parts[0].len()
+                    );
+                    sizes.push(parts[0].len() as f64 / mesh.len() as f64);
+                }
+                sizes.sort_unstable_by(f64::total_cmp);
+                largest.push(sizes[plate_count - 1]);
+                small.push(sizes.iter().filter(|&&s| s < 0.01).count() as f64);
             }
-            sizes.sort_unstable();
-            let largest = *sizes.last().unwrap() as f64 / mesh.len() as f64;
-            let smallest = sizes[0] as f64 / mesh.len() as f64;
-            assert!(largest > 0.12, "seed {seed}: {sizes:?}");
-            ratios.push(largest / smallest);
+            // The model's steady distribution: the largest ~20%, about a third below 1%.
+            let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+            assert!((0.13..0.3).contains(&mean(&largest)), "{largest:?}");
+            assert!((4.0..13.0).contains(&mean(&small)), "{small:?}");
         }
-        // A few large and several small plates (Earth: Pacific ~20%, the smallest of the 12
-        // largest plates ~1%).
-        let mean_ratio = ratios.iter().sum::<f64>() / ratios.len() as f64;
-        assert!(mean_ratio > 6.0, "{ratios:?}");
     }
 
     #[test]

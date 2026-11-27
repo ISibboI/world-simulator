@@ -22,18 +22,25 @@
 //! - **Sinks** ([`Sinks`]): silicate weathering of every land cell, kinetic (runoff, Arrhenius
 //!   temperature, CO₂, lithology, plants) but limited by the supply of fresh rock from the
 //!   erosion (`w = w_sup (1 − e^{−w_kin/w_sup})`); seafloor weathering per kg of new crust.
-//! - **Calibration**: one factor φ on both kinetic laws is set in the first step so that the
-//!   sinks balance the sources at the start's CO₂ and climate ([`CarbonParams::phi`]).
+//! - **Calibration**: one factor φ on both kinetic laws is set at the end of the planet's
+//!   ramp-up phase ([`crate::ramp_up`], #213) so that the sinks balance the sources of its last
+//!   window (the one that showed the tectonics settled) at the start's CO₂ and the climate of
+//!   those steps ([`CarbonParams::phi`]). The CO₂ is held until then ([`CarbonCycle::end_hold`]).
 //! - **Coupling**: an implicit (backward Euler) step for `ln r` with the temperature change the
 //!   new forcing will cause predicted by a fixed sensitivity λ, which is stable at the 1 Myr
 //!   step also when the feedback is faster than the step.
 //!
 //! See `notes/issue-154/plan.md` for the values and their sources.
 
+use std::collections::VecDeque;
+
 use tracing::warn;
 
 use crate::math;
 use crate::presets::{co2_forcing, co2_ratio_for_forcing};
+
+/// The calibration span (Myr) until the planet sets it ([`CarbonCycle::set_calibration_span`]).
+const DEFAULT_CALIBRATION_SPAN: f64 = 20.0;
 
 /// Pre-industrial partial pressure of CO₂ in bar (280 ppm of a 1 bar atmosphere), the reference
 /// of the CO₂ ratio `r`.
@@ -123,24 +130,19 @@ pub struct CarbonParams {
     pub climate_sensitivity: f64,
     /// Relative change of the runoff per kelvin that the implicit step predicts.
     pub runoff_sensitivity: f64,
-    /// Scale of both kinetic weathering laws. NaN (the default): set at
-    /// [`Self::calibration_time`] so that the sinks balance the sources over the last
-    /// [`Self::calibration_span`] before it, at the start's CO₂ (a continuous start); 1 takes
-    /// the laws as they are.
+    /// Scale of both kinetic weathering laws. NaN (the default): set at the end of the
+    /// ramp-up phase ([`CarbonCycle::end_hold`]) so that the sinks balance the sources over its
+    /// last window, at the start's CO₂ (a continuous start); until then the
+    /// CO₂ stays that of the start, as with `--no-carbon-cycle`. The ramp-up lasts until the
+    /// tectonics has settled from the generated start ([`crate::ramp_up`]), so that φ balances
+    /// the planet's degassing, not that of the model's transient. 1 takes the laws as they are,
+    /// without a hold.
     pub phi: f64,
-    /// The time (Myr) after which the CO₂ follows the carbon cycle; until then it stays that of
-    /// the start, as with `--no-carbon-cycle`. The tectonics starts at rest: its degassing
-    /// doubles over the first ~150 Myr (plates speed up, the sea floor opens, plumes rise), so
-    /// a φ set earlier would balance too little degassing and the CO₂ would rise with the
-    /// spin-up of the model, not with the planet.
-    pub calibration_time: f64,
-    /// The time (Myr) before [`Self::calibration_time`] whose sources and sinks φ balances.
-    pub calibration_span: f64,
     /// The calibrated φ stays within `1/phi_range..=phi_range`.
     pub phi_range: f64,
     /// Time (Myr) over which the tectonic rates (of the degassing and of the new crust that the
     /// seafloor weathering alters) are smoothed: they jump with the grid. The smoothing starts at
-    /// [`Self::calibration_time`] from the mean rates of the calibration.
+    /// the end of the ramp-up from the mean rates of the calibration.
     pub degassing_smoothing: f64,
 }
 
@@ -177,8 +179,6 @@ impl Default for CarbonParams {
             climate_sensitivity: 0.8,
             runoff_sensitivity: 0.03,
             phi: f64::NAN,
-            calibration_time: 150.0,
-            calibration_span: 50.0,
             phi_range: 1e3,
             degassing_smoothing: 3.0,
         }
@@ -222,8 +222,6 @@ impl CarbonParams {
             "climate_sensitivity" => &mut self.climate_sensitivity,
             "runoff_sensitivity" => &mut self.runoff_sensitivity,
             "phi" => &mut self.phi,
-            "calibration_time" => &mut self.calibration_time,
-            "calibration_span" => &mut self.calibration_span,
             "phi_range" => &mut self.phi_range,
             "degassing_smoothing" => &mut self.degassing_smoothing,
             _ => anyhow::bail!("unknown carbon parameter {name}"),
@@ -445,8 +443,14 @@ pub struct CarbonCycle {
     previous: Option<TectonicDrivers>,
     /// Simulated years so far.
     years: f64,
-    /// The steps of the calibration window, until φ is set.
-    calibration: Vec<CalibrationStep>,
+    /// The steps of the last [`Self::calibration_span`], until φ is set.
+    calibration: VecDeque<CalibrationStep>,
+    /// The time (Myr) before the end of the hold whose sources and sinks φ balances: the last
+    /// window of the ramp-up ([`Self::set_calibration_span`]).
+    calibration_span: f64,
+    /// The degassing of the last step without the seafloor carbon returning at arcs (mol/yr):
+    /// a rate of the tectonics alone, independent of φ.
+    tectonic_degassing: f64,
     /// φ once set.
     phi: Option<f64>,
     /// Carbon of the altered oceanic crust that arrives at the trenches (mol/kg): the seafloor
@@ -482,7 +486,9 @@ impl CarbonCycle {
             forcing,
             previous: None,
             years: 0.0,
-            calibration: Vec::new(),
+            calibration: VecDeque::new(),
+            calibration_span: DEFAULT_CALIBRATION_SPAN,
+            tectonic_degassing: 0.0,
             phi,
             slab_carbon: f64::NAN,
             smoothed: None,
@@ -509,12 +515,58 @@ impl CarbonCycle {
         self.params.enabled && self.phi.is_some()
     }
 
+    /// Sets the time (Myr) before the end of the hold whose steps φ balances: the last window
+    /// of the ramp-up phase, the one that showed the tectonics settled.
+    pub fn set_calibration_span(&mut self, span: f64) {
+        self.calibration_span = span;
+    }
+
+    /// Whether the CO₂ is held until φ is calibrated ([`Self::end_hold`]): the cycle is
+    /// enabled and φ was not given.
+    pub fn holds_co2(&self) -> bool {
+        self.params.enabled && self.phi.is_none()
+    }
+
+    /// The degassing of the last step without the seafloor carbon returning at arcs (mol/yr):
+    /// ridges, arcs (mantle wedge and sediment), plumes and metamorphism, unsmoothed. A rate of
+    /// the tectonics alone, which the ramp-up phase watches.
+    pub fn tectonic_degassing(&self) -> f64 {
+        self.tectonic_degassing
+    }
+
+    /// Ends the hold of the CO₂ at the end of the ramp-up phase: φ is set so that the sinks
+    /// balance the sources over the recorded steps (the last [`Self::calibration_span`]) at the
+    /// current CO₂, and the smoothing of the tectonic
+    /// rates starts from their mean over those steps. From the next step on, the CO₂ follows
+    /// the cycle. Does nothing if φ is known.
+    pub fn end_hold(&mut self) {
+        if self.phi.is_some() || self.calibration.is_empty() {
+            return;
+        }
+        let (phi, slab_carbon) = self.calibrate(math::ln(self.ratio));
+        let years: f64 = self.calibration.iter().map(|step| step.years).sum();
+        let mean = self
+            .calibration
+            .iter()
+            .fold(Rates::default(), |sum, step| Rates {
+                ridge: sum.ridge + step.years / years * step.rates.ridge,
+                subducted: sum.subducted + step.years / years * step.rates.subducted,
+                sediment: sum.sediment + step.years / years * step.rates.sediment,
+                metamorphic: sum.metamorphic + step.years / years * step.rates.metamorphic,
+            });
+        self.smoothed = Some(mean);
+        self.phi = Some(phi);
+        self.slab_carbon = slab_carbon;
+        self.calibration = VecDeque::new();
+        self.state.phi = phi;
+    }
+
     /// Takes one step: degassing from the tectonics of the step, weathering from its climate
     /// and erosion, and the new CO₂ by the implicit step. Returns the greenhouse forcing for the
     /// next climate update: the new CO₂'s if the cycle is active, else the current.
     ///
-    /// Until φ is set ([`CarbonParams::calibration_time`]), the CO₂ stays and the step is
-    /// recorded for the calibration.
+    /// Until φ is set ([`Self::end_hold`]), the CO₂ stays and the step is recorded for the
+    /// calibration.
     pub fn step(&mut self, input: &StepInput) -> f64 {
         let previous = self.previous.unwrap_or(input.drivers);
         self.previous = Some(input.drivers);
@@ -540,33 +592,25 @@ impl CarbonCycle {
             metamorphic: params.metamorphic_carbon * rates.metamorphic,
         };
 
-        let span_start = (params.calibration_time - params.calibration_span) * 1e6;
-        if self.phi.is_none() && self.years > span_start + 1.0 {
-            self.calibration.push(CalibrationStep {
+        self.tectonic_degassing = degassing_of(&raw).total();
+        if self.phi.is_none() {
+            // The last `calibration_span` of steps (at least this one).
+            self.calibration.push_back(CalibrationStep {
                 years: input.years,
                 cells: cells.clone(),
                 rates: raw,
                 deep_water_temperature: input.deep_water_temperature,
-                degassing: degassing_of(&raw).total(),
+                degassing: self.tectonic_degassing,
             });
-        }
-        if self.phi.is_none() && self.years >= params.calibration_time * 1e6 - 1.0 {
-            let (phi, slab_carbon) = self.calibrate(x_now);
-            // The smoothing starts from the window's mean rates, which φ balances.
-            let years: f64 = self.calibration.iter().map(|step| step.years).sum();
-            let mean = self
-                .calibration
-                .iter()
-                .fold(Rates::default(), |sum, step| Rates {
-                    ridge: sum.ridge + step.years / years * step.rates.ridge,
-                    subducted: sum.subducted + step.years / years * step.rates.subducted,
-                    sediment: sum.sediment + step.years / years * step.rates.sediment,
-                    metamorphic: sum.metamorphic + step.years / years * step.rates.metamorphic,
-                });
-            self.smoothed = Some(mean);
-            self.phi = Some(phi);
-            self.slab_carbon = slab_carbon;
-            self.calibration = Vec::new();
+            let span = self.calibration_span * 1e6;
+            let mut recorded: f64 = self.calibration.iter().map(|step| step.years).sum();
+            while self.calibration.len() > 1
+                && let Some(oldest) = self.calibration.front()
+                && recorded - oldest.years >= span - 1.0
+            {
+                recorded -= oldest.years;
+                self.calibration.pop_front();
+            }
         }
         let params = &self.params;
         let phi = self.phi.unwrap_or(1.0);
@@ -669,7 +713,6 @@ impl CarbonCycle {
     fn calibrate(&self, x: f64) -> (f64, f64) {
         let params = &self.params;
         let steps = &self.calibration;
-        let years: f64 = steps.iter().map(|step| step.years).sum();
         let degassing: f64 = steps.iter().map(|step| step.years * step.degassing).sum();
         let net_sinks = |phi: f64| {
             steps
@@ -705,7 +748,6 @@ impl CarbonCycle {
         } else {
             seafloor_uptake(params, phi, x, params.seafloor_reference_temperature, 0.0)
         };
-        let _ = years;
         (phi, slab_carbon)
     }
 
@@ -938,9 +980,9 @@ mod tests {
         }
     }
 
-    /// The CO₂ stays through the calibration window, after which the sinks balance the
-    /// sources; the implicit step conserves carbon; more degassing raises the CO₂ to a new
-    /// balance without overshooting.
+    /// The CO₂ stays through the hold, which keeps the last `calibration_span` of steps; after
+    /// it the sinks balance the sources; the implicit step conserves carbon; more degassing
+    /// raises the CO₂ to a new balance without overshooting.
     #[test]
     fn calibrated_start_conservation_and_response() {
         let land: Vec<LandCell> = (0..100).map(|i| cell(i as f64 * 0.3)).collect();
@@ -949,18 +991,25 @@ mod tests {
             degassing_smoothing: 0.0,
             ..CarbonParams::default()
         };
-        let window = params.calibration_time as usize;
+        let span = DEFAULT_CALIBRATION_SPAN as usize;
+        let held = 50;
         let mut cycle = CarbonCycle::new(params, forcing, OCEAN, AREA);
         cycle.start(drivers(0.0, 1.0));
-        for step in 1..=window {
-            let next = cycle.step(&input(&land, drivers(step as f64, 1.0), 0.0));
-            // Exactly the start's until φ is set in the window's last step, which balances.
-            if step < window {
-                assert_eq!(next, forcing);
-            } else {
-                assert!((next - forcing).abs() < 1e-6, "{next}");
-            }
+        assert!(cycle.holds_co2());
+        for step in 1..=held {
+            // Exactly the start's while held, however the degassing changes.
+            let rate = if step < 10 { 0.5 } else { 1.0 };
+            let next = cycle.step(&input(&land, drivers(step as f64, rate), 0.0));
+            assert_eq!(next, forcing);
+            assert!(cycle.calibration.len() <= span);
         }
+        assert_eq!(cycle.calibration.len(), span);
+        cycle.end_hold();
+        assert!(!cycle.holds_co2());
+        // φ balances the last steps of the hold: the next such step keeps the CO₂.
+        let window = held + 1;
+        let next = cycle.step(&input(&land, drivers(window as f64, 1.0), 0.0));
+        assert!((next - forcing).abs() < 1e-6, "{next}");
         let state = *cycle.state();
         assert!(state.phi.is_finite() && state.phi > 0.0);
         assert!((state.sinks.total() / state.sources.total() - 1.0).abs() < 1e-6);
@@ -998,7 +1047,6 @@ mod tests {
         for (sensitivity, response) in [(0.6, 0.5), (1.0, 0.5), (0.8, 0.3)] {
             let params = CarbonParams {
                 degassing_smoothing: 0.0,
-                calibration_time: 1.0,
                 ..CarbonParams::default()
             };
             let mut cycle = CarbonCycle::new(params, 0.0, OCEAN, AREA);
@@ -1020,6 +1068,9 @@ mod tests {
                 let equilibrium = start + sensitivity * forcing;
                 let imbalance = (equilibrium - temperature) / sensitivity;
                 forcing = cycle.step(&input(&land, now, imbalance));
+                if step == 1 {
+                    cycle.end_hold();
+                }
                 // The climate update: part of the way to the new equilibrium.
                 temperature += response * (start + sensitivity * forcing - temperature);
                 forcings.push(forcing);
@@ -1042,7 +1093,6 @@ mod tests {
         let land = vec![cell(10.0); 50];
         let params = CarbonParams {
             degassing_smoothing: 0.0,
-            calibration_time: 1.0,
             ..CarbonParams::default()
         };
         let start = ZERO_CO2_FORCING + 5.0;
@@ -1050,6 +1100,7 @@ mod tests {
         cycle.start(drivers(0.0, 1.0));
         let calibrated = cycle.step(&input(&land, drivers(1.0, 1.0), 0.0));
         assert!((calibrated - start).abs() < 1e-6, "{calibrated}");
+        cycle.end_hold();
         // The tectonics stops: no new sea floor, subduction or plumes.
         let stopped = TectonicDrivers {
             plume_flux: 0.0,
@@ -1082,17 +1133,19 @@ mod tests {
         let land = vec![cell(10.0); 10];
         let params = CarbonParams {
             enabled: false,
-            calibration_time: 20.0,
-            calibration_span: 10.0,
             ..CarbonParams::default()
         };
         let mut cycle = CarbonCycle::new(params, 30.0, OCEAN, AREA);
         cycle.start(drivers(0.0, 1.0));
+        assert!(!cycle.holds_co2());
         for step in 1..40 {
             assert_eq!(
                 cycle.step(&input(&land, drivers(step as f64, 1.0 + step as f64), 0.0)),
                 30.0
             );
+            if step == 20 {
+                cycle.end_hold();
+            }
         }
         assert!(cycle.state().sources.total() > 0.0);
         assert!(cycle.state().phi.is_finite());

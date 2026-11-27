@@ -382,8 +382,8 @@ impl TectonicParams {
     /// Sets the tunable parameter `name` (the field name, with `events.` for
     /// [`PlateEventParams`] fields and `initial_sediment.` for [`InitialSedimentParams`]
     /// fields, `matching.` for [`MatchingParams`] fields; `initial_sediment.enabled`,
-    /// `initial_sediment.biogenic_pelagic` and `matching.distinct` are off for 0 and on
-    /// otherwise) to `value`.
+    /// `initial_sediment.biogenic_pelagic`, `matching.distinct` and `mantle.steady_start` are
+    /// off for 0 and on otherwise) to `value`.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
         if let Some(name) = name.strip_prefix("sheet.") {
             return self.sheet.set(name, value);
@@ -395,6 +395,10 @@ impl TectonicParams {
         let field = match name {
             "matching.distinct" => {
                 self.matching.distinct = value != 0.0;
+                return Ok(());
+            }
+            "mantle.steady_start" => {
+                self.mantle.steady_start = value != 0.0;
                 return Ok(());
             }
             "matching.distinct_depth" => {
@@ -1062,6 +1066,14 @@ impl Simulation {
         self.plates.len()
     }
 
+    /// The effective number of plates `1 / Σ aᵢ²` of the plates' area shares `aᵢ` (an
+    /// inverse Simpson index): the plate count weighted towards the large plates, which tiny
+    /// plates that come and go hardly change. Equal plates give their count.
+    pub fn effective_plate_count(&self) -> f64 {
+        let squares: f64 = self.plate_area_fractions().iter().map(|a| a * a).sum();
+        if squares > 0.0 { 1.0 / squares } else { 0.0 }
+    }
+
     /// The id of a plate that stays the same while the plate exists, whereas its index
     /// (`plate`) changes when another plate is removed; ids are never reused.
     pub fn plate_id(&self, plate: u32) -> u32 {
@@ -1217,6 +1229,16 @@ impl Simulation {
         let subduction = self.subduction_rates(&boundaries);
         let slabs = self.sinking_slabs(&boundaries);
         self.mantle.step(dt, &subduction, &slabs, &mut self.rng);
+        if self.mantle.needs_priming() {
+            // The first solve's trenches fill the mantle's memory (#213).
+            self.mantle.prime(
+                dt,
+                &subduction,
+                &slabs,
+                self.params.events.rift_delay,
+                &mut self.rng,
+            );
+        }
 
         let sea_level = self.solve_sea_level();
         self.sea_level_budget.tectonics += sea_level - self.sea_level;
