@@ -248,7 +248,8 @@ impl Simulation {
                 let noise =
                     math::exp(params.lip_volume_spread * standard_normal(&mut self.volcanism.rng));
                 let volume = (params.lip_volume * strength * lid * noise)
-                    .clamp(params.lip_volume_range.0, params.lip_volume_range.1);
+                    .max(params.lip_volume_range.0)
+                    .min(params.lip_volume_range.1);
                 // Large provinces spread wider rather than piling up: plateaus are flat-topped at
                 // up to ~25 km of extra crust (Ontong Java), not Gaussian peaks.
                 let width = params.lip_width.max(
