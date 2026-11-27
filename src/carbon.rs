@@ -138,7 +138,9 @@ pub struct CarbonParams {
     pub calibration_span: f64,
     /// The calibrated φ stays within `1/phi_range..=phi_range`.
     pub phi_range: f64,
-    /// Time (Myr) over which the degassing is smoothed: the tectonic rates jump with the grid.
+    /// Time (Myr) over which the tectonic rates (of the degassing and of the new crust that the
+    /// seafloor weathering alters) are smoothed: they jump with the grid. The smoothing starts at
+    /// [`Self::calibration_time`] from the mean rates of the calibration.
     pub degassing_smoothing: f64,
 }
 
@@ -395,14 +397,35 @@ struct WeatheringCell {
     area: f64,
 }
 
+/// The tectonic rates of a step in kg/yr: new and subducted oceanic crust, subducted sediment,
+/// and metamorphosed or collided sediment.
+#[derive(Clone, Copy, Debug, Default)]
+struct Rates {
+    ridge: f64,
+    subducted: f64,
+    sediment: f64,
+    metamorphic: f64,
+}
+
+impl Rates {
+    /// `self + weight (other − self)`.
+    fn towards(self, other: Rates, weight: f64) -> Rates {
+        let mix = |a: f64, b: f64| a + weight * (b - a);
+        Rates {
+            ridge: mix(self.ridge, other.ridge),
+            subducted: mix(self.subducted, other.subducted),
+            sediment: mix(self.sediment, other.sediment),
+            metamorphic: mix(self.metamorphic, other.metamorphic),
+        }
+    }
+}
+
 /// What the calibration of φ keeps of a step of its window.
 #[derive(Clone, Debug)]
 struct CalibrationStep {
     years: f64,
     cells: Vec<WeatheringCell>,
-    /// New and subducted oceanic crust in kg/yr.
-    ridge_crust: f64,
-    subducted_crust: f64,
+    rates: Rates,
     deep_water_temperature: f64,
     /// The degassing without the return of the seafloor's carbon at arcs (mol/yr).
     degassing: f64,
@@ -429,9 +452,9 @@ pub struct CarbonCycle {
     /// Carbon of the altered oceanic crust that arrives at the trenches (mol/kg): the seafloor
     /// uptake, averaged over [`CarbonParams::slab_age`]. NaN until known.
     slab_carbon: f64,
-    /// The sources smoothed over [`CarbonParams::degassing_smoothing`]; `None` before the first
-    /// step.
-    smoothed: Option<Sources>,
+    /// The tectonic rates smoothed over [`CarbonParams::degassing_smoothing`], once φ is set
+    /// (before, the raw rates of each step are used, as in the calibration).
+    smoothed: Option<Rates>,
     state: CarbonState,
 }
 
@@ -498,21 +521,23 @@ impl CarbonCycle {
         self.years += input.years;
         let rate = |now: f64, before: f64| (now - before).max(0.0) / input.years;
         let drivers = input.drivers;
-        let ridge_crust = rate(drivers.new_sea_floor, previous.new_sea_floor);
-        let subducted_crust = rate(drivers.subducted_crust, previous.subducted_crust);
+        let raw = Rates {
+            ridge: rate(drivers.new_sea_floor, previous.new_sea_floor),
+            subducted: rate(drivers.subducted_crust, previous.subducted_crust),
+            sediment: rate(drivers.subducted_sediment, previous.subducted_sediment),
+            metamorphic: rate(drivers.metamorphic_sediment, previous.metamorphic_sediment),
+        };
         let cells = self.weathering_cells(input.land);
         let current_forcing = self.forcing;
         let x_now = math::ln(self.ratio);
         let params = &self.params;
         // Degassing without the slab's seafloor carbon (which depends on φ).
-        let raw = Sources {
-            ridges: params.ridge_carbon * ridge_crust,
-            arcs: params.wedge_carbon * subducted_crust
-                + params.slab_sediment_carbon
-                    * rate(drivers.subducted_sediment, previous.subducted_sediment),
+        let degassing_of = |rates: &Rates| Sources {
+            ridges: params.ridge_carbon * rates.ridge,
+            arcs: params.wedge_carbon * rates.subducted
+                + params.slab_sediment_carbon * rates.sediment,
             plumes: params.plume_carbon * drivers.plume_flux,
-            metamorphic: params.metamorphic_carbon
-                * rate(drivers.metamorphic_sediment, previous.metamorphic_sediment),
+            metamorphic: params.metamorphic_carbon * rates.metamorphic,
         };
 
         let span_start = (params.calibration_time - params.calibration_span) * 1e6;
@@ -520,56 +545,57 @@ impl CarbonCycle {
             self.calibration.push(CalibrationStep {
                 years: input.years,
                 cells: cells.clone(),
-                ridge_crust,
-                subducted_crust,
+                rates: raw,
                 deep_water_temperature: input.deep_water_temperature,
-                degassing: raw.total(),
+                degassing: degassing_of(&raw).total(),
             });
         }
         if self.phi.is_none() && self.years >= params.calibration_time * 1e6 - 1.0 {
             let (phi, slab_carbon) = self.calibrate(x_now);
+            // The smoothing starts from the window's mean rates, which φ balances.
+            let years: f64 = self.calibration.iter().map(|step| step.years).sum();
+            let mean = self
+                .calibration
+                .iter()
+                .fold(Rates::default(), |sum, step| Rates {
+                    ridge: sum.ridge + step.years / years * step.rates.ridge,
+                    subducted: sum.subducted + step.years / years * step.rates.subducted,
+                    sediment: sum.sediment + step.years / years * step.rates.sediment,
+                    metamorphic: sum.metamorphic + step.years / years * step.rates.metamorphic,
+                });
+            self.smoothed = Some(mean);
             self.phi = Some(phi);
             self.slab_carbon = slab_carbon;
             self.calibration = Vec::new();
-            // The degassing now includes the slab's carbon at φ: the smoothing starts afresh,
-            // or the jump would lag behind for a few steps and draw the CO₂ down meanwhile.
-            self.smoothed = None;
         }
         let params = &self.params;
         let phi = self.phi.unwrap_or(1.0);
-
-        // The seafloor carbon returning at arcs: the slab's carbon, before it is known that
-        // of the step at φ = 1 (only logged).
-        let uptake_now = seafloor_uptake(params, phi, x_now, input.deep_water_temperature, 0.0);
-        if self.slab_carbon.is_nan() && self.phi.is_some() {
-            self.slab_carbon = uptake_now;
-        }
-        let slab_carbon = if self.slab_carbon.is_nan() {
-            uptake_now
-        } else {
-            self.slab_carbon
-        };
-        let mut sources = raw;
-        sources.arcs += params.slab_return * subducted_crust * slab_carbon;
-        // Smoothed over a few steps (the tectonic rates jump with the grid).
+        // Smoothed over a few steps once φ is set (the tectonic rates jump with the grid).
         let weight = if params.degassing_smoothing > 0.0 {
             1.0 - math::exp(-input.years / (params.degassing_smoothing * 1e6))
         } else {
             1.0
         };
-        let smoothed = match self.smoothed {
-            None => sources,
-            Some(old) if self.phi.is_some() => Sources {
-                ridges: old.ridges + weight * (sources.ridges - old.ridges),
-                arcs: old.arcs + weight * (sources.arcs - old.arcs),
-                plumes: old.plumes + weight * (sources.plumes - old.plumes),
-                metamorphic: old.metamorphic + weight * (sources.metamorphic - old.metamorphic),
-            },
-            // Not smoothed during the calibration, which takes the window's mean.
-            Some(_) => sources,
+        let rates = match self.smoothed {
+            Some(old) => old.towards(raw, weight),
+            None => raw,
         };
-        self.smoothed = Some(smoothed);
-        let degassing = smoothed.total();
+        if self.smoothed.is_some() {
+            self.smoothed = Some(rates);
+        }
+        let ridge_crust = rates.ridge;
+
+        // The seafloor carbon returning at arcs: the slab's carbon, before it is known that
+        // of the step at φ = 1 (only logged).
+        let uptake_now = seafloor_uptake(params, phi, x_now, input.deep_water_temperature, 0.0);
+        let slab_carbon = if self.slab_carbon.is_nan() {
+            uptake_now
+        } else {
+            self.slab_carbon
+        };
+        let mut sources = degassing_of(&rates);
+        sources.arcs += params.slab_return * rates.subducted * slab_carbon;
+        let degassing = sources.total();
 
         let sinks_at = |x: f64, warming: f64| {
             sinks(
@@ -627,7 +653,7 @@ impl CarbonCycle {
             forcing,
             carbon: self.carbon,
             atmosphere: atmospheric_carbon(self.ratio, input.planet_area),
-            sources: smoothed,
+            sources,
             sinks,
             phi: self.phi.unwrap_or(f64::NAN),
             predicted_warming: predicted,
@@ -652,7 +678,7 @@ impl CarbonCycle {
                     let (sinks, _) = sinks(
                         params,
                         &step.cells,
-                        step.ridge_crust,
+                        step.rates.ridge,
                         step.deep_water_temperature,
                         phi,
                         x,
@@ -660,18 +686,18 @@ impl CarbonCycle {
                     );
                     let uptake = seafloor_uptake(params, phi, x, step.deep_water_temperature, 0.0);
                     step.years
-                        * (sinks.total() - params.slab_return * step.subducted_crust * uptake)
+                        * (sinks.total() - params.slab_return * step.rates.subducted * uptake)
                 })
                 .sum::<f64>()
         };
         let phi = calibrate(net_sinks, degassing, params.phi_range);
-        let ridge: f64 = steps.iter().map(|s| s.years * s.ridge_crust).sum();
+        let ridge: f64 = steps.iter().map(|s| s.years * s.rates.ridge).sum();
         let slab_carbon = if ridge > 0.0 {
             steps
                 .iter()
                 .map(|s| {
                     s.years
-                        * s.ridge_crust
+                        * s.rates.ridge
                         * seafloor_uptake(params, phi, x, s.deep_water_temperature, 0.0)
                 })
                 .sum::<f64>()
