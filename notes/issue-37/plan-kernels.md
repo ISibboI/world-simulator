@@ -144,3 +144,12 @@ Results to `results-kernels.md`.
   the amplitude; report, not fix.
 - Wider (global) response: the low degrees carry a long-wavelength tilt (degree 1–2) of the
   whole surface over slab graveyards, ~100s of metres. Physical, but visible in hypsometry.
+
+## Changes after the review ([review-plan-kernels.md](review-plan-kernels.md))
+
+- Degrees start at **l = 2** (degree 1 depends on how the core is held, i.e. on the frame).
+- **Slab grid subdivision 4** (= evaluation grid), each pair of cells visited once: subdivision 3
+  widened the loads by its tent spreading and made the peak 15–21% shallower than converged.
+  Worst case 46 ms per step.
+- Runge–Kutta resolution `6 (l + 3)` steps per unit ln r (converged to < 1e-5).
+- The prototype's layer-boundary sampling was fixed (its layered kernels were ~1% off).
