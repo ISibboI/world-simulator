@@ -505,6 +505,21 @@ impl Planet {
         self.carbon.holds_co2()
     }
 
+    /// The carbon cycle after the last step: CO₂ and its forcing (#154).
+    pub fn carbon_state(&self) -> &CarbonState {
+        self.carbon.state()
+    }
+
+    /// Whether the carbon cycle runs (else the CO₂ of the start stays).
+    pub fn carbon_cycle_enabled(&self) -> bool {
+        self.carbon.params().enabled
+    }
+
+    /// The radius of the planet in m.
+    pub fn radius(&self) -> f64 {
+        self.planet_radius
+    }
+
     pub fn tectonics(&self) -> &Simulation {
         &self.tectonics
     }
@@ -1055,7 +1070,8 @@ impl Planet {
             .unzip()
     }
 
-    fn cell_area(&self) -> f64 {
+    /// Area of a cell in m² (the cells of the mesh have nearly equal areas).
+    pub fn cell_area(&self) -> f64 {
         4.0 * std::f64::consts::PI * self.planet_radius.powi(2) / self.tectonics.mesh().len() as f64
     }
 

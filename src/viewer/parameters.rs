@@ -21,6 +21,7 @@ use clap::{ArgAction, CommandFactory, Parser};
 use eframe::egui;
 
 use super::Launch;
+use super::global::{GlobalStatus, PlanetView, Series};
 use crate::Cli;
 
 /// The long name of the subdivisions option.
@@ -83,62 +84,37 @@ pub struct SimulationStatus<'a> {
     pub starting: &'a str,
     /// The median time per step in seconds, once known.
     pub step_seconds: Option<f64>,
-    /// The global state of the run, once known.
+    /// The global state of the displayed state (live or a past frame), once known.
     pub global: Option<GlobalStatus>,
+    /// Simulated time of the displayed state (Myr) and the epoch of the run (`--epoch`).
+    pub shown_time: f64,
+    pub epoch: f64,
+    /// The global states of the recorded frames for the sparklines (#209).
+    pub series: Series,
 }
 
-/// The global state of the running simulation that the panel shows under its time (#213): the
-/// ramp-up phase so far. A place for the planet's global measures (#209).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GlobalStatus {
-    /// When the ramp-up phase ended (Myr); NaN while it runs.
-    pub ramp_up_end: f64,
-    /// Whether the phase ended because the tectonics settled (not at its longest duration).
-    pub ramp_up_settled: bool,
-    /// Whether the carbon cycle holds the CO₂ of the start (during the phase).
-    pub co2_held: bool,
-}
-
-impl GlobalStatus {
-    pub fn of(planet: &crate::planet::Planet) -> Self {
-        let (ramp_up_end, ramp_up_settled) = match planet.ramp_up_status() {
-            crate::ramp_up::RampUpStatus::Running => (f64::NAN, false),
-            crate::ramp_up::RampUpStatus::Ended { at, settled } => (at, settled),
-        };
-        Self {
-            ramp_up_end,
-            ramp_up_settled,
-            co2_held: planet.holds_co2(),
-        }
-    }
-
-    /// The line about the ramp-up phase, and a second, quieter line that explains it.
-    pub fn ramp_up_lines(&self) -> (String, &'static str) {
-        if self.ramp_up_end.is_nan() {
-            let held = if self.co2_held { " — CO₂ held" } else { "" };
-            (
-                format!("Ramp-up (tectonics settling){held}"),
-                "Until the plate count and the degassing are steady.",
-            )
-        } else if self.ramp_up_settled {
-            (
-                format!("Ramp-up ended at {:.0} Myr", self.ramp_up_end),
-                "The tectonics had settled; the carbon cycle sets the CO₂ since.",
-            )
-        } else {
-            (
-                format!("Ramp-up ended at {:.0} Myr", self.ramp_up_end),
-                "Its longest duration, before the tectonics settled.",
-            )
-        }
-    }
-}
-
-/// The global state under the time of the panel: plain lines, short enough for a phone.
-fn global_status(ui: &mut egui::Ui, global: &GlobalStatus) {
+/// The global state under the time of the panel: the ramp-up phase in plain lines, short
+/// enough for a phone, and the collapsible "Planet" section with the global statistics (#209),
+/// open by default on wide screens.
+fn global_status(ui: &mut egui::Ui, status: &SimulationStatus, global: &GlobalStatus) {
     let (line, detail) = global.ramp_up_lines();
     ui.label(line);
     ui.label(egui::RichText::new(detail).weak());
+    let wide = ui.ctx().content_rect().width() >= NARROW_SCREEN;
+    egui::CollapsingHeader::new("Planet")
+        .id_salt("parameter panel planet")
+        .default_open(wide)
+        .show(ui, |ui| {
+            super::global::planet_rows(
+                ui,
+                &PlanetView {
+                    global,
+                    time: status.shown_time,
+                    epoch: status.epoch,
+                    series: &status.series,
+                },
+            );
+        });
 }
 
 /// How an option is edited.
@@ -466,7 +442,7 @@ impl ParameterPanel {
             }
         }
         if let (None, Some(global)) = (status.failure, &status.global) {
-            global_status(ui, global);
+            global_status(ui, status, global);
         }
         if let Some(hint) = hint {
             hint(ui);
@@ -878,11 +854,10 @@ mod tests {
             failure: None,
             starting: "Starting the simulation…",
             step_seconds: Some(0.4),
-            global: Some(GlobalStatus {
-                ramp_up_end: f64::NAN,
-                ramp_up_settled: false,
-                co2_held: true,
-            }),
+            global: Some(super::super::global::example()),
+            shown_time: 10.0,
+            epoch: 0.0,
+            series: Vec::new(),
         };
         let mut launch = None;
         run(&ctx, egui::RawInput::default(), |ui| {

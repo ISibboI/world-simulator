@@ -26,7 +26,7 @@ pub mod store;
 
 use std::ops::Range;
 
-use super::{CellInfo, PlateInfo};
+use super::{CellInfo, GlobalStatus, PlateInfo};
 use codec::{Kind, Planes, State};
 pub use store::FrameStore;
 
@@ -38,6 +38,8 @@ pub const KEY_INTERVAL: usize = 25;
 struct Entry {
     time: f64,
     key: bool,
+    /// The global state of the planet, from the frame's header (#209).
+    global: GlobalStatus,
     /// Its write failed, or it depends on one that did.
     lost: bool,
 }
@@ -69,6 +71,7 @@ impl FrameEncoder {
     pub fn encode(
         &mut self,
         time: f64,
+        global: GlobalStatus,
         cells: &[CellInfo],
         plates: &[PlateInfo],
     ) -> Option<Vec<u8>> {
@@ -81,6 +84,7 @@ impl FrameEncoder {
         }
         let state = State {
             time,
+            global,
             planes: Planes::new(cells),
             plates: plates.to_vec(),
         };
@@ -167,7 +171,7 @@ impl History {
     /// recorded one and the store has room. Returns whether it was recorded.
     pub fn record(&mut self, frame: Vec<u8>) -> bool {
         self.check_writes();
-        let (kind, time, raw) = match codec::header(&frame) {
+        let (kind, time, raw, global) = match codec::header(&frame) {
             Ok(header) => header,
             Err(error) => {
                 tracing::error!("A frame for the history refused: {error}");
@@ -200,6 +204,7 @@ impl History {
         self.frames.push(Entry {
             time,
             key: kind == Kind::Key,
+            global,
             lost: false,
         });
         true
@@ -231,6 +236,17 @@ impl History {
     /// The simulated time of a frame in Myr.
     pub fn time(&self, index: usize) -> Option<f64> {
         self.frames.get(index).map(|entry| entry.time)
+    }
+
+    /// The global state of the planet in a frame (#209).
+    pub fn global(&self, index: usize) -> Option<GlobalStatus> {
+        self.frames.get(index).map(|entry| entry.global)
+    }
+
+    /// The time and the global state of every recorded frame, in order, for the sparklines of
+    /// the panel (#209): kept in memory, no frame is read.
+    pub fn globals(&self) -> impl ExactSizeIterator<Item = (f64, &GlobalStatus)> {
+        self.frames.iter().map(|entry| (entry.time, &entry.global))
     }
 
     /// Whether the history stopped recording.
@@ -530,7 +546,12 @@ mod tests {
                 Vec::new()
             };
             let frame = encoder
-                .encode(step as f64, &cells(count, step), &plates)
+                .encode(
+                    step as f64,
+                    crate::viewer::global::example(),
+                    &cells(count, step),
+                    &plates,
+                )
                 .expect("a later state");
             history.record(frame);
         }
@@ -583,14 +604,24 @@ mod tests {
     #[test]
     fn a_forced_keyframe_restarts_the_chain() {
         let mut encoder = FrameEncoder::default();
-        let first = encoder.encode(0.0, &cells(100, 0), &[]).unwrap();
+        let first = encoder
+            .encode(0.0, crate::viewer::global::example(), &cells(100, 0), &[])
+            .unwrap();
         // Lost on the way to the view.
-        let _lost = encoder.encode(1.0, &cells(100, 1), &[]).unwrap();
+        let _lost = encoder
+            .encode(1.0, crate::viewer::global::example(), &cells(100, 1), &[])
+            .unwrap();
         encoder.force_keyframe();
-        let next = encoder.encode(2.0, &cells(100, 2), &[]).unwrap();
+        let next = encoder
+            .encode(2.0, crate::viewer::global::example(), &cells(100, 2), &[])
+            .unwrap();
         assert_eq!(codec::kind(&next), Ok(Kind::Key));
         assert_eq!(
-            codec::kind(&encoder.encode(3.0, &cells(100, 3), &[]).unwrap()),
+            codec::kind(
+                &encoder
+                    .encode(3.0, crate::viewer::global::example(), &cells(100, 3), &[])
+                    .unwrap()
+            ),
             Ok(Kind::Delta)
         );
         let mut history = History::new(Box::new(MemoryStore::new(u64::MAX)));
@@ -606,11 +637,28 @@ mod tests {
     fn repeated_states_are_recorded_once() {
         let mut encoder = FrameEncoder::default();
         let frames: Vec<Vec<u8>> = (0..3)
-            .map(|step| encoder.encode(step as f64, &cells(100, step), &[]).unwrap())
+            .map(|step| {
+                encoder
+                    .encode(
+                        step as f64,
+                        crate::viewer::global::example(),
+                        &cells(100, step),
+                        &[],
+                    )
+                    .unwrap()
+            })
             .collect();
         // A state sent again (with other fields) is not encoded again.
-        assert!(encoder.encode(2.0, &cells(100, 2), &[]).is_none());
-        assert!(encoder.encode(1.0, &cells(100, 1), &[]).is_none());
+        assert!(
+            encoder
+                .encode(2.0, crate::viewer::global::example(), &cells(100, 2), &[])
+                .is_none()
+        );
+        assert!(
+            encoder
+                .encode(1.0, crate::viewer::global::example(), &cells(100, 1), &[])
+                .is_none()
+        );
         let mut history = History::new(Box::new(MemoryStore::new(u64::MAX)));
         for frame in &frames {
             assert!(history.record(frame.clone()));
@@ -634,7 +682,14 @@ mod tests {
         assert!(recorded > 1 && recorded < 200, "{recorded}");
         assert!(history.bytes().0 <= 3_000);
         let mut encoder = FrameEncoder::default();
-        let frame = encoder.encode(1000.0, &cells(100, 0), &[]).unwrap();
+        let frame = encoder
+            .encode(
+                1000.0,
+                crate::viewer::global::example(),
+                &cells(100, 0),
+                &[],
+            )
+            .unwrap();
         assert!(!history.record(frame));
         let last = show(&mut history, recorded - 1);
         assert_eq!(last.index, recorded - 1);
@@ -780,7 +835,14 @@ mod tests {
             if step == 13 || step == KEY_INTERVAL + 20 {
                 encoder.force_keyframe();
             }
-            let frame = encoder.encode(step as f64, &cells(50, step), &[]).unwrap();
+            let frame = encoder
+                .encode(
+                    step as f64,
+                    crate::viewer::global::example(),
+                    &cells(50, step),
+                    &[],
+                )
+                .unwrap();
             assert!(history.record(frame));
         }
         let keys: Vec<usize> = (0..steps).filter(|&i| history.frames[i].key).collect();

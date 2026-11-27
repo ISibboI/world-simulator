@@ -28,6 +28,7 @@ mod atmosphere;
 mod banner;
 mod cell_info;
 mod fields;
+mod global;
 mod history;
 mod hydrology;
 mod lighting;
@@ -58,6 +59,7 @@ use cell_info::{CellInfoPanel, ShownCell};
 #[cfg(target_arch = "wasm32")]
 pub use fields::Layer;
 pub use fields::{Fields, Layers, PlateInfo, plate_infos};
+pub use global::GlobalStatus;
 #[cfg(target_arch = "wasm32")]
 pub use history::store::MemoryStore;
 pub use history::{FrameEncoder, FrameStore, History};
@@ -72,7 +74,6 @@ pub use modes::{
 };
 use overlay::OverlayBuilder;
 use pace::{HintAction, Pace};
-pub use parameters::GlobalStatus;
 pub use parameters::with_random_seed;
 use parameters::{ParameterPanel, SimulationStatus};
 #[cfg(target_arch = "wasm32")]
@@ -574,6 +575,8 @@ struct Viewer {
     time: Option<f64>,
     /// The global state of the newest state of the running simulation (see [`GlobalStatus`]).
     global: Option<GlobalStatus>,
+    /// The global state of the displayed state (live or a past frame), for the panel (#209).
+    shown_global: Option<GlobalStatus>,
     /// Simulated duration of the running simulation in Myr.
     duration: f64,
     /// Why the running simulation failed, if it did.
@@ -638,6 +641,7 @@ impl FrameTimes {
 /// The newest state of the running simulation.
 struct Latest {
     time: f64,
+    global: GlobalStatus,
     cells: Arc<Vec<CellInfo>>,
     plates: Arc<Vec<PlateInfo>>,
     fields: Fields,
@@ -736,6 +740,7 @@ impl Viewer {
             adapted_at: None,
             time: None,
             global: None,
+            shown_global: None,
             duration: initial.cli.duration,
             failure: None,
             runs: 0,
@@ -765,6 +770,7 @@ impl Viewer {
         self.events = receiver;
         self.time = None;
         self.global = None;
+        self.shown_global = None;
         self.duration = launch.cli.duration;
         self.exaggeration = launch.cli.exaggeration;
         self.abiotic = launch.cli.biosphere == crate::presets::Biosphere::Abiotic;
@@ -962,6 +968,7 @@ impl Viewer {
         }
         self.latest = Some(Latest {
             time: update.time,
+            global: update.global,
             cells: update.cells.clone(),
             plates: update.plates.clone(),
             fields: update.fields.clone(),
@@ -980,6 +987,7 @@ impl Viewer {
                     self.walk.shown(now);
                 }
                 self.live_pending = false;
+                self.shown_global = Some(update.global);
                 self.show(update.time, update.cells, update.plates, update.fields);
             } else if let Some(index) = self.recorded_index(self.shown_time) {
                 self.viewing = Some(index);
@@ -1101,6 +1109,13 @@ impl Viewer {
                     .and_then(|history| history.time(frame.index))
                     .unwrap_or(self.shown_time);
                 self.frame_error = None;
+                if let Some(global) = self
+                    .history
+                    .as_ref()
+                    .and_then(|history| history.global(frame.index))
+                {
+                    self.shown_global = Some(global);
+                }
                 self.show(time, Arc::new(frame.cells), Arc::new(frame.plates), fields);
                 self.shown_frame = Some(frame.index);
                 // The walk holds every frame for its interval from when it is shown.
@@ -1226,6 +1241,7 @@ impl Viewer {
         self.live_pending = false;
         self.walk.shown(web_time::Instant::now());
         if let Some(latest) = &self.latest {
+            self.shown_global = Some(latest.global);
             let (time, cells, plates, fields) = (
                 latest.time,
                 latest.cells.clone(),
@@ -1792,13 +1808,25 @@ impl eframe::App for Viewer {
             ui.ctx().request_repaint();
         }
 
+        // The global states of the recorded frames for the panel's sparklines (#209).
+        let latest = self
+            .latest
+            .as_ref()
+            .map(|latest| (latest.time, latest.global));
+        let series = match &self.history {
+            Some(history) => global::thin(history.globals(), latest),
+            None => global::thin(std::iter::empty(), latest),
+        };
         let status = SimulationStatus {
             time: self.time,
             duration: self.duration,
             failure: self.failure.as_deref(),
             starting: banner::starting_text(restarted, self.generating),
             step_seconds: self.pace.median(),
-            global: self.global,
+            global: self.shown_global,
+            shown_time: self.shown_time,
+            epoch: self.epoch,
+            series,
         };
         let pace = &mut self.pace;
         let mut hint_action = None;
