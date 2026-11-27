@@ -138,7 +138,7 @@ impl GlobalStatus {
 fn global_status(ui: &mut egui::Ui, global: &GlobalStatus) {
     let (line, detail) = global.ramp_up_lines();
     ui.label(line);
-    ui.label(egui::RichText::new(detail).small().weak());
+    ui.label(egui::RichText::new(detail).weak());
 }
 
 /// How an option is edited.
