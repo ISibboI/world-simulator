@@ -80,11 +80,12 @@ struct Cli {
     subdivisions: u32,
 
     /// Number of tectonic plates at the start, with the model's steady size distribution (a few
-    /// large and many small plates). The default is where the model's plate count and
-    /// degassing change least over the first ~200 Myr (#213): between the count of its first
-    /// few hundred Myr (~25) and its long-term mean (~18).
-    #[arg(long, default_value_t = 21)]
-    plates: usize,
+    /// large and many small plates). Default: 21 for dispersed continents, where the model's
+    /// plate count and degassing change least over the first ~200 Myr (#213), between the count
+    /// of its first few hundred Myr (~25) and its long-term mean (~18); 11 for a supercontinent,
+    /// as in plate reconstructions of Pangaea (see `InitialConfiguration::default_plates`).
+    #[arg(long)]
+    plates: Option<usize>,
 
     /// Fraction of the surface initially covered by continental crust.
     #[arg(long, default_value_t = 0.4)]
@@ -528,16 +529,23 @@ fn main() {
 }
 
 impl Cli {
+    /// The number of plates at the start: `--plates`, or the default of the initial
+    /// configuration.
+    fn plates(&self) -> usize {
+        self.plates.unwrap_or_else(|| self.initial.default_plates())
+    }
+
     /// Checks the options that clap does not check itself.
     fn check(&self) -> anyhow::Result<()> {
         ensure!(
             self.subdivisions <= 8,
             "at most 8 subdivisions are supported"
         );
-        ensure!(self.plates >= 1, "there must be at least one plate");
+        let plates = self.plates();
+        ensure!(plates >= 1, "there must be at least one plate");
         let cells = 10 * 4usize.pow(self.subdivisions) + 2;
         ensure!(
-            self.plates <= cells,
+            plates <= cells,
             "there can be at most as many plates as cells ({cells} at {} subdivisions)",
             self.subdivisions
         );
@@ -634,7 +642,7 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
         carbon,
         ramp_up,
     } = parameters;
-    let simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
+    let simulation = Simulation::new(mesh, cli.plates(), params, cli.seed);
     let erosion = (!cli.no_erosion).then_some(erosion);
     let mut planet = Planet::new(
         simulation,

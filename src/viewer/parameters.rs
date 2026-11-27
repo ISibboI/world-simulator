@@ -958,7 +958,7 @@ mod tests {
         field(&mut panel, "plates").text = "8".to_owned();
         let launch = panel.launch_with_subdivisions(5).unwrap();
         assert_eq!(launch.cli.subdivisions, 5);
-        assert_eq!(launch.cli.plates, 21);
+        assert_eq!(launch.cli.plates, None);
         assert_eq!(
             launch.args,
             strings(&["world-simulator", "--seed=3", "--subdivisions=5"])
