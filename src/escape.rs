@@ -162,7 +162,7 @@ pub struct EscapeParams {
     pub felsic_oxygen_demand: f64,
     pub basalt_oxygen_demand: f64,
     /// O₂ partial pressure (bar) of the weathering's oxidation, `1 − exp(−√(p/p_ox))` of the
-    /// exposed Fe²⁺ and sulfide (rate ∝ [O₂]^½, Williamson & Rimstidt, 1994): detrital pyrite
+    /// exposed Fe²⁺ and sulfide (rate ∝ \[O₂\]^½, Williamson & Rimstidt, 1994): detrital pyrite
     /// survives below ~1e-5 PAL and is gone above ~1e-3 PAL.
     pub oxidation_pressure: f64,
     /// The escape stops when the ocean is down to this share of the planet's water at the start
