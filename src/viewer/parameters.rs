@@ -60,6 +60,7 @@ const MAIN: &[&str] = &[
     "epoch",
     "no-erosion",
     "no-carbon-cycle",
+    "no-escape",
 ];
 
 /// Screens narrower than this (in points) start with the panel hidden, e.g. phones in portrait.
@@ -794,6 +795,17 @@ mod tests {
             .is_ok()
         );
         assert!(error(&["world-simulator", "--epoch=-1"]).contains("epoch"));
+        // Past 1.2 S₀ (#212): later epochs are refused, longer runs shortened to end there.
+        assert!(error(&["world-simulator", "--epoch=7"]).contains("runaway greenhouse"));
+        assert!(error(&["world-simulator", "--epoch=5.904"]).contains("end at once"));
+        let late = launch_from(
+            strings(&["world-simulator", "--epoch=5.5", "--duration=1000"]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(late.cli.run_duration(), 404.0);
+        let early = launch_from(strings(&["world-simulator", "--duration=1000"]), None).unwrap();
+        assert_eq!(early.cli.run_duration().to_bits(), 1000.0f64.to_bits());
         assert!(error(&["world-simulator", "--set=nonexistent=1"]).contains("nonexistent"));
         assert!(error(&["world-simulator", "--set=basal_drag"]).contains("NAME=VALUE"));
         assert!(

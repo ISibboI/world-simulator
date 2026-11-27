@@ -27,8 +27,9 @@
 use crate::carbon::CarbonParams;
 use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
+use crate::escape::EscapeParams;
 use crate::math;
-use crate::sun::{self, MAX_EPOCH, PRESENT_EPOCH, PRESENT_SOLAR_CONSTANT};
+use crate::sun::{self, MAX_EPOCH, MAX_LUMINOSITY, PRESENT_EPOCH, PRESENT_SOLAR_CONSTANT};
 use crate::tectonics::TectonicParams;
 use crate::temperature::TemperatureParams;
 
@@ -176,7 +177,8 @@ impl Biosphere {
 /// The time of the planet's history at the start of the run, counted forwards in Gyr from the
 /// earliest start of a simulation (see [`crate::sun`]): 0 is 4.0 Ga, when the planet has cooled
 /// enough for plates and oceans, 0.5 the Palaeoarchean (3.5 Ga), [`PRESENT_EPOCH`] (4.0)
-/// today, and up to [`MAX_EPOCH`] (9.43) the future, before the Sun leaves the main sequence.
+/// today, and up to [`MAX_EPOCH`] (5.90) the future, until the Sun is 1.2 times as bright as
+/// today (beyond, an ocean planet enters a runaway greenhouse the model does not simulate).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Epoch {
     /// Gyr after epoch 0, within `0..=MAX_EPOCH`.
@@ -196,8 +198,10 @@ impl Epoch {
     pub fn new(gyr: f64, co2: Option<f64>) -> anyhow::Result<Self> {
         anyhow::ensure!(
             (0.0..=MAX_EPOCH).contains(&gyr),
-            "the epoch must be between 0 (the earliest start) and {MAX_EPOCH:.2} Gyr; today is \
-             {PRESENT_EPOCH}"
+            "the epoch must be between 0 (the earliest start) and {MAX_EPOCH:.2} Gyr (today is \
+             {PRESENT_EPOCH}): later, the Sun is more than {MAX_LUMINOSITY} times as bright as \
+             today, and an ocean planet would enter a runaway greenhouse (its ocean boils into a \
+             steam atmosphere), which the model does not simulate"
         );
         if let Some(co2) = co2 {
             anyhow::ensure!(co2 > 0.0, "the CO₂ ratio must be positive");
@@ -249,8 +253,9 @@ impl Epoch {
     /// CO₂ down, at most to none at all, so the forcing is bounded below by
     /// [`ZERO_CO2_FORCING`] (−30 W/m², reached at epoch ~5.3, 1.3 Gyr from today); later epochs
     /// are warmer than today. Life does not limit the drawdown (the default planet is barren,
-    /// #190). The model has no loss of water: beyond ~1.1 S₀ a real ocean planet enters a moist
-    /// greenhouse (Kasting, 1988; Kopparapu et al., 2013).
+    /// #190). Beyond ~1.1 S₀ an ocean planet enters a moist greenhouse and loses water to space
+    /// (Kasting, 1988; Kopparapu et al., 2013; simulated by [`crate::escape`], #210); runs end at
+    /// 1.2 S₀ ([`MAX_EPOCH`]), before the runaway greenhouse.
     ///
     /// Both forcings are bounded below by [`ZERO_CO2_FORCING`].
     pub fn greenhouse_forcing(&self) -> f64 {
@@ -282,6 +287,7 @@ pub struct Parameters {
     pub climate: ClimateParams,
     pub temperature: TemperatureParams,
     pub carbon: CarbonParams,
+    pub escape: EscapeParams,
 }
 
 impl Parameters {
@@ -296,6 +302,7 @@ impl Parameters {
             climate: ClimateParams::default(),
             temperature: TemperatureParams::default(),
             carbon: CarbonParams::default(),
+            escape: EscapeParams::default(),
         };
         biosphere.apply(
             &mut parameters.tectonics,
@@ -308,10 +315,12 @@ impl Parameters {
         parameters
     }
 
-    /// Overrides one parameter: `erosion.`, `climate.`, `temperature.` and `carbon.` select
-    /// those parameters, anything else is a tectonic parameter.
+    /// Overrides one parameter: `erosion.`, `climate.`, `temperature.`, `carbon.` and `escape.`
+    /// select those parameters, anything else is a tectonic parameter.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
-        if let Some(name) = name.strip_prefix("carbon.") {
+        if let Some(name) = name.strip_prefix("escape.") {
+            self.escape.set(name, value)
+        } else if let Some(name) = name.strip_prefix("carbon.") {
             self.carbon.set(name, value)
         } else if let Some(name) = name.strip_prefix("erosion.") {
             self.erosion.set(name, value)
@@ -333,13 +342,14 @@ mod tests {
 
     /// The parameters printed with `Debug`, which prints every f64 exactly (shortest
     /// round-trip representation), so equal strings mean bit-identical parameters.
-    fn fingerprint(parameters: &Parameters) -> [String; 5] {
+    fn fingerprint(parameters: &Parameters) -> [String; 6] {
         [
             format!("{:?}", parameters.tectonics),
             format!("{:?}", parameters.erosion),
             format!("{:?}", parameters.climate),
             format!("{:?}", parameters.temperature),
             format!("{:?}", parameters.carbon),
+            format!("{:?}", parameters.escape),
         ]
     }
 
@@ -353,6 +363,7 @@ mod tests {
             climate: ClimateParams::default(),
             temperature: TemperatureParams::default(),
             carbon: CarbonParams::default(),
+            escape: EscapeParams::default(),
         }
     }
 
@@ -415,7 +426,7 @@ mod tests {
         // Epoch 0: 4.0 Ga, 0.57 Gyr after the zero age of the Sun.
         assert!((at(0.0) - 0.741).abs() < 1e-3, "{}", at(0.0));
         assert!((at(5.0) - 1.096).abs() < 1e-3, "{}", at(5.0));
-        assert!((at(MAX_EPOCH) - 1.91).abs() < 0.01, "{}", at(MAX_EPOCH));
+        assert!((at(MAX_EPOCH) - 1.2).abs() < 1e-9, "{}", at(MAX_EPOCH));
         assert!(Epoch::new(MAX_EPOCH + 0.01, None).is_err());
         assert!(Epoch::new(-0.1, None).is_err());
         assert!(Epoch::new(1.0, Some(0.0)).is_err());
@@ -427,7 +438,7 @@ mod tests {
             (PRESENT_EPOCH, 500.0),
             (0.5, 1000.0),
             (2.0, 37.5),
-            (6.0, 80.0),
+            (5.8, 80.0),
         ] {
             let parameters =
                 Parameters::new(RADIUS, Biosphere::Modern, Epoch::new(epoch, None).unwrap());
@@ -445,7 +456,7 @@ mod tests {
                 "epoch {epoch} + {time} Myr: {climate} vs {}",
                 sun.luminosity * PRESENT_SOLAR_CONSTANT
             );
-            // About 1% brighter per 100 Myr (0.7% at 3.5 Ga, 0.9% today, 1.1% at epoch 6).
+            // About 1% brighter per 100 Myr (0.7% at 3.5 Ga, 0.9% today, 1.1% at epoch 5.8).
             let per_100_myr = temperature.solar_constant(100.0) / temperature.solar_constant(0.0);
             assert!((1.006..1.013).contains(&per_100_myr), "{per_100_myr}");
         }
@@ -497,7 +508,7 @@ mod tests {
                     < 1e-9
             );
         }
-        for gyr in [5.3, 7.0, MAX_EPOCH] {
+        for gyr in [5.3, 5.6, MAX_EPOCH] {
             let late = Epoch::new(gyr, None).unwrap();
             assert_eq!(late.greenhouse_forcing(), ZERO_CO2_FORCING, "{gyr}");
         }

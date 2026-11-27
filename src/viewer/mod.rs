@@ -730,7 +730,7 @@ impl Viewer {
             adaptation: sky::Adaptation::default(),
             adapted_at: None,
             time: None,
-            duration: initial.cli.duration,
+            duration: initial.cli.run_duration(),
             failure: None,
             runs: 0,
             generating: false,
@@ -758,7 +758,7 @@ impl Viewer {
         let (sender, receiver) = std::sync::mpsc::channel();
         self.events = receiver;
         self.time = None;
-        self.duration = launch.cli.duration;
+        self.duration = launch.cli.run_duration();
         self.exaggeration = launch.cli.exaggeration;
         self.abiotic = launch.cli.biosphere == crate::presets::Biosphere::Abiotic;
         self.river_threshold = launch.cli.river_threshold;
