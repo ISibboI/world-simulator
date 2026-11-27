@@ -532,6 +532,11 @@ impl Planet {
         self.carbon.params().enabled
     }
 
+    /// The escape after the last step (#210); `None` when it is off.
+    pub fn escape_state(&self) -> Option<&crate::escape::EscapeState> {
+        self.escape.params().enabled.then(|| self.escape.state())
+    }
+
     /// The radius of the planet in m.
     pub fn radius(&self) -> f64 {
         self.planet_radius

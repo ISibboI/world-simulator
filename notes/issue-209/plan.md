@@ -59,3 +59,6 @@ heat flow, a changing day length. Continental fraction is shown as simulated sta
 - Local CI with `CARGO_BUILD_WARNINGS=deny`: fmt, clippy, test, doc, wasm check/clippy (incl.
   tests); `trunk build --release`.
 - Screenshots (vscreen): desktop 1280×800, web 390×844; in `notes/issue-209/`.
+
+
+After the review (see `plan-review.md`) the record also carries the escape's water loss and O₂ (#212, after the base was merged with main): 73 bytes. The results are in `results.md`.

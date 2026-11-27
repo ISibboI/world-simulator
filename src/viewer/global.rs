@@ -16,6 +16,9 @@ use eframe::egui;
 use super::{CellInfo, PlateInfo};
 use crate::planet::Planet;
 
+/// The `f32` values of [`GlobalStatus::to_bytes`].
+const FLOATS: usize = 17;
+
 /// The global state of a state of the planet (see the module documentation). Means over cells
 /// are area-weighted, since the cells of the mesh have nearly equal areas.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,11 +65,15 @@ pub struct GlobalStatus {
     pub large_plates: u16,
     /// Mean surface speed of the plates over all cells (cm/yr).
     pub plate_speed: f32,
+    /// Water lost to space so far as a global layer (m), and the O₂ that the escape left in the
+    /// air (partial pressure, bar); NaN without the escape (#210, #212).
+    pub water_lost: f32,
+    pub oxygen: f32,
 }
 
 impl GlobalStatus {
     /// Size of [`GlobalStatus::to_bytes`].
-    pub const BYTES: usize = 1 + 15 * 4 + 2 * 2;
+    pub const BYTES: usize = 1 + FLOATS * 4 + 2 * 2;
 
     /// The global state of `planet`, whose cells and plates (as the view gets them) are
     /// `cells` and `plates`.
@@ -106,6 +113,8 @@ impl GlobalStatus {
         let large = 0.01 * count;
         // rad/Myr at the surface → cm/yr.
         let cm_per_year = planet.radius() * 100.0 / 1e6;
+        let area = 4.0 * std::f64::consts::PI * planet.radius().powi(2);
+        let escape = planet.escape_state();
         Self {
             ramp_up_end: ramp_up_end as f32,
             ramp_up_settled,
@@ -130,6 +139,10 @@ impl GlobalStatus {
                 .filter(|&&cells| cells as f64 > large)
                 .count() as u16,
             plate_speed: (sums.speed / count * cm_per_year) as f32,
+            water_lost: escape.map_or(f32::NAN, |escape| {
+                (escape.water_lost / crate::carbon::SEA_WATER_DENSITY / area) as f32
+            }),
+            oxygen: escape.map_or(f32::NAN, |escape| escape.oxygen_pressure as f32),
         }
     }
 
@@ -161,7 +174,7 @@ impl GlobalStatus {
             f32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"))
         };
         let count = |index: usize| {
-            let at = 1 + 4 * 15 + 2 * index;
+            let at = 1 + 4 * FLOATS + 2 * index;
             u16::from_le_bytes(bytes[at..at + 2].try_into().expect("2 bytes"))
         };
         Some(Self {
@@ -183,13 +196,15 @@ impl GlobalStatus {
             lake_area: float(12),
             lake_volume: float(13),
             plate_speed: float(14),
+            water_lost: float(15),
+            oxygen: float(16),
             plates: count(0),
             large_plates: count(1),
         })
     }
 
     /// The values of [`GlobalStatus::to_bytes`] in their order.
-    fn values(&self) -> [f32; 15] {
+    fn values(&self) -> [f32; FLOATS] {
         [
             self.ramp_up_end,
             self.solar_constant,
@@ -206,6 +221,8 @@ impl GlobalStatus {
             self.lake_area,
             self.lake_volume,
             self.plate_speed,
+            self.water_lost,
+            self.oxygen,
         ]
     }
 
@@ -366,6 +383,29 @@ pub fn planet_rows(ui: &mut egui::Ui, view: &PlanetView) {
                 "Land precipitation",
                 value(global.land_precipitation, |p| format!("{p:.2} m/yr")),
                 "Mean precipitation over land.",
+            );
+            ui.end_row();
+
+            row(
+                ui,
+                "Water lost",
+                value(global.water_lost, |depth| format!("{depth:.2} m layer")),
+                "Water lost to space so far (hydrogen escape), as a layer over the whole \
+                 planet; — without the escape.",
+            );
+            ui.end_row();
+            row(
+                ui,
+                "O₂",
+                value(global.oxygen, |pressure| {
+                    if pressure > 0.0 {
+                        format!("{pressure:.1e} bar")
+                    } else {
+                        "none".to_owned()
+                    }
+                }),
+                "Oxygen the escape left in the air (the sinks take most of it); — without the \
+                 escape. The biosphere's oxygen is not modelled.",
             );
             ui.end_row();
 
@@ -584,6 +624,8 @@ pub(super) fn example() -> GlobalStatus {
         plates: 23,
         large_plates: 14,
         plate_speed: 4.1,
+        water_lost: 0.8,
+        oxygen: 2e-9,
     }
 }
 
