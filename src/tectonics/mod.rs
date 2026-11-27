@@ -45,6 +45,7 @@ mod dynamics;
 mod events;
 mod generation;
 mod initial_sediment;
+mod kernels;
 mod ledger;
 mod mantle;
 mod matching;
