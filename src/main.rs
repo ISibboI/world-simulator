@@ -7,6 +7,7 @@ mod climate;
 #[cfg(any(target_arch = "wasm32", test))]
 mod device;
 mod erosion;
+mod escape;
 mod hash;
 mod isostasy;
 mod koppen;
@@ -95,7 +96,8 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = InitialConfiguration::Dispersed)]
     initial: InitialConfiguration,
 
-    /// Simulated duration in Myr.
+    /// Simulated duration in Myr. Shortened (with a warning) so that the run ends by epoch 5.90,
+    /// when the Sun is 1.2 times as bright as today (see `--epoch`).
     #[arg(long, default_value_t = 500.0)]
     duration: f64,
 
@@ -127,6 +129,13 @@ struct Cli {
     /// and logged.
     #[arg(long)]
     no_carbon_cycle: bool,
+
+    /// Keep all the planet's water instead of losing hydrogen, and with it water, to space
+    /// (#210): by default the water vapour that passes the cold trap of the tropopause is split
+    /// and its hydrogen escapes (diffusion- or XUV-limited), slowly in a temperate climate and
+    /// fast in a moist greenhouse; the ocean and the sea level fall, the oxygen stays behind.
+    #[arg(long)]
+    no_escape: bool,
 
     /// Start with a bare planet instead of an initial sediment cover.
     #[arg(long)]
@@ -198,8 +207,9 @@ struct Cli {
 
     /// Time of the planet's history at the start of the run, in Gyr counted forwards: 0 is the
     /// earliest start (4.0 Ga, when the planet has cooled enough for plates and oceans; the
-    /// default), 0.5 the Archean (3.5 Ga), 4 today, up to 9.43 (the Sun before it leaves the main
-    /// sequence). Sets the solar constant of the Sun, which then brightens during the run (~1% per
+    /// default), 0.5 the Archean (3.5 Ga), 4 today, up to 5.90 (the Sun 1.2 times as bright as
+    /// today; beyond, an ocean planet enters a runaway greenhouse, which the model does not
+    /// simulate, and a run that would pass it is shortened to end there). Sets the solar constant of the Sun, which then brightens during the run (~1% per
     /// 100 Myr; `--set temperature.solar_brightening=0` keeps it), and, unless `--co2` is given, a
     /// greenhouse forcing that offsets the difference to today's Sun at the start (in the future
     /// at most down to an atmosphere without CO₂, −30 W/m²). The carbon cycle then changes the
@@ -551,6 +561,15 @@ impl Cli {
         );
         ensure!(self.dt > 0.0, "the time step must be positive");
         ensure!(self.duration >= 0.0, "the duration must not be negative");
+        ensure!(
+            self.duration == 0.0 || self.run_duration() > 0.0,
+            "a run from epoch {} would end at once: runs end by epoch {:.2}, when the Sun is {} \
+             times as bright as today (beyond, an ocean planet enters a runaway greenhouse, which \
+             the model does not simulate)",
+            self.epoch,
+            sun::MAX_EPOCH,
+            sun::MAX_LUMINOSITY,
+        );
         ensure!(self.width >= 2, "the image width must be at least 2");
         Ok(())
     }
@@ -568,6 +587,7 @@ impl Cli {
         params.track_material_budget = self.material_budget;
         params.breakup.diagnose = self.plate_log.is_some();
         parameters.carbon.enabled = !self.no_carbon_cycle;
+        parameters.escape.enabled = !self.no_escape;
         let mut overrides = Vec::with_capacity(self.overrides.len());
         for assignment in &self.overrides {
             let (name, value) = assignment
@@ -587,6 +607,15 @@ impl Cli {
     fn validate(&self) -> anyhow::Result<()> {
         self.check()?;
         self.parameters().map(|_| ())
+    }
+
+    /// The simulated duration in Myr: `--duration`, shortened to whole steps that end by
+    /// [`sun::MAX_EPOCH`], when the Sun is [`sun::MAX_LUMINOSITY`] times as bright as today
+    /// (beyond, an ocean planet enters a runaway greenhouse, which the model does not simulate;
+    /// #212). Exactly `--duration` when the run ends before.
+    fn run_duration(&self) -> f64 {
+        let left = ((sun::MAX_EPOCH - self.epoch) * 1000.0 / self.dt).floor() * self.dt;
+        self.duration.min(left.max(0.0))
     }
 }
 
@@ -614,12 +643,32 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
              Goldblatt, 2014); above that it is extrapolated"
         );
     }
-    if sun::Sun::of_run(cli.epoch, cli.duration).luminosity > MOIST_GREENHOUSE {
+    let duration = cli.run_duration();
+    if duration < cli.duration {
+        warn!(
+            "the run is shortened from {} to {duration} Myr: it ends at epoch {:.3}, by epoch {:.2}, \
+             when the Sun is {} times as bright as today; beyond, an ocean planet enters a runaway \
+             greenhouse (its ocean boils into a steam atmosphere), which the model does not \
+             simulate",
+            cli.duration,
+            cli.epoch + duration / 1000.0,
+            sun::MAX_EPOCH,
+            sun::MAX_LUMINOSITY,
+        );
+    }
+    if sun::Sun::of_run(cli.epoch, duration).luminosity > MOIST_GREENHOUSE {
         warn!(
             "the Sun of this run (epoch {}, {} Myr) becomes more than {MOIST_GREENHOUSE} times as \
              bright as today's; a real ocean planet would lose its water in a moist greenhouse \
-             (Kasting, 1988), which the model does not simulate",
-            cli.epoch, cli.duration
+             (Kasting, 1988){}; the runaway greenhouse beyond ~1.2 times, where the ocean boils \
+             into a steam atmosphere, is not simulated (runs end there)",
+            cli.epoch,
+            duration,
+            if cli.no_escape {
+                ", which `--no-escape` turns off"
+            } else {
+                " (simulated: hydrogen escape from a wet stratosphere, #210)"
+            }
         );
     }
     for (name, value) in overrides {
@@ -641,6 +690,7 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
         temperature,
         carbon,
         ramp_up,
+        escape,
     } = parameters;
     let simulation = Simulation::new(mesh, cli.plates(), params, cli.seed);
     let erosion = (!cli.no_erosion).then_some(erosion);
@@ -649,6 +699,7 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
         climate,
         temperature,
         carbon,
+        escape,
         erosion,
         EARTH_RADIUS,
     );
@@ -733,7 +784,7 @@ impl Run {
         snapshot(&planet, cli, &mut previous_ledger)?;
         Ok(Self {
             planet,
-            steps: (cli.duration / cli.dt).round() as u64,
+            steps: (cli.run_duration() / cli.dt).round() as u64,
             step: 0,
             snapshot_every: ((cli.snapshot_interval / cli.dt).round() as u64).max(1),
             start,
@@ -1112,6 +1163,7 @@ fn snapshot(
             ),
             ("mantle", sea_level_budget.mantle, previous_sea_level.mantle),
             ("lakes", sea_level_budget.lakes, previous_sea_level.lakes),
+            ("escape", sea_level_budget.escape, previous_sea_level.escape),
         ];
         let parts: Vec<String> = terms
             .iter()
@@ -1516,6 +1568,9 @@ fn snapshot(
         planet_statistics.solar_constant,
     );
     info!("    {}", planet_statistics.carbon.summary());
+    if let Some(escape) = &planet_statistics.escape {
+        info!("    {}", escape.summary());
+    }
 
     let (groups, classes) = koppen::land_shares(&koppen::classes(planet));
     // The five most common classes, the more common first (ties by id).
