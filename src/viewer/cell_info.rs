@@ -11,7 +11,7 @@ use crate::tectonics::{self, BoundaryClass};
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 140 bytes per cell, 5.7 MB
+/// buffer (to the page on the web) and read back without parsing: 148 bytes per cell, 6.1 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -57,8 +57,15 @@ pub struct CellInfo {
     pub evaporation: f32,
     pub evaporation_january: f32,
     pub evaporation_july: f32,
-    /// Permanent ice cover (sea ice, ice sheets), 0 to 1.
+    /// Permanent ice cover (sea ice, lake ice, ice sheets), 0 to 1: the annual mean cover of the
+    /// temperature model (see `TemperatureFields::ice`).
     pub ice: f32,
+    /// The temperature model's mean lake-ice cover (0 to 1: ice thickness over the thickness at
+    /// which ice takes its full albedo, see `TemperatureFields::monthly_lake_ice`) in January
+    /// and in July (the months of [`CellInfo::temperature_january`] and
+    /// [`CellInfo::temperature_july`]); NaN where the model has no lake (#185).
+    pub lake_ice_january: f32,
+    pub lake_ice_july: f32,
     /// Water discharge in m³/yr (zero while erosion is disabled).
     pub discharge: f32,
     /// Depth of lake water over the cell in m (zero where there is none; see
@@ -483,6 +490,12 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
             .get(month)
             .map_or(f32::NAN, |values| field(values, cell))
     };
+    let lake_ice = |month: usize, cell: usize| {
+        temperature
+            .monthly_lake_ice
+            .get(month)
+            .map_or(f32::NAN, |values| field(values, cell))
+    };
     let current = |cell: usize, component: usize| {
         temperature
             .ocean_current
@@ -563,6 +576,8 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 evaporation_january: evaporation_of(0, index),
                 evaporation_july: evaporation_of(6, index),
                 ice: field(&temperature.ice, index),
+                lake_ice_january: lake_ice(0, index),
+                lake_ice_july: lake_ice(6, index),
                 discharge: field(planet.discharge(), index),
                 lake_depth: water
                     .lake_depth
@@ -819,12 +834,37 @@ fn format_surface(info: &CellInfo) -> String {
         WaterBody::Lake(depth) => format!(
             "lake, {} m deep{}",
             significant(f64::from(depth)),
-            if ice { ", ice" } else { "" }
+            lake_ice_text(info)
         ),
         WaterBody::DryDepression if ice => "dry depression, ice sheet".to_owned(),
         WaterBody::DryDepression => "land, dry depression".to_owned(),
         WaterBody::Land if ice => "land, ice sheet".to_owned(),
         WaterBody::Land => "land".to_owned(),
+    }
+}
+
+/// The ice of a lake as the realistic mode draws it from the temperature model (#185): in which
+/// of January and July it is frozen, and whether it is frozen most of the year (the annual
+/// state); nothing where the model has no lake ice there (a lake newer than the last
+/// temperature update, which the realistic mode freezes by its own rule).
+fn lake_ice_text(info: &CellInfo) -> &'static str {
+    use super::modes::Period;
+    use super::modes::realistic::{lake_frozen, model_lake_ice};
+    let frozen = |season: Period| {
+        model_lake_ice(info, season).is_some_and(|cover| lake_frozen(cover, season))
+    };
+    match (
+        frozen(Period::Annual),
+        frozen(Period::January),
+        frozen(Period::July),
+    ) {
+        (_, true, true) => ", ice in Jan and Jul",
+        (true, true, false) => ", ice most of the year, open in Jul",
+        (true, false, true) => ", ice most of the year, open in Jan",
+        (true, false, false) => ", ice most of the year",
+        (false, true, false) => ", ice in Jan",
+        (false, false, true) => ", ice in Jul",
+        (false, false, false) => "",
     }
 }
 
@@ -1137,6 +1177,8 @@ mod tests {
             evaporation_january: 0.0102,
             evaporation_july: 0.9,
             ice: 0.0,
+            lake_ice_january: f32::NAN,
+            lake_ice_july: f32::NAN,
             discharge: 3.15576e11,
             lake_depth: 0.0,
             current_east: f32::NAN,
@@ -1301,6 +1343,28 @@ mod tests {
             row(&format_rows(&below(35.0), None, 0.0, 0.0), "Surface").unwrap(),
             "lake, 35.0 m deep"
         );
+        // The lake ice of the temperature model, as the realistic mode draws it (#185).
+        let frozen = |annual: f32, january: f32, july: f32| {
+            let lake = CellInfo {
+                ice: annual,
+                lake_ice_january: january,
+                lake_ice_july: july,
+                ..below(35.0)
+            };
+            row(&format_rows(&lake, None, 0.0, 0.0), "Surface").unwrap()
+        };
+        assert_eq!(frozen(0.2, 0.5, 0.0), "lake, 35.0 m deep, ice in Jan");
+        assert_eq!(frozen(0.2, 0.05, 0.0), "lake, 35.0 m deep");
+        assert_eq!(
+            frozen(0.6, 1.0, 0.0),
+            "lake, 35.0 m deep, ice most of the year, open in Jul"
+        );
+        assert_eq!(
+            frozen(0.9, 1.0, 0.4),
+            "lake, 35.0 m deep, ice in Jan and Jul"
+        );
+        // Without the model's lake ice (a lake newer than the temperature update), no claim.
+        assert_eq!(frozen(0.9, f32::NAN, f32::NAN), "lake, 35.0 m deep");
         // Less than 1 m of water: land, even below sea level.
         assert_eq!(below(0.4).water_body(), WaterBody::DryDepression);
         let rows = format_rows(&below(0.4), None, 0.0, 0.0);
@@ -1485,7 +1549,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 140);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 148);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 
