@@ -12,8 +12,13 @@
 //!   ice where the month is below freezing;
 //! - **Land:** bare ground (rock, soil, or sand where arid) under a vegetation cover that grows
 //!   with the moisture index (precipitation over potential evaporation) and the warmth of the
-//!   warmest month, from steppe and grassland to forest (none on an abiotic planet); tundra
-//!   where the summers are cold; bare rock above the tree line of high mountains.
+//!   warmest month, from steppe and grassland to forest; tundra where the summers are cold;
+//!   bare rock above the tree line of high mountains;
+//! - **A barren planet** (`--biosphere abiotic`): no vegetation or tundra; bare ground by the
+//!   crust's rock type (basalt, andesite, granite, metasediment; fresh rock on high land), under
+//!   sediment plains and pale, unoxidised sand where arid ([`barren_ground`]); water without
+//!   plankton, blue rather than turquoise or green ([`Waters::BARREN`]). See
+//!   `notes/issue-190/barren-look.md`.
 //!
 //! The colours are reflectances (albedos) of the usual ranges (ocean water below 0.06 before the
 //! glint, forest 0.04–0.1, grassland 0.08–0.2, desert 0.3–0.4, fresh snow 0.8). The relief is
@@ -25,7 +30,7 @@
 
 use super::{Legend, ModeData, ModeOption, OptionKind, OptionValues, Period, RenderMode, Swatch};
 use crate::viewer::CellInfo;
-use crate::viewer::cell_info::WaterBody;
+use crate::viewer::cell_info::{CrustType, WaterBody};
 use crate::viewer::lighting::Light;
 use crate::viewer::renderer::{CloudDrift, DetailUniforms, DetailVertex, MAX_PLATES};
 
@@ -52,7 +57,7 @@ const OPTIONS: &[ModeOption] = &[
         label: "Season",
         hover: "The annual state, or January (northern winter) or July (northern summer): the \
                 sun's position, seasonal snow, lake and sea ice, and the greenness of the \
-                vegetation",
+                vegetation (if the planet has any)",
         kind: OptionKind::Choice(Period::CHOICES),
     },
     ModeOption {
@@ -148,6 +153,71 @@ const TUNDRA: [f32; 3] = [0.11, 0.105, 0.075];
 /// Reflectance of a snow-covered forest: the canopy hides most of the snow.
 const SNOWY_FOREST: [f32; 3] = [0.22, 0.24, 0.26];
 
+/// The colours of water, which differ with and without life (see [`Waters::of`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Waters {
+    deep_ocean: [f32; 3],
+    shelf: [f32; 3],
+    lake_shallow: [f32; 3],
+    lake_deep: [f32; 3],
+    saline_lake: [f32; 3],
+}
+
+impl Waters {
+    /// Water on a living planet: phytoplankton, dissolved organic matter and bright biogenic
+    /// (carbonate) sand turn shallow water turquoise to green.
+    const LIVING: Waters = Waters {
+        deep_ocean: DEEP_OCEAN,
+        shelf: SHELF,
+        lake_shallow: LAKE_SHALLOW,
+        lake_deep: LAKE_DEEP,
+        saline_lake: SALINE_LAKE,
+    };
+
+    /// Water on a barren planet: the colour of pure water (deep, slightly violet blue), over
+    /// shallow terrigenous sediment a lighter cyan-blue; lakes turbid with rock flour and silt
+    /// (grey-cyan) when shallow, clear blue when deep; shallow brine over salt pale cyan. No
+    /// green anywhere: that is the colour of life.
+    const BARREN: Waters = Waters {
+        deep_ocean: [0.005, 0.013, 0.048],
+        shelf: [0.012, 0.042, 0.080],
+        lake_shallow: [0.035, 0.045, 0.052],
+        lake_deep: [0.006, 0.014, 0.042],
+        saline_lake: [0.070, 0.110, 0.130],
+    };
+
+    fn of(abiotic: bool) -> &'static Waters {
+        if abiotic {
+            &Waters::BARREN
+        } else {
+            &Waters::LIVING
+        }
+    }
+}
+
+/// Bare ground of a barren planet (no life ever, so no free oxygen: no red, oxidised deserts,
+/// no dark organic soils; iron stays ferrous and weathering makes grey clays): the crust's rock
+/// under its regolith, fresh rock where the land is high and rugged, sediment plains, and buff
+/// sand and dust where arid.
+/// Basalt (oceanic crust and plateaus): dark grey.
+const BASALT: [f32; 3] = [0.085, 0.085, 0.082];
+const FRESH_BASALT: [f32; 3] = [0.07, 0.07, 0.068];
+/// Andesite (arcs and thickened crust on a mafic basement): medium-dark grey.
+const ANDESITE: [f32; 3] = [0.135, 0.13, 0.125];
+const FRESH_ANDESITE: [f32; 3] = [0.115, 0.11, 0.105];
+/// Granite and gneiss (felsic continental crust), as regolith and fresh rock: light grey-brown
+/// with the pink hint of potassium feldspar.
+const GRANITE: [f32; 3] = [0.24, 0.21, 0.185];
+const FRESH_GRANITE: [f32; 3] = [0.20, 0.18, 0.165];
+/// Metasediment (schist, greywacke): medium grey.
+const METASEDIMENT: [f32; 3] = [0.16, 0.155, 0.15];
+/// Sediment plains (silt and sand).
+const SEDIMENT_PLAIN: [f32; 3] = [0.25, 0.225, 0.19];
+/// Dry sand and dust: from felsic rock pale greyish buff (quartz and feldspar without the iron
+/// oxide coatings that make Earth's deserts yellow to red), from mafic rock dark (black sand).
+const DUST: [f32; 3] = [0.36, 0.335, 0.30];
+const MAFIC_SAND: [f32; 3] = [0.12, 0.115, 0.11];
+
 /// Depths in metres between which the water turns from the shelf colour to the deep ocean
 /// (logarithmically).
 const SHELF_DEPTH: f32 = 100.0;
@@ -178,17 +248,31 @@ impl RenderMode for Realistic {
         let swatch = |albedo: [f32; 3], label: &'static str| {
             Swatch::fill(albedo.map(|c| (srgb(c) * 255.0).round() as u8), label)
         };
+        let waters = Waters::of(abiotic);
         let mut swatches = vec![
-            swatch(DEEP_OCEAN, "Deep ocean"),
-            swatch(SHELF, "Shelf"),
+            swatch(waters.deep_ocean, "Deep ocean"),
+            swatch(waters.shelf, "Shelf"),
             swatch(SEA_ICE, "Sea ice"),
-            swatch(LAKE_SHALLOW, "Lake"),
-            swatch(SALINE_LAKE, "Saline lake"),
+            swatch(waters.lake_shallow, "Lake"),
+            swatch(waters.saline_lake, "Saline lake"),
             swatch(ICE_SHEET, "Ice, snow"),
-            swatch(SAND, "Desert"),
-            swatch(SALT_FLAT, "Salt flat"),
-            swatch(ROCK, "Rock"),
         ];
+        if abiotic {
+            swatches.extend([
+                swatch(BASALT, "Basalt"),
+                swatch(ANDESITE, "Andesite"),
+                swatch(GRANITE, "Granite"),
+                swatch(SEDIMENT_PLAIN, "Sediment"),
+                swatch(DUST, "Sand, dust"),
+                swatch(SALT_FLAT, "Salt flat"),
+            ]);
+        } else {
+            swatches.extend([
+                swatch(SAND, "Desert"),
+                swatch(SALT_FLAT, "Salt flat"),
+                swatch(ROCK, "Rock"),
+            ]);
+        }
         let clouds = options.is_on(CLOUDS);
         if clouds {
             swatches.push(swatch([0.75; 3], "Cloud"));
@@ -211,6 +295,14 @@ impl RenderMode for Realistic {
                           The view adapts to the light like an eye: after the sun goes behind \
                           the planet or out of view, more stars appear over a few seconds.",
         );
+        if abiotic {
+            description.push_str(
+                " Without life the land is bare rock by the type of crust (dark basalt, grey \
+                 andesite arcs, lighter granite), sediment plains and pale sand where dry, with \
+                 no oxidised reds (no free oxygen); the water has no plankton: deep blue, never \
+                 green.",
+            );
+        }
         if clouds {
             description.push_str(
                 " Clouds are a decoration derived from the climate (the simulation has none): \
@@ -378,11 +470,15 @@ fn layers(cell: &CellInfo, season: Period, abiotic: bool, closed_lake: bool) -> 
     let arid = 1.0 - smoothstep(0.1, 0.4, moisture);
     let [east, north] = season.wind(cell);
     let wind = finite((east * east + north * north).sqrt(), 7.0);
+    let waters = Waters::of(abiotic);
     let (water, water_roughness) = match body {
         WaterBody::Ocean => {
             let depth = (-cell.elevation).max(1.0);
             let t = ((depth / SHELF_DEPTH).ln() / (DEEP_DEPTH / SHELF_DEPTH).ln()).clamp(0.0, 1.0);
-            (mix(SHELF, DEEP_OCEAN, t), water_roughness(wind))
+            (
+                mix(waters.shelf, waters.deep_ocean, t),
+                water_roughness(wind),
+            )
         }
         WaterBody::Lake(depth) => {
             let t = ((depth.max(LAKE_SHALLOW_DEPTH) / LAKE_SHALLOW_DEPTH).ln()
@@ -397,16 +493,25 @@ fn layers(cell: &CellInfo, season: Period, abiotic: bool, closed_lake: bool) -> 
                 0.0
             };
             (
-                mix(mix(LAKE_SHALLOW, LAKE_DEEP, t), SALINE_LAKE, saline),
+                mix(
+                    mix(waters.lake_shallow, waters.lake_deep, t),
+                    waters.saline_lake,
+                    saline,
+                ),
                 water_roughness(LAKE_FETCH * wind),
             )
         }
         // Land: the colour of the sub-cell lakes the noise opens in humid lowlands (and of the
         // water next to it, if it has water neighbours, see `detail_vertices`).
-        _ => (LAKE_SHALLOW, water_roughness(LAKE_FETCH * wind)),
+        _ => (waters.lake_shallow, water_roughness(LAKE_FETCH * wind)),
     };
 
-    let bare = mix(mix(ROCK, SOIL, 0.5), SAND, arid);
+    let high = smoothstep(2500.0, 4500.0, cell.elevation);
+    let bare = if abiotic {
+        barren_ground(cell, arid, high)
+    } else {
+        mix(mix(ROCK, SOIL, 0.5), SAND, arid)
+    };
     let (plants, cover, forested) = if abiotic {
         (bare, 0.0, 0.0)
     } else {
@@ -437,8 +542,9 @@ fn layers(cell: &CellInfo, season: Period, abiotic: bool, closed_lake: bool) -> 
     } else {
         smoothstep(8.0, 2.0, warmest) * (1.0 - arid)
     };
-    let high = smoothstep(2500.0, 4500.0, cell.elevation);
-    let adjust = |albedo: [f32; 3]| mix(mix(albedo, TUNDRA, tundra), ROCK, high);
+    // (A barren planet's high mountains are its own fresh rock, see `barren_ground`.)
+    let summit = if abiotic { 0.0 } else { high };
+    let adjust = |albedo: [f32; 3]| mix(mix(albedo, TUNDRA, tundra), ROCK, summit);
     let (mut bare, plants) = (adjust(bare), adjust(plants));
     // A salt flat (playa) where the water of a dry closed basin collects and evaporates: at
     // its sink, in a dry climate.
@@ -507,6 +613,36 @@ fn layers(cell: &CellInfo, season: Period, abiotic: bool, closed_lake: bool) -> 
         water_roughness,
         relief,
     }
+}
+
+/// The bare ground of a barren planet (see [`BASALT`]): the rock of the crust's type, fresh
+/// where the land is `high` (0 to 1) and as regolith elsewhere, under the sediment of the land,
+/// and buff sand and dust as the land is `arid` (0 to 1), most on sediment, less on rock (rock
+/// deserts).
+fn barren_ground(cell: &CellInfo, arid: f32, high: f32) -> [f32; 3] {
+    let (regolith, fresh, sand) = match CrustType::of(cell) {
+        CrustType::Oceanic => (BASALT, FRESH_BASALT, MAFIC_SAND),
+        CrustType::MaficTransitional | CrustType::MaficContinental => {
+            (ANDESITE, FRESH_ANDESITE, MAFIC_SAND)
+        }
+        CrustType::Metasedimentary => (METASEDIMENT, METASEDIMENT, DUST),
+        CrustType::ThinnedContinental | CrustType::Continental | CrustType::ThickContinental => {
+            (GRANITE, FRESH_GRANITE, DUST)
+        }
+    };
+    let rock = mix(regolith, fresh, high);
+    // Rock-equivalent sediment in m: a thin veneer leaves the rock showing, a basin fill of a
+    // few hundred metres covers it.
+    let sediment = if cell.sediment.is_finite() {
+        cell.sediment
+    } else {
+        0.0
+    };
+    let covered = smoothstep(20.0, 400.0, sediment) * (1.0 - high);
+    // Sediment is a mix from the whole catchment: its sand is the pale one.
+    let ground = mix(rock, SEDIMENT_PLAIN, covered);
+    let dust = arid.clamp(0.0, 1.0) * (0.5 + 0.5 * covered) * (1.0 - high);
+    mix(ground, mix(sand, DUST, covered), dust)
 }
 
 /// The realistic mode's de-indexed mesh with the layers of every cell, three own vertices per
@@ -1568,6 +1704,76 @@ mod tests {
         let bare = material(&humid, Period::Annual, true).albedo;
         assert!(greenness(bare) < 0.35, "{bare:?}");
         assert!(greenness(material(&humid, Period::Annual, false).albedo) > 0.4);
+    }
+
+    #[test]
+    fn barren_planet_shows_rock_by_crust_and_water_without_green() {
+        let crust = |flags: u32, sediment: f32, precipitation: f32| CellInfo {
+            flags,
+            sediment,
+            crust_thickness: 35_000.0,
+            ..cell(300.0, 20.0, precipitation, 1.5)
+        };
+        let bare = |cell: &CellInfo| layers(cell, Period::Annual, true, false).bare;
+        let felsic = CellInfo::CONTINENTAL | CellInfo::FELSIC;
+        let basalt = bare(&crust(CellInfo::OCEANIC, 0.0, 2.0));
+        let andesite = bare(&crust(CellInfo::CONTINENTAL, 0.0, 2.0));
+        let granite = bare(&crust(felsic, 0.0, 2.0));
+        let plain = bare(&crust(felsic, 2000.0, 2.0));
+        let desert = bare(&crust(felsic, 2000.0, 0.05));
+        let rock_desert = bare(&crust(CellInfo::OCEANIC, 0.0, 0.05));
+        assert!(close(basalt, BASALT) && close(andesite, ANDESITE) && close(granite, GRANITE));
+        assert!(close(plain, SEDIMENT_PLAIN) && close(desert, DUST));
+        // Darker to lighter: basalt, andesite, granite, sediment, sand; a basaltic desert stays
+        // dark (black sand, rock), the plain albedos in the usual ranges.
+        let order = [basalt, andesite, granite, plain, desert].map(brightness);
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
+        assert!((0.06..0.12).contains(&order[0]) && (0.3..0.4).contains(&order[4]));
+        assert!(brightness(rock_desert) < brightness(granite));
+        // High land is the fresh rock of the crust, not the living planet's rock.
+        let mut summit = crust(felsic, 0.0, 2.0);
+        summit.elevation = 5000.0;
+        let summit = layers(&summit, Period::Annual, true, false);
+        assert!(close(summit.bare, FRESH_GRANITE) && close(summit.plants, FRESH_GRANITE));
+        // NaN sediment does not blacken the cell.
+        assert!(close(bare(&crust(felsic, f32::NAN, 2.0)), GRANITE));
+        // No green: on land green never exceeds red, and the water is blue.
+        let colours = [
+            BASALT,
+            FRESH_BASALT,
+            ANDESITE,
+            FRESH_ANDESITE,
+            GRANITE,
+            FRESH_GRANITE,
+            METASEDIMENT,
+            SEDIMENT_PLAIN,
+            DUST,
+            MAFIC_SAND,
+        ];
+        for colour in colours {
+            assert!(
+                colour[1] <= colour[0] && greenness(colour) < 0.34,
+                "{colour:?}"
+            );
+        }
+        let waters = Waters::BARREN;
+        for water in [
+            waters.deep_ocean,
+            waters.shelf,
+            waters.lake_shallow,
+            waters.lake_deep,
+            waters.saline_lake,
+        ] {
+            assert!(water[2] > water[1] && water[1] >= water[0], "{water:?}");
+        }
+        let ocean = layers(&cell(-50.0, 20.0, 1.0, 0.0), Period::Annual, true, false);
+        assert!(close(ocean.water, waters.shelf));
+        // The sub-cell lakes of land and closed lakes have the barren colours too.
+        let land = layers(&crust(felsic, 0.0, 2.0), Period::Annual, true, false);
+        assert!(close(land.water, waters.lake_shallow));
+        // The living planet keeps its own.
+        let living = layers(&cell(-50.0, 20.0, 1.0, 0.0), Period::Annual, false, false);
+        assert!(close(living.water, SHELF));
     }
 
     #[test]
