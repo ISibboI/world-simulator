@@ -978,7 +978,7 @@ impl Planet {
                 .fold((0.0, 0usize), |(sum, count), cell| {
                     (sum + fields.annual_mean[cell], count + 1)
                 });
-            (count > 0).then(|| sum / count as f64)
+            (count > 0).then_some(sum / count as f64)
         };
         let deep_water_temperature = deep_water(&|cell| self.deep_water_cells[cell])
             .or_else(|| deep_water(&|_| true))
