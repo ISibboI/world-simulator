@@ -28,6 +28,9 @@ pub struct CellInfo {
     pub orogenic: f32,
     /// Time since the last orogeny in Myr, or NaN if there was none.
     pub since_orogeny: f32,
+    /// Remaining extension fabric of the lithosphere (rifted margins, failed rifts), 0 to 1
+    /// (see [`crate::tectonics::Crust::rifted`]).
+    pub rifted: f32,
     /// The terms of the lithosphere strength that the view cannot rebuild from the other
     /// attributes (see [`crate::tectonics::Simulation::lithosphere_strength_terms`]), 0 to 1: the thermal term (from
     /// the thermal age, which a plume may have reset) and the thinning of stretched continental
@@ -263,7 +266,12 @@ impl CellInfo {
     /// Strength of the lithosphere relative to old, undeformed lithosphere, 0.05 to 1 (see
     /// [`crate::tectonics::combine_strength`]); NaN if a term is unknown.
     pub fn lithosphere_strength(&self) -> f32 {
-        let terms = [self.strength_thermal, self.strength_thinning, self.orogenic];
+        let terms = [
+            self.strength_thermal,
+            self.strength_thinning,
+            self.orogenic,
+            self.rifted,
+        ];
         if terms.iter().any(|term| term.is_nan()) {
             return f32::NAN;
         }
@@ -271,7 +279,14 @@ impl CellInfo {
             f64::from(self.strength_thermal),
             f64::from(self.strength_thinning),
             f64::from(self.orogenic),
+            f64::from(self.rifted),
         ) as f32
+    }
+
+    /// The extension-fabric term of the lithosphere strength (see
+    /// [`crate::tectonics::fabric_strength`]).
+    pub fn strength_fabric(&self) -> f32 {
+        tectonics::fabric_strength(f64::from(self.rifted)) as f32
     }
 
     /// The orogenic term of the lithosphere strength (see
@@ -287,26 +302,31 @@ impl CellInfo {
         if strength.is_nan() || strength >= FULL_STRENGTH {
             return None;
         }
-        let (thermal, thinning, orogenic) = (
+        let (thermal, thinning, orogenic, fabric) = (
             self.strength_thermal,
             self.strength_thinning,
             self.strength_orogenic(),
+            self.strength_fabric(),
         );
-        Some(if thermal <= thinning && thermal <= orogenic {
-            // A plume reset the thermal age where the thermal term is clearly below the one of
-            // the lithosphere's age (both quantised in past frames: 0.25 Myr steps of the age
-            // change the term by up to 0.015 next to a ridge axis, the term itself by 0.002).
-            let by_age = tectonics::thermal_strength(f64::from(self.age)) as f32;
-            if by_age - thermal > PLUME_RESET_MARGIN {
-                Weakness::Plume
+        Some(
+            if thermal <= thinning && thermal <= orogenic && thermal <= fabric {
+                // A plume reset the thermal age where the thermal term is clearly below the one of
+                // the lithosphere's age (both quantised in past frames: 0.25 Myr steps of the age
+                // change the term by up to 0.015 next to a ridge axis, the term itself by 0.002).
+                let by_age = tectonics::thermal_strength(f64::from(self.age)) as f32;
+                if by_age - thermal > PLUME_RESET_MARGIN {
+                    Weakness::Plume
+                } else {
+                    Weakness::Young
+                }
+            } else if thinning <= orogenic && thinning <= fabric {
+                Weakness::Thinned
+            } else if orogenic <= fabric {
+                Weakness::Orogenic
             } else {
-                Weakness::Young
-            }
-        } else if thinning <= orogenic {
-            Weakness::Thinned
-        } else {
-            Weakness::Orogenic
-        })
+                Weakness::Rifted
+            },
+        )
     }
 
     pub fn is_oceanic(&self) -> bool {
@@ -360,14 +380,17 @@ pub enum Weakness {
     Thinned,
     /// Orogenic belts, sutures and accreted terranes that have not healed yet.
     Orogenic,
+    /// The extension fabric of rifted margins and failed rifts that has not healed yet.
+    Rifted,
 }
 
 impl Weakness {
-    pub const ALL: [Weakness; 4] = [
+    pub const ALL: [Weakness; 5] = [
         Weakness::Young,
         Weakness::Plume,
         Weakness::Thinned,
         Weakness::Orogenic,
+        Weakness::Rifted,
     ];
 
     /// Short name, for the cell widget.
@@ -377,6 +400,7 @@ impl Weakness {
             Weakness::Plume => "plume-heated",
             Weakness::Thinned => "thinned crust",
             Weakness::Orogenic => "orogenic",
+            Weakness::Rifted => "rift fabric",
         }
     }
 }
@@ -563,6 +587,7 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 } else {
                     f32::NAN
                 },
+                rifted: crust.rifted as f32,
                 strength_thermal: strength.thermal as f32,
                 strength_thinning: strength.thinning as f32,
                 temperature: field(&temperature.annual_mean, index),
@@ -1163,6 +1188,7 @@ mod tests {
             age: 1180.0,
             sediment: 512.3,
             orogenic: 0.25,
+            rifted: 0.0,
             since_orogeny: 87.6,
             strength_thermal: 1.0,
             strength_thinning: 0.8,
@@ -1549,7 +1575,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 148);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 152);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 

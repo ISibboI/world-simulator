@@ -44,7 +44,7 @@ impl Code {
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 37] = [
+const CHANNELS: [Code; 38] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -105,6 +105,8 @@ const CHANNELS: [Code; 37] = [
     Code::Signed8(0.25),
     Code::Signed8(0.25),
     Code::Signed8(0.25),
+    // Extension fabric share.
+    Code::Share,
     // Plate (clamped to 16 bits), the low 16 bits of the flags, the drainage and the climate
     // class. The flags take 9 bits, so most of their high byte is zero and costs next to nothing
     // after the delta and lz4.
@@ -115,10 +117,10 @@ const CHANNELS: [Code; 37] = [
 ];
 
 /// The channels of the integer attributes: plate, flags, drainage and climate class.
-const PLATE: usize = 33;
-const FLAGS: usize = 34;
-const DRAINAGE: usize = 35;
-const CLIMATE_CLASS: usize = 36;
+const PLATE: usize = 34;
+const FLAGS: usize = 35;
+const DRAINAGE: usize = 36;
+const CLIMATE_CLASS: usize = 37;
 
 /// The value of an integer channel of a cell.
 fn integer(channel: usize, cell: &CellInfo) -> u16 {
@@ -178,6 +180,7 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         cell.wind_january_north,
         cell.wind_july_east,
         cell.wind_july_north,
+        cell.rifted,
         0.0,
         0.0,
         0.0,
@@ -375,6 +378,7 @@ impl Planes {
                     wind_january_north: value(30),
                     wind_july_east: value(31),
                     wind_july_north: value(32),
+                    rifted: value(33),
                     climate_class: u32::from(values[CLIMATE_CLASS]),
                     plate: u32::from(values[PLATE]),
                     flags: u32::from(values[FLAGS]),
@@ -402,7 +406,7 @@ pub struct State {
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 12;
+const VERSION: u8 = 13;
 /// Bytes per plate: its rotation (angular velocity), id and orientation.
 pub const PLATE_BYTES: usize = 32;
 /// Bytes before the compressed part: version, kind, time, cells, plates.
@@ -541,6 +545,7 @@ mod tests {
             age: x * 0.1 + time,
             sediment: x * 0.5,
             orogenic: (x * 0.01).fract(),
+            rifted: (x * 0.017).fract(),
             since_orogeny: if index.is_multiple_of(3) {
                 f32::NAN
             } else {
@@ -635,6 +640,7 @@ mod tests {
             (original.age, decoded.age, 0.125),
             (original.sediment, decoded.sediment, 0.5),
             (original.orogenic, decoded.orogenic, 0.5 / 254.0),
+            (original.rifted, decoded.rifted, 0.5 / 254.0),
             (original.since_orogeny, decoded.since_orogeny, 0.125),
             (
                 original.strength_thermal,
@@ -756,7 +762,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 57);
+        assert_eq!(BYTES_PER_CELL, 58);
     }
 
     #[test]

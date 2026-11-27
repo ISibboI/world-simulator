@@ -650,13 +650,14 @@ impl Simulation {
                 };
                 let plate = &mut plates[plate_index as usize];
                 if rifting
-                    && stretch_rift(
+                    && stretch_rift_marking(
                         mesh,
                         plate,
                         local,
                         rift_rings,
                         params.breakup_thickness,
                         time,
+                        params.rift_fabric,
                     )
                 {
                     gap_statistics.stretched_cells += 1;
@@ -1234,6 +1235,7 @@ impl RingScratch {
 /// Returns false if there is no donor or the donors cannot fill the vertex with at least
 /// `breakup_thickness` of crust: the continent breaks up and the gap becomes sea floor (no
 /// felsic slivers thin enough to be subducted).
+#[cfg(test)]
 fn stretch_rift(
     mesh: &SphereMesh,
     plate: &mut Plate,
@@ -1241,6 +1243,20 @@ fn stretch_rift(
     rings: usize,
     breakup_thickness: f64,
     time: f64,
+) -> bool {
+    stretch_rift_marking(mesh, plate, local, rings, breakup_thickness, time, 1.0)
+}
+
+/// `stretch_rift`, marking the extension fabric ([`Crust::rifted`]) with the factor `fabric`
+/// ([`TectonicParams::rift_fabric`]).
+fn stretch_rift_marking(
+    mesh: &SphereMesh,
+    plate: &mut Plate,
+    local: u32,
+    rings: usize,
+    breakup_thickness: f64,
+    time: f64,
+    fabric: f64,
 ) -> bool {
     // Donors with their ring, in ring order (deterministic).
     let mut donors = Vec::new();
@@ -1302,7 +1318,7 @@ fn stretch_rift(
     // Mass-weighted thickness and thermal fraction of the donors after stretching (repeated
     // stretching compounds in the donors).
     let (mut donor_thickness, mut donor_heat) = (0.0, 0.0);
-    let (mut orogeny, mut orogenic) = (NO_OROGENY, 0.0);
+    let (mut orogeny, mut orogenic, mut rifted) = (NO_OROGENY, 0.0, 0.0);
     // A plume's heating is kept as a reset of the strength age (the latest of the donors'); it
     // does not enter the heat budget of the stretching, which follows `birth`.
     let mut reheated = NO_REHEATING;
@@ -1313,6 +1329,7 @@ fn stretch_rift(
         orogeny = orogeny.max(crust.orogeny);
         reheated = reheated.max(crust.reheated);
         orogenic += crust.thickness * share * crust.density * crust.orogenic;
+        rifted += crust.thickness * share * crust.density * crust.rifted;
         let beta = 1.0 / (1.0 - share);
         let fraction = 1.0 - (1.0 - thermal_fraction(crust.age(time))) / beta;
         if let Some(age) = age_for_thermal_fraction(fraction) {
@@ -1331,6 +1348,8 @@ fn stretch_rift(
         cohort[1] += given_cohort[1];
         crust.thickness -= given;
         crust.sediment -= crust.sediment * share;
+        // The stretching leaves an extension fabric (#54).
+        crust.mark_extension((beta - 1.0) * fabric);
     }
     let beta = (donor_thickness / mass.max(1e-9)) / thickness.max(1e-9);
     let fraction = 1.0 - (1.0 - donor_heat / mass.max(1e-9)) / beta.max(1.0);
@@ -1344,13 +1363,16 @@ fn stretch_rift(
         metasediment: metasediment / mass.max(1e-9),
         orogeny: NO_OROGENY,
         orogenic: 0.0,
+        rifted: 0.0,
         reheated,
         cohort: Cohort {
             mixed: cohort[0] / sediment.max(1e-9),
             lifo: cohort[1] / sediment.max(1e-9),
         },
     };
-    crust.mix_orogeny(orogeny, orogenic / mass.max(1e-9));
+    crust.mix_orogeny(orogeny, orogenic / mass.max(1e-9), rifted / mass.max(1e-9));
+    // The new sample is crust stretched by `beta` into the gap.
+    crust.mark_extension((beta - 1.0) * fabric);
     plate.crust[local as usize] = Some(crust);
     true
 }
@@ -1407,7 +1429,7 @@ fn heal_gap(
     let (mut thickness, mut mass, mut sediment, mut felsic) = (0.0, 0.0, 0.0, 0.0);
     let (mut metasediment, mut cohort) = (0.0, [0.0; 2]);
     let mut birth = f64::NEG_INFINITY;
-    let (mut orogeny, mut orogenic) = (NO_OROGENY, 0.0);
+    let (mut orogeny, mut orogenic, mut rifted) = (NO_OROGENY, 0.0, 0.0);
     let mut reheated = NO_REHEATING;
     for &neighbor in &neighbors {
         let crust = plate.crust[neighbor as usize]
@@ -1416,6 +1438,7 @@ fn heal_gap(
         orogeny = orogeny.max(crust.orogeny);
         reheated = reheated.max(crust.reheated);
         orogenic += crust.thickness * share * crust.density * crust.orogenic;
+        rifted += crust.thickness * share * crust.density * crust.rifted;
         let given = crust.thickness * share;
         thickness += given;
         mass += given * crust.density;
@@ -1438,13 +1461,14 @@ fn heal_gap(
         metasediment: metasediment / mass.max(1e-9),
         orogeny: NO_OROGENY,
         orogenic: 0.0,
+        rifted: 0.0,
         reheated,
         cohort: Cohort {
             mixed: cohort[0] / sediment.max(1e-9),
             lifo: cohort[1] / sediment.max(1e-9),
         },
     };
-    crust.mix_orogeny(orogeny, orogenic / mass.max(1e-9));
+    crust.mix_orogeny(orogeny, orogenic / mass.max(1e-9), rifted / mass.max(1e-9));
     plate.crust[local as usize] = Some(crust);
     plate.consumed[local as usize] = false;
     statistics.enclosed_fills += 1;
@@ -1565,6 +1589,7 @@ mod tests {
                             metasediment: 0.0,
                             orogeny: NO_OROGENY,
                             orogenic: 0.0,
+                            rifted: 0.0,
                             reheated: NO_REHEATING,
                             cohort: Cohort::NONE,
                         };
@@ -1579,6 +1604,7 @@ mod tests {
                             metasediment: 0.0,
                             orogeny: NO_OROGENY,
                             orogenic: 0.0,
+                            rifted: 0.0,
                             reheated: NO_REHEATING,
                             cohort: Cohort::NONE,
                         };
@@ -1632,6 +1658,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: 400.0,
             orogenic: 1.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         }
@@ -1766,6 +1793,7 @@ mod tests {
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
+                rifted: 0.0,
                 reheated: NO_REHEATING,
                 cohort: Cohort::NONE,
             };
@@ -1803,6 +1831,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -1823,6 +1852,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -1901,6 +1931,7 @@ mod tests {
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
+                rifted: 0.0,
                 reheated: NO_REHEATING,
                 cohort: Cohort::NONE,
             };
@@ -2041,7 +2072,7 @@ mod tests {
         simulation.plates[0].crust[cell as usize]
             .as_mut()
             .unwrap()
-            .mix_orogeny(-500.0, 0.2);
+            .mix_orogeny(-500.0, 0.2, 0.0);
         simulation.apply_additions(&[CrustAddition {
             cell,
             plate: 0,
@@ -2204,7 +2235,7 @@ mod tests {
         simulation.plates[0].crust[local]
             .as_mut()
             .unwrap()
-            .mix_orogeny(-500.0, 1.0);
+            .mix_orogeny(-500.0, 1.0, 0.0);
         simulation.apply_additions(&[collision_addition(cell, 35e3)]);
         let gained = |c: u32| simulation.surface_crust(c).thickness - 35e3;
         // Fresh belt, strength bounded at 0.5: 8× the share.
@@ -2368,6 +2399,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         });
@@ -2824,6 +2856,7 @@ mod tests {
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
+                rifted: 0.0,
                 reheated: NO_REHEATING,
                 cohort: Cohort::NONE,
             };
