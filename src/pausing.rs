@@ -108,11 +108,12 @@ impl Pausing {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
     use super::*;
 
+    #[cfg(not(target_arch = "wasm32"))] // Runs write their output to files.
     fn cli(output: &std::path::Path) -> Cli {
+        use clap::Parser;
+
         Cli::try_parse_from([
             "world-simulator",
             "--headless",
@@ -128,6 +129,7 @@ mod tests {
 
     /// Runs a simulation through [`Pausing::tick`], applying `script(tick, pausing)` before every
     /// tick (requests of the view), and returns the ticks and the final state hash.
+    #[cfg(not(target_arch = "wasm32"))] // Runs write their output to files.
     fn session(script: impl Fn(usize, &mut Pausing)) -> (Vec<Tick>, Vec<f64>, u64) {
         let output = tempfile::tempdir().expect("temporary directory");
         let cli = cli(output.path());
@@ -154,10 +156,12 @@ mod tests {
         (ticks, times, run.planet.state_hash())
     }
 
+    #[cfg(not(target_arch = "wasm32"))] // Runs write their output to files.
     fn halt(request: u64, in_step: bool) -> Tick {
         Tick::Halt(Halt { request, in_step })
     }
 
+    #[cfg(not(target_arch = "wasm32"))] // Runs write their output to files.
     #[test]
     fn a_run_paused_inside_steps_ends_as_an_uninterrupted_one() {
         let (plain, plain_times, plain_hash) = session(|_, _| {});
@@ -207,6 +211,7 @@ mod tests {
         assert_eq!(steps, [false, false, false, true]);
     }
 
+    #[cfg(not(target_arch = "wasm32"))] // Runs write their output to files.
     #[test]
     fn a_run_paused_after_its_last_step_still_ends() {
         // Paused with exactly the steps of the run asked for: it stops after the last one
