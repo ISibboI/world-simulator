@@ -1299,6 +1299,25 @@ impl Simulation {
         self.mantle.plumes()
     }
 
+    /// What the carbon cycle's degassing is computed from (#154): new, subducted and
+    /// metamorphosed crust and sediment so far (kg), and the plumes' flux now. Cheap (no
+    /// statistics).
+    pub fn carbon_drivers(&self) -> crate::carbon::TectonicDrivers {
+        let radius = self.params.planet_radius;
+        let cell_area = 4.0 * std::f64::consts::PI * radius * radius / self.mesh.len() as f64;
+        let ledger = &self.ledger;
+        crate::carbon::TectonicDrivers {
+            new_sea_floor: ledger.new_sea_floor * cell_area,
+            subducted_crust: -(ledger.subducted_oceanic + ledger.subducted_transitional)
+                * cell_area,
+            subducted_sediment: -ledger.subducted_sediment * cell_area,
+            metamorphic_sediment: (self.metamorphosed.0 + self.metamorphosed.1) * 1e12
+                + self.trench_sediment.stacked * cell_area,
+            // `+ 0.0`: the empty sum is −0.
+            plume_flux: self.plumes().iter().map(Plume::flux).sum::<f64>() + 0.0,
+        }
+    }
+
     fn substep(&mut self, dt: f64) {
         self.time += dt;
         self.move_plates(dt);

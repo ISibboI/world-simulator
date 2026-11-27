@@ -2,6 +2,7 @@
 // native build still checks for dead code.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+mod carbon;
 mod climate;
 #[cfg(any(target_arch = "wasm32", test))]
 mod device;
@@ -113,6 +114,14 @@ struct Cli {
     #[arg(long)]
     no_erosion: bool,
 
+    /// Keep the greenhouse forcing of the start for the whole run instead of letting the carbon
+    /// cycle (#154) change it: by default, tectonic degassing and weathering set the CO₂ in
+    /// every step after the first 150 Myr (`carbon.calibration_time`), during which the
+    /// tectonics spins up from rest and the weathering is calibrated to balance the degassing.
+    /// The fluxes are still computed and logged.
+    #[arg(long)]
+    no_carbon_cycle: bool,
+
     /// Start with a bare planet instead of an initial sediment cover.
     #[arg(long)]
     no_initial_sediment: bool,
@@ -187,20 +196,22 @@ struct Cli {
     /// sequence). Sets the solar constant of the Sun, which then brightens during the run (~1% per
     /// 100 Myr; `--set temperature.solar_brightening=0` keeps it), and, unless `--co2` is given, a
     /// greenhouse forcing that offsets the difference to today's Sun at the start (in the future
-    /// at most down to an atmosphere without CO₂, −30 W/m²) and then stays fixed. See
-    /// `presets::Epoch`.
+    /// at most down to an atmosphere without CO₂, −30 W/m²). The carbon cycle then changes the
+    /// CO₂ and the forcing during the run (unless `--no-carbon-cycle`). See `presets::Epoch`.
     #[arg(long, default_value_t = sun::EARLIEST_EPOCH)]
     epoch: f64,
 
-    /// CO₂ relative to the pre-industrial 280 ppm; the greenhouse forcing becomes
-    /// 5.35 ln(ratio) W/m² (at least −30 W/m², no CO₂) instead of the default of the epoch.
+    /// CO₂ relative to the pre-industrial 280 ppm at the start; the greenhouse forcing becomes
+    /// 5.35 ln(ratio) W/m², plus 0.39 ln²(ratio) above 1 (at least −30 W/m², no CO₂), instead of
+    /// the default of the epoch.
     #[arg(long)]
     co2: Option<f64>,
 
     /// Overrides a tectonic parameter for calibration, e.g. `--set basal_drag=8e14`, or an
-    /// erosion, climate or temperature parameter with the prefix `erosion.`, `climate.` or
-    /// `temperature.`; can be repeated. See `TectonicParams::set`, `ErosionParams::set`,
-    /// `ClimateParams::set` and `TemperatureParams::set` for the names. Overrides are applied
+    /// erosion, climate, temperature or carbon-cycle parameter with the prefix `erosion.`,
+    /// `climate.`, `temperature.` or `carbon.`; can be repeated. See `TectonicParams::set`,
+    /// `ErosionParams::set`, `ClimateParams::set`, `TemperatureParams::set` and
+    /// `CarbonParams::set` for the names. Overrides are applied
     /// after the presets (`--biosphere`, `--epoch`, `--co2`).
     #[arg(long = "set", value_name = "NAME=VALUE")]
     overrides: Vec<String>,
@@ -542,6 +553,7 @@ impl Cli {
         params.initial_sediment.enabled = !self.no_initial_sediment;
         params.track_material_budget = self.material_budget;
         params.breakup.diagnose = self.plate_log.is_some();
+        parameters.carbon.enabled = !self.no_carbon_cycle;
         let mut overrides = Vec::with_capacity(self.overrides.len());
         for assignment in &self.overrides {
             let (name, value) = assignment
@@ -582,10 +594,10 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
     let mesh = SphereMesh::icosphere(cli.subdivisions);
     info!(cells = mesh.len(), "Created planet mesh");
     let (parameters, overrides) = cli.parameters()?;
-    if cli.co2.is_some_and(|co2| co2 > 30.0) {
+    if cli.co2.is_some_and(|co2| co2 > 36.0) {
         warn!(
-            "the logarithmic CO₂ forcing (Myhre et al., 1998) holds up to a few tens of times the \
-             pre-industrial CO₂; above that it underestimates the forcing (Byrne & Goldblatt, 2014)"
+            "the CO₂ forcing is fitted up to 10 000 ppmv, 36 times the pre-industrial CO₂ (Byrne & \
+             Goldblatt, 2014); above that it is extrapolated"
         );
     }
     if sun::Sun::of_run(cli.epoch, cli.duration).luminosity > MOIST_GREENHOUSE {
@@ -613,10 +625,18 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
         erosion,
         climate,
         temperature,
+        carbon,
     } = parameters;
     let simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
     let erosion = (!cli.no_erosion).then_some(erosion);
-    let mut planet = Planet::new(simulation, climate, temperature, erosion, EARTH_RADIUS);
+    let mut planet = Planet::new(
+        simulation,
+        climate,
+        temperature,
+        carbon,
+        erosion,
+        EARTH_RADIUS,
+    );
     planet.track_cover_cohort_from(cli.cover_cohort);
     Ok(planet)
 }
@@ -1479,6 +1499,7 @@ fn snapshot(
         planet_statistics.gyre_transport,
         planet_statistics.solar_constant,
     );
+    info!("    {}", planet_statistics.carbon.summary());
 
     let (groups, classes) = koppen::land_shares(&koppen::classes(planet));
     // The five most common classes, the more common first (ties by id).

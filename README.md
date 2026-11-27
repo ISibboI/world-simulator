@@ -12,8 +12,12 @@ given one.
 By default a run starts with a **barren planet at the earliest start** (#190): `--epoch 0` and
 `--biosphere abiotic`, i.e. 4.0 Ga, a sun at 74% of today's brightness and a planet without life
 (bare land, no transpiration, braided rivers, no biogenic pelagic sediment). The greenhouse
-forcing offsets the faint sun at the start and then stays fixed while the sun brightens, so long
-runs warm (there is no carbon cycle yet). Today's living Earth, the default before #190, is
+forcing offsets the faint sun at the start; then a **carbon cycle** (#154) changes the CO₂ in
+every step: tectonic degassing (ridges, arcs, plumes, metamorphism) against silicate weathering on
+land and seafloor weathering, the carbonate–silicate feedback that counters the brightening sun.
+Each step logs the CO₂, the forcing and the fluxes (`carbon:` lines); `--no-carbon-cycle` keeps
+the forcing of the start for the whole run, and `--set carbon.NAME=VALUE` changes its parameters
+(`src/carbon.rs`, `notes/issue-154/`). Today's living Earth, the default before #190, is
 `--biosphere modern --epoch 4` (URL `?biosphere=modern&epoch=4`).
 
 `--epoch` (URL `epoch=`) sets the time of the planet's history at the start of a run, in Gyr

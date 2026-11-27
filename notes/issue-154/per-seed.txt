@@ -1,0 +1,206 @@
+===== on
+seed 0 (local): phi 1.153 T0=12.7 T1=17.1 Tl=16.9 Tmin=12.7 Tmax=17.5 drift=-0.324 drift4=-0.253 ac1=0.861 ice0=6.3 icel=1.54 icemax=6.3 ice1=2.1 p0=0.493 p1=0.326 pmin=0.318 pmax=0.66 Fl=60.9 D=15 ridge=3.99 arcs=8.55 plumes=0.99 meta=1.47 land=4.75 sea=10.3 I=0.225 rev=0 budget=0.000935 c_land=0.22 c_landf=0.341 c_prod=-0.338 secs=822 lag 0:0.58 5:0.63 10:0.54 20:0.21
+seed 1 (local): phi 0.955 T0=13.4 T1=19.3 Tl=18.5 Tmin=13.4 Tmax=19.7 drift=2.35 drift4=2.97 ac1=0.872 ice0=6.2 icel=0.324 icemax=6.2 ice1=0.5 p0=0.493 p1=0.557 pmin=0.493 pmax=0.755 Fl=64.5 D=16.6 ridge=4.38 arcs=9.56 plumes=1.1 meta=1.55 land=4.32 sea=12.3 I=0.217 rev=0 budget=-0.00101 c_land=0.252 c_landf=0.347 c_prod=0.692 secs=837 lag 0:0.64 5:0.66 10:0.51 20:0.07
+seed 2 (local): phi 1.469 T0=11.2 T1=16.5 Tl=16.2 Tmin=11.2 Tmax=17.8 drift=3.35 drift4=2.56 ac1=0.824 ice0=5.9 icel=2.19 icemax=5.9 ice1=1.8 p0=0.493 p1=0.235 pmin=0.227 pmax=0.561 Fl=59.6 D=14.4 ridge=3.91 arcs=8.35 plumes=0.937 meta=1.21 land=3.75 sea=10.7 I=0.233 rev=3 budget=-0.000269 c_land=-0.409 c_landf=0.501 c_prod=0.188 secs=813 lag 0:0.54 5:0.60 10:0.46 20:0.10
+seed 3 (local): phi 1.482 T0=11.4 T1=16.3 Tl=15.7 Tmin=11.4 Tmax=17.1 drift=2.36 drift4=0.626 ac1=0.847 ice0=5.9 icel=2.11 icemax=5.9 ice1=1.4 p0=0.493 p1=0.314 pmin=0.306 pmax=0.56 Fl=58.9 D=12.2 ridge=3.35 arcs=7 plumes=0.654 meta=1.22 land=3.77 sea=8.52 I=0.238 rev=1 budget=0.000605 c_land=0.0965 c_landf=0.321 c_prod=0.186 secs=773 lag 0:0.52 5:0.64 10:0.60 20:0.26
+seed 4 (github): phi 1.565 T0=12.8 T1=17.3 Tl=15.8 Tmin=12.8 Tmax=17.3 drift=3.53 drift4=4.95 ac1=-0.0241 ice0=4.2 icel=3.03 icemax=4.5 ice1=1.9 p0=0.493 p1=0.288 pmin=0.277 pmax=0.502 Fl=58.3 D=15.3 ridge=4.28 arcs=8.9 plumes=0.856 meta=1.21 land=3.94 sea=11.4 I=0.24 rev=19 budget=0.000469 c_land=-0.375 c_landf=0.104 c_prod=-0.0398 secs=1.02e+03 lag 0:0.42 5:0.38 10:0.21 20:-0.08
+seed 5 (github): phi 1.050 T0=12.6 T1=18.4 Tl=17.6 Tmin=12.6 Tmax=19.2 drift=2.99 drift4=3.75 ac1=0.757 ice0=5.2 icel=0.624 icemax=5.2 ice1=0 p0=0.493 p1=0.456 pmin=0.384 pmax=0.665 Fl=61.7 D=14.6 ridge=4.32 arcs=8.36 plumes=0.683 meta=1.23 land=3.92 sea=10.7 I=0.251 rev=2 budget=-0.000606 c_land=-0.642 c_landf=-0.011 c_prod=0.195 secs=1.02e+03 lag 0:0.52 5:0.50 10:0.34 20:-0.03
+seed 6 (github): phi 1.391 T0=12.3 T1=17.1 Tl=15.7 Tmin=12.3 Tmax=17.1 drift=1.81 drift4=1.43 ac1=0.823 ice0=7.5 icel=2.11 icemax=7.5 ice1=1.6 p0=0.493 p1=0.278 pmin=0.257 pmax=0.518 Fl=59.3 D=14.2 ridge=3.94 arcs=8.28 plumes=0.961 meta=1.04 land=3.98 sea=10.3 I=0.247 rev=1 budget=0.000735 c_land=0.104 c_landf=-0.0748 c_prod=0.436 secs=1e+03 lag 0:0.63 5:0.64 10:0.46 20:0.05
+seed 7 (github): phi 0.984 T0=12 T1=19.1 Tl=18.4 Tmin=12 Tmax=19.9 drift=2.51 drift4=2.14 ac1=0.851 ice0=6.2 icel=0.712 icemax=6.2 ice1=0.2 p0=0.493 p1=0.468 pmin=0.397 pmax=0.73 Fl=62.4 D=13.5 ridge=3.85 arcs=7.81 plumes=0.938 meta=0.879 land=3.33 sea=10.2 I=0.276 rev=1 budget=3.45e-17 c_land=0.281 c_landf=0.522 c_prod=0.492 secs=974 lag 0:0.43 5:0.52 10:0.45 20:0.18
+MEAN T0=12.3 T1=17.6 Tl=16.9 Tmin=12.3 Tmax=18.2 drift=2.32 drift4=2.27 ac1=0.726 ice0=5.92 icel=1.58 icemax=5.96 ice1=1.19 p0=0.493 p1=0.365 pmin=0.332 pmax=0.619 Fl=60.7 D=14.5 ridge=4 arcs=8.35 plumes=0.89 meta=1.22 land=3.97 sea=10.6 I=0.241 rev=3.38 budget=0.000108 c_land=-0.059 c_landf=0.256 c_prod=0.226 secs=908
+MIN  T0=11.2 T1=16.3 Tl=15.7 Tmin=11.2 Tmax=17.1 drift=-0.324 drift4=-0.253 ac1=-0.0241 ice0=4.2 icel=0.324 icemax=4.5 ice1=0 p0=0.493 p1=0.235 pmin=0.227 pmax=0.502 Fl=58.3 D=12.2 ridge=3.35 arcs=7 plumes=0.654 meta=0.879 land=3.33 sea=8.52 I=0.217 rev=0 budget=-0.00101 c_land=-0.642 c_landf=-0.0748 c_prod=-0.338 secs=773
+MAX  T0=13.4 T1=19.3 Tl=18.5 Tmin=13.4 Tmax=19.9 drift=3.53 drift4=4.95 ac1=0.872 ice0=7.5 icel=3.03 icemax=7.5 ice1=2.1 p0=0.493 p1=0.557 pmin=0.493 pmax=0.755 Fl=64.5 D=16.6 ridge=4.38 arcs=9.56 plumes=1.1 meta=1.55 land=4.75 sea=12.3 I=0.276 rev=19 budget=0.000935 c_land=0.281 c_landf=0.522 c_prod=0.692 secs=1.02e+03
+t: T ice largest_land landf (seed means)
+       0  12.30  5.92  62.1  30.9
+      50  13.95  3.14  63.5  30.0
+     100  14.75  2.98  50.8  27.4
+     150  15.12  2.84  61.6  26.1
+     200  15.90  2.09  62.2  25.6
+     250  16.04  1.82  67.5  25.9
+     300  16.09  1.75  73.8  27.7
+     350  16.32  2.26  83.2  29.0
+     400  16.46  2.11  85.2  29.9
+     450  16.55  1.72  86.8  29.3
+     500  16.66  1.70  86.9  29.2
+     550  16.65  1.56  82.9  28.4
+     600  16.76  1.60  77.6  27.2
+     650  16.75  1.68  83.4  28.6
+     700  17.11  1.36  81.5  27.1
+     750  17.31  1.40  86.2  26.3
+     800  17.60  1.36  83.8  25.8
+     850  17.56  1.04  83.8  25.7
+     900  17.52  1.14  84.0  26.4
+     950  17.59  1.05  76.9  26.2
+    1000  17.64  1.19  89.9  27.1
+t: pCO2 bar  F  D  land seafloor (seed means)
+       1 0.4927  61.76   0.29   4.04   0.20
+      10 0.4927  61.76   5.99   3.60   3.61
+      20 0.4927  61.76   6.91   3.55   4.24
+      30 0.4927  61.76   7.50   3.58   4.58
+      50 0.4927  61.76   8.28   3.57   5.12
+      75 0.4927  61.76   8.99   3.52   5.62
+     100 0.4927  61.76  10.40   3.38   6.28
+     125 0.4927  61.76  10.92   3.21   6.76
+     150 0.4944  61.80  12.42   3.52   8.53
+     175 0.5269  62.50  13.73   3.65   9.77
+     200 0.5442  62.84  14.21   3.55  10.64
+     250 0.542  62.74  14.69   3.77  10.79
+     300 0.5503  62.89  14.40   3.67  10.56
+     350 0.5548  62.88  14.17   4.05  10.32
+     400 0.5418  62.61  15.16   3.90  11.22
+     450 0.5154  62.03  14.31   3.70  10.65
+     500 0.4983  61.68  15.24   4.19  11.11
+     550 0.4638  60.93  13.84   4.16   9.90
+     600 0.4412  60.34  13.92   4.08   9.96
+     650 0.428  60.02  13.60   3.90   9.68
+     700 0.4326  60.23  13.88   3.66  10.24
+     750 0.4127  59.61  14.33   3.80  10.61
+     800 0.4072  59.27  15.37   4.04  11.51
+     850 0.3898  58.78  14.08   4.10  10.12
+     900 0.3832  58.59  14.91   4.30  10.60
+     950 0.3707  58.23  14.36   4.21  10.27
+    1000 0.3654  58.04  15.33   4.28  11.08
+===== off
+seed 0 (github): phi 1.153 T0=12.7 T1=19.5 Tl=17.3 Tmin=12.7 Tmax=19.8 drift=5.41 drift4=6.54 ac1=nan ice0=6.3 icel=1.25 icemax=6.3 ice1=0.7 p0=0.493 p1=0.493 pmin=0.493 pmax=0.493 Fl=61.8 D=15.9 ridge=4.23 arcs=9.23 plumes=0.899 meta=1.55 land=4.78 sea=12 I=0.227 rev=0 budget=4.18 c_land=nan c_landf=nan c_prod=nan secs=1e+03 lag 0:-0.03 5:-0.05 10:0.01 20:-0.01
+seed 1 (github): phi 0.955 T0=13.4 T1=18.8 Tl=17.4 Tmin=13.4 Tmax=19 drift=3.15 drift4=6.44 ac1=nan ice0=6.2 icel=0.8 icemax=6.2 ice1=0 p0=0.493 p1=0.493 pmin=0.493 pmax=0.493 Fl=61.8 D=13.8 ridge=3.97 arcs=7.49 plumes=1.03 meta=1.31 land=3.67 sea=9.17 I=0.224 rev=0 budget=-5.29 c_land=nan c_landf=nan c_prod=nan secs=967 lag 0:0.03 5:-0.02 10:-0.02 20:-0.00
+seed 2 (github): phi 1.469 T0=11.2 T1=19.8 Tl=17.6 Tmin=11.2 Tmax=19.9 drift=7.8 drift4=7.29 ac1=nan ice0=5.9 icel=1.36 icemax=5.9 ice1=0.1 p0=0.493 p1=0.493 pmin=0.493 pmax=0.493 Fl=61.8 D=16.6 ridge=4.25 arcs=10.2 plumes=0.838 meta=1.3 land=5.2 sea=14.5 I=0.271 rev=0 budget=17 c_land=nan c_landf=nan c_prod=nan secs=1.02e+03 lag 0:0.03 5:-0.04 10:-0.03 20:0.03
+seed 3 (github): phi 1.482 T0=11.4 T1=21.2 Tl=17.4 Tmin=11.4 Tmax=21.2 drift=7.98 drift4=6.41 ac1=nan ice0=5.9 icel=1.06 icemax=5.9 ice1=0.1 p0=0.493 p1=0.493 pmin=0.493 pmax=0.493 Fl=61.8 D=16.2 ridge=4.08 arcs=9.98 plumes=0.932 meta=1.21 land=4.59 sea=14.4 I=0.269 rev=0 budget=14.7 c_land=nan c_landf=nan c_prod=nan secs=1.01e+03 lag 0:0.01 5:0.00 10:-0.05 20:0.13
+seed 4 (github): phi 1.565 T0=12.8 T1=19.8 Tl=17.3 Tmin=12.8 Tmax=19.8 drift=6.76 drift4=8 ac1=nan ice0=4.2 icel=1.33 icemax=4.2 ice1=1.9 p0=0.493 p1=0.493 pmin=0.493 pmax=0.493 Fl=61.8 D=17.5 ridge=4.36 arcs=10.7 plumes=0.958 meta=1.43 land=5.78 sea=15.2 I=0.28 rev=0 budget=19.2 c_land=nan c_landf=nan c_prod=nan secs=1.02e+03 lag 0:0.01 5:0.02 10:-0.04 20:-0.00
+seed 5 (github): phi 1.050 T0=12.6 T1=18.7 Tl=17.3 Tmin=12.6 Tmax=19 drift=5.25 drift4=6.02 ac1=nan ice0=5.2 icel=1.81 icemax=5.2 ice1=0.6 p0=0.493 p1=0.493 pmin=0.493 pmax=0.493 Fl=61.8 D=16.5 ridge=4.39 arcs=9.21 plumes=1.03 meta=1.82 land=4.79 sea=11.4 I=0.2 rev=0 budget=-1.96 c_land=nan c_landf=nan c_prod=nan secs=1.05e+03 lag 0:-0.05 5:-0.01 10:-0.00 20:0.01
+seed 6 (github): phi 1.391 T0=12.3 T1=19.4 Tl=17.4 Tmin=12.3 Tmax=20 drift=6.29 drift4=5.87 ac1=nan ice0=7.5 icel=1.13 icemax=7.5 ice1=0.3 p0=0.493 p1=0.493 pmin=0.493 pmax=0.493 Fl=61.8 D=16.4 ridge=4.21 arcs=9.89 plumes=0.911 meta=1.42 land=5.06 sea=13.7 I=0.263 rev=0 budget=12.7 c_land=nan c_landf=nan c_prod=nan secs=1.04e+03 lag 0:0.00 5:-0.04 10:-0.03 20:0.01
+seed 7 (github): phi 0.984 T0=12 T1=19.3 Tl=18.2 Tmin=12 Tmax=20.7 drift=5.66 drift4=5.33 ac1=nan ice0=6.2 icel=1.01 icemax=6.2 ice1=0.3 p0=0.493 p1=0.493 pmin=0.493 pmax=0.493 Fl=61.8 D=13.9 ridge=4.01 arcs=8.1 plumes=0.804 meta=1.02 land=3.28 sea=10.6 I=0.229 rev=0 budget=-0.268 c_land=nan c_landf=nan c_prod=nan secs=1e+03 lag 0:-0.03 5:0.04 10:0.07 20:-0.03
+MEAN T0=12.3 T1=19.6 Tl=17.5 Tmin=12.3 Tmax=19.9 drift=6.04 drift4=6.49 ac1=nan ice0=5.92 icel=1.22 icemax=5.92 ice1=0.5 p0=0.493 p1=0.493 pmin=0.493 pmax=0.493 Fl=61.8 D=15.8 ridge=4.19 arcs=9.35 plumes=0.926 meta=1.38 land=4.64 sea=12.6 I=0.245 rev=0 budget=7.53 c_land=nan c_landf=nan c_prod=nan secs=1.01e+03
+MIN  T0=11.2 T1=18.7 Tl=17.3 Tmin=11.2 Tmax=19 drift=3.15 drift4=5.33 ac1=nan ice0=4.2 icel=0.8 icemax=4.2 ice1=0 p0=0.493 p1=0.493 pmin=0.493 pmax=0.493 Fl=61.8 D=13.8 ridge=3.97 arcs=7.49 plumes=0.804 meta=1.02 land=3.28 sea=9.17 I=0.2 rev=0 budget=-5.29 c_land=nan c_landf=nan c_prod=nan secs=967
+MAX  T0=13.4 T1=21.2 Tl=18.2 Tmin=13.4 Tmax=21.2 drift=7.98 drift4=8 ac1=nan ice0=7.5 icel=1.81 icemax=7.5 ice1=1.9 p0=0.493 p1=0.493 pmin=0.493 pmax=0.493 Fl=61.8 D=17.5 ridge=4.39 arcs=10.7 plumes=1.03 meta=1.82 land=5.78 sea=15.2 I=0.28 rev=0 budget=19.2 c_land=nan c_landf=nan c_prod=nan secs=1.05e+03
+t: T ice largest_land landf (seed means)
+       0  12.30  5.92  62.1  30.9
+      50  13.95  3.14  63.5  30.0
+     100  14.75  2.98  50.8  27.4
+     150  15.12  2.84  61.6  26.1
+     200  15.36  2.81  64.0  25.5
+     250  15.64  2.23  68.6  25.9
+     300  15.65  2.15  82.0  27.7
+     350  15.78  2.24  85.2  28.8
+     400  15.86  2.10  90.1  29.2
+     450  16.15  1.70  89.8  29.1
+     500  16.49  1.43  87.4  27.9
+     550  16.96  0.96  90.0  28.2
+     600  17.48  0.69  82.8  26.8
+     650  18.12  0.65  78.0  25.1
+     700  18.64  0.50  81.4  25.4
+     750  18.69  0.65  88.8  26.9
+     800  19.04  0.57  89.8  26.7
+     850  19.20  0.35  84.9  27.2
+     900  19.12  0.55  91.1  28.3
+     950  19.32  0.64  85.1  28.8
+    1000  19.56  0.50  89.2  28.6
+t: pCO2 bar  F  D  land seafloor (seed means)
+       1 0.4927  61.76   0.29   4.04   0.20
+      10 0.4927  61.76   6.20   3.59   3.69
+      20 0.4927  61.76   6.91   3.56   4.24
+      30 0.4927  61.76   7.56   3.58   4.67
+      50 0.4927  61.76   8.18   3.53   5.31
+      75 0.4927  61.76   8.85   3.46   5.44
+===== modern
+seed 0 (github): phi 5.569 T0=12.6 T1=18.9 Tl=18.8 Tmin=12.6 Tmax=20.3 drift=1.25 drift4=4.07 ac1=0.148 ice0=14.8 icel=7.99 icemax=14.8 ice1=7.2 p0=0.00028 p1=2.7e-05 pmin=2.63e-05 pmax=0.000599 Fl=-3.24 D=12.1 ridge=4.13 arcs=5.86 plumes=0.925 meta=1.14 land=6.54 sea=5.52 I=0.479 rev=218 budget=0.053 c_land=-0.277 c_landf=-0.406 c_prod=0.0595 secs=762 lag 0:0.72 5:0.56 10:0.32 20:0.08
+seed 1 (github): phi 5.072 T0=13 T1=20.6 Tl=20 Tmin=13 Tmax=22.6 drift=1.14 drift4=2.96 ac1=-0.0293 ice0=14.1 icel=6.04 icemax=14.1 ice1=4.8 p0=0.00028 p1=4.91e-05 pmin=2.71e-05 pmax=0.000662 Fl=-2.41 D=11.7 ridge=4.04 arcs=5.66 plumes=0.95 meta=1.08 land=6.25 sea=5.49 I=0.494 rev=187 budget=0.0557 c_land=-0.187 c_landf=-0.169 c_prod=-0.214 secs=744 lag 0:0.65 5:0.48 10:0.25 20:-0.10
+seed 2 (github): phi 5.469 T0=11.9 T1=23.2 Tl=20.4 Tmin=11.8 Tmax=23.3 drift=4.84 drift4=1.4 ac1=0.303 ice0=13.8 icel=5.58 icemax=14.4 ice1=2.5 p0=0.00028 p1=6.78e-05 pmin=5.44e-05 pmax=0.000695 Fl=-1.69 D=11.3 ridge=3.94 arcs=5.59 plumes=0.829 meta=0.992 land=5.62 sea=5.72 I=0.511 rev=159 budget=0.00204 c_land=-0.524 c_landf=-0.404 c_prod=0.537 secs=743 lag 0:0.69 5:0.44 10:0.15 20:-0.11
+seed 3 (github): phi 3.873 T0=12.2 T1=21.7 Tl=19.9 Tmin=12.2 Tmax=21.7 drift=4.75 drift4=3.81 ac1=0.298 ice0=13.2 icel=5.06 icemax=13.2 ice1=3.6 p0=0.00028 p1=0.000122 pmin=8.32e-05 pmax=0.000593 Fl=-1.72 D=10.7 ridge=3.92 arcs=4.83 plumes=0.819 meta=1.17 land=6.77 sea=3.97 I=0.494 rev=193 budget=0.0124 c_land=-0.465 c_landf=-0.0509 c_prod=0.165 secs=752 lag 0:0.79 5:0.64 10:0.41 20:0.12
+seed 4 (github): phi 8.151 T0=12.9 T1=19.6 Tl=17.9 Tmin=12.9 Tmax=20.7 drift=6.04 drift4=3.97 ac1=0.0453 ice0=14.1 icel=8.02 icemax=14.1 ice1=7 p0=0.00028 p1=2.9e-05 pmin=1.65e-05 pmax=0.00042 Fl=-6.99 D=12.6 ridge=4.2 arcs=6.45 plumes=0.996 meta=1 land=5.97 sea=6.67 I=0.493 rev=226 budget=-0.00262 c_land=0.11 c_landf=-0.0831 c_prod=0.342 secs=927 lag 0:0.60 5:0.39 10:0.20 20:-0.05
+seed 5 (github): phi 5.586 T0=13.2 T1=21.4 Tl=18.8 Tmin=13.2 Tmax=21.4 drift=2.94 drift4=1.93 ac1=0.256 ice0=13 icel=6.86 icemax=13 ice1=5.1 p0=0.00028 p1=3.88e-05 pmin=2.54e-05 pmax=0.000419 Fl=-4.87 D=10.9 ridge=3.89 arcs=5.22 plumes=0.864 meta=0.971 land=6.21 sea=4.73 I=0.495 rev=226 budget=-0.00327 c_land=-0.274 c_landf=0.301 c_prod=0.0521 secs=914 lag 0:0.75 5:0.54 10:0.27 20:-0.14
+seed 6 (github): phi 6.635 T0=11.6 T1=19.9 Tl=16.8 Tmin=11.6 Tmax=19.9 drift=3.52 drift4=6.92 ac1=0.109 ice0=16.2 icel=10.1 icemax=16.2 ice1=8.1 p0=0.00028 p1=3.13e-05 pmin=3.13e-05 pmax=0.000362 Fl=-5.16 D=11 ridge=3.66 arcs=5.32 plumes=1.11 meta=0.959 land=5.88 sea=5.17 I=0.515 rev=267 budget=-0.0152 c_land=-0.329 c_landf=0.121 c_prod=0.635 secs=890 lag 0:0.60 5:0.37 10:0.13 20:-0.15
+seed 7 (github): phi 3.496 T0=12.2 T1=21.3 Tl=21.5 Tmin=12.2 Tmax=23.7 drift=2.61 drift4=2.3 ac1=0.215 ice0=14.4 icel=4.54 icemax=14.4 ice1=7.9 p0=0.00028 p1=0.000183 pmin=0.000161 pmax=0.000918 Fl=1.55 D=12.6 ridge=4.27 arcs=5.84 plumes=1.19 meta=1.34 land=6.84 sea=5.79 I=0.47 rev=184 budget=0.107 c_land=0.0358 c_landf=-0.24 c_prod=0.584 secs=929 lag 0:0.69 5:0.52 10:0.32 20:0.05
+MEAN T0=12.4 T1=20.8 Tl=19.3 Tmin=12.4 Tmax=21.7 drift=3.39 drift4=3.42 ac1=0.168 ice0=14.2 icel=6.78 icemax=14.3 ice1=5.78 p0=0.00028 p1=6.84e-05 pmin=5.32e-05 pmax=0.000583 Fl=-3.07 D=11.6 ridge=4.01 arcs=5.6 plumes=0.96 meta=1.08 land=6.26 sea=5.38 I=0.494 rev=208 budget=0.0261 c_land=-0.239 c_landf=-0.116 c_prod=0.27 secs=833
+MIN  T0=11.6 T1=18.9 Tl=16.8 Tmin=11.6 Tmax=19.9 drift=1.14 drift4=1.4 ac1=-0.0293 ice0=13 icel=4.54 icemax=13 ice1=2.5 p0=0.00028 p1=2.7e-05 pmin=1.65e-05 pmax=0.000362 Fl=-6.99 D=10.7 ridge=3.66 arcs=4.83 plumes=0.819 meta=0.959 land=5.62 sea=3.97 I=0.47 rev=159 budget=-0.0152 c_land=-0.524 c_landf=-0.406 c_prod=-0.214 secs=743
+MAX  T0=13.2 T1=23.2 Tl=21.5 Tmin=13.2 Tmax=23.7 drift=6.04 drift4=6.92 ac1=0.303 ice0=16.2 icel=10.1 icemax=16.2 ice1=8.1 p0=0.00028 p1=0.000183 pmin=0.000161 pmax=0.000918 Fl=1.55 D=12.6 ridge=4.27 arcs=6.45 plumes=1.19 meta=1.34 land=6.84 sea=6.67 I=0.515 rev=267 budget=0.107 c_land=0.11 c_landf=0.301 c_prod=0.635 secs=929
+t: T ice largest_land landf (seed means)
+       0  12.45 14.20  62.1  30.9
+      50  14.39 10.44  62.2  31.1
+     100  15.60  9.41  53.6  28.5
+     150  16.56  8.81  53.8  26.9
+     200  18.10  6.95  59.9  27.4
+     250  18.19  7.09  73.0  28.4
+     300  18.41  7.00  80.4  28.7
+     350  17.89  8.03  85.8  30.7
+     400  18.46  7.16  89.9  31.9
+     450  18.75  6.70  88.1  30.5
+     500  18.90  6.44  86.9  30.8
+     550  19.26  6.24  82.4  30.6
+     600  19.23  6.58  77.4  29.4
+     650  19.27  6.69  82.8  30.4
+     700  19.71  6.53  90.2  30.6
+     750  20.29  6.16  91.5  30.8
+     800  20.15  6.83  89.1  29.9
+     850  19.88  6.86  85.4  30.0
+     900  19.79  7.42  86.8  30.1
+     950  20.49  6.74  87.9  30.8
+    1000  20.82  5.78  89.1  30.2
+t: pCO2 bar  F  D  land seafloor (seed means)
+       1 0.00028   0.00   0.20   2.04   0.03
+      10 0.00028   0.00   4.10   1.89   0.56
+      20 0.00028   0.00   4.81   1.89   0.68
+      30 0.00028   0.00   5.43   1.89   0.75
+      50 0.00028   0.00   5.93   1.92   0.81
+      75 0.00028   0.00   6.30   1.98   0.90
+     100 0.00028   0.00   7.60   2.10   1.00
+     125 0.00028   0.00   7.95   2.20   1.05
+     150 0.0002998   0.29  10.80   4.95   5.80
+     175 0.0003606   1.22  11.29   5.06   6.20
+     200 0.000419   1.84  11.80   5.19   6.65
+     250 0.0004198   1.40  12.49   5.57   6.88
+     300 0.0004011   1.08  12.65   5.90   6.74
+     350 0.0003262  -0.20  11.97   6.29   5.69
+     400 0.0003339   0.04  12.38   6.40   5.97
+     450 0.0002931  -0.50  11.99   6.09   5.89
+     500 0.000241  -1.41  11.20   5.75   5.46
+     550 0.0002138  -1.87  11.80   6.12   5.70
+     600 0.0001611  -3.20  11.84   6.50   5.35
+     650 0.0001467  -3.99  11.23   6.39   4.84
+     700 0.0001388  -4.30  11.32   6.45   4.86
+     750 0.0001256  -4.60  10.83   6.18   4.66
+     800 0.0001044  -5.89  10.98   6.29   4.71
+     850 8.765e-05  -7.17  10.85   6.49   4.37
+     900 8.905e-05  -7.77  11.13   6.54   4.56
+     950 8.204e-05  -7.86  11.47   7.05   4.44
+    1000 6.843e-05  -8.82  11.31   7.00   4.31
+===== modern-off
+seed 0 (github): phi 5.569 T0=12.6 T1=24.1 Tl=19.9 Tmin=12.6 Tmax=24.1 drift=7.33 drift4=10.2 ac1=nan ice0=14.8 icel=6.68 icemax=14.8 ice1=2.7 p0=0.00028 p1=0.00028 pmin=0.00028 pmax=0.00028 Fl=0 D=15.3 ridge=4.79 arcs=7.68 plumes=1.19 meta=1.63 land=8.51 sea=8.96 I=0.517 rev=0 budget=611 c_land=nan c_landf=nan c_prod=nan secs=1.18e+03 lag 0:nan 5:nan 10:nan 20:nan
+seed 1 (github): phi 5.072 T0=13 T1=25.5 Tl=21.6 Tmin=13 Tmax=25.5 drift=11.9 drift4=13.6 ac1=nan ice0=14.1 icel=4.07 icemax=14.1 ice1=0.4 p0=0.00028 p1=0.00028 pmin=0.00028 pmax=0.00028 Fl=0 D=12.2 ridge=4.04 arcs=6.2 plumes=0.852 meta=1.13 land=8.09 sea=6.92 I=0.56 rev=0 budget=779 c_land=nan c_landf=nan c_prod=nan secs=1.1e+03 lag 0:nan 5:nan 10:nan 20:nan
+seed 2 (github): phi 5.469 T0=11.9 T1=25.9 Tl=20.5 Tmin=11.8 Tmax=25.9 drift=11.8 drift4=11 ac1=nan ice0=13.8 icel=5.05 icemax=14.4 ice1=0.7 p0=0.00028 p1=0.00028 pmin=0.00028 pmax=0.00028 Fl=0 D=12.6 ridge=4.23 arcs=6.44 plumes=0.949 meta=0.998 land=6.94 sea=7.43 I=0.554 rev=0 budget=482 c_land=nan c_landf=nan c_prod=nan secs=1.11e+03 lag 0:nan 5:nan 10:nan 20:nan
+seed 3 (github): phi 3.873 T0=12.2 T1=25.8 Tl=21.6 Tmin=12.2 Tmax=25.8 drift=12.3 drift4=11.2 ac1=nan ice0=13.2 icel=3.79 icemax=13.2 ice1=1.2 p0=0.00028 p1=0.00028 pmin=0.00028 pmax=0.00028 Fl=0 D=10.3 ridge=3.69 arcs=4.95 plumes=0.942 meta=0.761 land=5.84 sea=5.19 I=0.511 rev=0 budget=181 c_land=nan c_landf=nan c_prod=nan secs=1.04e+03 lag 0:nan 5:nan 10:nan 20:nan
+seed 4 (github): phi 8.151 T0=12.9 T1=25.9 Tl=21.5 Tmin=12.9 Tmax=26 drift=12.6 drift4=12.5 ac1=nan ice0=14.1 icel=4.6 icemax=14.1 ice1=1.4 p0=0.00028 p1=0.00028 pmin=0.00028 pmax=0.00028 Fl=0 D=14.1 ridge=4.19 arcs=8.15 plumes=0.888 meta=0.844 land=8.18 sea=11.1 I=0.653 rev=0 budget=1.49e+03 c_land=nan c_landf=nan c_prod=nan secs=744 lag 0:nan 5:nan 10:nan 20:nan
+seed 5 (github): phi 5.586 T0=13.2 T1=25.7 Tl=21.3 Tmin=13.2 Tmax=25.7 drift=7.68 drift4=7.76 ac1=nan ice0=13 icel=3.76 icemax=13 ice1=0.5 p0=0.00028 p1=0.00028 pmin=0.00028 pmax=0.00028 Fl=0 D=12.3 ridge=4.02 arcs=6.28 plumes=0.815 meta=1.16 land=8.13 sea=7.29 I=0.605 rev=0 budget=899 c_land=nan c_landf=nan c_prod=nan secs=751 lag 0:nan 5:nan 10:nan 20:nan
+seed 6 (github): phi 6.635 T0=11.6 T1=26.1 Tl=20.6 Tmin=11.6 Tmax=26.1 drift=13.5 drift4=17.6 ac1=nan ice0=16.2 icel=5.16 icemax=16.2 ice1=0.5 p0=0.00028 p1=0.00028 pmin=0.00028 pmax=0.00028 Fl=0 D=11.4 ridge=3.67 arcs=6.22 plumes=0.863 meta=0.625 land=6.66 sea=7.68 I=0.648 rev=0 budget=861 c_land=nan c_landf=nan c_prod=nan secs=713 lag 0:nan 5:nan 10:nan 20:nan
+seed 7 (github): phi 3.496 T0=12.2 T1=24.8 Tl=20.8 Tmin=12.2 Tmax=24.8 drift=8.62 drift4=8.68 ac1=nan ice0=14.4 icel=5.74 icemax=14.4 ice1=6.6 p0=0.00028 p1=0.00028 pmin=0.00028 pmax=0.00028 Fl=0 D=11.7 ridge=4.24 arcs=5.23 plumes=0.927 meta=1.29 land=6.86 sea=4.87 I=0.494 rev=0 budget=2.57 c_land=nan c_landf=nan c_prod=nan secs=739 lag 0:nan 5:nan 10:nan 20:nan
+MEAN T0=12.4 T1=25.5 Tl=21 Tmin=12.4 Tmax=25.5 drift=10.7 drift4=11.6 ac1=nan ice0=14.2 icel=4.86 icemax=14.3 ice1=1.75 p0=0.00028 p1=0.00028 pmin=0.00028 pmax=0.00028 Fl=0 D=12.5 ridge=4.11 arcs=6.39 plumes=0.928 meta=1.06 land=7.4 sea=7.44 I=0.568 rev=0 budget=663 c_land=nan c_landf=nan c_prod=nan secs=923
+MIN  T0=11.6 T1=24.1 Tl=19.9 Tmin=11.6 Tmax=24.1 drift=7.33 drift4=7.76 ac1=nan ice0=13 icel=3.76 icemax=13 ice1=0.4 p0=0.00028 p1=0.00028 pmin=0.00028 pmax=0.00028 Fl=0 D=10.3 ridge=3.67 arcs=4.95 plumes=0.815 meta=0.625 land=5.84 sea=4.87 I=0.494 rev=0 budget=2.57 c_land=nan c_landf=nan c_prod=nan secs=713
+MAX  T0=13.2 T1=26.1 Tl=21.6 Tmin=13.2 Tmax=26.1 drift=13.5 drift4=17.6 ac1=nan ice0=16.2 icel=6.68 icemax=16.2 ice1=6.6 p0=0.00028 p1=0.00028 pmin=0.00028 pmax=0.00028 Fl=0 D=15.3 ridge=4.79 arcs=8.15 plumes=1.19 meta=1.63 land=8.51 sea=11.1 I=0.653 rev=0 budget=1.49e+03 c_land=nan c_landf=nan c_prod=nan secs=1.18e+03
+t: T ice largest_land landf (seed means)
+       0  12.45 14.20  62.1  30.9
+      50  14.39 10.44  62.2  31.1
+     100  15.60  9.41  53.6  28.5
+     150  16.56  8.81  53.8  26.9
+     200  16.99  8.24  60.5  27.3
+     250  17.61  7.86  71.1  27.6
+     300  17.96  7.19  74.8  28.9
+     350  18.24  7.06  84.1  29.9
+     400  18.32  7.38  88.8  30.4
+     450  18.76  6.65  94.6  31.1
+     500  19.55  5.59  95.6  32.3
+     550  20.21  5.25  94.1  30.8
+     600  21.06  4.62  79.6  30.2
+     650  21.81  4.39  81.1  29.2
+     700  22.38  3.86  79.1  28.6
+     750  22.79  3.48  81.8  28.4
+     800  23.11  3.00  88.1  29.0
+     850  23.60  2.40  88.5  29.6
+     900  24.04  2.11  89.4  29.8
+     950  24.60  1.74  90.5  28.9
+    1000  25.48  1.75  88.6  28.8
+t: pCO2 bar  F  D  land seafloor (seed means)
+       1 0.00028   0.00   0.20   2.04   0.03
+      10 0.00028   0.00   4.30   1.88   0.58
+      20 0.00028   0.00   4.81   1.93   0.70
+      30 0.00028   0.00   6.08   2.29   1.11
+      50 0.00028   0.00   6.55   2.36   1.20
+      75 0.00028   0.00   6.31   1.88   0.89

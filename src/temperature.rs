@@ -413,6 +413,12 @@ pub struct TemperatureFields {
     pub gyre_transport: f64,
     /// The solar constant (W/m²) of the last update, raised by the sun's brightening.
     pub solar_constant: f64,
+    /// Global mean net radiation at the top of the atmosphere (absorbed sunlight minus outgoing
+    /// longwave radiation, W/m²) over the last simulated year of the update: positive while the
+    /// climate still warms towards its equilibrium (the mixed layer takes a few years, an
+    /// update simulates [`TemperatureParams::years_per_update`]). The carbon cycle uses it for
+    /// the warming still to come (#154).
+    pub toa_imbalance: f64,
     /// Depth-integrated volume transport of the wind-driven gyres (eastward, northward) in m²/s
     /// at every fine ocean cell: the value of its coarse cell, NaN where that is not ocean in the
     /// gyre model (mostly land) or the fine cell is land.
@@ -859,7 +865,10 @@ impl TemperatureModel {
         let mut annual_sea_ice = vec![0.0; coarse_count];
         let mut annual_gyre_heat = vec![0.0; coarse_count];
         let mut mean = vec![0.0; coarse_count];
-        for _ in 0..years {
+        // Global mean net radiation at the top of the atmosphere in the last year (W/m²).
+        let mut toa_imbalance = 0.0;
+        for year in 0..years {
+            let last_year = year + 1 == years;
             for season in seasonal_land
                 .iter_mut()
                 .chain(&mut seasonal_ocean)
@@ -1003,6 +1012,9 @@ impl TemperatureModel {
                         // and the lakes.
                         let land = self.land[cell];
                         let (a, b) = radiation(land);
+                        if last_year {
+                            toa_imbalance += f * (q * (1.0 - land_albedo[cell]) - a - b * land);
+                        }
                         let rate = dt / params.land_heat_capacity;
                         self.land[cell] = (land
                             + rate
@@ -1025,6 +1037,10 @@ impl TemperatureModel {
                             self.ocean_surface[cell],
                         );
                         let (a, b) = radiation(self.ocean_surface[cell]);
+                        if last_year {
+                            toa_imbalance += ocean_fraction[cell]
+                                * (q * (1.0 - albedo) - a - b * self.ocean_surface[cell]);
+                        }
                         // Net heating of the surface: `forcing − damping · T_surface`.
                         let forcing = q * (1.0 - albedo) - a
                             + transport
@@ -1050,6 +1066,10 @@ impl TemperatureModel {
                                 self.lake_surface[cell],
                             );
                             let (a, b) = radiation(self.lake_surface[cell]);
+                            if last_year {
+                                toa_imbalance += lake_fraction[cell]
+                                    * (q * (1.0 - albedo) - a - b * self.lake_surface[cell]);
+                            }
                             let forcing = q * (1.0 - albedo) - a
                                 + transport
                                 + to_land * self.land[cell]
@@ -1283,6 +1303,8 @@ impl TemperatureModel {
             ice,
             monthly_lake_ice,
             solar_constant: orbit.solar_constant,
+            toa_imbalance: toa_imbalance
+                / ((seasons * params.substeps_per_season) as f64 * coarse_count as f64),
             gyre_transport: gyres
                 .streamfunction
                 .iter()

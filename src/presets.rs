@@ -18,9 +18,13 @@
 //!   the Sun (Gough, 1981) and the greenhouse forcing that kept the young Earth from freezing
 //!   (the faint-young-Sun problem; Feulner, 2012).
 //!
-//! Not covered: dynamic vegetation, weathering and soils, a carbon cycle (the forcing is
-//! prescribed), ocean chemistry, the shorter day and the hotter mantle of a young planet.
+//! The greenhouse forcing of the epoch is the start of the carbon cycle ([`crate::carbon`],
+//! #154), which then changes it during the run (`--no-carbon-cycle` keeps it).
+//!
+//! Not covered: dynamic vegetation, soils, ocean chemistry beyond the carbonate buffer, the
+//! shorter day and the hotter mantle of a young planet.
 
+use crate::carbon::CarbonParams;
 use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
 use crate::math;
@@ -33,6 +37,48 @@ use crate::temperature::TemperatureParams;
 pub const BOND_ALBEDO: f64 = 0.3;
 /// Radiative forcing per e-fold of CO₂ in W/m² (Myhre et al., 1998: `F = 5.35 ln(C/C₀)`).
 pub const CO2_FORCING_PER_E_FOLD: f64 = 5.35;
+/// Curvature of the CO₂ forcing at high CO₂ in W/m² per e-fold squared (Byrne & Goldblatt,
+/// 2014: `F = 5.32 ln(C/C₀) + 0.39 ln²(C/C₀)`, fitted over 200–10 000 ppmv; see
+/// [`co2_forcing`]).
+pub const CO2_FORCING_CURVATURE: f64 = 0.39;
+
+/// Radiative forcing (W/m²) of CO₂ at `ratio` times the pre-industrial 280 ppm, relative to
+/// it: Myhre et al. (1998), `5.35 ln r`, below today's CO₂, and with the quadratic term of Byrne
+/// & Goldblatt (2014) above it, where the logarithmic fit underestimates the forcing (by a
+/// quarter at 10 000 ppmv). Their fit reaches 10 000 ppmv (r ≈ 36); beyond, e.g. the ~0.5 bar
+/// that the default forcing of epoch 0 (+61.8 W/m²) needs, it is an extrapolation: radiative–
+/// convective models with pressure broadening reach that forcing with ~0.1–0.3 bar, so the CO₂
+/// of thick atmospheres is indicative. Smooth at `r = 1`.
+///
+/// Bounded below by [`ZERO_CO2_FORCING`], which `5.35 ln r` reaches at ~1 ppm: below, the
+/// forcing stays at that of an atmosphere without CO₂ (also for `r = 0`).
+pub fn co2_forcing(ratio: f64) -> f64 {
+    let x = math::ln(ratio);
+    (CO2_FORCING_PER_E_FOLD * x + CO2_FORCING_CURVATURE * x.max(0.0) * x.max(0.0))
+        .max(ZERO_CO2_FORCING)
+}
+
+/// The CO₂ ratio at which [`co2_forcing`] reaches [`ZERO_CO2_FORCING`] (~1 ppm).
+pub fn zero_co2_forcing_ratio() -> f64 {
+    math::exp(ZERO_CO2_FORCING / CO2_FORCING_PER_E_FOLD)
+}
+
+/// The CO₂ ratio whose forcing is `forcing` (W/m²): the inverse of [`co2_forcing`]. At or
+/// below [`ZERO_CO2_FORCING`], where every CO₂ under ~1 ppm has the same forcing, the largest
+/// of them, [`zero_co2_forcing_ratio`].
+pub fn co2_ratio_for_forcing(forcing: f64) -> f64 {
+    if forcing <= ZERO_CO2_FORCING {
+        return zero_co2_forcing_ratio();
+    }
+    let (a, b) = (CO2_FORCING_PER_E_FOLD, CO2_FORCING_CURVATURE);
+    let x = if forcing <= 0.0 {
+        forcing / a
+    } else {
+        // b x² + a x − F = 0, in the form without cancellation.
+        2.0 * forcing / (a + (a * a + 4.0 * b * forcing).sqrt())
+    };
+    math::exp(x)
+}
 /// The forcing (W/m²) of an atmosphere without any CO₂, relative to today's: the lowest
 /// greenhouse forcing that removing CO₂ can give. Radiative transfer puts the effect of all of
 /// today's CO₂ at ~30 W/m² (clear sky ~30–32 W/m²: Kiehl & Trenberth, 1997; van Wijngaarden &
@@ -70,6 +116,7 @@ impl Biosphere {
         erosion: &mut ErosionParams,
         climate: &mut ClimateParams,
         temperature: &mut TemperatureParams,
+        carbon: &mut CarbonParams,
     ) {
         match self {
             Biosphere::Modern => {}
@@ -110,6 +157,17 @@ impl Biosphere {
                 // vegetated Earth delivered 2–4× today's dust to the ocean; Kohfeld & Harrison,
                 // 2001; Maher et al., 2010), which makes up for the missing ooze.
                 tectonics.initial_sediment.biogenic_pelagic = false;
+                // Silicate weathering without plants (#154): roots, mycorrhiza and soil
+                // organic acids speed up weathering several times; GEOCARB takes 1/4 of today's
+                // rate before vascular plants (f_E = 0.25; Berner, 1994; Moulton & Berner, 1998:
+                // 2–10×). Without roots the soil's CO₂ is the atmosphere's, so the weathering
+                // follows the CO₂ directly instead of through the saturating law of a rooted
+                // soil: `r^0.3` (Walker et al., 1981; GEOCARB's pre-plant law has `r^0.5`, which
+                // overstates the dependence at the ~10³ times today's CO₂ of a young planet,
+                // where the pH of the soil water limits it).
+                carbon.plant_factor = 0.25;
+                carbon.co2_exponent = 0.3;
+                carbon.soil_co2_saturation = 0.0;
             }
         }
     }
@@ -163,12 +221,11 @@ impl Epoch {
 
     /// Greenhouse forcing (W/m²) of the epoch relative to today's atmosphere.
     ///
-    /// With a CO₂ ratio, the forcing is `5.35 ln(C/C₀)` (Myhre et al., 1998); that fit holds up to
-    /// a few tens of times the pre-industrial CO₂, beyond it line-by-line models give somewhat
-    /// more (Byrne & Goldblatt, 2014).
+    /// With a CO₂ ratio, the forcing is [`co2_forcing`]: `5.35 ln(C/C₀)` (Myhre et al., 1998)
+    /// with the quadratic term of Byrne & Goldblatt (2014) above today's CO₂.
     ///
     /// Otherwise the forcing offsets the sunlight that the faint Sun does not deliver,
-    /// `(S₀ − S)(1 − α)/4` with Earth's Bond albedo α. The model has no carbon cycle; this assumes that the
+    /// `(S₀ − S)(1 − α)/4` with Earth's Bond albedo α. This assumes that the
     /// carbonate–silicate weathering feedback (Walker et al., 1981; Kasting, 1993) kept the climate
     /// close to today's, as the geological record suggests for most of the Archean and Proterozoic:
     /// liquid water and sediments since 3.8–4.4 Ga, and no lasting global glaciation except the
@@ -176,16 +233,17 @@ impl Epoch {
     /// in radiative–convective models of the order of 0.1 bar of CO₂, or 0.01–0.03 bar with
     /// ~0.1–0.5% of methane (Haqq-Misra et al., 2008; Wolf & Toon, 2013; Charnay et al., 2013).
     /// Methane on that scale is biogenic; for a barren planet (the default run, #190) read the
-    /// forcing as CO₂ alone, ~0.1–0.3 bar. The default is a prescribed, climate-compensated
-    /// forcing, not a prediction. It is uniform, while the missing sunlight is largest in the
+    /// forcing as CO₂ alone, ~0.1–0.3 bar ([`co2_forcing`], extrapolated, gives ~0.5 bar at epoch
+    /// 0). The default is a prescribed, climate-compensated forcing at the start, not a
+    /// prediction. It is uniform, while the missing sunlight is largest in the
     /// tropics, so the gradient flattens: at 3.5 Ga (4 seeds, 1000 Myr) the global mean was
     /// 0.8–1.9 K warmer than today's, the poles 8–10 K warmer, the equator ~2 K cooler, and the permanent
     /// ice covered 7–10% less of the surface. Without it the planet is a snowball (−36 °C, 95%
     /// frozen).
     ///
-    /// The forcing offsets the sun of the run's start and stays fixed while the sun brightens
-    /// during the run (#149), so long runs warm: there is no carbon cycle that would draw the
-    /// greenhouse down.
+    /// The forcing offsets the sun of the run's start. During the run the carbon cycle
+    /// ([`crate::carbon`], #154) changes it while the sun brightens (#149); with
+    /// `--no-carbon-cycle` it stays fixed and long runs warm.
     ///
     /// After today the Sun is brighter and the forcing negative: the weathering feedback draws
     /// CO₂ down, at most to none at all, so the forcing is bounded below by
@@ -197,15 +255,15 @@ impl Epoch {
     /// Both forcings are bounded below by [`ZERO_CO2_FORCING`].
     pub fn greenhouse_forcing(&self) -> f64 {
         match self.co2 {
-            Some(co2) => CO2_FORCING_PER_E_FOLD * math::ln(co2),
+            Some(co2) => co2_forcing(co2),
             None => (PRESENT_SOLAR_CONSTANT - self.solar_constant()) * (1.0 - BOND_ALBEDO) / 4.0,
         }
         .max(ZERO_CO2_FORCING)
     }
 
     /// Sets the solar constant of the run's start, the epoch (from which the sun brightens
-    /// during the run) and the greenhouse forcing of the epoch. The forcing stays fixed during
-    /// the run. The present keeps the defaults exactly (S₀, today's age and no forcing).
+    /// during the run) and the greenhouse forcing of the epoch at the start, from which the carbon
+    /// cycle goes on. The present keeps the defaults exactly (S₀, today's age and no forcing).
     pub fn apply(&self, temperature: &mut TemperatureParams) {
         if *self == Self::PRESENT {
             return;
@@ -223,6 +281,7 @@ pub struct Parameters {
     pub erosion: ErosionParams,
     pub climate: ClimateParams,
     pub temperature: TemperatureParams,
+    pub carbon: CarbonParams,
 }
 
 impl Parameters {
@@ -236,21 +295,25 @@ impl Parameters {
             },
             climate: ClimateParams::default(),
             temperature: TemperatureParams::default(),
+            carbon: CarbonParams::default(),
         };
         biosphere.apply(
             &mut parameters.tectonics,
             &mut parameters.erosion,
             &mut parameters.climate,
             &mut parameters.temperature,
+            &mut parameters.carbon,
         );
         epoch.apply(&mut parameters.temperature);
         parameters
     }
 
-    /// Overrides one parameter: `erosion.`, `climate.` and `temperature.` select those
-    /// parameters, anything else is a tectonic parameter.
+    /// Overrides one parameter: `erosion.`, `climate.`, `temperature.` and `carbon.` select
+    /// those parameters, anything else is a tectonic parameter.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
-        if let Some(name) = name.strip_prefix("erosion.") {
+        if let Some(name) = name.strip_prefix("carbon.") {
+            self.carbon.set(name, value)
+        } else if let Some(name) = name.strip_prefix("erosion.") {
             self.erosion.set(name, value)
         } else if let Some(name) = name.strip_prefix("climate.") {
             self.climate.set(name, value)
@@ -270,12 +333,13 @@ mod tests {
 
     /// The parameters printed with `Debug`, which prints every f64 exactly (shortest
     /// round-trip representation), so equal strings mean bit-identical parameters.
-    fn fingerprint(parameters: &Parameters) -> [String; 4] {
+    fn fingerprint(parameters: &Parameters) -> [String; 5] {
         [
             format!("{:?}", parameters.tectonics),
             format!("{:?}", parameters.erosion),
             format!("{:?}", parameters.climate),
             format!("{:?}", parameters.temperature),
+            format!("{:?}", parameters.carbon),
         ]
     }
 
@@ -288,7 +352,42 @@ mod tests {
             },
             climate: ClimateParams::default(),
             temperature: TemperatureParams::default(),
+            carbon: CarbonParams::default(),
         }
+    }
+
+    /// The CO₂ forcing is Myhre's below today's CO₂, larger above, smooth at today's CO₂, and
+    /// its inverse undoes it; epoch 0 needs ~0.5 bar.
+    #[test]
+    fn co2_forcing_and_its_inverse() {
+        assert_eq!(co2_forcing(1.0), 0.0);
+        assert!((co2_forcing(0.5) - 5.35 * math::ln(0.5)).abs() < 1e-12);
+        assert!(co2_forcing(2.0) > 5.35 * math::ln(2.0));
+        // Byrne & Goldblatt (2014): 38.1 W/m² at 50 000 ppmv (with their 5.32).
+        assert!((co2_forcing(50_000.0 / 280.0) - 38.1).abs() < 0.3);
+        for forcing in [-17.8, -1.0, 0.0, 0.5, 3.7, 20.0, 61.8, 120.0] {
+            let ratio = co2_ratio_for_forcing(forcing);
+            assert!((co2_forcing(ratio) - forcing).abs() < 1e-9, "{forcing}");
+        }
+        let epoch_zero = Epoch::new(0.0, None).unwrap().greenhouse_forcing();
+        let bar = co2_ratio_for_forcing(epoch_zero) * 280e-6;
+        assert!((0.4..0.6).contains(&bar), "{bar}");
+    }
+
+    /// Without CO₂ the forcing is that of an atmosphere without any, not −∞: below ~1 ppm the
+    /// forcing stays at [`ZERO_CO2_FORCING`], and the inverse gives the CO₂ where it is reached.
+    #[test]
+    fn co2_forcing_is_bounded_by_an_atmosphere_without_co2() {
+        let zero = zero_co2_forcing_ratio();
+        assert!((co2_forcing(zero) - ZERO_CO2_FORCING).abs() < 1e-9);
+        for ratio in [0.0, 1e-9, 1e-4, 0.5 * zero] {
+            assert_eq!(co2_forcing(ratio), ZERO_CO2_FORCING, "{ratio}");
+        }
+        assert!(co2_forcing(1.01 * zero) > ZERO_CO2_FORCING);
+        for forcing in [ZERO_CO2_FORCING, -31.0, -1000.0, f64::NEG_INFINITY] {
+            assert_eq!(co2_ratio_for_forcing(forcing), zero, "{forcing}");
+        }
+        assert!((co2_ratio_for_forcing(-29.0) - math::exp(-29.0 / 5.35)).abs() < 1e-15);
     }
 
     #[test]
@@ -376,11 +475,11 @@ mod tests {
             (absorbed(archean.solar_constant()) + forcing - absorbed(PRESENT_SOLAR_CONSTANT)).abs()
                 < 1e-9
         );
-        // A doubling of CO₂: 3.7 W/m².
+        // A doubling of CO₂: 3.7 W/m² (Myhre) plus 0.19 W/m² of the quadratic term.
         let doubled = Epoch::new(PRESENT_EPOCH, Some(2.0))
             .unwrap()
             .greenhouse_forcing();
-        assert!((doubled - 3.708).abs() < 1e-3, "{doubled}");
+        assert!((doubled - 3.895).abs() < 1e-3, "{doubled}");
         let mut temperature = TemperatureParams::default();
         archean.apply(&mut temperature);
         assert_eq!(temperature.greenhouse_forcing, forcing);
@@ -428,6 +527,9 @@ mod tests {
         undone.erosion.erodibility = modern.erosion.erodibility;
         undone.erosion.sediment_diffusivity = modern.erosion.sediment_diffusivity;
         undone.tectonics.initial_sediment.biogenic_pelagic = true;
+        undone.carbon.plant_factor = modern.carbon.plant_factor;
+        undone.carbon.co2_exponent = modern.carbon.co2_exponent;
+        undone.carbon.soil_co2_saturation = modern.carbon.soil_co2_saturation;
         assert_eq!(fingerprint(&undone), fingerprint(&modern));
     }
 
@@ -438,7 +540,12 @@ mod tests {
             Biosphere::Abiotic,
             Epoch::new(0.5, Some(10.0)).unwrap(),
         );
-        assert!((parameters.temperature.greenhouse_forcing - 5.35 * math::ln(10f64)).abs() < 1e-12);
+        assert!(
+            (parameters.temperature.greenhouse_forcing
+                - (5.35 * math::ln(10f64) + 0.39 * math::ln(10f64) * math::ln(10f64)))
+            .abs()
+                < 1e-12
+        );
         parameters.set("climate.budyko_omega", 2.0).unwrap();
         parameters.set("temperature.land_albedo", 0.3).unwrap();
         parameters
