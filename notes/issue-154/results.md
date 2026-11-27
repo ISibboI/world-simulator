@@ -65,7 +65,8 @@ by time: [`fluxes.txt`](fluxes.txt).
   physics; a tectonic spin-up before t = 0 would remove it (suggested as a follow-up).
 - **Modern Earth (`--biosphere modern --epoch 4`)**: the CO₂ falls to 68 ppm at 1000 Myr,
   27 ppm in the lowest seed, 17 ppm at its lowest: close to the 10 ppm limit of C4
-  photosynthesis (`presets::MIN_CO2`), which the cycle does not enforce; Caldeira & Kasting
+  photosynthesis, which the cycle does not enforce (the model has no CO₂ floor; the forcing is only
+  bounded by that of an atmosphere without CO₂, `presets::ZERO_CO2_FORCING`, at ~1 ppm); Caldeira & Kasting
   (1992) find the same fall over ~1 Gyr for Earth.
 - **Why the first 150 Myr warm in both**: of the +2.8 K (barren) the brightening sun gives
   ~1 K; the rest is the initial highlands (~1 km mean land) wearing down to ~0.5 km (#190), so

@@ -882,6 +882,7 @@ pub fn ocean_mass(volume: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presets::{ZERO_CO2_FORCING, zero_co2_forcing_ratio};
 
     const AREA: f64 = 5.1e14;
     const OCEAN: f64 = 1.37e21;
@@ -1031,6 +1032,48 @@ mod tests {
             assert_eq!(reversals, 0, "{sensitivity} {response}: {forcings:?}");
             assert!(forcings.last().unwrap() > &1.0);
         }
+    }
+
+    /// Without degassing the weathering draws the CO₂ down towards none, but the implicit step
+    /// in ln r never makes it negative (the sinks vanish with the CO₂), and the forcing stops at
+    /// that of an atmosphere without CO₂ ([`ZERO_CO2_FORCING`]) instead of diverging.
+    #[test]
+    fn co2_approaches_zero_without_negative_forcing_beyond_zero_co2() {
+        let land = vec![cell(10.0); 50];
+        let params = CarbonParams {
+            degassing_smoothing: 0.0,
+            calibration_time: 1.0,
+            ..CarbonParams::default()
+        };
+        let start = ZERO_CO2_FORCING + 5.0;
+        let mut cycle = CarbonCycle::new(params, start, OCEAN, AREA);
+        cycle.start(drivers(0.0, 1.0));
+        let calibrated = cycle.step(&input(&land, drivers(1.0, 1.0), 0.0));
+        assert!((calibrated - start).abs() < 1e-6, "{calibrated}");
+        // The tectonics stops: no new sea floor, subduction or plumes.
+        let stopped = TectonicDrivers {
+            plume_flux: 0.0,
+            ..drivers(1.0, 1.0)
+        };
+        let mut previous = cycle.state().ratio;
+        for _ in 0..40 {
+            let carbon = cycle.state().carbon;
+            let forcing = cycle.step(&input(&land, stopped, 0.0));
+            let state = cycle.state();
+            assert!(forcing >= ZERO_CO2_FORCING, "{forcing}");
+            assert!(
+                state.ratio > 0.0 && state.ratio <= previous,
+                "{}",
+                state.ratio
+            );
+            assert!(state.carbon > 0.0 && state.carbon <= carbon);
+            assert!(state.sinks.total() >= 0.0);
+            let balance = carbon + 1e6 * (state.sources.total() - state.sinks.total());
+            assert!((state.carbon - balance).abs() <= 1e-9 * carbon);
+            previous = state.ratio;
+        }
+        assert!(cycle.state().ratio < 0.5 * zero_co2_forcing_ratio());
+        assert_eq!(cycle.state().forcing, ZERO_CO2_FORCING);
     }
 
     /// Switched off, the CO₂ and the forcing stay, the fluxes are still computed.
