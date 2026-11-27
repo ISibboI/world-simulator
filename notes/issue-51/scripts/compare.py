@@ -116,7 +116,7 @@ def metrics(snaps, a, b):
         out[key] = window_mean(snaps, key, a, b)
     # Reactivation shares over [a, b]: boundary vs plate shares of belts / fabric.
     def share(k, which):
-        d = lambda s: sum(cause(s, c, which)[k] if cause(s, c, which) else 0 for c in CAUSES)
+        d = lambda s: sum(cause(s, c, which)[k] if len(cause(s, c, which) or []) > k else 0 for c in CAUSES)
         tot = lambda s: sum(cause(s, c, which)[0] if cause(s, c, which) else 0 for c in CAUSES)
         sa, sb = at(snaps, a), at(snaps, b)
         if sa is None or sb is None:
@@ -126,6 +126,21 @@ def metrics(snaps, a, b):
     for k, name in [(1, "belts"), (2, "fabric"), (3, "interior fabric")]:
         out[f"{name} % on new boundaries"] = share(k, "boundary")
         out[f"{name} % in split plates"] = share(k, "plates")
+    # Supercontinent: when the largest continental mass first falls below 50% and 35% of the
+    # continental crust, and aggregation cycles (up-crossings of 50% after a fall below 35%).
+    series = [(s["t"], s.get("largest_continent", float("nan"))) for s in snaps]
+    for limit in (50, 35):
+        out[f"first t with largest continent < {limit}%"] = next(
+            (t for t, v in series if t > 0 and v < limit), float("nan"))
+    cycles, low = 0, False
+    for t, v in series:
+        if v < 35:
+            low = True
+        elif v >= 50 and low:
+            cycles += 1
+            low = False
+    out["assemblies (largest continent back ≥ 50% after < 35%)"] = cycles
+    out["max largest continent % after 100 Myr"] = max((v for t, v in series if t >= 100), default=float("nan"))
     sa, sb = at(snaps, a), at(snaps, b)
     if sa and sb and "shortening" in sb:
         out["inversion: shortening on fabric %"] = sb.get("inversion_share", float("nan"))
