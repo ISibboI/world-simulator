@@ -1,19 +1,25 @@
-//! Where plates break: along the weakest lithosphere between the parts that move apart.
+//! The strength of the lithosphere, and where plates break along its weakest parts.
 //!
-//! A plate splits (above a plume, or where old lithosphere starts to subduct) into two parts that
-//! the driving forces pull apart. Far from the break they move as rigid blocks; the break forms
-//! where separating them takes the least force: the line of least integrated lithospheric strength
-//! between them, from plate boundary to plate boundary (a minimum cut). It follows weak zones:
-//! young sea floor, rifted margins, young arcs and accreted belts (sutures) rather than old
-//! cratons and old ocean (rifts follow mobile belts around cratons: Vauchez et al. 1998; Tommasi
-//! & Vauchez 2001; Wilson-cycle reactivation of sutures: Buiter & Torsvik 2014). The rigid blocks
-//! are the parts of the plate farther than [`BAND_WIDTH`] from the split's reference great circle
-//! (through the plume, or along the margin), which stands in for the stress field: the break
+//! [`lithosphere_strength`] combines the strength history of the lithosphere: its thermal age
+//! (sea-floor age, stretching, plume heating), the thinning of stretched continental crust, the
+//! orogenic weakening of collision belts and sutures, and the extension fabric of rifted
+//! margins and failed rifts (#54). The breakup of plates by their stress
+//! ([`super::breakup`]) and the deforming plates ([`super::sheet`]) use it; so does the split
+//! of a plate where old lithosphere starts to subduct: the plate breaks into two parts that the
+//! driving forces pull apart. Far from the break they move as rigid blocks; the break forms
+//! where separating them takes the least force: the line of least integrated lithospheric
+//! strength between them, from plate boundary to plate boundary (a minimum cut). It follows weak
+//! zones: young sea floor, rifted margins, young arcs and accreted belts (sutures) rather than
+//! old cratons and old ocean (rifts follow mobile belts around cratons: Vauchez et al. 1998;
+//! Tommasi & Vauchez 2001; Wilson-cycle reactivation of sutures: Buiter & Torsvik 2014). The
+//! rigid blocks are the parts of the plate farther than [`BAND_WIDTH`] from the split's
+//! reference great circle (along the margin), which stands in for the stress field: the break
 //! may wander from it within that band.
 //!
-//! Above a plume the lithosphere is heated and thinned (see [`plume_heating_age`]), so
-//! plume rifts break through the plume where that is the weakest way, and their arms leave it
-//! along whatever weak zones lie around it: the angle at the plume is an outcome of the cut.
+//! Above a plume the lithosphere is heated and thinned (see [`plume_heating_age`]), carried with
+//! the plate, and while the plume supplies magma its lithosphere opens more easily (see
+//! [`magma_weakening`], in the mantle's frame). Plume rifts are breakups by the plates' own stress
+//! (#51), which these weaknesses and the swell's push help.
 
 use std::collections::VecDeque;
 
@@ -39,6 +45,19 @@ const FULL_STRENGTH_AGE: f64 = 100.0;
 /// Buiter & Torsvik 2014) and avoid cratons. The permanent part of the inheritance (mantle
 /// fabric) and the compositional strength of cratonic keels are not modelled.
 const SUTURE_WEAKENING: f64 = 0.25;
+
+/// Strength of lithosphere with a full extension fabric ([`Crust::rifted`], #54) relative to
+/// unfaulted lithosphere of the same thermal state and thickness: the mechanical part of a
+/// rift's inherited weakness (its thermal part, the heating by stretching, and the thinning are
+/// separate terms). Faults and shear zones soften with strain to a fraction of their initial
+/// friction and cohesion (Huismans & Beaumont 2003 use a reduction of the friction angle from
+/// 15° to 2° in the brittle layer), and the stretched mantle lithosphere keeps a fabric that
+/// weakens it for deformation along the rift (Tommasi & Vauchez 2001); the depth-integrated
+/// strength, carried mostly by the ductile parts, falls less. Rifted margins and failed rifts
+/// (aulacogens) are reactivated in later breakups and inverted in compression (Benue Trough,
+/// Dniepr–Donets; Buiter & Torsvik 2014; Manatschal et al. 2015). Heals with
+/// [`OROGENIC_HEALING_TIME`].
+const RIFT_FABRIC_WEAKENING: f64 = 0.5;
 
 /// Time constant (Myr) with which the orogenic weakening ([`Crust::orogenic`]) decays: the
 /// first mode of conductive re-thickening of continental lithosphere towards ~250 km,
@@ -66,9 +85,9 @@ const PLUME_TAIL_RADIUS: f64 = 0.0785;
 /// Age (Myr) of a plume up to which its head heats the lithosphere over [`PLUME_HEAD_RADIUS`]:
 /// the head arrives over 10 Myr ([`Plume::head_growth`]) and spreads; its flood basalts erupt
 /// within a few Myr (Courtillot & Renne 2003), and the ponded head is sheared off by the moving
-/// plate. Afterwards only the tail heats ([`PLUME_TAIL_RADIUS`]). It equals the default
-/// `rift_delay`; a plume rifting later finds the head-heated lithosphere where the plate has
-/// carried it, cooled by the time since (the reset is kept, see [`Crust::reheated`]).
+/// plate. Afterwards only the tail heats ([`PLUME_TAIL_RADIUS`]); the lithosphere the head
+/// heated keeps the reset where the plate carries it and cools from there (see
+/// [`Crust::reheated`]).
 const PLUME_HEAD_STAGE: f64 = 20.0;
 
 /// Weakest lithosphere (the axis of a spreading ridge) relative to old lithosphere.
@@ -96,7 +115,7 @@ pub(super) const UNBREAKABLE: f64 = 1e12;
 /// needs the strength of a sample should call it.
 pub(super) fn lithosphere_strength(crust: &Crust, time: f64) -> f64 {
     let terms = StrengthTerms::of(crust, time);
-    combine_strength(terms.thermal, terms.thinning, crust.orogenic)
+    combine_strength(terms.thermal, terms.thinning, crust.orogenic, crust.rifted)
 }
 
 /// The terms of [`lithosphere_strength`] that depend on more than [`Crust::orogenic`], for the
@@ -138,10 +157,18 @@ pub fn orogenic_strength(orogenic: f64) -> f64 {
     1.0 - (1.0 - SUTURE_WEAKENING) * orogenic
 }
 
-/// [`lithosphere_strength`] from its terms (see [`StrengthTerms`]) and the orogenic weakening
-/// ([`Crust::orogenic`]): their product, at least [`MIN_STRENGTH`].
-pub fn combine_strength(thermal: f64, thinning: f64, orogenic: f64) -> f64 {
-    (thermal * thinning * orogenic_strength(orogenic)).max(MIN_STRENGTH)
+/// The extension-fabric term of [`lithosphere_strength`] for an extension fabric `rifted`
+/// ([`Crust::rifted`], 0 to 1): 1 for unfaulted lithosphere, [`RIFT_FABRIC_WEAKENING`] for a
+/// fresh rift.
+pub fn fabric_strength(rifted: f64) -> f64 {
+    1.0 - (1.0 - RIFT_FABRIC_WEAKENING) * rifted
+}
+
+/// [`lithosphere_strength`] from its terms (see [`StrengthTerms`]), the orogenic weakening
+/// ([`Crust::orogenic`]) and the extension fabric ([`Crust::rifted`]): their product, at least
+/// [`MIN_STRENGTH`].
+pub fn combine_strength(thermal: f64, thinning: f64, orogenic: f64, rifted: f64) -> f64 {
+    (thermal * thinning * orogenic_strength(orogenic) * fabric_strength(rifted)).max(MIN_STRENGTH)
 }
 
 /// The thermal age (Myr) to which `plume` reheats the lithosphere at `r` now, or `None` outside
@@ -167,7 +194,68 @@ pub(super) fn plume_heating_age(plume: &Plume, r: DVec3) -> Option<f64> {
     (thickness < 1.0).then_some(FULL_STRENGTH_AGE * thickness * thickness)
 }
 
+/// The factor (`magma` to 1) on the depth-integrated strength for opening of the lithosphere
+/// at `r` that the plumes `plumes` supply with magma now: dykes fed by a plume take up the
+/// extension of the strong upper lithosphere, so that rifting needs only a fraction `magma`
+/// ([`TectonicParams::magma_weakening`]) of the force of amagmatic rifting (Buck 2004, 2006;
+/// Bialas, Buck & Qin 2010; dyking in the Afar and Main Ethiopian rifts: Kendall et al. 2005).
+/// The melt comes from the plume head while it spreads below the lithosphere
+/// ([`PLUME_HEAD_RADIUS`] during the head stage), later from the tail
+/// ([`PLUME_TAIL_RADIUS`]); its supply tapers like the head's flattened shape and scales with
+/// the plume's flux relative to its peak, as the heating does ([`plume_heating_age`]). Unlike
+/// the heating it is not carried with the plate: it is where the melt is now (the mantle
+/// frame). The weakest factor of all plumes counts.
+pub(super) fn magma_weakening(plumes: &[Plume], r: DVec3, magma: f64) -> f64 {
+    if magma >= 1.0 {
+        return 1.0;
+    }
+    let mut factor = 1.0f64;
+    for plume in plumes {
+        let radius = magma_radius(plume);
+        if r.dot(plume.position) <= math::cos(radius) || plume.peak_flux <= 0.0 {
+            continue;
+        }
+        let x = math::angle_between(r, plume.position) / radius;
+        let supply = (1.0 - x * x).max(0.0) * magma_intensity(plume);
+        factor = factor.min(1.0 - (1.0 - magma.max(0.0)) * supply);
+    }
+    factor
+}
+
+/// The radius (rad) of the region that `plume` supplies with magma now (see
+/// [`magma_weakening`]): its head during the head stage, its tail later.
+pub(super) fn magma_radius(plume: &Plume) -> f64 {
+    if plume.age < PLUME_HEAD_STAGE {
+        PLUME_HEAD_RADIUS
+    } else {
+        PLUME_TAIL_RADIUS
+    }
+}
+
+/// The plume's magma supply relative to its peak (the head arriving, the plume fading), 0 to 1.
+fn magma_intensity(plume: &Plume) -> f64 {
+    if plume.peak_flux <= 0.0 {
+        return 0.0;
+    }
+    (plume.flux() / plume.peak_flux).clamp(0.0, 1.0)
+}
+
+/// The magma weakening ([`magma_weakening`]) of the strength in opening of a rift that `plume`
+/// feeds with magma along its length (#51): the factor at the plume's centre, `magma` at full
+/// supply.
+pub(super) fn plume_rift_magma(plume: &Plume, magma: f64) -> f64 {
+    if magma >= 1.0 {
+        return 1.0;
+    }
+    1.0 - (1.0 - magma.max(0.0)) * magma_intensity(plume)
+}
+
 impl Simulation {
+    /// The magma weakening ([`magma_weakening`]) at the world position `r` now.
+    pub(super) fn magma_weakening_at(&self, r: DVec3) -> f64 {
+        magma_weakening(self.mantle.plumes(), r, self.params.magma_weakening)
+    }
+
     /// Plumes heat the lithosphere above them: the thermal age that sets its strength is reset
     /// on the crust samples at the surface (see [`plume_heating_age`], [`Crust::reheated`]),
     /// which carry it along with the plate and cool from there. Runs once per step,
@@ -582,6 +670,7 @@ mod tests {
                         metasediment: 0.0,
                         orogeny: if belt { -400.0 } else { NO_OROGENY },
                         orogenic: if belt { orogenic } else { 0.0 },
+                        rifted: 0.0,
                         reheated: NO_REHEATING,
                         cohort: Cohort::NONE,
                     };
@@ -660,6 +749,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -676,6 +766,7 @@ mod tests {
         let suture = Crust {
             orogeny: -400.0,
             orogenic: 1.0,
+            rifted: 0.0,
             ..craton
         };
         assert_eq!(lithosphere_strength(&suture, 0.0), SUTURE_WEAKENING);
@@ -692,6 +783,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: if orogenic > 0.0 { -400.0 } else { NO_OROGENY },
             orogenic,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -710,7 +802,6 @@ mod tests {
             age,
             lifetime: 200.0,
             peak_flux: 5e-3,
-            has_rifted: false,
         };
         let at = |angle: f64| DVec3::new(math::sin(angle), 0.0, math::cos(angle));
         let strength = |plume: &Plume, r: DVec3| {
@@ -756,6 +847,78 @@ mod tests {
     }
 
     #[test]
+    fn plume_magma_weakens_the_head_while_the_plume_is_strong() {
+        let plume = |age: f64| Plume {
+            position: DVec3::Z,
+            age,
+            lifetime: 200.0,
+            peak_flux: 5e-3,
+        };
+        let at = |angle: f64| DVec3::new(math::sin(angle), 0.0, math::cos(angle));
+        let head = [plume(15.0)];
+        // A tenth of the strength at the centre of a full head, none beyond it.
+        assert!((magma_weakening(&head, DVec3::Z, 0.1) - 0.1).abs() < 1e-9);
+        let middle = magma_weakening(&head, at(0.5 * PLUME_HEAD_RADIUS), 0.1);
+        assert!(middle > 0.1 && middle < 1.0, "{middle}");
+        assert_eq!(
+            magma_weakening(&head, at(1.01 * PLUME_HEAD_RADIUS), 0.1),
+            1.0
+        );
+        // Switched off.
+        assert_eq!(magma_weakening(&head, DVec3::Z, 1.0), 1.0);
+        // The tail feeds a narrower zone; an arriving head and a fading plume less magma.
+        let tail = [plume(50.0)];
+        assert!((magma_weakening(&tail, DVec3::Z, 0.1) - 0.1).abs() < 1e-9);
+        assert_eq!(
+            magma_weakening(&tail, at(0.6 * PLUME_HEAD_RADIUS), 0.1),
+            1.0
+        );
+        assert!(magma_weakening(&[plume(5.0)], DVec3::Z, 0.1) > 0.5);
+        assert!(magma_weakening(&[plume(195.0)], DVec3::Z, 0.1) > 0.5);
+        // The weakest of several plumes counts.
+        let both = [plume(15.0), plume(5.0)];
+        assert!((magma_weakening(&both, DVec3::Z, 0.1) - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extension_fabric_weakens_heals_and_mixes_like_orogenic_weakening() {
+        let craton = Crust {
+            thickness: 35_000.0,
+            density: crate::isostasy::CONTINENTAL_DENSITY,
+            birth: -1000.0,
+            sediment: 0.0,
+            felsic: 1.0,
+            metasediment: 0.0,
+            orogeny: NO_OROGENY,
+            orogenic: 0.0,
+            rifted: 0.0,
+            reheated: NO_REHEATING,
+            cohort: Cohort::NONE,
+        };
+        let mut rift = craton;
+        rift.mark_extension(0.4);
+        assert!((rift.rifted - 0.4).abs() < 1e-12);
+        rift.mark_extension(2.0);
+        assert_eq!(rift.rifted, 1.0);
+        assert_eq!(lithosphere_strength(&rift, 0.0), RIFT_FABRIC_WEAKENING);
+        // Oceanic crust carries none.
+        let mut ocean = new_oceanic_crust(-50.0);
+        ocean.mark_extension(1.0);
+        assert_eq!(ocean.rifted, 0.0);
+        ocean.mix_orogeny(NO_OROGENY, 0.0, 0.7);
+        assert_eq!(ocean.rifted, 0.0);
+        // Mixed by mass on continental lithosphere.
+        let mut mixed = craton;
+        mixed.mix_orogeny(NO_OROGENY, 0.0, 0.3);
+        assert_eq!(mixed.rifted, 0.3);
+        // Heals with the orogenic weakening.
+        rift.heal_orogenic(math::exp(-1.0f64));
+        assert!((rift.rifted - math::exp(-1.0f64)).abs() < 1e-12);
+        let healed = lithosphere_strength(&rift, 0.0);
+        assert!(healed > RIFT_FABRIC_WEAKENING && healed < 1.0, "{healed}");
+    }
+
+    #[test]
     fn orogenic_weakening_heals_and_commutes_with_mixing() {
         let mut simulation =
             Simulation::new(SphereMesh::icosphere(3), 1, TectonicParams::default(), 0);
@@ -778,6 +941,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: -200.0,
             orogenic: math::exp(-1.0f64),
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -811,7 +975,6 @@ mod tests {
             age: 15.0,
             lifetime: 200.0,
             peak_flux: 5e-3,
-            has_rifted: false,
         });
         let cell = simulation.mesh.nearest(position);
         assert_eq!(simulation.lithosphere_strength(cell), 1.0);
@@ -837,7 +1000,6 @@ mod tests {
             age: 12.0,
             lifetime: 200.0,
             peak_flux: 5e-3,
-            has_rifted: true,
         });
         for _ in 0..5 {
             simulation.step(1.0);

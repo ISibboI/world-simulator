@@ -11,7 +11,7 @@ use crate::tectonics::{self, BoundaryClass};
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 140 bytes per cell, 5.7 MB
+/// buffer (to the page on the web) and read back without parsing: 148 bytes per cell, 6.1 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -28,6 +28,9 @@ pub struct CellInfo {
     pub orogenic: f32,
     /// Time since the last orogeny in Myr, or NaN if there was none.
     pub since_orogeny: f32,
+    /// Remaining extension fabric of the lithosphere (rifted margins, failed rifts), 0 to 1
+    /// (see [`crate::tectonics::Crust::rifted`]).
+    pub rifted: f32,
     /// The terms of the lithosphere strength that the view cannot rebuild from the other
     /// attributes (see [`crate::tectonics::Simulation::lithosphere_strength_terms`]), 0 to 1: the thermal term (from
     /// the thermal age, which a plume may have reset) and the thinning of stretched continental
@@ -57,8 +60,15 @@ pub struct CellInfo {
     pub evaporation: f32,
     pub evaporation_january: f32,
     pub evaporation_july: f32,
-    /// Permanent ice cover (sea ice, ice sheets), 0 to 1.
+    /// Permanent ice cover (sea ice, lake ice, ice sheets), 0 to 1: the annual mean cover of the
+    /// temperature model (see `TemperatureFields::ice`).
     pub ice: f32,
+    /// The temperature model's mean lake-ice cover (0 to 1: ice thickness over the thickness at
+    /// which ice takes its full albedo, see `TemperatureFields::monthly_lake_ice`) in January
+    /// and in July (the months of [`CellInfo::temperature_january`] and
+    /// [`CellInfo::temperature_july`]); NaN where the model has no lake (#185).
+    pub lake_ice_january: f32,
+    pub lake_ice_july: f32,
     /// Water discharge in m³/yr (zero while erosion is disabled).
     pub discharge: f32,
     /// Depth of lake water over the cell in m (zero where there is none; see
@@ -256,7 +266,12 @@ impl CellInfo {
     /// Strength of the lithosphere relative to old, undeformed lithosphere, 0.05 to 1 (see
     /// [`crate::tectonics::combine_strength`]); NaN if a term is unknown.
     pub fn lithosphere_strength(&self) -> f32 {
-        let terms = [self.strength_thermal, self.strength_thinning, self.orogenic];
+        let terms = [
+            self.strength_thermal,
+            self.strength_thinning,
+            self.orogenic,
+            self.rifted,
+        ];
         if terms.iter().any(|term| term.is_nan()) {
             return f32::NAN;
         }
@@ -264,7 +279,14 @@ impl CellInfo {
             f64::from(self.strength_thermal),
             f64::from(self.strength_thinning),
             f64::from(self.orogenic),
+            f64::from(self.rifted),
         ) as f32
+    }
+
+    /// The extension-fabric term of the lithosphere strength (see
+    /// [`crate::tectonics::fabric_strength`]).
+    pub fn strength_fabric(&self) -> f32 {
+        tectonics::fabric_strength(f64::from(self.rifted)) as f32
     }
 
     /// The orogenic term of the lithosphere strength (see
@@ -280,26 +302,31 @@ impl CellInfo {
         if strength.is_nan() || strength >= FULL_STRENGTH {
             return None;
         }
-        let (thermal, thinning, orogenic) = (
+        let (thermal, thinning, orogenic, fabric) = (
             self.strength_thermal,
             self.strength_thinning,
             self.strength_orogenic(),
+            self.strength_fabric(),
         );
-        Some(if thermal <= thinning && thermal <= orogenic {
-            // A plume reset the thermal age where the thermal term is clearly below the one of
-            // the lithosphere's age (both quantised in past frames: 0.25 Myr steps of the age
-            // change the term by up to 0.015 next to a ridge axis, the term itself by 0.002).
-            let by_age = tectonics::thermal_strength(f64::from(self.age)) as f32;
-            if by_age - thermal > PLUME_RESET_MARGIN {
-                Weakness::Plume
+        Some(
+            if thermal <= thinning && thermal <= orogenic && thermal <= fabric {
+                // A plume reset the thermal age where the thermal term is clearly below the one of
+                // the lithosphere's age (both quantised in past frames: 0.25 Myr steps of the age
+                // change the term by up to 0.015 next to a ridge axis, the term itself by 0.002).
+                let by_age = tectonics::thermal_strength(f64::from(self.age)) as f32;
+                if by_age - thermal > PLUME_RESET_MARGIN {
+                    Weakness::Plume
+                } else {
+                    Weakness::Young
+                }
+            } else if thinning <= orogenic && thinning <= fabric {
+                Weakness::Thinned
+            } else if orogenic <= fabric {
+                Weakness::Orogenic
             } else {
-                Weakness::Young
-            }
-        } else if thinning <= orogenic {
-            Weakness::Thinned
-        } else {
-            Weakness::Orogenic
-        })
+                Weakness::Rifted
+            },
+        )
     }
 
     pub fn is_oceanic(&self) -> bool {
@@ -353,14 +380,17 @@ pub enum Weakness {
     Thinned,
     /// Orogenic belts, sutures and accreted terranes that have not healed yet.
     Orogenic,
+    /// The extension fabric of rifted margins and failed rifts that has not healed yet.
+    Rifted,
 }
 
 impl Weakness {
-    pub const ALL: [Weakness; 4] = [
+    pub const ALL: [Weakness; 5] = [
         Weakness::Young,
         Weakness::Plume,
         Weakness::Thinned,
         Weakness::Orogenic,
+        Weakness::Rifted,
     ];
 
     /// Short name, for the cell widget.
@@ -370,6 +400,7 @@ impl Weakness {
             Weakness::Plume => "plume-heated",
             Weakness::Thinned => "thinned crust",
             Weakness::Orogenic => "orogenic",
+            Weakness::Rifted => "rift fabric",
         }
     }
 }
@@ -483,6 +514,12 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
             .get(month)
             .map_or(f32::NAN, |values| field(values, cell))
     };
+    let lake_ice = |month: usize, cell: usize| {
+        temperature
+            .monthly_lake_ice
+            .get(month)
+            .map_or(f32::NAN, |values| field(values, cell))
+    };
     let current = |cell: usize, component: usize| {
         temperature
             .ocean_current
@@ -550,6 +587,7 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 } else {
                     f32::NAN
                 },
+                rifted: crust.rifted as f32,
                 strength_thermal: strength.thermal as f32,
                 strength_thinning: strength.thinning as f32,
                 temperature: field(&temperature.annual_mean, index),
@@ -563,6 +601,8 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 evaporation_january: evaporation_of(0, index),
                 evaporation_july: evaporation_of(6, index),
                 ice: field(&temperature.ice, index),
+                lake_ice_january: lake_ice(0, index),
+                lake_ice_july: lake_ice(6, index),
                 discharge: field(planet.discharge(), index),
                 lake_depth: water
                     .lake_depth
@@ -819,12 +859,37 @@ fn format_surface(info: &CellInfo) -> String {
         WaterBody::Lake(depth) => format!(
             "lake, {} m deep{}",
             significant(f64::from(depth)),
-            if ice { ", ice" } else { "" }
+            lake_ice_text(info)
         ),
         WaterBody::DryDepression if ice => "dry depression, ice sheet".to_owned(),
         WaterBody::DryDepression => "land, dry depression".to_owned(),
         WaterBody::Land if ice => "land, ice sheet".to_owned(),
         WaterBody::Land => "land".to_owned(),
+    }
+}
+
+/// The ice of a lake as the realistic mode draws it from the temperature model (#185): in which
+/// of January and July it is frozen, and whether it is frozen most of the year (the annual
+/// state); nothing where the model has no lake ice there (a lake newer than the last
+/// temperature update, which the realistic mode freezes by its own rule).
+fn lake_ice_text(info: &CellInfo) -> &'static str {
+    use super::modes::Period;
+    use super::modes::realistic::{lake_frozen, model_lake_ice};
+    let frozen = |season: Period| {
+        model_lake_ice(info, season).is_some_and(|cover| lake_frozen(cover, season))
+    };
+    match (
+        frozen(Period::Annual),
+        frozen(Period::January),
+        frozen(Period::July),
+    ) {
+        (_, true, true) => ", ice in Jan and Jul",
+        (true, true, false) => ", ice most of the year, open in Jul",
+        (true, false, true) => ", ice most of the year, open in Jan",
+        (true, false, false) => ", ice most of the year",
+        (false, true, false) => ", ice in Jan",
+        (false, false, true) => ", ice in Jul",
+        (false, false, false) => "",
     }
 }
 
@@ -1123,6 +1188,7 @@ mod tests {
             age: 1180.0,
             sediment: 512.3,
             orogenic: 0.25,
+            rifted: 0.0,
             since_orogeny: 87.6,
             strength_thermal: 1.0,
             strength_thinning: 0.8,
@@ -1137,6 +1203,8 @@ mod tests {
             evaporation_january: 0.0102,
             evaporation_july: 0.9,
             ice: 0.0,
+            lake_ice_january: f32::NAN,
+            lake_ice_july: f32::NAN,
             discharge: 3.15576e11,
             lake_depth: 0.0,
             current_east: f32::NAN,
@@ -1301,6 +1369,28 @@ mod tests {
             row(&format_rows(&below(35.0), None, 0.0, 0.0), "Surface").unwrap(),
             "lake, 35.0 m deep"
         );
+        // The lake ice of the temperature model, as the realistic mode draws it (#185).
+        let frozen = |annual: f32, january: f32, july: f32| {
+            let lake = CellInfo {
+                ice: annual,
+                lake_ice_january: january,
+                lake_ice_july: july,
+                ..below(35.0)
+            };
+            row(&format_rows(&lake, None, 0.0, 0.0), "Surface").unwrap()
+        };
+        assert_eq!(frozen(0.2, 0.5, 0.0), "lake, 35.0 m deep, ice in Jan");
+        assert_eq!(frozen(0.2, 0.05, 0.0), "lake, 35.0 m deep");
+        assert_eq!(
+            frozen(0.6, 1.0, 0.0),
+            "lake, 35.0 m deep, ice most of the year, open in Jul"
+        );
+        assert_eq!(
+            frozen(0.9, 1.0, 0.4),
+            "lake, 35.0 m deep, ice in Jan and Jul"
+        );
+        // Without the model's lake ice (a lake newer than the temperature update), no claim.
+        assert_eq!(frozen(0.9, f32::NAN, f32::NAN), "lake, 35.0 m deep");
         // Less than 1 m of water: land, even below sea level.
         assert_eq!(below(0.4).water_body(), WaterBody::DryDepression);
         let rows = format_rows(&below(0.4), None, 0.0, 0.0);
@@ -1485,7 +1575,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 140);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 152);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 

@@ -25,8 +25,10 @@
 //! **Epochs** (#150) count forwards in Gyr: epoch 0 is the earliest start of a simulation, when
 //! the planet has cooled enough for plates and oceans, [`EPOCH_ZERO_AGE`] = 0.57 Gyr after the
 //! sun's zero age (4.0 Ga, the end of the Hadean on Earth); [`PRESENT_EPOCH`] (4.0) is today, and
-//! [`MAX_EPOCH`] (9.43) the end of the sun model, before the sun leaves the main sequence. See
-//! `notes/issue-150/plan.md`. A run starts at epoch 0 unless `--epoch` says otherwise (#190).
+//! [`MAX_EPOCH`] (5.90) the latest time a run may reach: the sun is then [`MAX_LUMINOSITY`] = 1.2
+//! times as bright as today, beyond which an ocean planet enters a runaway greenhouse that the
+//! model does not simulate (#212). See `notes/issue-150/plan.md`. A run starts at epoch 0 unless
+//! `--epoch` says otherwise (#190). The sun model itself goes on to [`MAX_AGE`] (the view's sun).
 
 use glam::DVec3;
 
@@ -55,8 +57,17 @@ pub const PRESENT_EPOCH: f64 = 4.0;
 pub const EARLIEST_EPOCH: f64 = 0.0;
 /// The age of the sun in Gyr at epoch 0, the earliest start of a simulation.
 pub const EPOCH_ZERO_AGE: f64 = SOLAR_AGE - PRESENT_EPOCH;
-/// The latest epoch, at the end of the sun model ([`MAX_AGE`]): 9.43.
-pub const MAX_EPOCH: f64 = MAX_AGE - EPOCH_ZERO_AGE;
+/// The brightest sun a run may see, relative to today's: beyond ~1.1–1.2 S₀ an ocean planet's
+/// water vapour traps more heat than it can radiate and the ocean boils into a steam atmosphere,
+/// the runaway greenhouse (Kasting, 1988; Kopparapu et al., 2013: 1.06 S₀ in 1-D; 3-D models
+/// with clouds: ~1.1–1.2 S₀, Leconte et al., 2013; Wolf & Toon, 2015). The model does not simulate it (its ocean
+/// stays liquid at any temperature), so no run goes past it (#212).
+pub const MAX_LUMINOSITY: f64 = 1.2;
+/// The age of the sun in Gyr at [`MAX_LUMINOSITY`]: the inverse of [`solar_constant`],
+/// `t = t₀ (1 − (1/L − 1)/0.4)`, 6.47 Gyr.
+pub const MAX_LUMINOSITY_AGE: f64 = SOLAR_AGE * (1.0 - (1.0 / MAX_LUMINOSITY - 1.0) / 0.4);
+/// The latest epoch a run may reach, at [`MAX_LUMINOSITY`]: 5.90 (1.9 Gyr from today).
+pub const MAX_EPOCH: f64 = MAX_LUMINOSITY_AGE - EPOCH_ZERO_AGE;
 
 /// Effective temperature (K) of the solar model of Schröder & Smith (2008) by age (Gyr): zero
 /// age, today (the IAU value instead of their 5774 K), the hottest point and 10 Gyr.
@@ -282,9 +293,12 @@ mod tests {
     #[test]
     fn epochs_count_forwards_from_the_earliest_start() {
         assert!((EPOCH_ZERO_AGE - 0.57).abs() < 1e-12);
-        assert!((MAX_EPOCH - 9.43).abs() < 1e-12);
+        assert!((MAX_EPOCH - 5.904).abs() < 1e-3, "{MAX_EPOCH}");
         assert_eq!(age_of_run(0.0, 0.0), EPOCH_ZERO_AGE);
-        assert!((age_of_run(MAX_EPOCH, 0.0) - MAX_AGE).abs() < 1e-12);
+        assert!((age_of_run(MAX_EPOCH, 0.0) - MAX_LUMINOSITY_AGE).abs() < 1e-12);
+        let luminosity = Sun::of_run(MAX_EPOCH, 0.0).luminosity;
+        assert!((luminosity - MAX_LUMINOSITY).abs() < 1e-12, "{luminosity}");
+        const { assert!(MAX_LUMINOSITY_AGE < MAX_AGE) };
         // The former numbering (Gyr before present) gives the same age bit for bit.
         for (epoch, before_present) in [(0.5, 3.5), (0.0, 4.0), (PRESENT_EPOCH, 0.0), (2.0, 2.0)] {
             assert_eq!(

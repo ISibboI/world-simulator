@@ -2,7 +2,7 @@
 //! ([`super::timeline`]) can show any past one.
 //!
 //! A frame keeps what the view needs to rebuild everything it shows: the attributes of the
-//! cells, quantised ([`codec`], 55 bytes per cell), and the angular velocity of every plate, for
+//! cells, quantised ([`codec`], 57 bytes per cell), and the angular velocity of every plate, for
 //! the layers derived from plates. The vertices follow from the cells. Frames are stored as the
 //! difference to the frame before (mostly zeros), compressed with lz4, with a keyframe every
 //! [`KEY_INTERVAL`] frames, so that showing a frame decodes at most that many. A [`FrameStore`]
@@ -21,7 +21,7 @@
 //! When the store is full (its capacity, or a failed write such as an exhausted browser quota),
 //! the history stops recording: the frames it has stay viewable.
 
-mod codec;
+pub(super) mod codec;
 pub mod store;
 
 use std::ops::Range;
@@ -493,6 +493,7 @@ mod tests {
                 age: step as f32,
                 sediment: 0.0,
                 orogenic: 0.0,
+                rifted: 0.0,
                 since_orogeny: f32::NAN,
                 strength_thermal: 1.0,
                 strength_thinning: 1.0,
@@ -507,6 +508,8 @@ mod tests {
                 evaporation_january: 0.4,
                 evaporation_july: 1.0,
                 ice: 0.0,
+                lake_ice_january: f32::NAN,
+                lake_ice_july: f32::NAN,
                 discharge: 0.0,
                 lake_depth: 0.0,
                 current_east: 1.0,

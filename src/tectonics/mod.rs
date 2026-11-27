@@ -45,6 +45,7 @@ mod dynamics;
 mod events;
 mod generation;
 mod initial_sediment;
+mod kernels;
 mod ledger;
 mod mantle;
 mod matching;
@@ -60,7 +61,9 @@ pub use cover::{CohortMasses, CoverBudget, CoverMasses, CoverTerm};
 pub use crust::*;
 pub use deformation::MIN_BAND_STRENGTH;
 pub use display::BoundaryClass;
-pub use events::{EventCounts, PlateEventParams, WEAK_BELT_THRESHOLD};
+pub use events::{
+    EventCounts, PLUME_SPLIT_DISTANCES, PlateEventParams, SplitCause, WEAK_BELT_THRESHOLD,
+};
 pub use generation::InitialConfiguration;
 pub use initial_sediment::{InitialSedimentParams, PlatformEmplacement};
 pub use ledger::MassLedger;
@@ -68,7 +71,9 @@ pub use mantle::{MantleParams, Plume};
 pub use matching::{MatchingParams, MatchingStatistics};
 pub use sheet::{SheetParams, SheetStatistics};
 pub use statistics::*;
-pub use weak_zones::{MIN_STRENGTH, combine_strength, orogenic_strength, thermal_strength};
+pub use weak_zones::{
+    MIN_STRENGTH, combine_strength, fabric_strength, orogenic_strength, thermal_strength,
+};
 
 use boundaries::{METASEDIMENT_DENSITY, ResolvedBoundaries, pair_key};
 use generation::*;
@@ -250,6 +255,19 @@ pub struct TectonicParams {
     pub slab_decay_time: f64,
     /// Ridge push per metre of ridge in N/m.
     pub ridge_push: f64,
+    /// Factor on the load of the plume swells' potential energy in the deforming plates and
+    /// in the breakup analysis (1 = physical, 0 disables it; for ablations, #51; see
+    /// `MantleFlow::plume_swell_gradient`).
+    pub swell_load: f64,
+    /// Depth-integrated strength of lithosphere above a plume head that supplies magma,
+    /// relative to its strength without, for opening (dyking): magma-assisted rifting needs
+    /// about an order of magnitude less tectonic force than amagmatic rifting of thick
+    /// lithosphere (Buck 2004, 2006; Bialas, Buck & Qin 2010). 1 disables it (for ablations;
+    /// see `weak_zones::magma_weakening`, #51).
+    pub magma_weakening: f64,
+    /// Factor on the extension fabric that stretching marks (1 = physical, 0: no fabric; for
+    /// ablations; see [`Crust::rifted`], #54).
+    pub rift_fabric: f64,
     /// Oceanic crust up to this age in Myr at a divergent boundary counts as a ridge flank.
     pub ridge_age: f64,
     /// Basal drag coefficient `c` in Pa·s/m: shear stress per relative velocity between plate
@@ -357,6 +375,9 @@ impl Default for TectonicParams {
             min_slab_length: 20e3,
             slab_sinking_speed: 10.0,
             ridge_push: 3e12,
+            swell_load: 1.0,
+            magma_weakening: 0.1,
+            rift_fabric: 1.0,
             ridge_age: 20.0,
             basal_drag: 1e15,
             continental_drag_factor: 4.0,
@@ -461,6 +482,9 @@ impl TectonicParams {
             "continental_interior_thickness" => &mut self.continental_interior_thickness,
             "continental_margin_width" => &mut self.continental_margin_width,
             "ridge_push" => &mut self.ridge_push,
+            "swell_load" => &mut self.swell_load,
+            "magma_weakening" => &mut self.magma_weakening,
+            "rift_fabric" => &mut self.rift_fabric,
             "arc_crust_per_subduction" => &mut self.arc_crust_per_subduction,
             "subduction_erosion" => &mut self.subduction_erosion,
             "oceanic_arc_felsic" => &mut self.oceanic_arc_felsic,
@@ -483,7 +507,6 @@ impl TectonicParams {
                 &mut self.events.boundary_initiation_waiting_time
             }
             "events.initiation_age_contrast" => &mut self.events.initiation_age_contrast,
-            "events.min_oceanic_rift_area" => &mut self.events.min_oceanic_rift_area,
             "events.rift_continent_radius" => &mut self.events.rift_continent_radius,
             "events.suture_time" => &mut self.events.suture_time,
             "events.suture_convergence" => &mut self.events.suture_convergence,
@@ -603,6 +626,11 @@ pub struct SeaLevelBudget {
     pub mantle: f64,
     /// Water held in lakes, which the ocean lacks (see [`Simulation::set_lake_water`]).
     pub lakes: f64,
+    /// Water lost to space by atmospheric escape (see [`Simulation::remove_water`]): the
+    /// change when the water is removed. A lower bound of its effect: while the sea level
+    /// stands at a pass (see [`Simulation::sea_level_deficit`]) the removed water first reduces
+    /// the deficit, and the level falls only when a later process unpins it (in that term).
+    pub escape: f64,
 }
 
 impl SeaLevelBudget {
@@ -614,6 +642,7 @@ impl SeaLevelBudget {
             + self.metamorphism
             + self.mantle
             + self.lakes
+            + self.escape
     }
 }
 
@@ -867,6 +896,7 @@ impl Simulation {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    rifted: 0.0,
                     reheated: NO_REHEATING,
                     cohort: Cohort::NONE,
                 }
@@ -1231,13 +1261,7 @@ impl Simulation {
         self.mantle.step(dt, &subduction, &slabs, &mut self.rng);
         if self.mantle.needs_priming() {
             // The first solve's trenches fill the mantle's memory (#213).
-            self.mantle.prime(
-                dt,
-                &subduction,
-                &slabs,
-                self.params.events.rift_delay,
-                &mut self.rng,
-            );
+            self.mantle.prime(dt, &subduction, &slabs, &mut self.rng);
         }
 
         let sea_level = self.solve_sea_level();
@@ -1289,6 +1313,18 @@ impl Simulation {
         self.lake_water = volume.clamp(0.0, self.params.ocean_volume);
         let sea_level = self.solve_sea_level();
         self.sea_level_budget.lakes += sea_level - self.sea_level;
+        self.sea_level = sea_level;
+    }
+
+    /// Removes `volume` m³ of water from the ocean (lost to space, #210), at most what the ocean
+    /// holds besides the lakes; the planet's water ([`TectonicParams::ocean_volume`]) shrinks
+    /// and the sea level is solved again.
+    pub fn remove_water(&mut self, volume: f64) {
+        let volume = volume.clamp(0.0, self.ocean_volume().max(0.0));
+        self.params.ocean_volume -= volume;
+        self.lake_water = self.lake_water.min(self.params.ocean_volume);
+        let sea_level = self.solve_sea_level();
+        self.sea_level_budget.escape += sea_level - self.sea_level;
         self.sea_level = sea_level;
     }
 
@@ -1937,6 +1973,36 @@ mod tests {
         Simulation::new(SphereMesh::icosphere(4), 8, TectonicParams::default(), seed)
     }
 
+    /// Water lost to space lowers the sea level by about its volume over the ocean's area, all
+    /// of it in the `escape` term of the budget; never more than the ocean holds.
+    #[test]
+    fn removed_water_lowers_the_sea_level() {
+        let mut simulation = simulation(3);
+        let before = simulation.sea_level;
+        let ocean_cells = simulation
+            .surface_elevations()
+            .iter()
+            .filter(|&&e| e < 0.0)
+            .count() as f64;
+        let cell_area = 4.0 * std::f64::consts::PI * simulation.params.planet_radius.powi(2)
+            / simulation.mesh.len() as f64;
+        let volume = 1e15;
+        simulation.remove_water(volume);
+        let drop = before - simulation.sea_level;
+        // The sea floor rises as the water's load goes (Airy).
+        let expected = volume / (ocean_cells * cell_area)
+            * (1.0 - crate::isostasy::WATER_DENSITY / crate::isostasy::MANTLE_DENSITY);
+        assert!((drop / expected - 1.0).abs() < 0.05, "{drop} {expected}");
+        let (budget, residual) = simulation.sea_level_budget();
+        assert_eq!(budget.escape, simulation.sea_level - before);
+        assert!(residual.abs() < 1e-6);
+        let water = simulation.water_volume();
+        simulation.set_lake_water(0.25 * water);
+        simulation.remove_water(2.0 * water);
+        assert!((simulation.water_volume() - 0.25 * water).abs() < 1e-6 * water);
+        assert!(simulation.ocean_volume().abs() < 1e-6 * water);
+    }
+
     #[test]
     fn uniform_dynamic_topography_shifts_the_sea_level_only() {
         let mut simulation = simulation(3);
@@ -2085,6 +2151,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -2112,6 +2179,7 @@ mod tests {
                         metasediment: 0.0,
                         orogeny: NO_OROGENY,
                         orogenic: 0.0,
+                        rifted: 0.0,
                         reheated: NO_REHEATING,
                         cohort: Cohort::NONE,
                     };
@@ -2143,6 +2211,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    rifted: 0.0,
                     reheated: NO_REHEATING,
                     cohort: Cohort::NONE,
                 };
@@ -2162,6 +2231,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -2185,6 +2255,7 @@ mod tests {
                 metasediment: 0.0,
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
+                rifted: 0.0,
                 reheated: NO_REHEATING,
                 cohort: Cohort::NONE,
             };
@@ -2217,6 +2288,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };

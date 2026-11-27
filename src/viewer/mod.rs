@@ -741,7 +741,7 @@ impl Viewer {
             time: None,
             global: None,
             shown_global: None,
-            duration: initial.cli.duration,
+            duration: initial.cli.run_duration(),
             failure: None,
             runs: 0,
             generating: false,
@@ -771,7 +771,7 @@ impl Viewer {
         self.time = None;
         self.global = None;
         self.shown_global = None;
-        self.duration = launch.cli.duration;
+        self.duration = launch.cli.run_duration();
         self.exaggeration = launch.cli.exaggeration;
         self.abiotic = launch.cli.biosphere == crate::presets::Biosphere::Abiotic;
         self.river_threshold = launch.cli.river_threshold;

@@ -168,3 +168,13 @@ more pieces):
 - Grid: at 4–5 subdivisions (web, quick runs), the degassing per step is noisier; the phase
   then ends later or at the safety net more often (a 4-subdivision GUI check of the pre-#195
   branch ended at 120 Myr).
+
+## Decisions (Sebastian on #217, 2026-11-27)
+
+1. **Supercontinent plate count**: "use as many plates as earth supercontinent is conjectured to
+   have had": the default for `--initial supercontinent` is now 11, from the Pangaea-era plate
+   reconstructions (Matthews et al. 2016, Müller et al. 2019); dispersed stays at 21. Sources,
+   counts and the 4 seeds × 500 Myr check: [supercontinent-plates.md](supercontinent-plates.md).
+2. **Ramp**: "For now about half the ramp is enough." Decided: removing about half of the
+   degassing ramp, with the phase ending at 30–90 Myr, is accepted. Option B
+   (motion-consistent boundaries and ages) and option E (metamorphic stock) stay future work.

@@ -50,7 +50,7 @@ const AIR_MOLAR_MASS: f64 = 0.029;
 /// Surface gravity in m/s².
 const GRAVITY: f64 = 9.81;
 /// Density of sea water in kg/m³.
-const SEA_WATER_DENSITY: f64 = 1025.0;
+pub const SEA_WATER_DENSITY: f64 = 1025.0;
 /// Molar gas constant in J/(mol K).
 const GAS_CONSTANT: f64 = 8.314;
 /// 0 °C in K.
@@ -139,10 +139,12 @@ pub struct CarbonParams {
     /// without a hold.
     pub phi: f64,
     /// The calibrated φ is clamped to `phi_min..=phi_max` (with a warning). φ only absorbs the
-    /// residual uncertainty of the barren laws, mainly the seafloor uptake (×3) and the
-    /// kinetics (×2), so a plausible φ lies within ~0.3–3 (`notes/issue-154/phi-barren.md`).
-    /// Where the clamp binds, the sinks do not balance the sources at the start's CO₂, and the
-    /// CO₂ moves after the ramp-up to where they do.
+    /// residual uncertainty of the laws, mainly the seafloor uptake (×3), the kinetics (×2) and
+    /// the degassing coefficients (×2), so a plausible φ lies within ~0.3–3. That holds for both
+    /// biospheres: the barren laws add the plants' uncertainty, the modern ones put more of the
+    /// sink on land (`notes/issue-154/phi-barren.md`, `phi-modern.md`), so the presets share the
+    /// band. Where the clamp binds, the sinks do not balance the sources at the start's CO₂,
+    /// and the CO₂ moves after the ramp-up to where they do.
     pub phi_min: f64,
     /// See [`Self::phi_min`].
     pub phi_max: f64,
@@ -319,6 +321,11 @@ pub struct CarbonState {
     /// Share of the land weathering's supply limit that the kinetics use (0 to 1): near 1 the
     /// weathering is supply-limited.
     pub weathering_intensity: f64,
+    /// New oceanic crust (kg/yr, smoothed like the degassing) and the degassing of the mantle at
+    /// arcs and plumes (mol C/yr: the wedge's own carbon and the plumes', without recycled
+    /// sediment and seafloor carbon), for the O₂ sinks of the escape (#210).
+    pub new_crust: f64,
+    pub arc_plume_mantle_degassing: f64,
 }
 
 impl CarbonState {
@@ -711,6 +718,9 @@ impl CarbonCycle {
             predicted_warming: predicted,
             deep_water_temperature: input.deep_water_temperature,
             weathering_intensity: intensity,
+            new_crust: ridge_crust,
+            arc_plume_mantle_degassing: params.wedge_carbon * rates.subducted
+                + params.plume_carbon * drivers.plume_flux,
         };
         forcing
     }

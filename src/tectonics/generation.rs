@@ -25,6 +25,29 @@ pub enum InitialConfiguration {
     Supercontinent,
 }
 
+impl InitialConfiguration {
+    /// The number of plates at the start unless `--plates` is given.
+    ///
+    /// * Dispersed: 21, where the model's plate count and degassing change least over the first
+    ///   ~200 Myr (#213).
+    /// * Supercontinent: 11, the number of plates in the global plate reconstructions of
+    ///   Pangaea before its breakup (250–230 Ma): 11 at 250 Ma and 9 at 230 Ma in Matthews et
+    ///   al. (2016, Global Planet. Change 146, 226–250, which uses Domeier & Torsvik 2014 before
+    ///   250 Ma), 11 at 250 Ma and 12 at 230 Ma in Müller et al. (2019, Tectonics 38,
+    ///   1884–1907); the median, not tuned. Pangaea lies on one plate at 250 Ma (37% of the
+    ///   surface) and on two to three at 230 Ma (Gondwana, Laurasia/Eurasia); the rest are the
+    ///   Panthalassa (Farallon, Izanagi, Phoenix) and Tethys plates and a few small ones. Today
+    ///   Matthews et al. have 46 plates; the reconstructions themselves note that
+    ///   their minimum around 260–160 Ma partly reflects small, now subducted plates that cannot
+    ///   be reconstructed (`notes/issue-213/supercontinent-plates.md`).
+    pub fn default_plates(self) -> usize {
+        match self {
+            Self::Dispersed => 21,
+            Self::Supercontinent => 11,
+        }
+    }
+}
+
 pub(super) fn random_unit_vector(rng: &mut impl Rng) -> DVec3 {
     loop {
         let v = DVec3::new(

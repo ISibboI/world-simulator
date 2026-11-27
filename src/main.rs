@@ -7,6 +7,7 @@ mod climate;
 #[cfg(any(target_arch = "wasm32", test))]
 mod device;
 mod erosion;
+mod escape;
 mod hash;
 mod isostasy;
 mod koppen;
@@ -80,11 +81,12 @@ struct Cli {
     subdivisions: u32,
 
     /// Number of tectonic plates at the start, with the model's steady size distribution (a few
-    /// large and many small plates). The default is where the model's plate count and
-    /// degassing change least over the first ~200 Myr (#213): between the count of its first
-    /// few hundred Myr (~25) and its long-term mean (~18).
-    #[arg(long, default_value_t = 21)]
-    plates: usize,
+    /// large and many small plates). Default: 21 for dispersed continents, where the model's
+    /// plate count and degassing change least over the first ~200 Myr (#213), between the count
+    /// of its first few hundred Myr (~25) and its long-term mean (~18); 11 for a supercontinent,
+    /// as in plate reconstructions of Pangaea (see `InitialConfiguration::default_plates`).
+    #[arg(long)]
+    plates: Option<usize>,
 
     /// Fraction of the surface initially covered by continental crust.
     #[arg(long, default_value_t = 0.4)]
@@ -94,7 +96,8 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = InitialConfiguration::Dispersed)]
     initial: InitialConfiguration,
 
-    /// Simulated duration in Myr.
+    /// Simulated duration in Myr. Shortened (with a warning) so that the run ends by epoch 5.90,
+    /// when the Sun is 1.2 times as bright as today (see `--epoch`).
     #[arg(long, default_value_t = 500.0)]
     duration: f64,
 
@@ -126,6 +129,13 @@ struct Cli {
     /// and logged.
     #[arg(long)]
     no_carbon_cycle: bool,
+
+    /// Keep all the planet's water instead of losing hydrogen, and with it water, to space
+    /// (#210): by default the water vapour that passes the cold trap of the tropopause is split
+    /// and its hydrogen escapes (diffusion- or XUV-limited), slowly in a temperate climate and
+    /// fast in a moist greenhouse; the ocean and the sea level fall, the oxygen stays behind.
+    #[arg(long)]
+    no_escape: bool,
 
     /// Start with a bare planet instead of an initial sediment cover.
     #[arg(long)]
@@ -197,8 +207,9 @@ struct Cli {
 
     /// Time of the planet's history at the start of the run, in Gyr counted forwards: 0 is the
     /// earliest start (4.0 Ga, when the planet has cooled enough for plates and oceans; the
-    /// default), 0.5 the Archean (3.5 Ga), 4 today, up to 9.43 (the Sun before it leaves the main
-    /// sequence). Sets the solar constant of the Sun, which then brightens during the run (~1% per
+    /// default), 0.5 the Archean (3.5 Ga), 4 today, up to 5.90 (the Sun 1.2 times as bright as
+    /// today; beyond, an ocean planet enters a runaway greenhouse, which the model does not
+    /// simulate, and a run that would pass it is shortened to end there). Sets the solar constant of the Sun, which then brightens during the run (~1% per
     /// 100 Myr; `--set temperature.solar_brightening=0` keeps it), and, unless `--co2` is given, a
     /// greenhouse forcing that offsets the difference to today's Sun at the start (in the future
     /// at most down to an atmosphere without CO₂, −30 W/m²). The carbon cycle then changes the
@@ -529,21 +540,37 @@ fn main() {
 }
 
 impl Cli {
+    /// The number of plates at the start: `--plates`, or the default of the initial
+    /// configuration.
+    fn plates(&self) -> usize {
+        self.plates.unwrap_or_else(|| self.initial.default_plates())
+    }
+
     /// Checks the options that clap does not check itself.
     fn check(&self) -> anyhow::Result<()> {
         ensure!(
             self.subdivisions <= 8,
             "at most 8 subdivisions are supported"
         );
-        ensure!(self.plates >= 1, "there must be at least one plate");
+        let plates = self.plates();
+        ensure!(plates >= 1, "there must be at least one plate");
         let cells = 10 * 4usize.pow(self.subdivisions) + 2;
         ensure!(
-            self.plates <= cells,
+            plates <= cells,
             "there can be at most as many plates as cells ({cells} at {} subdivisions)",
             self.subdivisions
         );
         ensure!(self.dt > 0.0, "the time step must be positive");
         ensure!(self.duration >= 0.0, "the duration must not be negative");
+        ensure!(
+            self.duration == 0.0 || self.run_duration() > 0.0,
+            "a run from epoch {} would end at once: runs end by epoch {:.2}, when the Sun is {} \
+             times as bright as today (beyond, an ocean planet enters a runaway greenhouse, which \
+             the model does not simulate)",
+            self.epoch,
+            sun::MAX_EPOCH,
+            sun::MAX_LUMINOSITY,
+        );
         ensure!(self.width >= 2, "the image width must be at least 2");
         Ok(())
     }
@@ -561,6 +588,7 @@ impl Cli {
         params.track_material_budget = self.material_budget;
         params.breakup.diagnose = self.plate_log.is_some();
         parameters.carbon.enabled = !self.no_carbon_cycle;
+        parameters.escape.enabled = !self.no_escape;
         let mut overrides = Vec::with_capacity(self.overrides.len());
         for assignment in &self.overrides {
             let (name, value) = assignment
@@ -580,6 +608,15 @@ impl Cli {
     fn validate(&self) -> anyhow::Result<()> {
         self.check()?;
         self.parameters().map(|_| ())
+    }
+
+    /// The simulated duration in Myr: `--duration`, shortened to whole steps that end by
+    /// [`sun::MAX_EPOCH`], when the Sun is [`sun::MAX_LUMINOSITY`] times as bright as today
+    /// (beyond, an ocean planet enters a runaway greenhouse, which the model does not simulate;
+    /// #212). Exactly `--duration` when the run ends before.
+    fn run_duration(&self) -> f64 {
+        let left = ((sun::MAX_EPOCH - self.epoch) * 1000.0 / self.dt).floor() * self.dt;
+        self.duration.min(left.max(0.0))
     }
 }
 
@@ -607,12 +644,32 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
              Goldblatt, 2014); above that it is extrapolated"
         );
     }
-    if sun::Sun::of_run(cli.epoch, cli.duration).luminosity > MOIST_GREENHOUSE {
+    let duration = cli.run_duration();
+    if duration < cli.duration {
+        warn!(
+            "the run is shortened from {} to {duration} Myr: it ends at epoch {:.3}, by epoch {:.2}, \
+             when the Sun is {} times as bright as today; beyond, an ocean planet enters a runaway \
+             greenhouse (its ocean boils into a steam atmosphere), which the model does not \
+             simulate",
+            cli.duration,
+            cli.epoch + duration / 1000.0,
+            sun::MAX_EPOCH,
+            sun::MAX_LUMINOSITY,
+        );
+    }
+    if sun::Sun::of_run(cli.epoch, duration).luminosity > MOIST_GREENHOUSE {
         warn!(
             "the Sun of this run (epoch {}, {} Myr) becomes more than {MOIST_GREENHOUSE} times as \
              bright as today's; a real ocean planet would lose its water in a moist greenhouse \
-             (Kasting, 1988), which the model does not simulate",
-            cli.epoch, cli.duration
+             (Kasting, 1988){}; the runaway greenhouse beyond ~1.2 times, where the ocean boils \
+             into a steam atmosphere, is not simulated (runs end there)",
+            cli.epoch,
+            duration,
+            if cli.no_escape {
+                ", which `--no-escape` turns off"
+            } else {
+                " (simulated: hydrogen escape from a wet stratosphere, #210)"
+            }
         );
     }
     for (name, value) in overrides {
@@ -634,14 +691,16 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
         temperature,
         carbon,
         ramp_up,
+        escape,
     } = parameters;
-    let simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
+    let simulation = Simulation::new(mesh, cli.plates(), params, cli.seed);
     let erosion = (!cli.no_erosion).then_some(erosion);
     let mut planet = Planet::new(
         simulation,
         climate,
         temperature,
         carbon,
+        escape,
         erosion,
         EARTH_RADIUS,
     );
@@ -726,7 +785,7 @@ impl Run {
         snapshot(&planet, cli, &mut previous_ledger)?;
         Ok(Self {
             planet,
-            steps: (cli.duration / cli.dt).round() as u64,
+            steps: (cli.run_duration() / cli.dt).round() as u64,
             step: 0,
             snapshot_every: ((cli.snapshot_interval / cli.dt).round() as u64).max(1),
             start,
@@ -911,9 +970,9 @@ fn snapshot(
     );
     info!(
         "    trenches {:.0} km, ridges {:.0} km, collisions {:.0} km ({:.0} converging, {:.0} diverging) | slab pull {:.2e} N, ridge push {:.2e} N | \
-         rifts {}, initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
-         blocked splits {}, terranes {} ({} cells, {} slab break-offs) | continental contacts made by rifts {:.0} km ({:.0} far), by initiations {:.0} km ({:.0} far) | \
-         splits along weak zones {} ({} cut again, {} along the coast, {} rifts through the plume head; rift boundaries on sutures {:.0}% of their continental cells vs {:.0}% of the rifted plates), along great circles {}, boundary deviation from a great circle: rifts {:.0} km, initiations {:.0} km | \
+         initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
+         blocked splits {}, terranes {} ({} cells, {} slab break-offs) | continental contacts made by initiations {:.0} km ({:.0} far) | \
+         initiation splits along weak zones {} ({} cut again, {} along the coast), along great circles {}, boundary deviation from a great circle {:.0} km | \
          fracture-zone initiations {}, failed initiations (no division/overriding/subducting part too small) {}/{}/{}, \
          undone initiations (suture/capture/piece/terrane) {}/{}/{}/{}",
         statistics.trench_length,
@@ -923,7 +982,6 @@ fn snapshot(
         statistics.collision_diverging_length,
         statistics.slab_pull,
         statistics.ridge_push,
-        statistics.events.rifts,
         statistics.events.initiations,
         statistics.events.breakups,
         statistics.events.induced_subductions,
@@ -939,23 +997,13 @@ fn snapshot(
         statistics.events.terrane_accretions,
         statistics.events.accreted_terrane_cells,
         statistics.events.slab_breakoffs,
-        statistics.events.rift_contact_km,
-        statistics.events.rift_far_contact_km,
         statistics.events.initiation_contact_km,
         statistics.events.initiation_far_contact_km,
         statistics.events.weak_zone_splits,
         statistics.events.recut_splits,
         statistics.events.coastal_splits,
-        statistics.events.head_rifts,
-        100.0 * statistics.events.rift_suture_cells[0] as f64
-            / statistics.events.rift_suture_cells[1].max(1) as f64,
-        100.0 * statistics.events.rift_suture_cells[2] as f64
-            / statistics.events.rift_suture_cells[3].max(1) as f64,
         statistics.events.great_circle_splits,
-        statistics.events.split_deviation_km[0]
-            / statistics.events.measured_splits[0].max(1) as f64,
-        statistics.events.split_deviation_km[1]
-            / statistics.events.measured_splits[1].max(1) as f64,
+        statistics.events.split_deviation_km / statistics.events.measured_splits.max(1) as f64,
         statistics.events.fracture_zone_initiations,
         statistics.events.failed_initiation_reasons[0],
         statistics.events.failed_initiation_reasons[1],
@@ -966,22 +1014,72 @@ fn snapshot(
         statistics.events.undone_initiations[3],
     );
     let events = &statistics.events;
-    info!(
-        "    rift belts (continental cells, boundary/plates): ever marked {}/{} of {}/{}, orogenic weakening {:.1}/{:.1}, weak (≥ {}) {}/{} | \
-         plume rifts failed {}, break vs plate motion |cos| {:.3} over {} rifts",
-        events.rift_suture_cells[0],
-        events.rift_suture_cells[2],
-        events.rift_suture_cells[1],
-        events.rift_suture_cells[3],
-        events.rift_orogenic[0],
-        events.rift_orogenic[1],
-        tectonics::WEAK_BELT_THRESHOLD,
-        events.rift_weak_cells[0],
-        events.rift_weak_cells[1],
-        events.failed_plume_rifts,
-        events.rift_motion_alignment.0 / events.rift_motion_alignment.1.max(1) as f64,
-        events.rift_motion_alignment.1,
-    );
+    {
+        let tallies: Vec<String> = tectonics::SplitCause::ALL
+            .iter()
+            .zip(&events.splits_by_cause)
+            .map(|(cause, tally)| {
+                format!(
+                    "{} {} ({}/{} at plumes, {}/{} at antipodes, mean distance {:.3}/{:.3} rad; \
+                     boundary {}/{}/{}/{}, plates {}/{}/{}/{})",
+                    cause.name(),
+                    tally.count,
+                    tally.near_plume[0],
+                    tally.near_plume[1],
+                    tally.near_antipode[0],
+                    tally.near_antipode[1],
+                    tally.plume_distance / tally.count.max(1) as f64,
+                    tally.antipode_distance / tally.count.max(1) as f64,
+                    tally.boundary[0],
+                    tally.boundary[1],
+                    tally.boundary[2],
+                    tally.boundary[3],
+                    tally.plates[0],
+                    tally.plates[1],
+                    tally.plates[2],
+                    tally.plates[3],
+                )
+            })
+            .collect();
+        info!(
+            "    splits by cause (within {:.3}/{:.3} rad of a plume; continental cells all/belts/fabric/interior fabric): {}",
+            tectonics::PLUME_SPLIT_DISTANCES[0],
+            tectonics::PLUME_SPLIT_DISTANCES[1],
+            tallies.join(" | "),
+        );
+    }
+    {
+        // Extension fabric (#54): continental cells marked at least as much as a weak belt,
+        // near coasts and margins or deep inside continents (failed rifts, aulacogens).
+        let (mut continental, mut margin, mut interior, mut sum) = (0usize, 0usize, 0usize, 0.0);
+        for cell in 0..simulation.mesh().len() as u32 {
+            let crust = simulation.surface_crust(cell);
+            if !crust.is_continental_origin() {
+                continue;
+            }
+            continental += 1;
+            sum += crust.rifted;
+            if crust.rifted >= tectonics::WEAK_BELT_THRESHOLD {
+                if simulation.deep_in_continent(cell) {
+                    interior += 1;
+                } else {
+                    margin += 1;
+                }
+            }
+        }
+        let sheet = simulation.sheet_statistics();
+        info!(
+            "    extension fabric: mean {:.3} on continental crust, ≥ {} on {:.1}% near margins and \
+             {:.1}% deep inside continents (of the continental cells) | sheet shortening on fabric \
+             {:.1}% of {:.3e}",
+            sum / continental.max(1) as f64,
+            tectonics::WEAK_BELT_THRESHOLD,
+            100.0 * margin as f64 / continental.max(1) as f64,
+            100.0 * interior as f64 / continental.max(1) as f64,
+            100.0 * sheet.shortening.1 / sheet.shortening.0.max(f64::MIN_POSITIVE),
+            sheet.shortening.0,
+        );
+    }
     log_sediment_reservoirs(&planet_statistics);
     {
         let field = simulation.dynamic_topography();
@@ -1066,6 +1164,7 @@ fn snapshot(
             ),
             ("mantle", sea_level_budget.mantle, previous_sea_level.mantle),
             ("lakes", sea_level_budget.lakes, previous_sea_level.lakes),
+            ("escape", sea_level_budget.escape, previous_sea_level.escape),
         ];
         let parts: Vec<String> = terms
             .iter()
@@ -1285,14 +1384,23 @@ fn snapshot(
     let breakup = simulation.breakup_statistics();
     info!(
         "    breakup by stress: {} plates broken ({} cells; {} opening, {} closing, the others \
-         sliding), {} plates overloaded at the last analysis (largest overload {:.2}), {:.1} s",
+         sliding; {} through a plume), plume sections by overload (< 0.25, < 0.5, < 1, ≥ 1) {:?}, \
+         {} plates overloaded at the last analysis (largest overload {:.2}), {:.1} s | plume \
+         rifts {} (by the plume's age at onset < 20, < 50, < 100, older: {:?}), rift sections by \
+         overload {:?}, {} plates with a propagating rift",
         breakup.splits,
         breakup.split_cells,
         breakup.opening_splits,
         breakup.closing_splits,
+        breakup.plume_splits,
+        breakup.plume_overloads,
         breakup.overloaded,
         breakup.max_overload,
         breakup.seconds,
+        breakup.rift_splits,
+        breakup.rift_onsets,
+        breakup.rift_overloads,
+        breakup.propagating,
     );
     info!(
         "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
@@ -1461,6 +1569,9 @@ fn snapshot(
         planet_statistics.solar_constant,
     );
     info!("    {}", planet_statistics.carbon.summary());
+    if let Some(escape) = &planet_statistics.escape {
+        info!("    {}", escape.summary());
+    }
 
     let (groups, classes) = koppen::land_shares(&koppen::classes(planet));
     // The five most common classes, the more common first (ties by id).
@@ -1606,13 +1717,14 @@ fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Res
         writeln!(
             file,
             "time,plate,cells,overload,level_overload,cut_overload,length_km,piece_cells,\
-             strength,piece_continental,opening,residual,timer"
+             strength,piece_continental,opening,residual,timer,through_plume,plume_overload,\
+             rift_overload,rift_timer,rift_reach_km"
         )?;
     }
     for record in simulation.section_records() {
         writeln!(
             file,
-            "{},{},{},{:.4},{:.4},{:.4},{:.0},{},{:.3},{:.3},{:.3},{:.3},{}",
+            "{},{},{},{:.4},{:.4},{:.4},{:.0},{},{:.3},{:.3},{:.3},{:.3},{},{},{:.4},{:.4},{},{:.0}",
             simulation.time(),
             record.plate_id,
             record.cells,
@@ -1626,6 +1738,11 @@ fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Res
             record.opening,
             record.residual,
             record.timer,
+            u8::from(record.through_plume),
+            record.plume_overload,
+            record.rift_overload,
+            record.rift_timer,
+            record.rift_reach_km,
         )?;
     }
     Ok(())
@@ -1837,7 +1954,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain,ice"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,rifted,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain,ice"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -1863,7 +1980,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
         writeln!(
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
-             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
+             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
              {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1},{:.3}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
@@ -1892,6 +2009,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             },
             simulation.dynamic_topography()[cell as usize],
             crust.orogenic,
+            crust.rifted,
             crust.strength_age(simulation.time()).min(1e4),
             simulation.lithosphere_strength(cell),
             u8::from(marine),

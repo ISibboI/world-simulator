@@ -9,7 +9,7 @@
 //!   shelves to the deep blue of the open ocean, plus a sun glint (GGX reflection with the
 //!   Fresnel factor of water) whose roughness follows the wind speed (Cox & Munk, 1954);
 //! - **Ice:** permanent ice sheets and sea ice; in January and July also seasonal snow and sea
-//!   ice where the month is below freezing;
+//!   ice where the month is below freezing; lake ice where the temperature model has it (#185);
 //! - **Land:** bare ground (rock, soil, or sand where arid) under a vegetation cover that grows
 //!   with the moisture index (precipitation over potential evaporation) and the warmth of the
 //!   warmest month, from steppe and grassland to forest; tundra where the summers are cold;
@@ -255,6 +255,7 @@ impl RenderMode for Realistic {
             swatch(SEA_ICE, "Sea ice"),
             swatch(waters.lake_shallow, "Lake"),
             swatch(waters.saline_lake, "Saline lake"),
+            swatch(LAKE_ICE, "Lake ice"),
             swatch(ICE_SHEET, "Ice, snow"),
         ];
         if abiotic {
@@ -290,8 +291,9 @@ impl RenderMode for Realistic {
                           derived from the simulated climate (vegetation from rain and warmth, \
                           none without life), relief and atmosphere true to scale, sun glint on \
                           the water. Lakes darken with depth, closed lakes in dry climates are \
-                          saline and dry basins have salt flats; the seasons bring snow, lake \
-                          and sea ice; mountain relief runs along the ranges. \
+                          saline and dry basins have salt flats; the seasons bring snow and sea \
+                          ice, and lake ice where the temperature model freezes the lakes; \
+                          mountain relief runs along the ranges. \
                           The view adapts to the light like an eye: after the sun goes behind \
                           the planet or out of view, more stars appear over a few seconds.",
         );
@@ -416,13 +418,52 @@ fn moisture_index(cell: &CellInfo) -> f32 {
     }
 }
 
-/// The ice cover of a lake `depth` m deep in a month with the mean temperature `t` (°C):
+/// The ice cover of a lake without the model's lake ice (see [`model_lake_ice`]), `depth` m
+/// deep, in a month with the mean temperature `t` (°C):
 /// from −1 °C (like the snow on land), later the deeper the lake (its water stores the summer's
 /// heat), fully frozen at −5 °C (shallow) to −10 °C (≥ 200 m). (The simulation's
 /// `climate::ice_free` ramp of −2 to +2 °C stops the evaporation within a month; a lake
 /// covered for most of the month needs a colder mean.)
 fn lake_ice(t: f32, depth: f32) -> f32 {
     smoothstep(-1.0, -5.0 - 5.0 * smoothstep(10.0, 200.0, depth), t)
+}
+
+/// The mean lake-ice cover of a month from which a lake is drawn frozen in that month: 0.1, a
+/// mean ice thickness of 5 cm (the model's cover is the ice thickness over the 0.5 m at which
+/// ice takes its full albedo), so that a lake under thin ice all month shows as frozen.
+pub const FROZEN_LAKE_COVER: f32 = 0.1;
+
+/// The temperature model's lake-ice cover of a cell in a season (0 to 1): its annual mean
+/// ([`CellInfo::ice`] on a lake of the model) or that of January or July; `None` where the
+/// model has no lake (#185).
+pub fn model_lake_ice(cell: &CellInfo, season: Period) -> Option<f32> {
+    if !(cell.lake_ice_january.is_finite() && cell.lake_ice_july.is_finite()) {
+        return None;
+    }
+    let cover = match season {
+        Period::Annual => cell.ice,
+        Period::January => cell.lake_ice_january,
+        Period::July => cell.lake_ice_july,
+    };
+    cover.is_finite().then(|| cover.clamp(0.0, 1.0))
+}
+
+/// Whether a lake with the model's lake-ice cover `cover` is drawn frozen in a season: in a
+/// month where its mean cover reaches [`FROZEN_LAKE_COVER`]; in the annual state where it is
+/// frozen most of the year (an annual mean cover above one half, the permanent ice of the other
+/// modes and of the cell information).
+pub fn lake_frozen(cover: f32, season: Period) -> bool {
+    lake_ice_layer(cover, season) > 0.5
+}
+
+/// The ice layer of a lake with the model's lake-ice cover `cover` in a season: continuous, so
+/// that the detail shader's ice edge (where the interpolated layer crosses one half) falls
+/// between frozen and open lakes, and above one half exactly where [`lake_frozen`].
+fn lake_ice_layer(cover: f32, season: Period) -> f32 {
+    match season {
+        Period::Annual => smoothstep(0.3, 0.7, cover),
+        _ => smoothstep(0.0, 2.0 * FROZEN_LAKE_COVER, cover),
+    }
 }
 
 /// The sea-ice cover of a month for an ocean cell whose annual mean cover is `annual`, in its
@@ -578,17 +619,21 @@ fn layers(cell: &CellInfo, season: Period, abiotic: bool, closed_lake: bool) -> 
         let cold = smoothstep(0.0, -10.0, temperature);
         (mix(MELTING_SEA_ICE, SEA_ICE, cold), cover)
     } else if let WaterBody::Lake(depth) = body {
-        // Lakes ice over in their own way here, not from the climate's `ice` (since #173 the
-        // lake ice of the temperature model; using it is a follow-up). In the annual state where
-        // the annual mean is far below freezing; in a month by its temperature, or where even
-        // the warmest month freezes. The ice is
-        // snow-covered where snow falls, grey and bare where it does not.
-        let frozen = match season {
-            // Frozen most of the year.
-            Period::Annual => smoothstep(-10.0, -20.0, annual_temperature),
-            // Frozen in the month, or all year where even the warmest month freezes.
-            _ => lake_ice(temperature, depth).max(smoothstep(0.0, -5.0, warmest)),
+        // The lake ice of the temperature model (#185), as a continuous cover that crosses one
+        // half where the lake is drawn frozen (see `lake_ice_layer`). Where the model has no lake
+        // there (lakes as land, or a lake newer than the last temperature update), lakes ice
+        // over by their own rule: in the annual state where the annual mean is far below
+        // freezing; in a month by its temperature, or where even the warmest month freezes.
+        let frozen = match model_lake_ice(cell, season) {
+            Some(cover) => lake_ice_layer(cover, season),
+            None => match season {
+                // Frozen most of the year.
+                Period::Annual => smoothstep(-10.0, -20.0, annual_temperature),
+                // Frozen in the month, or all year where even the warmest month freezes.
+                _ => lake_ice(temperature, depth).max(smoothstep(0.0, -5.0, warmest)),
+            },
         };
+        // The ice is snow-covered where snow falls, grey and bare where it does not.
         let snowy = smoothstep(0.02, 0.15, precipitation);
         (mix(BARE_LAKE_ICE, LAKE_ICE, snowy), frozen)
     } else {
@@ -1539,6 +1584,9 @@ mod tests {
             wind_east: 7.0,
             wind_january_east: 9.0,
             wind_july_east: 5.0,
+            // No lake ice of the temperature model (the tests of the lakes' own rule).
+            lake_ice_january: f32::NAN,
+            lake_ice_july: f32::NAN,
             ..bytemuck::Zeroable::zeroed()
         }
     }
@@ -1854,6 +1902,131 @@ mod tests {
         assert!(lake_ice(-5.0, 300.0) < lake_ice(-5.0, 5.0));
         assert_eq!(lake_ice(0.0, 5.0), 0.0);
     }
+
+    #[test]
+    fn lakes_freeze_where_the_temperature_model_has_lake_ice() {
+        // A lake in a mild climate whose model says frozen in January, and a cold one whose
+        // model says open in July: the model wins over the temperatures (#185).
+        let lake = |temperature: f32, january: f32, july: f32, annual: f32| CellInfo {
+            drainage: CellInfo::drainage_bits(Some(0), false, true, 20.0),
+            lake_depth: 20.0,
+            lake_ice_january: january,
+            lake_ice_july: july,
+            ice: annual,
+            ..cell(200.0, temperature, 1.0, 1.0)
+        };
+        let cover = |cell: &CellInfo, season: Period| layers(cell, season, false, false).snow_cover;
+        let mild = lake(12.0, 0.8, 0.0, 0.3);
+        assert!(cover(&mild, Period::January) > 0.5);
+        assert!(close(
+            layers(&mild, Period::January, false, false).snow,
+            LAKE_ICE
+        ));
+        assert_eq!(cover(&mild, Period::July), 0.0);
+        // Frozen for less than half the year: open in the annual state.
+        assert!(cover(&mild, Period::Annual) < 0.5);
+        let cold = lake(-25.0, 1.0, 0.0, 0.9);
+        assert_eq!(cover(&cold, Period::July), 0.0);
+        assert_eq!(cover(&cold, Period::January), 1.0);
+        assert!(cover(&cold, Period::Annual) > 0.5);
+        // Thin ice (a mean cover of 0.1, 5 cm) is the edge of frozen in a month.
+        for (value, frozen) in [(0.09, false), (0.11, true), (0.5, true)] {
+            let cell = lake(5.0, value, value, value);
+            assert_eq!(cover(&cell, Period::January) > 0.5, frozen, "{value}");
+            assert_eq!(lake_frozen(value, Period::July), frozen, "{value}");
+        }
+        // The layer and `lake_frozen` agree in every season, also at the edges.
+        for step in 0..=100 {
+            let value = step as f32 / 100.0;
+            let cell = lake(5.0, value, value, value);
+            for season in [Period::Annual, Period::January, Period::July] {
+                assert_eq!(
+                    cover(&cell, season) > 0.5,
+                    lake_frozen(value, season),
+                    "{value} {season:?}"
+                );
+            }
+        }
+        // Without the model's lake ice, the lakes' own rule (a cold January freezes).
+        let own = lake(-5.0, f32::NAN, f32::NAN, 0.0);
+        assert_eq!(model_lake_ice(&own, Period::January), None);
+        assert_eq!(cover(&own, Period::January), 1.0);
+        assert_eq!(model_lake_ice(&mild, Period::January), Some(0.8));
+        assert_eq!(model_lake_ice(&mild, Period::Annual), Some(0.3));
+    }
+
+    /// The lakes drawn frozen are those the temperature model freezes (#185), in every season,
+    /// in the live state and as the frame history replays it (quantised).
+    #[test]
+    fn the_lake_ice_drawn_is_the_temperature_models() {
+        use crate::viewer::history::codec::Planes;
+        use clap::Parser;
+        // Seed 4: lakes on the model's lake ice after STEPS, frozen in July and open in January
+        // (seed 0 has no lakes yet with #213's start).
+        let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "4", "--seed", "4"]);
+        let mut planet = crate::build_planet(&cli).unwrap();
+        for _ in 0..STEPS {
+            planet.step(cli.dt);
+        }
+        let live = crate::viewer::cell_infos(&planet);
+        let replayed = Planes::new(&live).cell_infos();
+        let fields = planet.temperature();
+        let model = |season: Period, cell: usize| match season {
+            Period::Annual => fields.ice[cell],
+            Period::January => fields.monthly_lake_ice[0][cell],
+            Period::July => fields.monthly_lake_ice[6][cell],
+        } as f32;
+        let (mut lakes, mut fallback) = (0, 0);
+        // Lakes drawn frozen and open in each season (annual, January, July).
+        let (mut frozen, mut open) = ([0; 3], [0; 3]);
+        for cells in [&live, &replayed] {
+            for (index, cell) in cells.iter().enumerate() {
+                let is_lake = matches!(cell.water_body(), WaterBody::Lake(_));
+                let model_lake = fields.monthly_lake_ice[0][index].is_finite();
+                // The model's lakes are those of the erosion step before the last one.
+                if is_lake && !model_lake {
+                    fallback += 1;
+                }
+                // The cells carry the model's lake ice exactly on its lakes.
+                assert_eq!(model_lake_ice(cell, Period::January).is_some(), model_lake);
+                if !(is_lake && model_lake) {
+                    continue;
+                }
+                lakes += 1;
+                for (slot, season) in [Period::Annual, Period::January, Period::July]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let cover = model(season, index);
+                    let threshold = match season {
+                        Period::Annual => 0.5,
+                        _ => FROZEN_LAKE_COVER,
+                    };
+                    let drawn = layers(cell, season, false, false).snow_cover > 0.5;
+                    // Within half a quantisation step of the edge, either is right.
+                    if (cover - threshold).abs() > 0.5 / 254.0 {
+                        assert_eq!(drawn, cover > threshold, "cell {index} {season:?} {cover}");
+                    }
+                    if drawn {
+                        frozen[slot] += 1;
+                    } else {
+                        open[slot] += 1;
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "{lakes} lakes, {fallback} without the model's lake ice; frozen {frozen:?}, open \
+             {open:?} (year, January, July)"
+        );
+        // Some lakes freeze in their winter month and are open in their summer month.
+        assert!(lakes > 0);
+        assert!(frozen[1] + frozen[2] > 0 && open[1] + open[2] > 0);
+    }
+
+    /// Steps of the planet in [`the_lake_ice_drawn_is_the_temperature_models`]: enough for lakes
+    /// to form with this seed, some of them frozen in January.
+    const STEPS: usize = 20;
 
     #[test]
     fn dry_basins_have_salt_flats_at_their_sink() {
