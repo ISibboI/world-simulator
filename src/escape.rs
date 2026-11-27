@@ -852,6 +852,7 @@ mod tests {
                 sediment_erosion: 1e-4,
                 bedrock_density: 2800.0,
                 mafic: cell as f64 / 9.0,
+                bare: 0.0,
             })
             .collect()
     }

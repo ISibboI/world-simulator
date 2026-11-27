@@ -34,6 +34,8 @@ use crate::tectonics::SurfaceSeaLevel;
 
 mod basins;
 use basins::Basins;
+mod regolith;
+pub use regolith::{RegolithParams, RegolithStats};
 
 /// Parameters of erosion. Lengths in metres, times in years unless noted otherwise.
 #[derive(Clone, Debug)]
@@ -162,6 +164,9 @@ pub struct ErosionParams {
     /// fed by the sea) or, once full, joins the ocean. Otherwise the water that would pour in is
     /// not placed (the sea-level solve's deficit; the model before #168).
     pub sea_spill: bool,
+    /// Weathering of bare rock into regolith and weathering-limited erosion (#197; see
+    /// [`regolith`]).
+    pub regolith: RegolithParams,
 }
 
 impl Default for ErosionParams {
@@ -207,6 +212,7 @@ impl Default for ErosionParams {
             sample_surface: true,
             lake_hierarchy: true,
             sea_spill: true,
+            regolith: RegolithParams::default(),
         }
     }
 }
@@ -214,6 +220,9 @@ impl Default for ErosionParams {
 impl ErosionParams {
     /// Sets the tunable parameter `name` (the field name) to `value`.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
+        if let Some(result) = self.regolith.set(name, value) {
+            return result;
+        }
         let field = match name {
             "erodibility" => &mut self.erodibility,
             "lake_onset_depth" => &mut self.lake_onset_depth,
@@ -366,6 +375,15 @@ pub struct Surface<'a> {
     /// Cells showing one crust sample share an id here (#112 b; empty: every cell is its own
     /// column). The lakes at the end of the step see such cells at their mean level.
     pub sample: &'a [u32],
+    /// Annual mean surface temperature (°C), permanent ice cover (0 to 1) and the mafic share
+    /// of the bedrock (0 to 1), for the regolith production (empty: the reference temperature,
+    /// no ice, felsic rock).
+    pub temperature: &'a [f64],
+    pub ice: &'a [f64],
+    pub mafic: &'a [f64],
+    /// Regolith at the bottom of each cell's sediment (rock-equivalent m) from the previous
+    /// step (empty: none); clamped to the sediment.
+    pub regolith: &'a [f64],
 }
 
 /// Changes caused by one erosion step, and diagnostic fields.
@@ -396,6 +414,15 @@ pub struct ErosionResult {
     pub sea_level_change: SurfaceSeaLevel,
     /// Sediment moved by waves.
     pub wave: WaveErosion,
+    /// Regolith at the bottom of each cell's sediment at the end of the step (rock-equivalent
+    /// m, at most the sediment; zero without regolith).
+    pub regolith: Vec<f64>,
+    /// Fraction of the step each land cell's rock was bare (0 where a deposit or lake covered
+    /// it, and for the sea).
+    pub bare: Vec<f64>,
+    /// Regolith production on bare rock `P₀` (m/yr of bedrock) of each land cell.
+    pub production: Vec<f64>,
+    pub regolith_stats: RegolithStats,
 }
 
 /// Water balance of the land in one step.
@@ -550,6 +577,7 @@ pub fn erode(
         ocean_volume,
         ocean_seeds,
         sample,
+        runoff,
         ..
     } = *surface;
     let cell_count = mesh.len();
@@ -598,6 +626,32 @@ pub fn erode(
     let mut bedrock_delta = vec![0.0; cell_count];
     let mut sediment_delta = vec![0.0; cell_count];
     let mut produced = vec![0.0; cell_count];
+    let weathering = &params.regolith;
+    let mut regolith = vec![0.0; cell_count];
+    let mut bare = vec![0.0; cell_count];
+    let mut production = vec![0.0; cell_count];
+    let mut regolith_stats = RegolithStats::default();
+    if weathering.enabled {
+        for cell in 0..cell_count {
+            if ocean[cell] {
+                continue;
+            }
+            regolith[cell] = surface
+                .regolith
+                .get(cell)
+                .map_or(0.0, |&r| r.clamp(0.0, sediment[cell]));
+            production[cell] = weathering.production_scale(
+                surface
+                    .temperature
+                    .get(cell)
+                    .copied()
+                    .unwrap_or(weathering.reference_temperature),
+                runoff.get(cell).copied().unwrap_or(0.0),
+                surface.ice.get(cell).copied().unwrap_or(0.0),
+                surface.mafic.get(cell).copied().unwrap_or(0.0),
+            );
+        }
+    }
     for &cell in &order {
         let cell = cell as usize;
         let Some(receiver) = receiver[cell] else {
@@ -615,6 +669,65 @@ pub fn erode(
         } else {
             new_elevation[receiver].max(water_level[receiver])
         };
+        if weathering.enabled {
+            regolith_stats.land_cells += 1;
+            let rate = if elevation[cell] <= base {
+                0.0
+            } else {
+                let distance =
+                    math::angle_between(mesh.vertex(cell as u32), mesh.vertex(receiver as u32))
+                        * params.planet_radius;
+                params.erodibility * math::powf(discharge[cell], params.discharge_exponent)
+                    / distance
+            };
+            let bedrock = Bedrock {
+                dense: dense_crust[cell],
+                dense_density: bedrock_isostatic_density[cell],
+                density: bedrock_density[cell],
+            };
+            let weathered = weather(
+                weathering,
+                (elevation[cell], base),
+                (sediment[cell], regolith[cell]),
+                &bedrock,
+                (production[cell], rate, params.sediment_erodibility_factor),
+                dt_years,
+                params.isostatic_incision,
+            );
+            let step = &weathered.step;
+            let left = weathered.deposit + step.regolith;
+            sediment_delta[cell] += left - sediment[cell];
+            bedrock_delta[cell] -= step.bedrock;
+            // What leaves the cell: the eroded deposit and regolith, the same rock mass.
+            produced[cell] = (sediment[cell] - left
+                + step.bedrock * bedrock_density[cell] / SEDIMENT_ROCK_DENSITY)
+                .max(0.0);
+            regolith[cell] = step.regolith;
+            bare[cell] = step.exposure / dt_years;
+            if weathered.transported {
+                if step.transport_limited {
+                    regolith_stats.transport_limited_cells += 1;
+                    regolith_stats.transport_limited_bedrock += step.bedrock / dt_years;
+                } else {
+                    regolith_stats.weathering_limited_cells += 1;
+                    regolith_stats.weathering_limited_bedrock += step.bedrock / dt_years;
+                }
+            } else {
+                regolith_stats.untransported_bedrock += step.bedrock / dt_years;
+            }
+            let without_sediment = isostasy::change_sediment(elevation[cell], sediment[cell], left);
+            let from_dense = step.bedrock.min(dense_crust[cell]);
+            new_elevation[cell] = isostasy::add_layer(
+                isostasy::add_layer(
+                    without_sediment,
+                    -from_dense,
+                    bedrock_isostatic_density[cell],
+                ),
+                -(step.bedrock - from_dense),
+                bedrock_density[cell],
+            );
+            continue;
+        }
         if elevation[cell] <= base {
             continue; // Flat: no incision.
         }
@@ -935,7 +1048,10 @@ pub fn erode(
         ocean_seeds.iter().copied(),
         !params.sea_spill,
     );
-    diffuse_sediment(mesh, &mut seabed, &ocean, params, dt_years);
+    let fixed: Vec<f64> = (0..cell_count)
+        .map(|cell| if ocean[cell] { 0.0 } else { regolith[cell] })
+        .collect();
+    diffuse_sediment(mesh, &mut seabed, (&ocean, &fixed), params, dt_years);
 
     let wave = if params.waves {
         wave_erosion(
@@ -996,6 +1112,10 @@ pub fn erode(
     } else {
         end
     };
+    // The regolith is the bottom of the sediment: what the deposition, diffusion and waves left.
+    for (regolith, &sediment) in regolith.iter_mut().zip(&seabed.sediment) {
+        *regolith = regolith.min(sediment.max(0.0));
+    }
     let mut water = end.surface_water;
     water.depression_at_start = lakes.lake.iter().map(|&lake| lake != NO_LAKE).collect();
     let hydrology = Hydrology {
@@ -1017,6 +1137,10 @@ pub fn erode(
         deposited,
         sea_level_change: SurfaceSeaLevel { fluvial, coastal },
         wave,
+        regolith,
+        bare,
+        production,
+        regolith_stats,
     }
 }
 
@@ -1611,6 +1735,114 @@ fn incise(
     Incision {
         bulk,
         bedrock: cut.max(0.0),
+    }
+}
+
+/// What [`weather`] did to a cell.
+struct Weathered {
+    /// Rock-equivalent thickness of the deposit left above the regolith.
+    deposit: f64,
+    step: regolith::RegolithStep,
+    /// Whether the deposit was cut through and the regolith carried away for part of the step.
+    transported: bool,
+}
+
+/// One step of a land cell with regolith (#197): the deposit above the regolith is cut first
+/// with the sediment's erodibility (`sediment_factor` times the bedrock `rate`, as in
+/// [`incise`]); for the rest of the step the regolith is carried away and the bare rock
+/// weathers and erodes (see [`regolith::regolith_step`]). Where the step ends in the deposit,
+/// the rock below it still weathers under the deposit's cover. `production` is `P₀` (m/yr of
+/// bedrock); the column's surface is at `elevation`, its base level at `base`.
+fn weather(
+    params: &RegolithParams,
+    (elevation, base): (f64, f64),
+    (sediment, regolith): (f64, f64),
+    bedrock: &Bedrock,
+    (production, rate, sediment_factor): (f64, f64, f64),
+    dt: f64,
+    isostatic: bool,
+) -> Weathered {
+    let total_bulk = isostasy::sediment_bulk_thickness(sediment);
+    let top_bulk = (total_bulk - isostasy::sediment_bulk_thickness(regolith)).max(0.0);
+    let after = |cut: f64| {
+        if isostatic {
+            isostasy::change_sediment(
+                elevation,
+                sediment,
+                isostasy::sediment_for_bulk_thickness((total_bulk - cut).max(0.0)),
+            )
+        } else {
+            elevation - cut
+        }
+    };
+    let response = |density: f64| {
+        if isostatic {
+            isostasy::dry_response(density).max(1e-3)
+        } else {
+            1.0
+        }
+    };
+    let column = |surface: f64| regolith::Column {
+        height: (surface - base).max(0.0),
+        dense: bedrock.dense,
+        dense_response: response(bedrock.dense_density),
+        response: response(bedrock.density),
+        density: bedrock.density,
+    };
+    let mut years = dt;
+    let mut surface = elevation;
+    if top_bulk > 0.0 {
+        let factor = rate * sediment_factor * dt;
+        let bare = after(top_bulk);
+        if rate <= 0.0 || top_bulk >= factor * (bare - base) {
+            // The step ends in the deposit (see `incise`); the rock below weathers under it.
+            let cut = if rate <= 0.0 {
+                0.0
+            } else {
+                let (mut low, mut high) = (0.0, top_bulk);
+                for _ in 0..50 {
+                    let cut = 0.5 * (low + high);
+                    if cut < factor * (after(cut) - base) {
+                        low = cut;
+                    } else {
+                        high = cut;
+                    }
+                }
+                low
+            };
+            let remaining = isostasy::sediment_for_bulk_thickness((total_bulk - cut).max(0.0));
+            let deposit = (remaining - regolith).max(0.0);
+            let step = regolith::regolith_step(
+                params,
+                &column(after(cut)),
+                regolith,
+                top_bulk - cut,
+                production,
+                0.0,
+                dt,
+            );
+            return Weathered {
+                deposit,
+                step,
+                transported: false,
+            };
+        }
+        years -= top_bulk / (rate * sediment_factor * (bare - base));
+        surface = bare;
+    }
+    let step = regolith::regolith_step(
+        params,
+        &column(surface),
+        regolith,
+        0.0,
+        production,
+        rate,
+        years,
+    );
+    Weathered {
+        deposit: 0.0,
+        step,
+        transported: rate > 0.0,
     }
 }
 
@@ -2355,11 +2587,12 @@ impl Seabed {
 /// is [`ErosionParams::sediment_diffusivity`] and land is lowered at most to sea level: delta and
 /// coastal plains spread seaward and grade to sea level, they are not drowned. Below sea level
 /// sediment spreads [`ErosionParams::marine_diffusivity_ratio`] times as fast (below wave base
-/// only gravity flows move it).
+/// only gravity flows move it). The regolith at the bottom of the sediment (`fixed`, #197) is
+/// rock weathered in place and stays: its transport is part of the weathering step.
 fn diffuse_sediment(
     mesh: &SphereMesh,
     seabed: &mut Seabed,
-    ocean: &[bool],
+    (ocean, fixed): (&[bool], &[f64]),
     params: &ErosionParams,
     dt_years: f64,
 ) {
@@ -2379,7 +2612,7 @@ fn diffuse_sediment(
         outflow.iter_mut().for_each(|x| *x = 0.0);
         for cell in 0..cell_count {
             let height = seabed.elevation[cell];
-            if seabed.sediment[cell] <= 0.0 {
+            if seabed.sediment[cell] - fixed[cell] <= 0.0 {
                 continue;
             }
             // Land (also in depressions below sea level) is lowered at most to sea level towards
@@ -2407,7 +2640,7 @@ fn diffuse_sediment(
         }
         for &(from, to, amount) in &transfers {
             // No cell gives more sediment than it has.
-            let scale = (seabed.sediment[from] / outflow[from]).min(1.0);
+            let scale = ((seabed.sediment[from] - fixed[from]) / outflow[from]).min(1.0);
             let amount = amount * scale;
             if amount > 0.0 {
                 seabed.remove(from, amount);
@@ -2558,6 +2791,15 @@ mod tests {
             .collect()
     }
 
+    /// The model without regolith (#197), for the tests of routing, lakes and waves that check
+    /// exact amounts on bare bedrock.
+    fn without_regolith() -> RegolithParams {
+        RegolithParams {
+            enabled: false,
+            ..RegolithParams::default()
+        }
+    }
+
     /// Continental crust down to `depth` below sea level, oceanic crust below, all on one plate.
     fn classes(elevation: &[f64], depth: f64) -> Vec<CrustClass> {
         elevation
@@ -2630,6 +2872,10 @@ mod tests {
                 ),
                 previous_lakes: &[],
                 sample: &[],
+                temperature: &[],
+                ice: &[],
+                mafic: &[],
+                regolith: &[],
             },
             params,
             1e6,
@@ -2699,6 +2945,7 @@ mod tests {
         let params = ErosionParams {
             sediment_diffusivity: 0.0,
             waves: false,
+            regolith: without_regolith(),
             ..ErosionParams::default()
         };
         // The same island with a thick sediment cover on land, at the same elevations.
@@ -2965,6 +3212,10 @@ mod tests {
                 ),
                 previous_lakes: &[],
                 sample: &[],
+                temperature: &[],
+                ice: &[],
+                mafic: &[],
+                regolith: &[],
             },
             &params,
             1e6,
@@ -3068,6 +3319,10 @@ mod tests {
                 ),
                 previous_lakes: &[],
                 sample: &[],
+                temperature: &[],
+                ice: &[],
+                mafic: &[],
+                regolith: &[],
             },
             params,
             1e6,
@@ -3153,6 +3408,10 @@ mod tests {
                 ocean_seeds: &seeds,
                 previous_lakes: &[],
                 sample: &[],
+                temperature: &[],
+                ice: &[],
+                mafic: &[],
+                regolith: &[],
             };
             let ocean = sea::ocean_from(&mesh, &elevation, seeds.iter().copied(), false);
             assert!(!ocean[pit]);
@@ -3254,6 +3513,10 @@ mod tests {
             ocean_seeds: &seeds,
             previous_lakes: &[],
             sample: &[],
+            temperature: &[],
+            ice: &[],
+            mafic: &[],
+            regolith: &[],
         };
         let ocean = sea::ocean_from(&mesh, &elevation, seeds.iter().copied(), false);
         assert!(ocean[pit]);
@@ -3296,6 +3559,7 @@ mod tests {
         let sediment = vec![0.0; mesh.len()];
         let params = ErosionParams {
             sediment_diffusivity: 0.0,
+            regolith: without_regolith(),
             ..ErosionParams::default()
         };
         // No rain: only waves act. The rim of the depression is no coast.
@@ -3335,7 +3599,13 @@ mod tests {
                 sediment,
                 delta: vec![0.0; mesh.len()],
             };
-            diffuse_sediment(&mesh, &mut seabed, ocean, &params, 1e6);
+            diffuse_sediment(
+                &mesh,
+                &mut seabed,
+                (ocean, &vec![0.0; mesh.len()]),
+                &params,
+                1e6,
+            );
             seabed.delta[pit]
         };
         let ocean = sea::ocean_mask(&mesh, &elevation, sea::MIN_SEA_FRACTION, true);
@@ -3458,6 +3728,7 @@ mod tests {
             erodibility: 0.0,
             sediment_diffusivity: 0.0,
             waves: false,
+            regolith: without_regolith(),
             ..ErosionParams::default()
         };
         let sediment = vec![0.0; n];
@@ -3484,6 +3755,10 @@ mod tests {
                 ),
                 previous_lakes,
                 sample: &[],
+                temperature: &[],
+                ice: &[],
+                mafic: &[],
+                regolith: &[],
             },
             &params,
             1e6,
@@ -3815,6 +4090,7 @@ mod tests {
         let mesh = SphereMesh::icosphere(4);
         let params = ErosionParams {
             sediment_diffusivity: 0.0,
+            regolith: without_regolith(),
             ..ErosionParams::default()
         };
         let spacing = mesh.mean_edge_angle() * params.planet_radius;
@@ -3888,6 +4164,7 @@ mod tests {
         let class = classes(&elevation, -1000.0);
         let params = ErosionParams {
             sediment_diffusivity: 0.0,
+            regolith: without_regolith(),
             ..ErosionParams::default()
         };
         let result = run_with(
@@ -3980,6 +4257,7 @@ mod tests {
             // The model before #47.
             graded_fans: false,
             terminal_fans: false,
+            regolith: without_regolith(),
             ..ErosionParams::default()
         };
         let sediment = vec![0.0; mesh.len()];
@@ -4239,5 +4517,137 @@ mod tests {
         assert!(result.water.depression_at_start[pit] && result.water.depression_at_start[twin]);
         assert!(result.sediment_delta[pit] > 0.0);
         assert!((result.sediment_delta[pit] - result.sediment_delta[twin]).abs() < 1e-6);
+    }
+
+    /// One erosion step of 1 Myr on the island with uniform rain, temperature (°C) and
+    /// sediment, with `params`.
+    fn run_climate_regolith(
+        mesh: &SphereMesh,
+        temperature: f64,
+        precipitation: f64,
+        sediment: f64,
+        params: &ErosionParams,
+    ) -> (Vec<f64>, ErosionResult) {
+        let elevation = island(mesh);
+        let n = mesh.len();
+        let sediment = vec![sediment; n];
+        let class = classes(&elevation, 0.0);
+        let result = erode(
+            mesh,
+            &Surface {
+                elevation: &elevation,
+                sediment: &sediment,
+                bedrock_density: &vec![2800.0; n],
+                bedrock_isostatic_density: &vec![2800.0; n],
+                dense_crust: &vec![0.0; n],
+                precipitation: &vec![precipitation; n],
+                runoff: &vec![precipitation; n],
+                potential_evaporation: &vec![0.0; n],
+                plate: &vec![0; n],
+                class: &class,
+                ocean_volume: ocean_volume(mesh, &elevation, &sediment, params.planet_radius),
+                water_volume: ocean_volume(mesh, &elevation, &sediment, params.planet_radius),
+                ocean_seeds: &sea::ocean_seeds(
+                    mesh,
+                    &elevation,
+                    -sea::SILL_TOLERANCE,
+                    sea::MIN_SEA_FRACTION,
+                ),
+                previous_lakes: &[],
+                sample: &[],
+                temperature: &vec![temperature; n],
+                ice: &[],
+                mafic: &[],
+                regolith: &[],
+            },
+            params,
+            1e6,
+        );
+        (sediment, result)
+    }
+
+    fn rock_mass_change(result: &ErosionResult) -> (f64, f64) {
+        let change: f64 = (0..result.bedrock_delta.len())
+            .map(|c| {
+                result.bedrock_delta[c] * 2800.0 + result.sediment_delta[c] * SEDIMENT_ROCK_DENSITY
+            })
+            .sum();
+        let eroded: f64 = result.bedrock_delta.iter().map(|d| -d * 2800.0).sum();
+        (change, eroded)
+    }
+
+    #[test]
+    fn regolith_conserves_rock_mass() {
+        let mesh = SphereMesh::icosphere(4);
+        let params = ErosionParams {
+            waves: false,
+            ..ErosionParams::default()
+        };
+        for (temperature, rain, sediment) in
+            [(20.0, 1.0, 0.0), (-20.0, 0.05, 0.0), (10.0, 0.3, 1.0)]
+        {
+            let (start, result) = run_climate_regolith(&mesh, temperature, rain, sediment, &params);
+            let (change, eroded) = rock_mass_change(&result);
+            assert!(eroded > 0.0);
+            assert!(
+                change.abs() < 1e-9 * eroded,
+                "change {change}, eroded {eroded}"
+            );
+            // The regolith is part of the sediment at the end.
+            for c in 0..mesh.len() {
+                assert!(result.regolith[c] <= start[c] + result.sediment_delta[c] + 1e-9);
+                assert!(result.regolith[c] >= 0.0 && result.bare[c] >= 0.0);
+                assert!(result.bare[c] <= 1.0 + 1e-12);
+            }
+            assert!(result.regolith.iter().any(|&r| r > 0.0));
+            assert!(result.regolith_stats.land_cells > 0);
+        }
+    }
+
+    #[test]
+    fn cold_dry_rock_erodes_slower_than_without_regolith() {
+        let mesh = SphereMesh::icosphere(4);
+        let on = ErosionParams {
+            waves: false,
+            ..ErosionParams::default()
+        };
+        let mut off = on.clone();
+        off.regolith.enabled = false;
+        let eroded = |temperature: f64, rain: f64, params: &ErosionParams| {
+            let (_, result) = run_climate_regolith(&mesh, temperature, rain, 0.0, params);
+            rock_mass_change(&result).1
+        };
+        // Same rain (same transport), cold: the rock weathers slowly and erosion is
+        // weathering-limited.
+        let cold = eroded(-15.0, 0.3, &on);
+        let warm = eroded(25.0, 0.3, &on);
+        let old = eroded(-15.0, 0.3, &off);
+        assert!(cold < warm, "{cold} vs {warm}");
+        assert!(cold < 0.8 * old, "{cold} vs {old}");
+        // Without regolith the climate does not matter (beyond the runoff).
+        assert_eq!(old, eroded(25.0, 0.3, &off));
+        assert!(warm <= old * (1.0 + 1e-9), "{warm} vs {old}");
+    }
+
+    #[test]
+    fn regolith_off_keeps_the_old_model() {
+        let mesh = SphereMesh::icosphere(4);
+        let mut params = ErosionParams::default();
+        params.regolith.enabled = false;
+        let (_, result) = run_climate_regolith(&mesh, 10.0, 0.5, 2.0, &params);
+        let elevation = island(&mesh);
+        let old = run_with(
+            &mesh,
+            &elevation,
+            &vec![2.0; mesh.len()],
+            0.5,
+            &vec![0; mesh.len()],
+            &classes(&elevation, 0.0),
+            &params,
+        );
+        assert_eq!(result.bedrock_delta, old.bedrock_delta);
+        assert_eq!(result.sediment_delta, old.sediment_delta);
+        assert!(result.regolith.iter().all(|&r| r == 0.0));
+        assert!(result.bare.iter().all(|&b| b == 0.0));
     }
 }

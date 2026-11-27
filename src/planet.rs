@@ -10,7 +10,7 @@ use tracing::{debug, debug_span, info};
 use crate::carbon::{CarbonCycle, CarbonParams, CarbonState, LandCell, StepInput};
 use crate::climate::{Climate, ClimateParams, WaterCycle};
 use crate::erosion::{
-    CrustClass, ErosionParams, Hydrology, Surface, SurfaceWater, WaveErosion, erode,
+    CrustClass, ErosionParams, Hydrology, RegolithStats, Surface, SurfaceWater, WaveErosion, erode,
 };
 use crate::escape::{Escape, EscapeParams, EscapeState};
 use crate::ramp_up::{RampUp, RampUpParams, RampUpStatus};
@@ -73,6 +73,10 @@ pub struct Planet {
     /// Cells that the last erosion step saw as ocean on the sample surface but not on the
     /// per-cell surface, or the other way round (#112 b; zero without it).
     ocean_mismatch: usize,
+    /// The regolith of the last step (#197): per cell, the regolith at the bottom of the
+    /// sediment (rock-equivalent m), the fraction of the step the rock was bare, the production
+    /// scale `P₀` and the bedrock lowering (m/yr), and the step's statistics.
+    regolith: RegolithFields,
 }
 
 /// A step of the planet in progress (see [`Planet::begin_step`]): which part comes next, and what
@@ -255,6 +259,32 @@ pub struct CoverTurnover {
 }
 
 /// Statistics of the planet, extending the tectonic statistics.
+/// The regolith of the last erosion step, per cell (#197).
+#[derive(Clone, Debug, Default)]
+pub struct RegolithFields {
+    /// Regolith at the bottom of the sediment (rock-equivalent m).
+    pub thickness: Vec<f64>,
+    /// Fraction of the step the rock was bare.
+    pub bare: Vec<f64>,
+    /// Production on bare rock `P₀` (m/yr of bedrock).
+    pub production: Vec<f64>,
+    /// Bedrock lowered by erosion and weathering (m/yr).
+    pub bedrock_erosion: Vec<f64>,
+    pub stats: RegolithStats,
+}
+
+impl RegolithFields {
+    fn new(cell_count: usize) -> Self {
+        Self {
+            thickness: vec![0.0; cell_count],
+            bare: vec![0.0; cell_count],
+            production: vec![0.0; cell_count],
+            bedrock_erosion: vec![0.0; cell_count],
+            stats: RegolithStats::default(),
+        }
+    }
+}
+
 pub struct PlanetStatistics {
     pub tectonics: Statistics,
     /// Mean precipitation over land in m/yr.
@@ -495,6 +525,7 @@ impl Planet {
             cover_cohort: None,
             inland_change: 0.0,
             ocean_mismatch: 0,
+            regolith: RegolithFields::new(cell_count),
         };
         planet.update_water_cycle(&view);
         planet
@@ -528,6 +559,11 @@ impl Planet {
 
     pub fn temperature(&self) -> &TemperatureFields {
         self.temperature.fields()
+    }
+
+    /// The regolith of the last erosion step (#197).
+    pub fn regolith(&self) -> &RegolithFields {
+        &self.regolith
     }
 
     pub fn precipitation(&self) -> &[f64] {
@@ -828,8 +864,9 @@ impl Planet {
         view: &[f64],
     ) -> Duration {
         let open = open_sills(&self.erosion);
-        // Bedrock and sediment eroded per cell in the step (m/yr), for the weathering.
-        let mut eroded = vec![(0.0, 0.0); elevation.len()];
+        // Bedrock and sediment eroded per cell in the step (m/yr), and the fraction of the step
+        // its rock was bare, for the weathering.
+        let mut eroded = vec![(0.0, 0.0, 0.0); elevation.len()];
         if let Some(params) = &self.erosion {
             let dt_years = dt * 1e6;
             let (plate, class) = self.plates_and_classes();
@@ -869,16 +906,37 @@ impl Planet {
                     } else {
                         Vec::new()
                     },
+                    temperature: &self.temperature.fields().annual_mean,
+                    ice: &self.temperature.fields().ice,
+                    mafic: &(0..elevation.len() as u32)
+                        .map(|cell| 1.0 - self.tectonics.surface_crust(cell).felsic)
+                        .collect::<Vec<_>>(),
+                    regolith: &self.regolith.thickness,
                 },
                 params,
                 dt_years,
             );
             for (cell, eroded) in eroded.iter_mut().enumerate() {
+                // The regolith was counted as fresh rock when it was made (the bedrock lowering),
+                // so its removal is not counted again as eroded sediment.
+                let regolith_removed = self.regolith.thickness[cell] - result.regolith[cell];
                 *eroded = (
                     (-result.bedrock_delta[cell]).max(0.0) / dt_years,
-                    (-result.sediment_delta[cell]).max(0.0) / dt_years,
+                    (-result.sediment_delta[cell] - regolith_removed).max(0.0) / dt_years,
+                    result.bare[cell],
                 );
             }
+            self.regolith = RegolithFields {
+                bedrock_erosion: result
+                    .bedrock_delta
+                    .iter()
+                    .map(|d| (-d).max(0.0) / dt_years)
+                    .collect(),
+                thickness: result.regolith,
+                bare: result.bare,
+                production: result.production,
+                stats: result.regolith_stats,
+            };
             for (delta, class) in result.sediment_delta.iter().zip(&class) {
                 if *class == CrustClass::Continental {
                     if *delta < 0.0 {
@@ -997,7 +1055,7 @@ impl Planet {
     fn update_carbon(
         &mut self,
         elevation: &[f64],
-        eroded: &[(f64, f64)],
+        eroded: &[(f64, f64, f64)],
         dt: f64,
     ) -> Vec<LandCell> {
         let fields = self.temperature.fields();
@@ -1014,6 +1072,7 @@ impl Planet {
                 ice: fields.ice[cell],
                 bedrock_erosion: eroded[cell].0,
                 sediment_erosion: eroded[cell].1,
+                bare: eroded[cell].2,
                 bedrock_density: bedrock_density[cell],
             })
             .collect();
