@@ -73,9 +73,11 @@ Degassing: 10-Myr means of the logged sources (Tmol C/yr).
 | pCO₂ (bar) at 0 / 200 / 300 / 1000 Myr | 0.493 / 0.561 / 0.548 / 0.351 | 0.493 / 0.536 / 0.577 / 0.341 |
 | global temperature at 50 / 1000 Myr (°C) | 13.9 / 17.6 | 14.0 / 18.0 |
 
-- **Most of the ramp is gone.** The degassing starts at ~70% of its 200–500-Myr level instead
-  of ~37%; the ridge source (the new sea floor) at ~80–87% within 50 Myr instead of 44–70%.
-  The plumes are there from the start.
+- **About half of the ramp is gone.** Over the first 50 Myr the degassing averages 0.76 of its
+  200–500-Myr level instead of 0.54 (independent evaluation, below); in the first steps ~70%
+  instead of ~37%. The ridge source (the new sea floor) is at ~80–87% within 50 Myr instead of
+  44–70%, and the plumes are there from the start. Most of the remaining gap is arcs (~0.17)
+  and the metamorphic stock (~0.05).
 - **A slow rise remains** (10.5 → 13 Tmol/yr from 50 to 200 Myr, ~25%): partly the plate count
   (21 → 24–25 by 150–200 Myr, the model's count over its first few hundred Myr, before its
   long-term decline to 16–18 with #195), partly arcs, and the metamorphic stock (0.4 → 1.1,
@@ -115,12 +117,39 @@ source and faster plates).
 
 - Modern: φ hits #196's plausible-range clamp in both (a #196 matter); the CO₂ then drifts in
   both after the calibration.
-- **Supercontinent caveat**: the superocean becomes the largest plate, and the remaining plates
-  mostly fall inside the supercontinent, so 21 plates cut it into ~10–12 pieces (12 plates cut
-  it too, into fewer). The plate count falls back to 17–19 within 100 Myr (sutures), and the
-  largest plate stays at 26–30% instead of growing to 35–40% as in the base. A supercontinent
-  start may want fewer plates, or a partition that keeps the supercontinent together (a
-  follow-up if wanted).
+- **Supercontinent: the breakup changes.** The 21-plate partition does not split the
+  supercontinent into more large pieces than before (4–5 plates hold > 5% of the land at
+  t = 0, base 3–6; small plates sit mostly in the superocean and along its margins). But the
+  base re-welds the land onto one plate in 2 of 4 seeds by 100 Myr (largest plate 29 → 38 →
+  51%, ocean age stagnating at ~82 Myr), while the new start breaks up into 2–3 continents by
+  200 Myr in all 4 seeds (plate count 21 → 17–18, largest plate 25–30%). Plausible for a
+  Pangaea-like start, but a behaviour change; a supercontinent start may want fewer plates.
+
+## Independent evaluation (summary)
+
+A separate agent evaluated all runs (read-only). Its findings, which corrected two statements
+of the first draft (the ramp removed is about half, not most; the supercontinent is not cut into
+more pieces):
+
+- Degassing as a fraction of each run's 200–500-Myr mean, base → new: 1–50 Myr 0.54 → 0.76,
+  50–100 0.69 → 0.82, 100–150 0.81 → 0.87, 150–200 0.99 → 0.96. Same for modern (0.47 → 0.75)
+  and supercontinent (0.45 → 0.75).
+- 21 plates is a sensible compromise: it undershoots the 100–500-Myr level (24–25) by ~3 and
+  overshoots the late level (16–18); 18 overshoots to 28–29 early, 15 rises to 23.
+- Calibration quality: at the end of the phase the degassing over its last 30 Myr is 0.79 of
+  the later level (seeds 0.65–0.92); the old 150-Myr hold calibrated at 0.83 (0.58–1.01). About
+  as good, ~100 Myr earlier. Two seeds (0, 2) end on a still-rising trend; their degassing
+  climbs ~25% afterwards. The criterion cannot see a slow drift of ~10%/100 Myr in a 30-Myr span.
+- The post-calibration CO₂ drift is unchanged in size (new +9% at end + 150 Myr, peak +20%;
+  base +11%, peak +15%), with a wider seed spread (0.37–0.66 vs 0.44–0.61 bar).
+- The climate also spins up: the global temperature rises from 12.3 to ~16 °C over 200 Myr with
+  the CO₂ held (not CO₂-driven); φ is calibrated on a colder climate than later (14.1 °C at the
+  new phase end vs 15.3 °C at the base's 150 Myr). Modern: φ clamped at 3 in every seed
+  (balancing 3.7–8.7; base 4.3–5.7, also clamped).
+- Mantle priming helps early only (1–50 Myr 0.71 vs 0.56; 10 plumes vs 4, 3.5 vs 2.8 cm/yr at
+  50 Myr), no difference from 100 Myr on. No jump at t ≈ 1 Myr.
+- No crashes (60 runs). Sea level slightly better (lowest mean freeboard 160 m vs −28 m). A few
+  more "sea-level solve sees 96–104% of the sediment" warnings (9 vs 0–2 per 8 runs).
 
 ## Caveats
 
