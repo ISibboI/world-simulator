@@ -16,6 +16,107 @@ use super::*;
 /// thickness spills.
 const SPILL_RINGS: usize = 8;
 
+/// Subduction erosion at the trench cells in `eroded` (one entry per subducted sample, with
+/// the overriding plate), by `amount` (m of column over one cell, sediment first, down to
+/// oceanic thickness) per event, after the final assignment of samples to cells (`owners`).
+///
+/// Each event erodes the sample its cell shows. A sample shown at k cells is thinned once by
+/// the mean of its cells' erosion, `n / k × amount` for n events, not once per cell (#113): the
+/// books count it as one cell of area. The rest, `(1 − 1/k) n × amount`, is the erosion of the
+/// subducted slab area the extra cells stand for; it is taken in equal parts from the sample's
+/// neighbours on its plate (the adjacent forearc), so the erosion per subducted sample stays
+/// `amount` and in balance with arc growth. Every sample is thinned once with the sum of what it
+/// gets, in sample order. Returns nothing; the ledger and cover budget book what was removed.
+#[allow(clippy::too_many_arguments)]
+fn erode_overriding_samples(
+    mesh: &SphereMesh,
+    plates: &mut [Plate],
+    owners: &[Ownership],
+    eroded: &[(u32, u32)],
+    amount: f64,
+    ledger: &mut MassLedger,
+    cover_budget: &mut CoverBudget,
+    rates: &mut SharedSampleRates,
+) {
+    if eroded.is_empty() {
+        return;
+    }
+    // Per eroded sample, in the order of its first event: (sample, events, cells showing it).
+    let mut slots: HashMap<Ownership, usize> = HashMap::default();
+    let mut samples: Vec<(Ownership, u32, u32)> = Vec::new();
+    for &(cell, plate) in eroded {
+        let shown = owners[cell as usize];
+        // Matching changes which sample of its plate a cell shows, never the plate.
+        debug_assert_eq!(shown.plate, plate);
+        if shown.plate != plate {
+            continue;
+        }
+        let slot = *slots.entry(shown).or_insert_with(|| {
+            samples.push((shown, 0, 0));
+            samples.len() - 1
+        });
+        samples[slot].1 += 1;
+    }
+    for owner in owners {
+        if let Some(&slot) = slots.get(owner) {
+            samples[slot].2 += 1;
+        }
+    }
+    // Thickness to erode per sample.
+    let mut thinning: HashMap<Ownership, f64> = HashMap::default();
+    let mut neighbours: Vec<Ownership> = Vec::new();
+    for &(sample, events, cells) in &samples {
+        // Every event's cell shows the sample, so cells ≥ 1.
+        let cells = f64::from(cells.max(1));
+        let events = f64::from(events);
+        rates.erosion_events += events;
+        rates.erosion_per_sample += events / cells;
+        *thinning.entry(sample).or_default() += events / cells * amount;
+        let rest = events * (1.0 - 1.0 / cells) * amount;
+        if rest <= 0.0 {
+            continue;
+        }
+        let plate = &plates[sample.plate as usize];
+        neighbours.clear();
+        neighbours.extend(
+            mesh.neighbors(sample.local)
+                .iter()
+                .filter(|&&local| plate.crust[local as usize].is_some())
+                .map(|&local| Ownership {
+                    plate: sample.plate,
+                    local,
+                }),
+        );
+        if neighbours.is_empty() {
+            // No forearc around it: the sample takes it all, as one cell would.
+            *thinning.entry(sample).or_default() += rest;
+            continue;
+        }
+        rates.erosion_to_neighbours += rest / amount;
+        let share = rest / neighbours.len() as f64;
+        for &neighbour in &neighbours {
+            *thinning.entry(neighbour).or_default() += share;
+        }
+    }
+    let mut thinning: Vec<(Ownership, f64)> = thinning.into_iter().collect();
+    thinning.sort_unstable_by_key(|&(sample, _)| (sample.plate, sample.local));
+    for (sample, mut amount) in thinning {
+        let Some(crust) = &mut plates[sample.plate as usize].crust[sample.local as usize] else {
+            continue;
+        };
+        let before = crust.mass();
+        let column = *crust;
+        let from_sediment = amount.min(crust.sediment);
+        crust.remove_sediment_to(crust.sediment - from_sediment);
+        amount -= from_sediment;
+        crust.thin_from_below(
+            (crust.thickness - amount).max(crust.thickness.min(OCEANIC_THICKNESS)),
+        );
+        ledger.record(Term::SubductionErosion, crust.mass() - before);
+        cover_budget.record_change(CoverTerm::SubductionErosion, &column, crust);
+    }
+}
+
 impl Simulation {
     /// Orogenic collapse: the weak lower crust of thick, hot crust flows down the gradient of
     /// surface elevation (lower-crustal channel flow; Clark & Royden 2000, Bird 1991), spreading
@@ -38,6 +139,12 @@ impl Simulation {
     /// One-cell holes (see [`TectonicParams::hole_flow_depth`]) take crust from every neighbour
     /// of their plate with crust of continental origin at full mobility, down to half of the
     /// neighbour's thickness per step, until they are no longer holes (decided once per step).
+    ///
+    /// A sample shown at k cells has the edges of all k cells, but the books count it as one
+    /// cell of area. Each transfer between two cells is therefore divided by the larger number
+    /// of cells showing its source or its receiver sample, so a duplicated sample exchanges the
+    /// mean of its cells' exchanges, once, not their sum (#113, like the surface changes of
+    /// #57). The partner takes or gives exactly the same, so mass stays conserved locally.
     /// Returns the change of mass (zero up to rounding).
     fn crustal_flow_inner(&mut self, dt: f64) -> f64 {
         let params = &self.params;
@@ -64,6 +171,12 @@ impl Simulation {
         let mut transfers: Vec<(usize, usize, f64, f64, (f64, f64, f64))> = Vec::new();
         let mut touched: Vec<usize> = Vec::new();
         let holes = self.one_cell_holes();
+        // Per crust sample: the number of cells showing it.
+        let mut shown = vec![0u32; self.plates.len() * cell_count];
+        for &owner in &self.owners {
+            shown[sample_index(owner, cell_count)] += 1;
+        }
+        let (mut per_cell, mut per_sample) = (0.0, 0.0);
         for _ in 0..cycles {
             for cell in 0..cell_count as u32 {
                 let owner = self.owners[cell as usize];
@@ -121,9 +234,12 @@ impl Simulation {
                     } else {
                         (mobility, params.crustal_flow_threshold)
                     };
-                    let amount = (weight * mobility * drop / response).min(0.5 * equalising);
                     let from = sample_index(owner, cell_count);
                     let to = sample_index(neighbor_owner, cell_count);
+                    let amount = (weight * mobility * drop / response).min(0.5 * equalising);
+                    per_cell += amount * source.density;
+                    let amount = amount / f64::from(shown[from].max(shown[to]));
+                    per_sample += amount * source.density;
                     outflow[from] += amount;
                     inflow[to] += amount;
                     transfers.push((
@@ -192,6 +308,8 @@ impl Simulation {
             }
             touched.clear();
         }
+        self.shared_rates.flow_per_cell += per_cell;
+        self.shared_rates.flow_per_sample += per_sample;
         change
     }
 
@@ -211,6 +329,7 @@ impl Simulation {
             matching_statistics,
             trench_sediment,
             cover_budget,
+            shared_rates,
             ..
         } = self;
         let time = *time;
@@ -513,29 +632,8 @@ impl Simulation {
                     });
                 }
                 if !accretionary {
-                    eroded.push(winner);
+                    eroded.push((contact.cell, winner.plate));
                 }
-            }
-        }
-
-        // Subduction erosion: the slab scrapes material off the underside and front of the
-        // overriding plate and carries it into the mantle, sediment first. On Earth this and
-        // sediment subduction recycle about as much crust as arcs produce.
-        for ownership in eroded {
-            if let Some(crust) =
-                &mut plates[ownership.plate as usize].crust[ownership.local as usize]
-            {
-                let before = crust.mass();
-                let mut amount = params.subduction_erosion;
-                let column = *crust;
-                let from_sediment = amount.min(crust.sediment);
-                crust.remove_sediment_to(crust.sediment - from_sediment);
-                amount -= from_sediment;
-                crust.thin_from_below(
-                    (crust.thickness - amount).max(crust.thickness.min(OCEANIC_THICKNESS)),
-                );
-                ledger.record(Term::SubductionErosion, crust.mass() - before);
-                cover_budget.record_change(CoverTerm::SubductionErosion, &column, crust);
             }
         }
 
@@ -757,6 +855,20 @@ impl Simulation {
                 matching_statistics,
             );
         }
+        // Subduction erosion: the slab scrapes material off the underside and front of the
+        // overriding plate and carries it into the mantle, sediment first. On Earth this and
+        // sediment subduction recycle about as much crust as arcs produce. It works on the
+        // samples the cells finally show (see `erode_overriding_samples`).
+        erode_overriding_samples(
+            mesh,
+            plates,
+            owners,
+            &eroded,
+            params.subduction_erosion,
+            ledger,
+            cover_budget,
+            shared_rates,
+        );
         ResolvedBoundaries {
             additions,
             collisions,
@@ -2947,5 +3059,174 @@ mod tests {
         assert!(!spreading(DVec3::Y * 0.01, -DVec3::Y * 0.01));
         // Spreading slower than the threshold.
         assert!(!spreading(DVec3::ZERO, DVec3::Y * 0.0003));
+    }
+
+    /// A continent with a 70 km sample at `cell`, after one short crustal-flow step (one
+    /// sub-cycle, no cap binding), with `duplicates` cells set to show the sample of their
+    /// paired cell first. Returns the simulation and the thickness change per local sample.
+    fn collapse_once(cell: u32, duplicates: &[(u32, u32)]) -> (Simulation, Vec<f64>) {
+        let mut simulation = single_continent();
+        let local = simulation.owners[cell as usize].local as usize;
+        simulation.plates[0].crust[local]
+            .as_mut()
+            .unwrap()
+            .thickness = 70_000.0;
+        for &(shown_twice, at) in duplicates {
+            simulation.owners[at as usize] = simulation.owners[shown_twice as usize];
+        }
+        let before: Vec<f64> = simulation.plates[0]
+            .crust
+            .iter()
+            .map(|c| c.map_or(0.0, |c| c.thickness))
+            .collect();
+        let mass = simulation.total_mass();
+        simulation.crustal_flow(0.01);
+        assert!((simulation.total_mass() / mass - 1.0).abs() < 1e-12);
+        let change = simulation.plates[0]
+            .crust
+            .iter()
+            .zip(&before)
+            .map(|(c, before)| c.map_or(0.0, |c| c.thickness) - before)
+            .collect();
+        (simulation, change)
+    }
+
+    #[test]
+    fn duplicated_sources_collapse_once() {
+        // The 70 km sample shown at two adjacent cells exchanges over the 5 + 5 outer edges of
+        // its two cells, each at half the per-edge amount: 10/12 of what it gives from one cell
+        // over 6 edges, not 20/12 (#113).
+        let cell = 100u32;
+        let twin = single_continent().mesh.neighbors(cell)[0];
+        let (simulation, single) = collapse_once(cell, &[]);
+        let (_, twice) = collapse_once(cell, &[(cell, twin)]);
+        let local = simulation.owners[cell as usize].local as usize;
+        assert!(single[local] < 0.0);
+        assert!(
+            (twice[local] / single[local] - 10.0 / 12.0).abs() < 1e-9,
+            "{} vs {}",
+            twice[local],
+            single[local]
+        );
+        // A neighbour of the first cell only gets half of its single-cell share.
+        let mesh = &simulation.mesh;
+        let outer = mesh
+            .neighbors(cell)
+            .iter()
+            .copied()
+            .find(|&n| n != twin && !mesh.neighbors(twin).contains(&n))
+            .unwrap();
+        let outer = simulation.owners[outer as usize].local as usize;
+        assert!(single[outer] > 0.0);
+        assert!((twice[outer] / single[outer] - 0.5).abs() < 1e-9);
+        // The sample hidden by the twin takes no part.
+        let hidden = simulation.owners[twin as usize].local as usize;
+        assert_eq!(twice[hidden], 0.0);
+    }
+
+    #[test]
+    fn duplicated_receivers_take_once() {
+        // A neighbour sample shown at a second cell (not next to the source) receives half of
+        // what it receives as one cell.
+        let cell = 100u32;
+        let mesh = single_continent().mesh;
+        let receiver = mesh.neighbors(cell)[0];
+        let far = mesh
+            .neighbors(receiver)
+            .iter()
+            .copied()
+            .find(|&n| n != cell && !mesh.neighbors(cell).contains(&n))
+            .unwrap();
+        let (simulation, single) = collapse_once(cell, &[]);
+        let (_, twice) = collapse_once(cell, &[(receiver, far)]);
+        let receiver = simulation.owners[receiver as usize].local as usize;
+        let source = simulation.owners[cell as usize].local as usize;
+        assert!(single[receiver] > 0.0);
+        assert!((twice[receiver] / single[receiver] - 0.5).abs() < 1e-9);
+        assert!((twice[source] / single[source] - 5.5 / 6.0).abs() < 1e-9);
+    }
+
+    /// Erodes `events` (contact cells) on a continent where `twin` shows the sample of `cell`;
+    /// returns the thickness plus sediment change per local sample and the ledger term.
+    fn erode(sediment: f64, twin: Option<u32>, events: &[u32]) -> (Simulation, Vec<f64>, f64) {
+        let mut simulation = single_continent();
+        for crust in simulation.plates[0].crust.iter_mut().flatten() {
+            crust.sediment = sediment;
+        }
+        if let Some(twin) = twin {
+            simulation.owners[twin as usize] = simulation.owners[100];
+        }
+        let column = |c: &Option<Crust>| c.map_or(0.0, |c| c.thickness + c.sediment);
+        let before: Vec<f64> = simulation.plates[0].crust.iter().map(column).collect();
+        let mass = simulation.total_mass();
+        let events: Vec<(u32, u32)> = events.iter().map(|&cell| (cell, 0)).collect();
+        let Simulation {
+            mesh,
+            plates,
+            owners,
+            ledger,
+            cover_budget,
+            shared_rates,
+            params,
+            ..
+        } = &mut simulation;
+        erode_overriding_samples(
+            mesh,
+            plates,
+            owners,
+            &events,
+            params.subduction_erosion,
+            ledger,
+            cover_budget,
+            shared_rates,
+        );
+        let removed = simulation.total_mass() - mass;
+        assert!((simulation.ledger.subduction_erosion - removed).abs() < 1e-9 * removed.abs());
+        let change = simulation.plates[0]
+            .crust
+            .iter()
+            .zip(&before)
+            .map(|(c, before)| column(c) - before)
+            .collect();
+        (simulation, change, removed)
+    }
+
+    #[test]
+    fn duplicated_overriding_samples_are_eroded_once() {
+        let amount = TectonicParams::default().subduction_erosion;
+        let cell = 100u32;
+        let twin = single_continent().mesh.neighbors(cell)[0];
+        // One event per cell at both cells showing the sample: thinned once; the other cell's
+        // share comes from the sample's neighbours, so the erosion per event stays the same.
+        let (simulation, both, removed_both) = erode(0.0, Some(twin), &[cell, twin]);
+        let local = simulation.owners[cell as usize].local as usize;
+        assert!((both[local] + amount).abs() < 1e-9);
+        let neighbours: f64 = simulation
+            .mesh
+            .neighbors(local as u32)
+            .iter()
+            .map(|&n| both[n as usize])
+            .sum();
+        assert!((neighbours + amount).abs() < 1e-9, "{neighbours}");
+        let rates = simulation.shared_sample_rates();
+        assert_eq!(rates.erosion_events, 2.0);
+        assert_eq!(rates.erosion_per_sample, 1.0);
+        assert_eq!(rates.erosion_to_neighbours, 1.0);
+        // Without the twin, two events at one cell erode its sample twice, as before.
+        let (_, single, removed_single) = erode(0.0, None, &[cell, cell]);
+        assert!((single[local] + 2.0 * amount).abs() < 1e-9);
+        assert!(
+            single
+                .iter()
+                .enumerate()
+                .all(|(i, &c)| i == local || c == 0.0)
+        );
+        assert!((removed_both / removed_single - 1.0).abs() < 1e-12);
+        // One event, shown at two cells: half on the sample, sediment first.
+        let (eroded, half, _) = erode(100.0, Some(twin), &[cell]);
+        assert!((half[local] + 0.5 * amount).abs() < 1e-9);
+        let crust = eroded.plates[0].crust[local].unwrap();
+        assert_eq!(crust.sediment, 0.0);
+        assert!((crust.thickness - (35_000.0 - 0.5 * amount + 100.0)).abs() < 1e-9);
     }
 }

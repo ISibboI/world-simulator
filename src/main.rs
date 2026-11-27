@@ -1430,6 +1430,17 @@ fn snapshot(
         100.0 * sharing.kept / sharing.gross.max(1e-30),
         sharing.clamped,
     );
+    let rates = simulation.shared_sample_rates();
+    info!(
+        "    duplicated samples act once so far: crustal flow {:.2}% of the per-cell request \
+         ({:.3e} kg/m² per cell) | subduction erosion {:.0} events, {:.2}% on the eroded samples, \
+         {:.2}% on their neighbours",
+        100.0 * rates.flow_per_sample / rates.flow_per_cell.max(1e-30),
+        rates.flow_per_cell,
+        rates.erosion_events,
+        100.0 * rates.erosion_per_sample / rates.erosion_events.max(1e-30),
+        100.0 * rates.erosion_to_neighbours / rates.erosion_events.max(1e-30),
+    );
     info!(
         "    land masses {} ({} specks, largest {:.0}%) | continental crust masses {} ({} specks, \
          largest {:.0}%)",
