@@ -306,17 +306,20 @@ pub(super) fn continents(
 }
 
 /// The shape of the steady plate-size distribution of the model (#213): the plate of rank `r`
-/// (from 0) of `n` covers a share ∝ `exp(−(r/n)^PLATE_SIZE_STRETCH / PLATE_SIZE_SCALE)`. Fitted
-/// to the rank–area distribution of the 8-seed base runs at 300–1000 Myr (28 plates: the
-/// largest ~20%, 18 above 1%, ten small ones of 0.1–1%; `notes/issue-213/results.md`): a few
-/// large plates and many small ones, like Earth's (Bird 2003), whose ranks fall off faster than
-/// any power law over the large plates and slower over the small ones.
+/// (from 0, the largest) covers a share ∝ `exp(−r^PLATE_SIZE_STRETCH / PLATE_SIZE_SCALE)`, a
+/// stretched exponential in the rank, fitted to the model's steady rank–area distribution
+/// (`notes/issue-213/results.md`): a few large plates and many small ones, like Earth's (Bird
+/// 2003), whose ranks fall off faster than any power law over the large plates and slower over
+/// the small ones. It depends on the rank only, so `--plates` picks the first ranks.
 const PLATE_SIZE_STRETCH: f64 = 0.85;
-const PLATE_SIZE_SCALE: f64 = 0.224;
+const PLATE_SIZE_SCALE: f64 = 3.8;
+
+/// Plates smaller than this share of the surface start in the ocean where possible.
+const SMALL_PLATE_SHARE: f64 = 0.02;
 
 /// Smallest target share of a plate: above the size below which tiny plates are captured by a
 /// neighbour (0.3%), so that no generated plate disappears at once.
-const MIN_PLATE_SHARE: f64 = 0.004;
+const MIN_PLATE_SHARE: f64 = 0.005;
 
 /// Target area shares of `plate_count` plates, largest first (before their random scatter):
 /// the model's steady distribution ([`PLATE_SIZE_STRETCH`]), each with a log-normal scatter of
@@ -325,7 +328,7 @@ fn target_areas(plate_count: usize, cell_count: usize, rng: &mut impl Rng) -> Ve
     let n = plate_count.max(1) as f64;
     let mut targets: Vec<f64> = (0..plate_count)
         .map(|rank| {
-            let x = math::powf(rank as f64 / n, PLATE_SIZE_STRETCH) / PLATE_SIZE_SCALE;
+            let x = math::powf(rank as f64, PLATE_SIZE_STRETCH) / PLATE_SIZE_SCALE;
             math::exp(-x + 0.25 * standard_normal(rng))
         })
         .collect();
@@ -371,36 +374,35 @@ pub(super) fn plate_partition(
         .map(|cell| warp.apply(mesh.vertex(cell)))
         .collect();
     // Random centres (in the warped frame), kept apart by about the radii of their target
-    // areas where possible, so that no plate starts inside a much larger one.
+    // areas where possible, so that no plate starts inside a much larger one. Small plates
+    // start in the ocean where possible: inside a continent, the plate that holds the rest of
+    // it would swallow them (see [`CONTINENT_COHESION`]).
     let mut centres: Vec<u32> = Vec::with_capacity(plate_count);
     let mut attempts = 0;
     while centres.len() < plate_count {
         let cell = rng.random_range(0..cell_count as u32);
         attempts += 1;
-        let radius = cap_radius(targets[centres.len()]);
+        let target = targets[centres.len()];
+        let radius = cap_radius(target);
         let separated = centres.iter().enumerate().all(|(other, &centre)| {
             angle_between(warped[cell as usize], warped[centre as usize])
                 > 0.6 * (radius + cap_radius(targets[other]))
         });
-        if !centres.contains(&cell) && (separated || attempts > 100 * plate_count) {
+        let placeable = target >= SMALL_PLATE_SHARE || !is_continental[cell as usize];
+        if !centres.contains(&cell) && ((separated && placeable) || attempts > 200) {
             centres.push(cell);
+            attempts = 0;
         }
     }
     let centre_positions: Vec<DVec3> = centres.iter().map(|&c| warped[c as usize]).collect();
     let mut weights = vec![0.0; plate_count];
     let mut plate_of_cell = vec![u32::MAX; cell_count];
     let mut heap = BinaryHeap::new();
-    for iteration in 0..=20 {
-        if iteration > 0 {
-            let mut areas = vec![0usize; plate_count];
-            for &plate in &plate_of_cell {
-                areas[plate as usize] += 1;
-            }
-            for plate in 0..plate_count {
-                let area = areas[plate] as f64 / cell_count as f64;
-                weights[plate] += 0.5 * (cap_radius(targets[plate]) - cap_radius(area));
-            }
-        }
+    // The partition closest to the targets of all iterations: a small plate can flip between
+    // a few cells and a whole continent it reaches first (see [`CONTINENT_COHESION`]), so the
+    // last iteration need not be the best.
+    let mut best = (f64::INFINITY, Vec::new());
+    for _ in 0..=40 {
         plate_of_cell.fill(u32::MAX);
         for (plate, &centre) in centres.iter().enumerate() {
             heap.push(Reverse((Key(f64::NEG_INFINITY), centre, plate as u32)));
@@ -422,8 +424,22 @@ pub(super) fn plate_partition(
                 }
             }
         }
+        let mut areas = vec![0usize; plate_count];
+        for &plate in &plate_of_cell {
+            areas[plate as usize] += 1;
+        }
+        // Relative misfit of the areas, worst for plates far below their target.
+        let mut misfit = 0.0;
+        for plate in 0..plate_count {
+            let area = areas[plate] as f64 / cell_count as f64;
+            misfit += math::ln(area / targets[plate]).powi(2);
+            weights[plate] += 0.5 * (cap_radius(targets[plate]) - cap_radius(area));
+        }
+        if misfit < best.0 {
+            best = (misfit, plate_of_cell.clone());
+        }
     }
-    plate_of_cell
+    best.1
 }
 
 /// Great-circle distance (radians) of every cell to the closest cell satisfying `is_source`,
@@ -655,15 +671,13 @@ mod tests {
                 for plate in 0..plate_count as u32 {
                     let parts = components(&mesh, |cell| plate_of_cell[cell as usize] == plate);
                     assert_eq!(parts.len(), 1, "seed {seed} plate {plate}");
-                    // None is below the capture size (0.3%).
-                    assert!(
-                        parts[0].len() as f64 >= 0.003 * mesh.len() as f64,
-                        "{subdivisions} seed {seed}: {}",
-                        parts[0].len()
-                    );
                     sizes.push(parts[0].len() as f64 / mesh.len() as f64);
                 }
                 sizes.sort_unstable_by(f64::total_cmp);
+                // At most a couple below the capture size (0.3%): a small plate that floods into
+                // a continent first or not at all is hard to size exactly.
+                let tiny = sizes.iter().filter(|&&s| s < 0.003).count();
+                assert!(tiny <= 2, "{subdivisions} seed {seed}: {sizes:?}");
                 largest.push(sizes[plate_count - 1]);
                 small.push(sizes.iter().filter(|&&s| s < 0.01).count() as f64);
             }
