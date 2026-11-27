@@ -22,8 +22,10 @@ the forcing of the start for the whole run, and `--set carbon.NAME=VALUE` change
 
 `--epoch` (URL `epoch=`) sets the time of the planet's history at the start of a run, in Gyr
 counted forwards: `0` is the earliest start (4.0 Ga, once the planet has cooled enough for plates
-and oceans; the default), `0.5` the Archean (3.5 Ga), `4` today and up to `9.43` the future,
-before the sun leaves the main sequence. It sets the brightness of the sun and the default
+and oceans; the default), `0.5` the Archean (3.5 Ga), `4` today and up to `5.90` the future,
+when the sun is 1.2 times as bright as today: beyond, an ocean planet enters a runaway greenhouse,
+which the model does not simulate, so later epochs are refused and a run that would pass it is
+shortened to end there (#212). It sets the brightness of the sun and the default
 greenhouse forcing. Until #150 it counted backwards (Gyr before present); old values `x` are now
 `4 − x`. `--biosphere` (URL `biosphere=`) is `abiotic` (the default) or `modern`.
 

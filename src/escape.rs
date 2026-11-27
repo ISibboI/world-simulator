@@ -27,8 +27,13 @@
 //!   [`crate::tectonics::Simulation::remove_water`]), so the sea level falls, and the carbon
 //!   cycle sees the smaller ocean in its next step.
 //! - **Oxygen**: one O₂ per four H stays (no oxygen is dragged along). It is a source of abiotic
-//!   O₂ (#201); a placeholder sink of constant capacity ([`EscapeParams::oxygen_sink`]: reduced
-//!   volcanic gases, oxidation of the crust) removes it. What is left adds to the air.
+//!   O₂, and this module keeps the abiotic O₂ budget of #201 ([`OxygenSinks`]; #212 decision 1):
+//!   reduced gases of arc and plume volcanoes (in proportion to their mantle CO₂, Holland,
+//!   2002), the oxidation of new oceanic crust by hydrothermal alteration (per kg of new crust,
+//!   Lécuyer & Ricard, 1999) and the oxidation of the Fe²⁺ and sulfide that erosion exposes on
+//!   land, which needs O₂ (`1 − exp(−√(p/p_ox))`). The first two are capacities set by the
+//!   tectonics; what they cannot take, and the weathering at the new O₂ (an implicit step), adds
+//!   to the air.
 //! - **Not modelled**: ion pickup and sputtering by the solar wind, impact erosion and Jeans
 //!   escape of heavy gases (all minor for an Earth-sized planet with a magnetic field after the
 //!   heavy bombardment), hydrogen from other gases (H₂, CH₄; #202), and the runaway greenhouse.
@@ -37,7 +42,7 @@
 
 use tracing::warn;
 
-use crate::carbon::SEA_WATER_DENSITY;
+use crate::carbon::{LandCell, SEA_WATER_DENSITY};
 use crate::math;
 use crate::sun::SOLAR_AGE;
 
@@ -144,11 +149,22 @@ pub struct EscapeParams {
     pub heating_efficiency: f64,
     /// Latitude (degrees) within which the surface sets the cold trap.
     pub tropics_latitude: f64,
-    /// Capacity of the sinks of O₂ (mol/yr): reduced volcanic gases, oxidation of new sea floor
-    /// and of the Fe²⁺ of weathered rock, each of the order of 1 Tmol/yr on a tectonically
-    /// active planet (Catling & Kasting, 2017); a placeholder until the oxygen has a budget of
-    /// its own (#201).
-    pub oxygen_sink: f64,
+    /// O₂ taken up by the reduced gases (H₂, CO, H₂S, SO₂) of arc and plume volcanoes, in mol
+    /// O₂ per mol of their mantle CO₂ (Holland, 2002: somewhat below 0.2; Catling & Kasting,
+    /// 2017). The ridges' reductants are part of [`Self::seafloor_oxidation`].
+    pub volcanic_reductants: f64,
+    /// O₂ taken up by the hydrothermal oxidation of new oceanic crust (Fe²⁺ → Fe³⁺ and sulfide
+    /// of its upper ~0.6 km), mol O₂ per kg of new crust (Lécuyer & Ricard, 1999).
+    pub seafloor_oxidation: f64,
+    /// O₂ that the oxidative weathering of eroded felsic and basaltic bedrock takes up, mol O₂
+    /// per kg: half its Fe²⁺ to Fe³⁺, all its sulfide to sulfate. Eroded sediment counts as
+    /// oxidised already.
+    pub felsic_oxygen_demand: f64,
+    pub basalt_oxygen_demand: f64,
+    /// O₂ partial pressure (bar) of the weathering's oxidation, `1 − exp(−√(p/p_ox))` of the
+    /// exposed Fe²⁺ and sulfide (rate ∝ [O₂]^½, Williamson & Rimstidt, 1994): detrital pyrite
+    /// survives below ~1e-5 PAL and is gone above ~1e-3 PAL.
+    pub oxidation_pressure: f64,
     /// The escape stops when the ocean is down to this share of the planet's water at the start
     /// (the climate model needs an ocean).
     pub min_ocean_fraction: f64,
@@ -166,7 +182,11 @@ impl Default for EscapeParams {
             xuv_saturation_age: 0.1,
             heating_efficiency: 0.15,
             tropics_latitude: 20.0,
-            oxygen_sink: 3e12,
+            volcanic_reductants: 0.15,
+            seafloor_oxidation: 0.008,
+            felsic_oxygen_demand: 0.089,
+            basalt_oxygen_demand: 0.23,
+            oxidation_pressure: 2e-5,
             min_ocean_fraction: 0.01,
         }
     }
@@ -188,7 +208,11 @@ impl EscapeParams {
             "xuv_saturation_age" => &mut self.xuv_saturation_age,
             "heating_efficiency" => &mut self.heating_efficiency,
             "tropics_latitude" => &mut self.tropics_latitude,
-            "oxygen_sink" => &mut self.oxygen_sink,
+            "volcanic_reductants" => &mut self.volcanic_reductants,
+            "seafloor_oxidation" => &mut self.seafloor_oxidation,
+            "felsic_oxygen_demand" => &mut self.felsic_oxygen_demand,
+            "basalt_oxygen_demand" => &mut self.basalt_oxygen_demand,
+            "oxidation_pressure" => &mut self.oxidation_pressure,
             "min_ocean_fraction" => &mut self.min_ocean_fraction,
             _ => anyhow::bail!("unknown escape parameter {name}"),
         };
@@ -341,6 +365,109 @@ pub struct StepInput<'a> {
     pub planet_radius: f64,
     /// Volume of the ocean in m³.
     pub ocean_volume: f64,
+    /// Mantle CO₂ of arc and plume volcanoes (mol C/yr) and new oceanic crust (kg/yr), from the
+    /// carbon cycle.
+    pub volcanic_degassing: f64,
+    pub new_crust: f64,
+    /// The land cells with their erosion in the step.
+    pub land: &'a [LandCell],
+}
+
+/// The sinks of O₂ in mol O₂/yr (rates) or mol (totals).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OxygenSinks {
+    /// Reduced gases of arc and plume volcanoes.
+    pub volcanic: f64,
+    /// Oxidation of new oceanic crust.
+    pub seafloor: f64,
+    /// Oxidative weathering on land.
+    pub weathering: f64,
+}
+
+impl OxygenSinks {
+    pub fn total(&self) -> f64 {
+        self.volcanic + self.seafloor + self.weathering
+    }
+
+    fn add(&self, other: &OxygenSinks) -> OxygenSinks {
+        OxygenSinks {
+            volcanic: self.volcanic + other.volcanic,
+            seafloor: self.seafloor + other.seafloor,
+            weathering: self.weathering + other.weathering,
+        }
+    }
+}
+
+/// The O₂ (mol/yr) that the weathering of the land's eroded bedrock takes up when all of it is
+/// oxidised.
+pub fn weathering_oxygen_demand(params: &EscapeParams, land: &[LandCell]) -> f64 {
+    land.iter()
+        .filter(|cell| cell.ice < 1.0)
+        .map(|cell| {
+            let mafic = cell.mafic.clamp(0.0, 1.0);
+            let demand = params.felsic_oxygen_demand
+                + mafic * (params.basalt_oxygen_demand - params.felsic_oxygen_demand);
+            cell.area * cell.bedrock_erosion.max(0.0) * cell.bedrock_density * demand
+        })
+        .sum()
+}
+
+/// Share of the exposed Fe²⁺ and sulfide that is oxidised at the O₂ partial pressure `pressure`
+/// (bar): `1 − exp(−√(p/p_ox))`.
+pub fn oxidised_share(params: &EscapeParams, pressure: f64) -> f64 {
+    if pressure <= 0.0 || params.oxidation_pressure <= 0.0 {
+        return if pressure > 0.0 { 1.0 } else { 0.0 };
+    }
+    -math::exp_m1(-(pressure / params.oxidation_pressure).sqrt())
+}
+
+/// The O₂ budget of a step of `years`: `available` mol (the air's and the step's source) meet
+/// the fixed capacities (mol/yr) of the volcanic and seafloor sinks and the weathering's demand
+/// `weathering` (mol/yr at full oxidation), which needs O₂ (`pressure_per_mol`: bar per mol).
+/// Returns what each sink takes (mol) and the O₂ left; the sinks and the rest add up to
+/// `available` (to rounding).
+fn oxygen_step(
+    params: &EscapeParams,
+    available: f64,
+    years: f64,
+    capacity: OxygenSinks,
+    pressure_per_mol: f64,
+) -> (OxygenSinks, f64) {
+    let fixed = years * (capacity.volcanic + capacity.seafloor);
+    if available <= fixed {
+        // All goes to the fixed sinks, in proportion to their capacity (W(0) = 0).
+        let share = if fixed > 0.0 { available / fixed } else { 0.0 };
+        let volcanic = years * capacity.volcanic * share;
+        let taken = OxygenSinks {
+            volcanic,
+            seafloor: available - volcanic,
+            weathering: 0.0,
+        };
+        return (taken, 0.0);
+    }
+    // Backward Euler: N + y (G + F + W(p(N))) = available, increasing in N.
+    let weathering =
+        |n: f64| years * capacity.weathering * oxidised_share(params, n * pressure_per_mol);
+    let excess = |n: f64| n + fixed + weathering(n) - available;
+    let (mut low, mut high) = (0.0, available - fixed);
+    for _ in 0..200 {
+        let middle = 0.5 * (low + high);
+        if middle <= low || middle >= high {
+            break;
+        }
+        if excess(middle) > 0.0 {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    let taken = OxygenSinks {
+        volcanic: years * capacity.volcanic,
+        seafloor: years * capacity.seafloor,
+        weathering: weathering(high).min(available - fixed),
+    };
+    let left = (available - taken.total()).max(0.0);
+    (taken, left)
 }
 
 /// The state of the escape after a step, for the log and the statistics.
@@ -364,8 +491,12 @@ pub struct EscapeState {
     /// O₂ left behind so far, taken up by the sinks so far, and in the air (mol), and the
     /// partial pressure of that (bar).
     pub oxygen_produced: f64,
-    pub oxygen_consumed: f64,
+    pub oxygen_consumed: OxygenSinks,
     pub oxygen: f64,
+    /// The sinks' capacity in the step (mol/yr; the weathering's at full oxidation) and what
+    /// they took (mol/yr).
+    pub sink_capacity: OxygenSinks,
+    pub sink_rates: OxygenSinks,
     pub oxygen_pressure: f64,
     /// Whether the ocean has reached [`EscapeParams::min_ocean_fraction`].
     pub at_floor: bool,
@@ -383,7 +514,9 @@ impl EscapeState {
             "escape: tropics {:.1} °C, stratospheric H₂O {:.2e} (cold point at {:.3e} Pa) | H {:.2e} cm⁻² s⁻¹ ({}; \
              diffusion limit {:.2e}, energy limit {:.2e} at XUV {:.2} mW/m²) | water {:.3e} \
              kg/yr, lost so far {:.3e} kg | O₂ produced {:.3e} mol, sinks {:.3e}, in the air \
-             {:.3e} mol ({:.2e} bar){}",
+             {:.3e} mol ({:.2e} bar) | O₂ sinks {:.3} Tmol/yr (volcanic {:.3} of {:.3}, \
+             seafloor {:.3} of {:.3}, weathering {:.3} of {:.3}), so far volcanic {:.3e}, \
+             seafloor {:.3e}, weathering {:.3e} mol{}",
             self.tropical_temperature,
             self.stratospheric_water,
             self.cold_point_pressure,
@@ -399,9 +532,19 @@ impl EscapeState {
             self.water_loss_rate,
             self.water_lost,
             self.oxygen_produced,
-            self.oxygen_consumed,
+            self.oxygen_consumed.total(),
             self.oxygen,
             self.oxygen_pressure,
+            self.sink_rates.total() / 1e12,
+            self.sink_rates.volcanic / 1e12,
+            self.sink_capacity.volcanic / 1e12,
+            self.sink_rates.seafloor / 1e12,
+            self.sink_capacity.seafloor / 1e12,
+            self.sink_rates.weathering / 1e12,
+            self.sink_capacity.weathering / 1e12,
+            self.oxygen_consumed.volcanic,
+            self.oxygen_consumed.seafloor,
+            self.oxygen_consumed.weathering,
             if self.at_floor {
                 " | ocean at its floor"
             } else {
@@ -487,9 +630,24 @@ impl Escape {
         }
         // One O₂ per two H₂O.
         let produced = water_mass / WATER_MOLAR_MASS / 2.0;
-        let oxygen = self.state.oxygen + produced;
-        let consumed = oxygen.min(params.oxygen_sink.max(0.0) * input.years);
-        let oxygen = oxygen - consumed;
+        let capacity = OxygenSinks {
+            volcanic: params.volcanic_reductants.max(0.0) * input.volcanic_degassing.max(0.0),
+            seafloor: params.seafloor_oxidation.max(0.0) * input.new_crust.max(0.0),
+            weathering: weathering_oxygen_demand(params, input.land),
+        };
+        let pressure_per_mol = OXYGEN_MOLAR_MASS * GRAVITY / area / 1e5;
+        let (taken, oxygen) = oxygen_step(
+            params,
+            self.state.oxygen + produced,
+            input.years,
+            capacity,
+            pressure_per_mol,
+        );
+        let rates = OxygenSinks {
+            volcanic: taken.volcanic / input.years,
+            seafloor: taken.seafloor / input.years,
+            weathering: taken.weathering / input.years,
+        };
         self.state = EscapeState {
             tropical_temperature,
             stratospheric_water: water,
@@ -501,9 +659,11 @@ impl Escape {
             water_loss_rate: water_mass / input.years,
             water_lost: self.state.water_lost + water_mass,
             oxygen_produced: self.state.oxygen_produced + produced,
-            oxygen_consumed: self.state.oxygen_consumed + consumed,
+            oxygen_consumed: self.state.oxygen_consumed.add(&taken),
             oxygen,
-            oxygen_pressure: oxygen * OXYGEN_MOLAR_MASS * GRAVITY / area / 1e5,
+            oxygen_pressure: oxygen * pressure_per_mol,
+            sink_capacity: capacity,
+            sink_rates: rates,
             at_floor,
         };
         water_mass / SEA_WATER_DENSITY
@@ -577,6 +737,10 @@ mod tests {
             sun_age: SOLAR_AGE,
             planet_radius: RADIUS,
             ocean_volume,
+            // ~0.5 and ~1.3 Tmol O₂/yr.
+            volcanic_degassing: 3e12,
+            new_crust: 1.6e14,
+            land: &[],
         }
     }
 
@@ -593,11 +757,14 @@ mod tests {
         assert!(!state.energy_limited());
         // Far below the sinks: no O₂ in the air.
         assert_eq!(state.oxygen, 0.0);
-        assert_eq!(state.oxygen_consumed, state.oxygen_produced);
+        assert!(
+            (state.oxygen_consumed.total() - state.oxygen_produced).abs()
+                <= 1e-12 * state.oxygen_produced
+        );
 
         // Sinks that take all the O₂ (it would otherwise dry the stratosphere, see below).
         let params = EscapeParams {
-            oxygen_sink: 1e20,
+            volcanic_reductants: 1e20,
             ..EscapeParams::default()
         };
         let mut escape = Escape::new(params, OCEAN);
@@ -619,12 +786,12 @@ mod tests {
                 < 1e-9 * state.oxygen_produced
         );
         assert!(
-            (state.oxygen + state.oxygen_consumed - state.oxygen_produced).abs()
+            (state.oxygen + state.oxygen_consumed.total() - state.oxygen_produced).abs()
                 < 1e-9 * state.oxygen_produced
         );
         assert_eq!(state.oxygen, 0.0);
 
-        // With the placeholder sink the O₂ builds up (bars), dilutes the vapour and ends the
+        // With sinks of a few Tmol/yr the O₂ builds up (bars), dilutes the vapour and ends the
         // fast loss: the escape becomes diffusion-limited.
         let mut escape = Escape::new(EscapeParams::default(), OCEAN);
         let mut ocean = OCEAN;
@@ -638,7 +805,7 @@ mod tests {
         assert!(!state.energy_limited());
         assert!(escape.step(&input(&[100.0], ocean)) < 0.5 * first);
         assert!(
-            (state.oxygen + state.oxygen_consumed - state.oxygen_produced).abs()
+            (state.oxygen + state.oxygen_consumed.total() - state.oxygen_produced).abs()
                 < 1e-9 * state.oxygen_produced
         );
     }
@@ -649,7 +816,7 @@ mod tests {
         let params = EscapeParams {
             min_ocean_fraction: 0.5,
             heating_efficiency: 1e3,
-            oxygen_sink: 1e20,
+            volcanic_reductants: 1e20,
             ..EscapeParams::default()
         };
         let mut escape = Escape::new(params, OCEAN);
@@ -672,5 +839,136 @@ mod tests {
         escape.step(&input(&[70.0], OCEAN));
         assert!(spread > 1.5 * escape.state().stratospheric_water);
         assert_eq!(escape.step(&input(&[], OCEAN)), 0.0);
+    }
+
+    fn eroding_land() -> Vec<LandCell> {
+        (0..10)
+            .map(|cell| LandCell {
+                area: 1e12,
+                temperature: 15.0,
+                runoff: 0.3,
+                ice: if cell == 0 { 1.0 } else { 0.0 },
+                bedrock_erosion: 5e-5,
+                sediment_erosion: 1e-4,
+                bedrock_density: 2800.0,
+                mafic: cell as f64 / 9.0,
+            })
+            .collect()
+    }
+
+    /// The weathering's demand follows the eroded bedrock and its rock; its oxidation the O₂.
+    #[test]
+    fn weathering_demand_and_oxidation() {
+        let params = EscapeParams::default();
+        let land = eroding_land();
+        // 9 ice-free cells of 1.4e11 kg/yr each, half-way between felsic and basalt on average.
+        let demand = weathering_oxygen_demand(&params, &land);
+        let rock = 9.0 * 1e12 * 5e-5 * 2800.0;
+        let mean = land[1..]
+            .iter()
+            .map(|cell| 0.089 + cell.mafic * (0.23 - 0.089))
+            .sum::<f64>()
+            / 9.0;
+        assert!((demand / (rock * mean) - 1.0).abs() < 1e-12, "{demand}");
+        assert_eq!(oxidised_share(&params, 0.0), 0.0);
+        let pal = 0.21;
+        let low = oxidised_share(&params, 1e-5 * pal);
+        let high = oxidised_share(&params, 1e-3 * pal);
+        assert!((0.2..0.35).contains(&low), "{low}");
+        assert!(high > 0.95, "{high}");
+        assert!(oxidised_share(&params, 1.0) > 0.999_999);
+    }
+
+    /// The O₂ budget closes over many steps with changing sources and sinks: produced = taken
+    /// by each sink + left in the air, the sinks never take more than there is, and nothing is
+    /// left while the fixed sinks exceed the source.
+    #[test]
+    fn oxygen_budget_closes() {
+        let params = EscapeParams::default();
+        let land = eroding_land();
+        let mut escape = Escape::new(params.clone(), OCEAN);
+        let mut ocean = OCEAN;
+        let mut produced_before = 0.0;
+        let mut oxygen_before = 0.0;
+        let mut peak = 0.0;
+        for step in 0..400 {
+            // Temperate, then a moist greenhouse, then temperate again; the tectonics vary.
+            let celsius = [match step {
+                0..100 => 20.0,
+                100..300 => 95.0 + (step % 7) as f64,
+                _ => 25.0,
+            }];
+            let mut step_input = input(&celsius, ocean);
+            step_input.years = 1e6;
+            step_input.volcanic_degassing = 1e12 * (1.0 + (step % 5) as f64);
+            step_input.new_crust = 1e14 * (1.0 + (step % 3) as f64);
+            step_input.land = &land;
+            ocean -= escape.step(&step_input);
+            let state = *escape.state();
+            let available = oxygen_before + state.oxygen_produced - produced_before;
+            let taken = state.sink_rates.total() * 1e6;
+            assert!(
+                taken <= available * (1.0 + 1e-12),
+                "{step}: {taken} > {available}"
+            );
+            assert!(state.oxygen >= 0.0);
+            assert!(
+                (state.oxygen + state.oxygen_consumed.total() - state.oxygen_produced).abs()
+                    <= 1e-12 * state.oxygen_produced,
+                "{step}"
+            );
+            // The fixed sinks take what they can before the weathering, which needs O₂.
+            if state.oxygen == 0.0 {
+                assert_eq!(state.sink_rates.weathering, 0.0);
+            } else {
+                assert_eq!(state.sink_rates.volcanic, state.sink_capacity.volcanic);
+                assert_eq!(state.sink_rates.seafloor, state.sink_capacity.seafloor);
+                assert!(state.sink_rates.weathering <= state.sink_capacity.weathering);
+            }
+            match step {
+                99 => assert_eq!(state.oxygen, 0.0),
+                299 => {
+                    // Bars of O₂: the weathering is fully oxidising.
+                    assert!(state.oxygen_pressure > 0.1, "{}", state.oxygen_pressure);
+                    let share = state.sink_rates.weathering / state.sink_capacity.weathering;
+                    assert!(share > 0.99, "{share}");
+                    peak = state.oxygen;
+                }
+                _ => {}
+            }
+            produced_before = state.oxygen_produced;
+            oxygen_before = state.oxygen;
+        }
+        // Afterwards the sinks draw the O₂ down again.
+        let state = *escape.state();
+        assert!(state.oxygen < peak, "{} {peak}", state.oxygen);
+        let consumed = state.oxygen_consumed;
+        assert!(consumed.volcanic > 0.0 && consumed.seafloor > 0.0 && consumed.weathering > 0.0);
+    }
+
+    /// The implicit step meets the root: with only the weathering (no fixed sinks), the O₂ that
+    /// stays and the weathering at its pressure add up to the O₂ there was.
+    #[test]
+    fn implicit_weathering_step() {
+        let params = EscapeParams::default();
+        let capacity = OxygenSinks {
+            volcanic: 0.0,
+            seafloor: 0.0,
+            weathering: 2e12,
+        };
+        let per_mol =
+            OXYGEN_MOLAR_MASS * GRAVITY / (4.0 * std::f64::consts::PI * RADIUS * RADIUS) / 1e5;
+        // (Where nearly all is taken, the steep √p makes the check need more than rounding.)
+        for available in [1e18, 1e20, 1e21, 1e22] {
+            let (taken, left) = oxygen_step(&params, available, 1e6, capacity, per_mol);
+            assert!(left > 0.0);
+            let expected = 1e6 * 2e12 * oxidised_share(&params, left * per_mol);
+            assert!(
+                (taken.weathering - expected).abs() <= 1e-6 * expected,
+                "{available}: {} vs {expected}",
+                taken.weathering
+            );
+            assert!((taken.total() + left - available).abs() <= 1e-12 * available);
+        }
     }
 }

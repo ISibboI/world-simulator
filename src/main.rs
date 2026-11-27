@@ -91,7 +91,8 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = InitialConfiguration::Dispersed)]
     initial: InitialConfiguration,
 
-    /// Simulated duration in Myr.
+    /// Simulated duration in Myr. Shortened (with a warning) so that the run ends by epoch 5.90,
+    /// when the Sun is 1.2 times as bright as today (see `--epoch`).
     #[arg(long, default_value_t = 500.0)]
     duration: f64,
 
@@ -200,8 +201,9 @@ struct Cli {
 
     /// Time of the planet's history at the start of the run, in Gyr counted forwards: 0 is the
     /// earliest start (4.0 Ga, when the planet has cooled enough for plates and oceans; the
-    /// default), 0.5 the Archean (3.5 Ga), 4 today, up to 9.43 (the Sun before it leaves the main
-    /// sequence). Sets the solar constant of the Sun, which then brightens during the run (~1% per
+    /// default), 0.5 the Archean (3.5 Ga), 4 today, up to 5.90 (the Sun 1.2 times as bright as
+    /// today; beyond, an ocean planet enters a runaway greenhouse, which the model does not
+    /// simulate, and a run that would pass it is shortened to end there). Sets the solar constant of the Sun, which then brightens during the run (~1% per
     /// 100 Myr; `--set temperature.solar_brightening=0` keeps it), and, unless `--co2` is given, a
     /// greenhouse forcing that offsets the difference to today's Sun at the start (in the future
     /// at most down to an atmosphere without CO₂, −30 W/m²). The carbon cycle then changes the
@@ -583,6 +585,15 @@ impl Cli {
         self.check()?;
         self.parameters().map(|_| ())
     }
+
+    /// The simulated duration in Myr: `--duration`, shortened to whole steps that end by
+    /// [`sun::MAX_EPOCH`], when the Sun is [`sun::MAX_LUMINOSITY`] times as bright as today
+    /// (beyond, an ocean planet enters a runaway greenhouse, which the model does not simulate;
+    /// #212). Exactly `--duration` when the run ends before.
+    fn run_duration(&self) -> f64 {
+        let left = ((sun::MAX_EPOCH - self.epoch) * 1000.0 / self.dt).floor() * self.dt;
+        self.duration.min(left.max(0.0))
+    }
 }
 
 /// The luminosity of the Sun relative to today's above which an Earth-like planet enters a moist
@@ -609,15 +620,25 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
              Goldblatt, 2014); above that it is extrapolated"
         );
     }
-    if sun::Sun::of_run(cli.epoch, cli.duration).luminosity > MOIST_GREENHOUSE {
+    let duration = cli.run_duration();
+    if duration < cli.duration {
+        warn!(
+            "the run is shortened from {} to {duration} Myr: it ends at epoch {:.2}, when the Sun \
+             is {} times as bright as today; beyond, an ocean planet enters a runaway greenhouse \
+             (its ocean boils into a steam atmosphere), which the model does not simulate",
+            cli.duration,
+            sun::MAX_EPOCH,
+            sun::MAX_LUMINOSITY,
+        );
+    }
+    if sun::Sun::of_run(cli.epoch, duration).luminosity > MOIST_GREENHOUSE {
         warn!(
             "the Sun of this run (epoch {}, {} Myr) becomes more than {MOIST_GREENHOUSE} times as \
              bright as today's; a real ocean planet would lose its water in a moist greenhouse \
-             (Kasting, 1988){}, and beyond ~1.2 times it would boil its ocean into a steam \
-             atmosphere (runaway greenhouse), which the model does not simulate: its ocean stays \
-             liquid at any temperature",
+             (Kasting, 1988){}; the runaway greenhouse beyond ~1.2 times, where the ocean boils \
+             into a steam atmosphere, is not simulated (runs end there)",
             cli.epoch,
-            cli.duration,
+            duration,
             if cli.no_escape {
                 ", which `--no-escape` turns off"
             } else {
@@ -736,7 +757,7 @@ impl Run {
         snapshot(&planet, cli, &mut previous_ledger)?;
         Ok(Self {
             planet,
-            steps: (cli.duration / cli.dt).round() as u64,
+            steps: (cli.run_duration() / cli.dt).round() as u64,
             step: 0,
             snapshot_every: ((cli.snapshot_interval / cli.dt).round() as u64).max(1),
             start,

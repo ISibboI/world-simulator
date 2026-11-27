@@ -954,8 +954,8 @@ impl Planet {
             ));
         }
         let start_carbon = Instant::now();
-        self.update_carbon(view, &eroded, dt);
-        self.update_escape(dt);
+        let land = self.update_carbon(view, &eroded, dt);
+        self.update_escape(dt, &land);
         let carbon_time = start_carbon.elapsed();
         if self.cover_cohort.is_none() && self.tectonics.time() >= self.cover_cohort_time - 1e-9 {
             let mass = self.tectonics.start_cover_cohort();
@@ -971,8 +971,13 @@ impl Planet {
 
     /// One step of the carbon cycle on the step's climate (`elevation` as the climate saw it)
     /// and erosion (`eroded`: bedrock and sediment per cell in m/yr), which sets the greenhouse
-    /// forcing of the next climate update unless the cycle is off.
-    fn update_carbon(&mut self, elevation: &[f64], eroded: &[(f64, f64)], dt: f64) {
+    /// forcing of the next climate update unless the cycle is off. Returns the land cells it saw.
+    fn update_carbon(
+        &mut self,
+        elevation: &[f64],
+        eroded: &[(f64, f64)],
+        dt: f64,
+    ) -> Vec<LandCell> {
         let fields = self.temperature.fields();
         let runoff = &self.climate.water_cycle().runoff;
         let bedrock_density = self.tectonics.bedrock_densities();
@@ -1020,11 +1025,13 @@ impl Planet {
             self.temperature.params_mut().greenhouse_forcing = forcing;
         }
         info!(time = %format_args!("{time:.1}"), "{}", self.carbon.state().summary());
+        land
     }
 
     /// One step of the escape (#210) on the step's climate and CO₂: the water it loses is taken
-    /// from the ocean. Nothing happens when it is off.
-    fn update_escape(&mut self, dt: f64) {
+    /// from the ocean, its O₂ meets the sinks of the step's tectonics and erosion (`land`).
+    /// Nothing happens when it is off.
+    fn update_escape(&mut self, dt: f64, land: &[LandCell]) {
         if !self.escape.params().enabled {
             return;
         }
@@ -1049,6 +1056,9 @@ impl Planet {
             sun_age: crate::sun::age_of_run(self.temperature.params().epoch, time),
             planet_radius: self.planet_radius,
             ocean_volume: self.tectonics.ocean_volume(),
+            volcanic_degassing: self.carbon.state().arc_plume_mantle_degassing,
+            new_crust: self.carbon.state().new_crust,
+            land,
         });
         if volume > 0.0 {
             self.tectonics.remove_water(volume);

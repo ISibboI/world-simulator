@@ -313,6 +313,11 @@ pub struct CarbonState {
     /// Share of the land weathering's supply limit that the kinetics use (0 to 1): near 1 the
     /// weathering is supply-limited.
     pub weathering_intensity: f64,
+    /// New oceanic crust (kg/yr, smoothed like the degassing) and the degassing of the mantle at
+    /// arcs and plumes (mol C/yr: the wedge's own carbon and the plumes', without recycled
+    /// sediment and seafloor carbon), for the O₂ sinks of the escape (#210).
+    pub new_crust: f64,
+    pub arc_plume_mantle_degassing: f64,
 }
 
 impl CarbonState {
@@ -659,6 +664,9 @@ impl CarbonCycle {
             predicted_warming: predicted,
             deep_water_temperature: input.deep_water_temperature,
             weathering_intensity: intensity,
+            new_crust: ridge_crust,
+            arc_plume_mantle_degassing: params.wedge_carbon * rates.subducted
+                + params.plume_carbon * drivers.plume_flux,
         };
         forcing
     }
