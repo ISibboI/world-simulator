@@ -53,6 +53,7 @@ mod polarity;
 mod sheet;
 mod statistics;
 mod topology;
+mod volcanism;
 mod weak_zones;
 
 pub use boundaries::{GapStatistics, TrenchSediment};
@@ -71,6 +72,7 @@ pub use mantle::{MantleParams, Plume};
 pub use matching::{MatchingParams, MatchingStatistics};
 pub use sheet::{SheetParams, SheetStatistics};
 pub use statistics::*;
+pub use volcanism::{PLUME_CRUST_DENSITY, VolcanismParams, VolcanismRecord};
 pub use weak_zones::{
     MIN_STRENGTH, combine_strength, fabric_strength, orogenic_strength, thermal_strength,
 };
@@ -304,6 +306,8 @@ pub struct TectonicParams {
     pub min_sea_fraction: f64,
     /// Mantle flow below the plates.
     pub mantle: MantleParams,
+    /// Volcanism of the mantle plumes (see [`volcanism`]).
+    pub volcanism: VolcanismParams,
     /// How plates are matched to cells.
     pub matching: MatchingParams,
     /// Rifting, subduction initiation and suturing.
@@ -387,6 +391,7 @@ impl Default for TectonicParams {
             ocean_volume: 1.335e18,
             min_sea_fraction: crate::sea::NO_SIZE_RULE,
             mantle: MantleParams::default(),
+            volcanism: VolcanismParams::default(),
             matching: MatchingParams::default(),
             events: PlateEventParams::default(),
             polarity_memory: 20.0,
@@ -411,6 +416,9 @@ impl TectonicParams {
         }
         if let Some(name) = name.strip_prefix("breakup.") {
             return self.breakup.set(name, value);
+        }
+        if let Some(name) = name.strip_prefix("volcanism.") {
+            return self.volcanism.set(name, value);
         }
         let sediment = &mut self.initial_sediment;
         let field = match name {
@@ -743,6 +751,8 @@ pub struct Simulation {
     polarities: polarity::Polarities,
     rng: ChaCha8Rng,
     mantle: mantle::MantleFlow,
+    /// The plumes' volcanism so far (see [`volcanism`]).
+    volcanism: volcanism::Volcanism,
     /// Dynamic topography of every world cell (m, dry): the deflection of the surface by the
     /// mantle flow below (see [`mantle::MantleFlow::dynamic_topography`]).
     dynamic_topography: Vec<f64>,
@@ -971,6 +981,7 @@ impl Simulation {
             owners,
             polarities,
             mantle,
+            volcanism: volcanism::Volcanism::new(seed),
             gap_statistics: GapStatistics::default(),
             trench_sediment: TrenchSediment::default(),
             event_counts: EventCounts::default(),
@@ -1263,6 +1274,8 @@ impl Simulation {
             // The first solve's trenches fill the mantle's memory (#213).
             self.mantle.prime(dt, &subduction, &slabs, &mut self.rng);
         }
+        // The plumes' crust: LIPs of the heads that arrived, tails of the older plumes.
+        self.volcanism_step(dt);
 
         let sea_level = self.solve_sea_level();
         self.sea_level_budget.tectonics += sea_level - self.sea_level;
@@ -1347,6 +1360,7 @@ impl Simulation {
             subducted_sediment: -ledger.subducted_sediment * cell_area,
             metamorphic_sediment: (self.metamorphosed.0 + self.metamorphosed.1) * 1e12
                 + self.trench_sediment.stacked * cell_area,
+            lip_crust: ledger.lips * cell_area,
             // `+ 0.0`: the empty sum is −0.
             plume_flux: self.plumes().iter().map(Plume::flux).sum::<f64>() + 0.0,
         }
