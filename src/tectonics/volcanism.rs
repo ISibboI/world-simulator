@@ -90,6 +90,12 @@ pub struct VolcanismParams {
     /// cratons) and the most of oceanic lithosphere (plate model).
     pub continental_lid: f64,
     pub max_oceanic_lid: f64,
+    /// Most mafic crust (m) a column can hold from plume magma: deeper than ~40–45 km, mafic
+    /// rock turns to eclogite, denser than the mantle, and founders (Ontong Java, Kerguelen and
+    /// Iceland have 25–40 km of crust). Magma beyond it freezes at depth and sinks; it is not
+    /// added. Without the limit, plumes rising close together piled up 50–75 km of basalt
+    /// (`notes/issue-106/evaluation-1.md`).
+    pub mafic_column_limit: f64,
 }
 
 impl Default for VolcanismParams {
@@ -107,6 +113,7 @@ impl Default for VolcanismParams {
             melting_depth: 180e3,
             continental_lid: 130e3,
             max_oceanic_lid: 95e3,
+            mafic_column_limit: 40e3,
         }
     }
 }
@@ -128,6 +135,7 @@ impl VolcanismParams {
             "melting_depth" => self.melting_depth = value.max(1.0),
             "continental_lid" => self.continental_lid = value.max(0.0),
             "max_oceanic_lid" => self.max_oceanic_lid = value.max(0.0),
+            "mafic_column_limit" => self.mafic_column_limit = value.max(0.0),
             _ => anyhow::bail!("unknown volcanism parameter {name}"),
         }
         Ok(())
@@ -341,6 +349,7 @@ impl Simulation {
         }
         let per_weight = volume / (total_weight * self.cell_area_m2());
         let max_thickness = self.params.max_crust_thickness;
+        let mafic_limit = self.params.volcanism.mafic_column_limit;
         let mut result = Emplacement {
             samples: samples.len(),
             ..Emplacement::default()
@@ -351,8 +360,12 @@ impl Simulation {
                 .expect("owners always point to existing crust");
             let before = crust.mass();
             // Only what fits below the thickness cap, so that the cap does not thin the
-            // existing (possibly felsic) crust from below.
-            let thickness = (per_weight * weight).min((max_thickness - crust.thickness).max(0.0));
+            // existing (possibly felsic) crust from below, and below the mafic column limit
+            // (eclogite founders); the mafic thickness approximately, by mass fraction.
+            let mafic = crust.thickness * (1.0 - crust.felsic);
+            let thickness = (per_weight * weight)
+                .min((max_thickness - crust.thickness).max(0.0))
+                .min((mafic_limit - mafic).max(0.0));
             crust.add_crust(thickness, PLUME_CRUST_DENSITY, (0.0, 0.0), max_thickness);
             result.mass += crust.mass() - before;
             result.peak_thickness = result.peak_thickness.max(thickness);
@@ -525,6 +538,30 @@ mod tests {
         assert!((felsic(&simulation) - before).abs() <= 1e-12 * before);
         let crust = simulation.plates[owner.plate as usize].crust[owner.local as usize].unwrap();
         assert!((crust.thickness - max).abs() < 1e-6, "{}", crust.thickness);
+    }
+
+    /// Plume crust stops at the mafic column limit; felsic crust below does not count.
+    #[test]
+    fn plume_crust_stops_at_the_mafic_column_limit() {
+        let mut simulation = simulation(7);
+        let limit = simulation.params.volcanism.mafic_column_limit;
+        let centre = simulation.mesh.vertex(50);
+        let owner = simulation.owners[50];
+        simulation.plates[owner.plate as usize].crust[owner.local as usize] = Some(oceanic(50.0));
+        for _ in 0..5 {
+            simulation.emplace(centre, 3e7 * 1e9, 400e3);
+        }
+        let crust = simulation.plates[owner.plate as usize].crust[owner.local as usize].unwrap();
+        assert!((crust.thickness - limit).abs() < 1.0, "{}", crust.thickness);
+        // On 35 km of felsic crust the same limit leaves room for 40 km of basalt.
+        simulation.plates[owner.plate as usize].crust[owner.local as usize] = Some(continental());
+        for _ in 0..5 {
+            simulation.emplace(centre, 3e7 * 1e9, 400e3);
+        }
+        let crust = simulation.plates[owner.plate as usize].crust[owner.local as usize].unwrap();
+        let mafic = crust.thickness * (1.0 - crust.felsic);
+        // The mafic thickness from the mass fraction is approximate (basalt is denser).
+        assert!(mafic <= 1.01 * limit && mafic > 0.9 * limit, "{mafic}");
     }
 
     /// The LIP volumes are log-normal with the given spread.
