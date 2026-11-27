@@ -211,6 +211,14 @@ pub(super) struct PlateSheet {
     pub(super) breakup_opening: f64,
     /// Whether that section runs through a plume.
     pub(super) breakup_through_plume: bool,
+    /// Whether the pending breakup is a plume rift that crossed the plate, and how long (Myr)
+    /// the plate's best rift through a plume has propagated (#51, see [`super::breakup`]).
+    pub(super) breakup_rift: bool,
+    pub(super) rift_timer: f64,
+    /// The plume (its cell's position) of that rift, and the plume's age (Myr) when the rift of
+    /// the pending breakup started.
+    pub(super) rift_plume: Option<DVec3>,
+    pub(super) rift_onset_age: f64,
 }
 
 impl PlateSheet {
@@ -231,6 +239,10 @@ impl PlateSheet {
             pending_breakup: None,
             breakup_opening: 0.0,
             breakup_through_plume: false,
+            breakup_rift: false,
+            rift_timer: 0.0,
+            rift_plume: None,
+            rift_onset_age: 0.0,
         }
     }
 

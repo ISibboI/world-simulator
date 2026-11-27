@@ -87,6 +87,19 @@ pub struct BreakupParams {
     /// Time (Myr) between analyses of the sections: the loads change over millions of years,
     /// and the analysis takes ~7% of a step at 6 subdivisions; every 2 Myr halves that.
     pub interval: f64,
+    /// Speed (km/Myr) at which a magma-fed rift propagates from a plume across a plate (#51;
+    /// see [`Simulation::plume_sections`]): published propagation rates of rifts and young
+    /// spreading centres span ~15 km/Myr (3D models of propagating breakup, Jourdon et al.
+    /// 2020) through a few tens (westward propagation of spreading in the Gulf of Aden,
+    /// d'Acremont et al. 2010) and ~100 km/Myr (the South Atlantic breakup propagating
+    /// northward) to ~140 km/Myr (Woodlark basin, Taylor et al. 1995); 50 km/Myr (5 cm/yr) is
+    /// the middle of that range on a log scale. 0: plume rifts do not propagate.
+    pub propagation: f64,
+    /// How far (km) from a plume its magma reaches along a rift (0: along the whole rift, the
+    /// default). Only for the sensitivity of the model to that assumption: dyke swarms of
+    /// large igneous provinces reach 1000–2500 km from the plume (Ernst & Buchan 1997), and an
+    /// opening rift melts by decompression itself.
+    pub rift_reach: f64,
 }
 
 impl Default for BreakupParams {
@@ -101,6 +114,8 @@ impl Default for BreakupParams {
             compression: 3.0,
             from: 0.0,
             interval: 2.0,
+            propagation: 50.0,
+            rift_reach: 0.0,
         }
     }
 }
@@ -118,6 +133,8 @@ impl BreakupParams {
             "from" => self.from = value,
             "interval" => self.interval = value.max(0.0),
             "compression" => self.compression = value.max(0.0),
+            "propagation" => self.propagation = value.max(0.0),
+            "rift_reach" => self.rift_reach = value.max(0.0),
             _ => anyhow::bail!("unknown breakup parameter {name}"),
         }
         Ok(())
@@ -171,6 +188,12 @@ pub struct SectionRecord {
     /// overload of the most overloaded section through a plume (0 if the plate has none).
     pub through_plume: bool,
     pub plume_overload: f64,
+    /// The overload of the best section through a plume as a magma-fed rift (see
+    /// [`Simulation::plume_sections`]; 0 if none), how long (Myr) the plate's rift has
+    /// propagated, and how far (km) it has to propagate from the plume's magma footprint.
+    pub rift_overload: f64,
+    pub rift_timer: f64,
+    pub rift_reach_km: f64,
     /// The net torque of the piece's loads that was removed before the analysis, relative to
     /// the torque the section carries.
     pub residual: f64,
@@ -193,6 +216,16 @@ pub struct BreakupStatistics {
     /// Analyses of plates with a section through a plume, by the overload of the most
     /// overloaded such section: below 0.25, 0.5, 1, and from 1 on.
     pub plume_overloads: [u64; 4],
+    /// Plates split by a magma-fed rift that propagated across them from a plume (#51), and the
+    /// analyses of plates with a plume by the overload of their best rift section (bins as
+    /// [`Self::plume_overloads`]).
+    pub rift_splits: u64,
+    pub rift_overloads: [u64; 4],
+    /// Plume rifts by the age (Myr) of their plume when the rift started to propagate: in the
+    /// head stage (< 20), < 50, < 100, older.
+    pub rift_onsets: [u64; 4],
+    /// At the last analysis: plates with a propagating plume rift.
+    pub propagating: usize,
     /// At the last step: plates with an overloaded section, and the largest overload.
     pub overloaded: usize,
     pub max_overload: f64,
@@ -223,6 +256,67 @@ struct Section {
     /// overloaded section through a plume (0 if none).
     through_plume: bool,
     plume_overload: f64,
+    /// The best section through a plume as a magma-fed rift, if the plate has a plume.
+    rift: Option<Rift>,
+}
+
+/// A section through a plume as a magma-fed rift (#51): the opening strength along its whole
+/// length is lowered by the plume's magma, so that its overload says whether the plate's loads
+/// can open it as a rift propagating from the plume (see [`Simulation::plume_sections`]).
+#[derive(Clone)]
+struct Rift {
+    /// The cells of the side next to the plume (indices into the piece).
+    side: Vec<bool>,
+    overload: f64,
+    opening: f64,
+    /// The plume's magma along the rift.
+    magma: RiftMagma,
+    /// The plume's position, the radius (rad) of its magma footprint and its age (Myr).
+    plume: DVec3,
+    radius: f64,
+    plume_age: f64,
+    /// How far (rad) the rift has to propagate from the footprint's edge to cross the plate.
+    reach: f64,
+}
+
+/// The magma of a plume along a rift through it (#51): the factor `magma` on the strength in
+/// opening of the cells `r` with `r · plume > min_dot` (all of them with `min_dot` = −2; see
+/// [`BreakupParams::rift_reach`]).
+#[derive(Clone, Copy, Debug)]
+struct RiftMagma {
+    magma: f64,
+    plume: DVec3,
+    min_dot: f64,
+}
+
+/// An active plume whose sections are searched (#51): its position, its magma factor on the
+/// opening strength of a rift it feeds ([`super::weak_zones::plume_rift_magma`]) and the radius
+/// (rad) of its magma footprint ([`super::weak_zones::magma_radius`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PlumeSource {
+    pub(super) position: DVec3,
+    pub(super) magma: f64,
+    pub(super) radius: f64,
+    pub(super) age: f64,
+}
+
+/// The sections through the plumes above a piece (see [`Simulation::plume_sections`]).
+struct PlumeSearch {
+    /// The most overloaded one: (overload, (level, level field whose cells below the level are
+    /// the side next to the plume), torque of that side's loads).
+    ordinary: Option<(f64, (u32, Vec<u32>), DVec3)>,
+    /// The most overloaded one as a magma-fed rift.
+    rift: Option<Rift>,
+}
+
+/// The opening strength of lithosphere of relative strength `s` with the magma factor `magma`:
+/// never weaker than a ridge axis.
+fn dyked(s: f64, magma: f64) -> f64 {
+    if magma < 1.0 {
+        (s * magma).max(MIN_STRENGTH.min(s))
+    } else {
+        s
+    }
 }
 
 /// An edge of the mesh crossed by a section, from the side whose loads are summed to the other:
@@ -464,28 +558,29 @@ impl Simulation {
             let s = lithosphere_strength(&crust, self.time);
             strength.shear[c] = s;
             // Magma-assisted opening, but never weaker than a ridge axis.
-            let magma = self.magma_weakening_at(r);
-            strength.tension[c] = if magma < 1.0 {
-                (s * magma).max(MIN_STRENGTH.min(s))
-            } else {
-                s
-            };
+            strength.tension[c] = dyked(s, self.magma_weakening_at(r));
             continental[c] = crust.is_continental_origin();
             plate_cells[owner.plate as usize].push(cell);
         }
 
         let now = self.time;
         // Active plumes, whose sections are searched (#51).
-        let plumes: Vec<DVec3> = self
+        let plumes: Vec<PlumeSource> = self
             .mantle
             .plumes()
             .iter()
             .filter(|plume| plume.flux() > 0.0)
-            .map(|plume| plume.position)
+            .map(|plume| PlumeSource {
+                position: plume.position,
+                magma: weak_zones::plume_rift_magma(plume, self.params.magma_weakening),
+                radius: weak_zones::magma_radius(plume),
+                age: plume.age,
+            })
             .collect();
         let mut records = Vec::new();
         let mut statistics = std::mem::take(&mut self.breakup_statistics);
         statistics.overloaded = 0;
+        statistics.propagating = 0;
         statistics.max_overload = 0.0;
         // Position of a cell in the analysed piece (u32::MAX: not in it), and scratch.
         let mut index = vec![u32::MAX; cell_count];
@@ -510,8 +605,11 @@ impl Simulation {
             }
             let plate = &mut self.plates[p];
             plate.sheet.pending_breakup = None;
+            plate.sheet.breakup_rift = false;
             let Some((section, residual)) = best else {
                 plate.sheet.breakup_timer = 0.0;
+                plate.sheet.rift_timer = 0.0;
+                plate.sheet.rift_plume = None;
                 continue;
             };
             let side_cells = section.side.iter().filter(|&&a| a).count();
@@ -539,18 +637,64 @@ impl Simulation {
                 statistics.plume_overloads[bin] += 1;
             }
             statistics.max_overload = statistics.max_overload.max(section.overload);
+            // A magma-fed rift from a plume propagates while the loads can open it (#51; see
+            // `plume_sections`) and stalls (its dykes freeze) as fast when they cannot; it
+            // splits the plate once it has crossed it.
+            let rift = section.rift.as_ref();
+            if let Some(rift) = rift {
+                let bin = [0.25, 0.5, 1.0]
+                    .iter()
+                    .filter(|&&limit| rift.overload >= limit)
+                    .count();
+                statistics.rift_overloads[bin] += 1;
+            }
+            let propagating = rift.filter(|rift| rift.overload >= 1.0 && params.propagation > 0.0);
+            if let Some(rift) = propagating {
+                // A rift from another plume starts anew.
+                if plate
+                    .sheet
+                    .rift_plume
+                    .is_some_and(|plume| plume.dot(rift.plume) <= math::cos(rift.radius))
+                {
+                    plate.sheet.rift_timer = 0.0;
+                }
+                statistics.propagating += 1;
+                plate.sheet.rift_timer += dt;
+                plate.sheet.rift_plume = Some(rift.plume);
+            } else {
+                plate.sheet.rift_timer = (plate.sheet.rift_timer - dt).max(0.0);
+                if plate.sheet.rift_timer == 0.0 {
+                    plate.sheet.rift_plume = None;
+                }
+            }
+            let crossed = propagating.filter(|rift| {
+                let crossing = (rift.reach * radius / 1e3 / params.propagation).max(params.time);
+                plate.sheet.rift_timer >= crossing - 1e-9
+            });
+            let due = if overloaded && plate.sheet.breakup_timer >= params.time - 1e-9 {
+                Some((&section.side, section.opening, section.through_plume, false))
+            } else {
+                crossed.map(|rift| {
+                    plate.sheet.rift_onset_age = rift.plume_age - plate.sheet.rift_timer;
+                    (&rift.side, rift.opening, true, true)
+                })
+            };
             if params.enabled
                 && now >= params.from
-                && overloaded
-                && plate.sheet.breakup_timer >= params.time - 1e-9
+                && let Some((side, opening, through_plume, is_rift)) = due
             {
+                let side_cells = side.iter().filter(|&&a| a).count();
+                let small_side = side_cells * 2 <= piece.len();
                 let locals: Vec<u32> = piece
                     .iter()
-                    .zip(&section.side)
+                    .zip(side)
                     .filter(|&(_, &a)| a == small_side)
                     .map(|(&cell, _)| self.owners[cell as usize].local)
                     .collect();
                 plate.sheet.pending_breakup = Some(locals);
+                plate.sheet.breakup_opening = opening;
+                plate.sheet.breakup_through_plume = through_plume;
+                plate.sheet.breakup_rift = is_rift;
             }
             if params.diagnose {
                 let continental_cells = piece
@@ -571,6 +715,9 @@ impl Simulation {
                     opening: section.opening,
                     through_plume: section.through_plume,
                     plume_overload: section.plume_overload,
+                    rift_overload: rift.map_or(0.0, |rift| rift.overload),
+                    rift_timer: plate.sheet.rift_timer,
+                    rift_reach_km: rift.map_or(0.0, |rift| rift.reach * radius / 1e3),
                     residual,
                     timer: plate.sheet.breakup_timer,
                 });
@@ -635,19 +782,38 @@ impl Simulation {
     }
 
     /// The two halves of the section across the mesh edge `slot` (of `SheetGeometry`) from
-    /// `cell` (see [`SectionEdge::halves`]).
-    fn section_edge(&self, cell: u32, slot: usize, strength: &Strength) -> [SectionEdge; 2] {
+    /// `cell` (see [`SectionEdge::halves`]); `magma`: the magma factor on the opening strength
+    /// of a magma-fed rift along the section (see [`Rift`]).
+    fn section_edge(
+        &self,
+        cell: u32,
+        slot: usize,
+        strength: &Strength,
+        magma: Option<RiftMagma>,
+    ) -> [SectionEdge; 2] {
         let geometry = &self.sheet_geometry;
         let n = geometry.neighbor[slot];
         let (c, m) = (cell as usize, n as usize);
+        let tension = |i: usize| self.rift_tension(strength, i, magma);
         SectionEdge::halves(
             self.mesh.vertex(cell),
             self.mesh.vertex(n),
             geometry.face[slot],
             0.5 * (strength.shear[c] + strength.shear[m]),
-            0.5 * (strength.tension[c] + strength.tension[m]),
+            0.5 * (tension(c) + tension(m)),
             self.params.breakup.compression,
         )
+    }
+
+    /// The relative strength in opening of the cell `cell`, along a rift fed with `magma` if
+    /// any.
+    fn rift_tension(&self, strength: &Strength, cell: usize, magma: Option<RiftMagma>) -> f64 {
+        match magma {
+            Some(magma) if self.mesh.vertex(cell as u32).dot(magma.plume) > magma.min_dot => {
+                strength.tension[cell].min(dyked(strength.shear[cell], magma.magma))
+            }
+            _ => strength.tension[cell],
+        }
     }
 
     /// The strength (N per unit length on the unit sphere) of lithosphere of relative strength
@@ -658,7 +824,7 @@ impl Simulation {
 
     /// The overload of the section between the cells of the piece on `side` and the others,
     /// with the loads `loads` (per cell of the piece): (overload, opening, length on the unit
-    /// sphere, mean relative strength).
+    /// sphere, mean relative strength); `magma` as for [`Self::section_edge`].
     fn section_overload(
         &self,
         piece: &[u32],
@@ -666,6 +832,7 @@ impl Simulation {
         side: &[bool],
         loads: &[DVec3],
         strength: &Strength,
+        magma: Option<RiftMagma>,
     ) -> (f64, f64, f64, f64) {
         let geometry = &self.sheet_geometry;
         let mut torque = DVec3::ZERO;
@@ -680,7 +847,7 @@ impl Simulation {
                 let n = geometry.neighbor[slot];
                 let j = index[n as usize];
                 if j != u32::MAX && !side[j as usize] {
-                    edges.extend(self.section_edge(cell, slot, strength));
+                    edges.extend(self.section_edge(cell, slot, strength, magma));
                 }
             }
         }
@@ -698,8 +865,8 @@ impl Simulation {
 
     /// The most overloaded section of a piece of a plate (see the module documentation) and the
     /// net torque of the loads that was removed, relative to the section's torque; `None` if the
-    /// piece has no section with both parts of at least `min_cells`. `plumes` are the positions
-    /// of the active plumes (sections through those above the piece are searched too).
+    /// piece has no section with both parts of at least `min_cells`. `plumes` are the active
+    /// plumes (sections through those above the piece are searched too).
     #[allow(clippy::too_many_arguments)]
     fn most_overloaded_section(
         &self,
@@ -708,7 +875,7 @@ impl Simulation {
         load: &[DVec3],
         drag: &[f64],
         strength: &Strength,
-        plumes: &[DVec3],
+        plumes: &[PlumeSource],
         min_cells: usize,
         params: &BreakupParams,
     ) -> Option<(Section, f64)> {
@@ -784,7 +951,7 @@ impl Simulation {
                     let m = geometry.neighbor[slot];
                     let j = index[m as usize];
                     if j != u32::MAX && distance[j as usize] as usize == d + 1 {
-                        let halves = self.section_edge(cell, slot, strength);
+                        let halves = self.section_edge(cell, slot, strength, None);
                         edges[fill[d + 1]..fill[d + 1] + 2].copy_from_slice(&halves);
                         fill[d + 1] += 2;
                     }
@@ -819,9 +986,8 @@ impl Simulation {
         // lithosphere apart and its magma weakens it in opening, so the most overloaded section
         // may run through it, which the level sets above rarely do.
         let mut plume_overload = 0.0;
-        if let Some((overload, field, torque)) =
-            self.plume_sections(piece, index, &loads, strength, plumes, min_cells)
-        {
+        let search = self.plume_sections(piece, index, &loads, strength, plumes, min_cells);
+        if let Some((overload, field, torque)) = search.ordinary {
             plume_overload = overload;
             if best.is_none_or(|(o, ..)| overload > o) {
                 let level = field.0;
@@ -834,7 +1000,7 @@ impl Simulation {
         let distance = &fields[field];
         let level_side: Vec<bool> = distance.iter().map(|&d| d < level).collect();
         let (_, level_opening, level_length, level_strength) =
-            self.section_overload(piece, index, &level_side, &loads, strength);
+            self.section_overload(piece, index, &level_side, &loads, strength, None);
         let mut section = Section {
             side: level_side,
             overload: level_overload,
@@ -845,194 +1011,136 @@ impl Simulation {
             opening: level_opening,
             through_plume,
             plume_overload,
+            rift: None,
         };
-        // Refined along the weakest lithosphere, where it matters.
-        if level_overload > 0.5 {
-            let max_level = distance.iter().copied().max().unwrap_or(0);
-            let low = level.saturating_sub(1 + params.band as u32);
-            let high = (level + params.band as u32).min(max_level);
-            // The network spans the band only: cells at its edges are tied to the source and
-            // sink, and every link that can be cut lies between them.
-            let band: Vec<usize> = (0..n)
-                .filter(|&i| (low..=high).contains(&distance[i]))
-                .collect();
-            let mut node = vec![u32::MAX; n];
-            for (k, &i) in band.iter().enumerate() {
-                node[i] = k as u32;
+        // Refined along the weakest lithosphere, where it matters. The break opens where it
+        // can (most sections fail mainly by opening): the strength in opening, which a plume's
+        // magma lowers.
+        if level_overload > 0.5
+            && let Some(side) = self.refined_side(piece, index, distance, level, params.band, |c| {
+                strength.tension[c]
+            })
+            && side.iter().filter(|&&a| a).count() >= min_cells
+            && side.iter().filter(|&&a| !a).count() >= min_cells
+        {
+            let (overload, opening, length, mean_strength) =
+                self.section_overload(piece, index, &side, &loads, strength, None);
+            section.cut = overload;
+            if overload > section.overload {
+                section = Section {
+                    side,
+                    overload,
+                    length,
+                    strength: mean_strength,
+                    opening,
+                    ..section
+                };
             }
-            let (source, sink) = (band.len(), band.len() + 1);
-            let mut network = Network::new(band.len() + 2);
-            for (k, &i) in band.iter().enumerate() {
-                let cell = piece[i];
-                if distance[i] == low {
-                    network.link(source, k, UNBREAKABLE);
-                } else if distance[i] == high {
-                    network.link(k, sink, UNBREAKABLE);
-                }
-                for slot in geometry.edges(cell) {
-                    let m = geometry.neighbor[slot];
-                    let j = index[m as usize];
-                    if j == u32::MAX || m < cell || node[j as usize] == u32::MAX {
-                        continue;
-                    }
-                    // The break opens where it can (most sections fail mainly by opening):
-                    // the strength in opening, which a plume's magma lowers.
-                    let s = 0.5 * (strength.tension[cell as usize] + strength.tension[m as usize]);
-                    network.link(k, node[j as usize] as usize, geometry.face[slot] * s);
-                }
-            }
-            network.max_flow(source, sink);
-            let in_band = network.reachable(source);
-            let reachable =
-                |i: usize| distance[i] < low || (node[i] != u32::MAX && in_band[node[i] as usize]);
-            // The part connected to the source's cells.
-            let mut side = vec![false; n];
-            let mut stack: Vec<usize> = (0..n).filter(|&i| distance[i] <= low).collect();
-            for &i in &stack {
-                side[i] = true;
-            }
-            while let Some(i) = stack.pop() {
-                for &m in self.mesh.neighbors(piece[i]) {
-                    let j = index[m as usize];
-                    if j != u32::MAX && reachable(j as usize) && !side[j as usize] {
-                        side[j as usize] = true;
-                        stack.push(j as usize);
-                    }
-                }
-            }
-            let cells = side.iter().filter(|&&a| a).count();
-            if cells >= min_cells && n - cells >= min_cells {
-                let (overload, opening, length, mean_strength) =
-                    self.section_overload(piece, index, &side, &loads, strength);
-                section.cut = overload;
-                if overload > section.overload {
-                    section = Section {
-                        side,
-                        overload,
-                        length,
-                        strength: mean_strength,
-                        opening,
-                        ..section
-                    };
+        }
+        // The best rift through a plume, refined the same way with the strength in opening of
+        // the magma-fed rift.
+        let mut rift = search.rift;
+        if let Some(r) = rift.as_mut()
+            && r.overload > 0.5
+        {
+            let (level, field) = self.side_field(piece, index, &r.side);
+            let magma = Some(r.magma);
+            if let Some(side) = self.refined_side(piece, index, &field, level, params.band, |c| {
+                self.rift_tension(strength, c, magma)
+            }) && side.iter().filter(|&&a| a).count() >= min_cells
+                && side.iter().filter(|&&a| !a).count() >= min_cells
+            {
+                let (overload, opening, ..) =
+                    self.section_overload(piece, index, &side, &loads, strength, magma);
+                if overload > r.overload {
+                    r.reach = self.rift_reach(piece, index, &side, r.plume, r.radius);
+                    r.side = side;
+                    r.overload = overload;
+                    r.opening = opening;
                 }
             }
         }
+        section.rift = rift;
         Some((section, residual))
     }
 
-    /// The most overloaded section along a great circle through one of the plumes `plumes`
-    /// above the piece, with two arms from the plume ([`PLUME_SECTION_DIRECTIONS`],
-    /// [`PLUME_SECTION_ANGLES`]): (overload, (level,
-    /// a level field whose cells below the level are the side next to the plume), the torque
-    /// of that side's loads), or `None` if no such section leaves both parts of at least
-    /// `min_cells`. The side next to the plume is the connected part of the half of the piece
-    /// on one side of the circle that touches the plume's cell, the other side the rest; the
-    /// level field is the distance in cell steps from the section (so that the section can be
-    /// refined like the level sections).
-    fn plume_sections(
+    /// The side of the minimum cut of the strength `strength` (per cell, by its index in the
+    /// mesh) within `band` cells of the section between the cells of the piece below `level` of
+    /// the level field `distance` and the others: the source's side, connected to the cells at
+    /// the band's low edge; `None` if the network is empty.
+    fn refined_side(
         &self,
         piece: &[u32],
         index: &[u32],
-        loads: &[DVec3],
-        strength: &Strength,
-        plumes: &[DVec3],
-        min_cells: usize,
-    ) -> Option<(f64, (u32, Vec<u32>), DVec3)> {
+        distance: &[u32],
+        level: u32,
+        band: usize,
+        strength: impl Fn(usize) -> f64,
+    ) -> Option<Vec<bool>> {
         let n = piece.len();
-        let force = self.section_force();
         let geometry = &self.sheet_geometry;
-        let mut best: Option<(f64, Vec<bool>, DVec3)> = None;
-        let mut side = vec![false; n];
-        for &position in plumes {
-            let centre = self.mesh.nearest(position);
-            let start = index[centre as usize];
-            if start == u32::MAX {
-                continue;
+        let max_level = distance.iter().copied().max().unwrap_or(0);
+        let low = level.saturating_sub(1 + band as u32);
+        let high = (level + band as u32).min(max_level);
+        // The network spans the band only: cells at its edges are tied to the source and
+        // sink, and every link that can be cut lies between them.
+        let cells: Vec<usize> = (0..n)
+            .filter(|&i| (low..=high).contains(&distance[i]))
+            .collect();
+        if cells.is_empty() {
+            return None;
+        }
+        let mut node = vec![u32::MAX; n];
+        for (k, &i) in cells.iter().enumerate() {
+            node[i] = k as u32;
+        }
+        let (source, sink) = (cells.len(), cells.len() + 1);
+        let mut network = Network::new(cells.len() + 2);
+        for (k, &i) in cells.iter().enumerate() {
+            let cell = piece[i];
+            if distance[i] == low {
+                network.link(source, k, UNBREAKABLE);
+            } else if distance[i] == high {
+                network.link(k, sink, UNBREAKABLE);
             }
-            let p = self.mesh.vertex(centre);
-            let east = DVec3::Z.cross(p);
-            let east = if east.length_squared() > 1e-12 {
-                east.normalize()
-            } else {
-                DVec3::X
-            };
-            let north = p.cross(east);
-            // Direction (in steps of the arms' directions) of every cell of the piece seen from
-            // the plume.
-            let step = std::f64::consts::TAU / PLUME_SECTION_DIRECTIONS as f64;
-            let direction: Vec<f64> = piece
-                .iter()
-                .map(|&cell| {
-                    let r = self.mesh.vertex(cell);
-                    let a = math::atan2(r.dot(north), r.dot(east)) / step;
-                    a.rem_euclid(PLUME_SECTION_DIRECTIONS as f64)
-                })
-                .collect();
-            let wedges = PLUME_SECTION_ANGLES.iter().flat_map(|&width| {
-                // A straight section and its complement are the same section.
-                let starts = if 2 * width == PLUME_SECTION_DIRECTIONS {
-                    PLUME_SECTION_DIRECTIONS / 2
-                } else {
-                    PLUME_SECTION_DIRECTIONS
-                };
-                (0..starts).map(move |start| (start, width))
-            });
-            let mut candidates: Vec<(f64, Vec<bool>, DVec3)> = Vec::new();
-            for (first, width) in wedges {
-                let inside = |i: usize| {
-                    let d =
-                        (direction[i] - first as f64).rem_euclid(PLUME_SECTION_DIRECTIONS as f64);
-                    d < width as f64
-                };
-                // The plume's cell and the cells of the piece between the two arms, connected
-                // to it.
-                side.fill(false);
-                side[start as usize] = true;
-                let mut stack = vec![start as usize];
-                while let Some(i) = stack.pop() {
-                    for &m in self.mesh.neighbors(piece[i]) {
-                        let j = index[m as usize];
-                        if j != u32::MAX && !side[j as usize] && inside(j as usize) {
-                            side[j as usize] = true;
-                            stack.push(j as usize);
-                        }
-                    }
-                }
-                let cells = side.iter().filter(|&&a| a).count();
-                if cells < min_cells || n - cells < min_cells {
+            for slot in geometry.edges(cell) {
+                let m = geometry.neighbor[slot];
+                let j = index[m as usize];
+                if j == u32::MAX || m < cell || node[j as usize] == u32::MAX {
                     continue;
                 }
-                let mut torque = DVec3::ZERO;
-                let mut edges: Vec<SectionEdge> = Vec::new();
-                for (i, &cell) in piece.iter().enumerate() {
-                    if !side[i] {
-                        continue;
-                    }
-                    torque += self.mesh.vertex(cell).cross(loads[i]);
-                    for slot in geometry.edges(cell) {
-                        let j = index[geometry.neighbor[slot] as usize];
-                        if j != u32::MAX && !side[j as usize] {
-                            edges.extend(self.section_edge(cell, slot, strength));
-                        }
-                    }
-                }
-                let mut warm = DVec3::ZERO;
-                let overload = quick_overload(torque, &edges, force, &mut warm);
-                candidates.push((overload, side.clone(), torque));
-            }
-            // The most overloaded orientation in full.
-            let Some((_, side, torque)) = candidates.into_iter().max_by(|a, b| a.0.total_cmp(&b.0))
-            else {
-                continue;
-            };
-            let (overload, ..) = self.section_overload(piece, index, &side, loads, strength);
-            if best.as_ref().is_none_or(|(o, ..)| overload > *o) {
-                best = Some((overload, side, torque));
+                let s = 0.5 * (strength(cell as usize) + strength(m as usize));
+                network.link(k, node[j as usize] as usize, geometry.face[slot] * s);
             }
         }
-        let (overload, side, torque) = best?;
-        // Distances from the section: within the side, counted down from the level; outside,
-        // up from it.
+        network.max_flow(source, sink);
+        let in_band = network.reachable(source);
+        let reachable =
+            |i: usize| distance[i] < low || (node[i] != u32::MAX && in_band[node[i] as usize]);
+        // The part connected to the source's cells.
+        let mut side = vec![false; n];
+        let mut stack: Vec<usize> = (0..n).filter(|&i| distance[i] <= low).collect();
+        for &i in &stack {
+            side[i] = true;
+        }
+        while let Some(i) = stack.pop() {
+            for &m in self.mesh.neighbors(piece[i]) {
+                let j = index[m as usize];
+                if j != u32::MAX && reachable(j as usize) && !side[j as usize] {
+                    side[j as usize] = true;
+                    stack.push(j as usize);
+                }
+            }
+        }
+        Some(side)
+    }
+
+    /// A level field for the section between the cells of the piece on `side` and the others:
+    /// (level, field) with the cells of `side` below the level, the distance in cell steps from
+    /// the section counted down from the level within the side and up from it outside (so that
+    /// the section can be refined like the level sections).
+    fn side_field(&self, piece: &[u32], index: &[u32], side: &[bool]) -> (u32, Vec<u32>) {
+        let n = piece.len();
         let mut distance = vec![u32::MAX; n];
         let mut queue: Vec<usize> = Vec::new();
         for i in 0..n {
@@ -1071,7 +1179,202 @@ impl Simulation {
                 if side[i] { level - 1 - d } else { level + d }
             })
             .collect();
-        Some((overload, (level, field), torque))
+        (level, field)
+    }
+
+    /// How far (rad) a rift from the plume at `plume` with a magma footprint of radius `radius`
+    /// has to propagate to run along the whole section between the cells of the piece on
+    /// `side` and the others: from the footprint's edge to the section's farthest cell.
+    fn rift_reach(
+        &self,
+        piece: &[u32],
+        index: &[u32],
+        side: &[bool],
+        plume: DVec3,
+        radius: f64,
+    ) -> f64 {
+        let mut reach = 0.0f64;
+        for (i, &cell) in piece.iter().enumerate() {
+            if !side[i] {
+                continue;
+            }
+            let crosses = self.mesh.neighbors(cell).iter().any(|&m| {
+                let j = index[m as usize];
+                j != u32::MAX && !side[j as usize]
+            });
+            if crosses {
+                reach = reach.max(math::angle_between(plume, self.mesh.vertex(cell)));
+            }
+        }
+        (reach - radius).max(0.0)
+    }
+
+    /// The most overloaded sections through the plumes `plumes` above the piece, with two arms
+    /// from the plume ([`PLUME_SECTION_DIRECTIONS`], [`PLUME_SECTION_ANGLES`]).
+    ///
+    /// The side next to the plume is the connected part of the piece between the two arms that
+    /// touches the plume's cell, the other side the rest; sections that leave a part smaller
+    /// than `min_cells` are skipped. [`PlumeSearch::ordinary`] is the most overloaded of them
+    /// with the lithosphere's strength (a candidate of #182's search); [`PlumeSearch::rift`]
+    /// the most overloaded as a magma-fed rift: with the strength in opening along the whole
+    /// section lowered by the plume's magma (#51). A rift tip concentrates the stress of the
+    /// loads that the open rift no longer carries on the intact lithosphere ahead of it, which
+    /// yields there long before the whole section would; the dykes advance into it, fed by melt
+    /// channelled along the opening rift from the plume (Courtillot 1982; Ebinger & Sleep 1998;
+    /// Buck 2006). What limits the rift is the work of the loads when the plate opens along it
+    /// against the strength of the magma-fed rift: the limit analysis of the section with that
+    /// strength (an overload of at least 1: the rift propagates). It propagates at
+    /// [`BreakupParams::propagation`] (see [`Simulation::analyse_sections`]).
+    fn plume_sections(
+        &self,
+        piece: &[u32],
+        index: &[u32],
+        loads: &[DVec3],
+        strength: &Strength,
+        plumes: &[PlumeSource],
+        min_cells: usize,
+    ) -> PlumeSearch {
+        let n = piece.len();
+        let force = self.section_force();
+        let geometry = &self.sheet_geometry;
+        let mut best: Option<(f64, Vec<bool>, DVec3)> = None;
+        let mut best_rift: Option<Rift> = None;
+        let mut side = vec![false; n];
+        let (mut edges, mut rift_edges): (Vec<SectionEdge>, Vec<SectionEdge>) =
+            (Vec::new(), Vec::new());
+        for plume in plumes {
+            let centre = self.mesh.nearest(plume.position);
+            let start = index[centre as usize];
+            if start == u32::MAX {
+                continue;
+            }
+            let p = self.mesh.vertex(centre);
+            let east = DVec3::Z.cross(p);
+            let east = if east.length_squared() > 1e-12 {
+                east.normalize()
+            } else {
+                DVec3::X
+            };
+            let north = p.cross(east);
+            // Direction (in steps of the arms' directions) of every cell of the piece seen from
+            // the plume.
+            let step = std::f64::consts::TAU / PLUME_SECTION_DIRECTIONS as f64;
+            let direction: Vec<f64> = piece
+                .iter()
+                .map(|&cell| {
+                    let r = self.mesh.vertex(cell);
+                    let a = math::atan2(r.dot(north), r.dot(east)) / step;
+                    a.rem_euclid(PLUME_SECTION_DIRECTIONS as f64)
+                })
+                .collect();
+            let wedges = PLUME_SECTION_ANGLES.iter().flat_map(|&width| {
+                // A straight section and its complement are the same section.
+                let starts = if 2 * width == PLUME_SECTION_DIRECTIONS {
+                    PLUME_SECTION_DIRECTIONS / 2
+                } else {
+                    PLUME_SECTION_DIRECTIONS
+                };
+                (0..starts).map(move |start| (start, width))
+            });
+            // A rift only from a plume that supplies magma.
+            let reach = self.params.breakup.rift_reach * 1e3 / self.params.planet_radius;
+            let magma = (plume.magma < 1.0).then_some(RiftMagma {
+                magma: plume.magma,
+                plume: p,
+                min_dot: if reach > 0.0 { math::cos(reach) } else { -2.0 },
+            });
+            // (overload, overload as a rift, side, torque of the side's loads)
+            let mut candidates: Vec<(f64, f64, Vec<bool>, DVec3)> = Vec::new();
+            for (first, width) in wedges {
+                let inside = |i: usize| {
+                    let d =
+                        (direction[i] - first as f64).rem_euclid(PLUME_SECTION_DIRECTIONS as f64);
+                    d < width as f64
+                };
+                // The plume's cell and the cells of the piece between the two arms, connected
+                // to it.
+                side.fill(false);
+                side[start as usize] = true;
+                let mut stack = vec![start as usize];
+                while let Some(i) = stack.pop() {
+                    for &m in self.mesh.neighbors(piece[i]) {
+                        let j = index[m as usize];
+                        if j != u32::MAX && !side[j as usize] && inside(j as usize) {
+                            side[j as usize] = true;
+                            stack.push(j as usize);
+                        }
+                    }
+                }
+                let cells = side.iter().filter(|&&a| a).count();
+                if cells < min_cells || n - cells < min_cells {
+                    continue;
+                }
+                let mut torque = DVec3::ZERO;
+                edges.clear();
+                rift_edges.clear();
+                for (i, &cell) in piece.iter().enumerate() {
+                    if !side[i] {
+                        continue;
+                    }
+                    torque += self.mesh.vertex(cell).cross(loads[i]);
+                    for slot in geometry.edges(cell) {
+                        let j = index[geometry.neighbor[slot] as usize];
+                        if j != u32::MAX && !side[j as usize] {
+                            edges.extend(self.section_edge(cell, slot, strength, None));
+                            if magma.is_some() {
+                                rift_edges.extend(self.section_edge(cell, slot, strength, magma));
+                            }
+                        }
+                    }
+                }
+                let mut warm = DVec3::ZERO;
+                let overload = quick_overload(torque, &edges, force, &mut warm);
+                let rift_overload = if magma.is_some() {
+                    let mut warm = DVec3::ZERO;
+                    quick_overload(torque, &rift_edges, force, &mut warm)
+                } else {
+                    0.0
+                };
+                candidates.push((overload, rift_overload, side.clone(), torque));
+            }
+            // The most overloaded orientations in full.
+            if let Some((_, _, side, torque)) = candidates.iter().max_by(|a, b| a.0.total_cmp(&b.0))
+            {
+                let (overload, ..) =
+                    self.section_overload(piece, index, side, loads, strength, None);
+                if best.as_ref().is_none_or(|(o, ..)| overload > *o) {
+                    best = Some((overload, side.clone(), *torque));
+                }
+            }
+            if let Some(magma) = magma
+                && let Some((_, _, side, _)) = candidates.iter().max_by(|a, b| a.1.total_cmp(&b.1))
+            {
+                let (overload, opening, ..) =
+                    self.section_overload(piece, index, side, loads, strength, Some(magma));
+                if best_rift.as_ref().is_none_or(|r| overload > r.overload) {
+                    best_rift = Some(Rift {
+                        side: side.clone(),
+                        overload,
+                        opening,
+                        magma,
+                        plume: p,
+                        radius: plume.radius,
+                        plume_age: plume.age,
+                        reach: 0.0,
+                    });
+                }
+            }
+        }
+        if let Some(rift) = best_rift.as_mut() {
+            rift.reach = self.rift_reach(piece, index, &rift.side, rift.plume, rift.radius);
+        }
+        let ordinary = best.map(|(overload, side, torque)| {
+            (overload, self.side_field(piece, index, &side), torque)
+        });
+        PlumeSearch {
+            ordinary,
+            rift: best_rift,
+        }
     }
 
     /// Splits the plates that have been overloaded for long enough (see
@@ -1107,9 +1410,34 @@ impl Simulation {
             }
             let opening = self.plates[plate as usize].sheet.breakup_opening;
             let through_plume = self.plates[plate as usize].sheet.breakup_through_plume;
+            let rift = self.plates[plate as usize].sheet.breakup_rift;
             if let Some(new_plate) = self.split_plate_cells(plate, &piece) {
-                self.plates[plate as usize].sheet.breakup_timer = 0.0;
-                self.plates[new_plate as usize].sheet.breakup_timer = 0.0;
+                for p in [plate, new_plate] {
+                    let sheet = &mut self.plates[p as usize].sheet;
+                    sheet.breakup_timer = 0.0;
+                    sheet.rift_timer = 0.0;
+                    sheet.rift_plume = None;
+                    sheet.breakup_rift = false;
+                }
+                if rift {
+                    let onset = self.plates[plate as usize].sheet.rift_onset_age;
+                    let bin = [20.0, 50.0, 100.0]
+                        .iter()
+                        .filter(|&&limit| onset >= limit)
+                        .count();
+                    self.breakup_statistics.rift_onsets[bin] += 1;
+                    self.breakup_statistics.rift_splits += 1;
+                    self.record_split_cause(plate, new_plate, events::SplitCause::PlumeRift);
+                    tracing::debug!(
+                        plate,
+                        new_plate,
+                        cells = piece.len(),
+                        opening,
+                        time = self.time,
+                        "Plume rift crossed the plate"
+                    );
+                    continue;
+                }
                 let statistics = &mut self.breakup_statistics;
                 statistics.splits += 1;
                 statistics.split_cells += piece.len() as u64;
@@ -1349,7 +1677,13 @@ mod tests {
         };
         let drag = vec![1.0; n];
         let params = simulation.params.breakup.clone();
-        let section_of = |plumes: &[DVec3]| {
+        let source = PlumeSource {
+            position: plume,
+            magma: 1.0,
+            radius: 0.17,
+            age: 30.0,
+        };
+        let section_of = |plumes: &[PlumeSource]| {
             simulation
                 .most_overloaded_section(
                     &cap, &index, &loads, &drag, &strength, plumes, 20, &params,
@@ -1357,7 +1691,7 @@ mod tests {
                 .expect("a section")
                 .0
         };
-        let section = section_of(&[plume]);
+        let section = section_of(&[source]);
         // The most overloaded section runs through the plume and opens; so does the one found
         // among the sections through the plume
         // (a curved level section through the head may do slightly better than the great
@@ -1384,6 +1718,80 @@ mod tests {
         // The level sections alone find no more overloaded one.
         let plain = section_of(&[]);
         assert!(plain.overload <= section.overload * (1.0 + 1e-9));
+    }
+
+    #[test]
+    fn magma_fed_rifts_open_plates_that_the_intact_lithosphere_holds() {
+        let mut simulation =
+            Simulation::new(SphereMesh::icosphere(4), 4, TectonicParams::default(), 1);
+        let mesh = &simulation.mesh;
+        // A cap of 40° radius with a plume at its centre, pulled apart along the x axis: two
+        // halves pulled in opposite directions.
+        let plume = DVec3::new(0.2, 0.1, 1.0).normalize();
+        let cap: Vec<u32> = (0..mesh.len() as u32)
+            .filter(|&c| mesh.vertex(c).dot(plume) > math::cos(40f64.to_radians()))
+            .collect();
+        let n = mesh.len();
+        let mut index = vec![u32::MAX; n];
+        for (i, &cell) in cap.iter().enumerate() {
+            index[cell as usize] = i as u32;
+        }
+        let east = DVec3::Z.cross(plume).normalize();
+        let loads: Vec<DVec3> = (0..n as u32)
+            .map(|cell| {
+                let r = mesh.vertex(cell);
+                let f = east * (3e18 * r.dot(east).signum());
+                f - r * f.dot(r)
+            })
+            .collect();
+        let strength = Strength {
+            shear: vec![1.0; n],
+            tension: vec![1.0; n],
+        };
+        let drag = vec![1.0; n];
+        let params = simulation.params.breakup.clone();
+        let analyse = |simulation: &Simulation, magma: f64| {
+            let source = PlumeSource {
+                position: plume,
+                magma,
+                radius: 0.1,
+                age: 30.0,
+            };
+            simulation
+                .most_overloaded_section(
+                    &cap,
+                    &index,
+                    &loads,
+                    &drag,
+                    &strength,
+                    &[source],
+                    20,
+                    &params,
+                )
+                .expect("a section")
+                .0
+        };
+        // The intact plate holds; as a magma-fed rift through the plume it opens.
+        let section = analyse(&simulation, 0.1);
+        let rift = section.rift.as_ref().expect("a rift section");
+        assert!(section.overload < 1.0, "{}", section.overload);
+        assert!(rift.overload > 1.0, "{}", rift.overload);
+        assert!(rift.overload > 2.0 * section.overload);
+        assert!(rift.opening > 0.5, "{}", rift.opening);
+        // It has to propagate from the edge of the magma footprint to the plate's edge.
+        let reach = rift.reach;
+        assert!(
+            reach > 0.3 && reach < 40f64.to_radians(),
+            "{}",
+            reach.to_degrees()
+        );
+        // No magma, no rift.
+        assert!(analyse(&simulation, 1.0).rift.is_none());
+        // Magma only near the plume: the rift is no more loaded than the intact section much.
+        simulation.params.breakup.rift_reach = 200.0;
+        let near = analyse(&simulation, 0.1);
+        let near = near.rift.as_ref().expect("a rift section");
+        assert!(near.overload < 0.5 * rift.overload, "{}", near.overload);
     }
 
     /// Owners and rotations, bit for bit.

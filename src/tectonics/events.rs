@@ -277,8 +277,8 @@ fn extension_fabric(crust: &Crust) -> f64 {
 /// Why a plate split (for the statistics of new plate boundaries, [`SplitTally`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitCause {
-    /// A plume rifted the plate by the rule that `main` had before #51 (`rift_above_plumes`;
-    /// kept so that the statistics line up with runs of it).
+    /// A magma-fed rift propagated from a plume across the plate (#51, see
+    /// [`super::breakup`]); before #51, the rule `rift_above_plumes`.
     PlumeRift,
     /// The plate broke by its internal stress (#182), mainly by opening.
     BreakupOpening,
@@ -302,7 +302,7 @@ impl SplitCause {
 
     pub fn name(self) -> &'static str {
         match self {
-            SplitCause::PlumeRift => "plume rule",
+            SplitCause::PlumeRift => "plume rift",
             SplitCause::BreakupOpening => "stress opening",
             SplitCause::BreakupOther => "stress other",
             SplitCause::SheetSplit => "sheet",
@@ -363,6 +363,7 @@ impl EventCounts {
         self.initiations
             + self.breakups
             + [
+                SplitCause::PlumeRift,
                 SplitCause::BreakupOpening,
                 SplitCause::BreakupOther,
                 SplitCause::SheetSplit,

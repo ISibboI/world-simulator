@@ -1296,7 +1296,9 @@ fn snapshot(
     info!(
         "    breakup by stress: {} plates broken ({} cells; {} opening, {} closing, the others \
          sliding; {} through a plume), plume sections by overload (< 0.25, < 0.5, < 1, ≥ 1) {:?}, \
-         {} plates overloaded at the last analysis (largest overload {:.2}), {:.1} s",
+         {} plates overloaded at the last analysis (largest overload {:.2}), {:.1} s | plume \
+         rifts {} (by the plume's age at onset < 20, < 50, < 100, older: {:?}), rift sections by \
+         overload {:?}, {} plates with a propagating rift",
         breakup.splits,
         breakup.split_cells,
         breakup.opening_splits,
@@ -1306,6 +1308,10 @@ fn snapshot(
         breakup.overloaded,
         breakup.max_overload,
         breakup.seconds,
+        breakup.rift_splits,
+        breakup.rift_onsets,
+        breakup.rift_overloads,
+        breakup.propagating,
     );
     info!(
         "    plate matching: {} incremental, {} full scans, {:.1} cells searched per plate and \
@@ -1618,13 +1624,14 @@ fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Res
         writeln!(
             file,
             "time,plate,cells,overload,level_overload,cut_overload,length_km,piece_cells,\
-             strength,piece_continental,opening,residual,timer,through_plume,plume_overload"
+             strength,piece_continental,opening,residual,timer,through_plume,plume_overload,\
+             rift_overload,rift_timer,rift_reach_km"
         )?;
     }
     for record in simulation.section_records() {
         writeln!(
             file,
-            "{},{},{},{:.4},{:.4},{:.4},{:.0},{},{:.3},{:.3},{:.3},{:.3},{},{},{:.4}",
+            "{},{},{},{:.4},{:.4},{:.4},{:.0},{},{:.3},{:.3},{:.3},{:.3},{},{},{:.4},{:.4},{},{:.0}",
             simulation.time(),
             record.plate_id,
             record.cells,
@@ -1640,6 +1647,9 @@ fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Res
             record.timer,
             u8::from(record.through_plume),
             record.plume_overload,
+            record.rift_overload,
+            record.rift_timer,
+            record.rift_reach_km,
         )?;
     }
     Ok(())

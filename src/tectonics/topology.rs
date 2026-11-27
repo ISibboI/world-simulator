@@ -299,6 +299,8 @@ impl Simulation {
                 sheet.split_timer = 0.0;
                 sheet.pending_breakup = None;
                 sheet.breakup_timer = 0.0;
+                sheet.rift_timer = 0.0;
+                sheet.rift_plume = None;
                 sheet
             },
         };
@@ -309,6 +311,12 @@ impl Simulation {
         // Its sections change: the time it was overloaded starts again.
         self.plates[plate as usize].sheet.pending_breakup = None;
         self.plates[plate as usize].sheet.breakup_timer = 0.0;
+        // A propagating plume rift goes on in the part above its plume (#51).
+        let rift = (
+            self.plates[plate as usize].sheet.rift_timer,
+            self.plates[plate as usize].sheet.rift_plume.take(),
+        );
+        self.plates[plate as usize].sheet.rift_timer = 0.0;
         let new_index = self.plates.len() as u32;
         self.plates.push(new_plate);
 
@@ -317,6 +325,14 @@ impl Simulation {
                 && self.plates[plate as usize].crust[owner.local as usize].is_none()
             {
                 owner.plate = new_index;
+            }
+        }
+        if let (timer, Some(plume)) = rift {
+            let owner = self.owners[self.mesh.nearest(plume) as usize].plate;
+            if owner == plate || owner == new_index {
+                let sheet = &mut self.plates[owner as usize].sheet;
+                sheet.rift_timer = timer;
+                sheet.rift_plume = Some(plume);
             }
         }
 
@@ -356,6 +372,15 @@ impl Simulation {
         self.plates[into as usize].tracked = None;
         self.plates[into as usize].sheet.pending_breakup = None;
         self.plates[into as usize].sheet.breakup_timer = 0.0;
+        // A propagating plume rift goes on in the merged plate (the longer one of the two).
+        let absorbed_rift = (
+            self.plates[absorbed as usize].sheet.rift_timer,
+            self.plates[absorbed as usize].sheet.rift_plume,
+        );
+        let sheet = &mut self.plates[into as usize].sheet;
+        if absorbed_rift.0 > sheet.rift_timer {
+            (sheet.rift_timer, sheet.rift_plume) = absorbed_rift;
+        }
         let to_into =
             self.plates[into as usize].rotation.inverse() * self.plates[absorbed as usize].rotation;
         let cell_count = self.mesh.len();

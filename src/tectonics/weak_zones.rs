@@ -211,20 +211,43 @@ pub(super) fn magma_weakening(plumes: &[Plume], r: DVec3, magma: f64) -> f64 {
     }
     let mut factor = 1.0f64;
     for plume in plumes {
-        let radius = if plume.age < PLUME_HEAD_STAGE {
-            PLUME_HEAD_RADIUS
-        } else {
-            PLUME_TAIL_RADIUS
-        };
+        let radius = magma_radius(plume);
         if r.dot(plume.position) <= math::cos(radius) || plume.peak_flux <= 0.0 {
             continue;
         }
         let x = math::angle_between(r, plume.position) / radius;
-        let intensity = (plume.flux() / plume.peak_flux).clamp(0.0, 1.0);
-        let supply = (1.0 - x * x).max(0.0) * intensity;
+        let supply = (1.0 - x * x).max(0.0) * magma_intensity(plume);
         factor = factor.min(1.0 - (1.0 - magma.max(0.0)) * supply);
     }
     factor
+}
+
+/// The radius (rad) of the region that `plume` supplies with magma now (see
+/// [`magma_weakening`]): its head during the head stage, its tail later.
+pub(super) fn magma_radius(plume: &Plume) -> f64 {
+    if plume.age < PLUME_HEAD_STAGE {
+        PLUME_HEAD_RADIUS
+    } else {
+        PLUME_TAIL_RADIUS
+    }
+}
+
+/// The plume's magma supply relative to its peak (the head arriving, the plume fading), 0 to 1.
+fn magma_intensity(plume: &Plume) -> f64 {
+    if plume.peak_flux <= 0.0 {
+        return 0.0;
+    }
+    (plume.flux() / plume.peak_flux).clamp(0.0, 1.0)
+}
+
+/// The magma weakening ([`magma_weakening`]) of the strength in opening of a rift that `plume`
+/// feeds with magma along its length (#51): the factor at the plume's centre, `magma` at full
+/// supply.
+pub(super) fn plume_rift_magma(plume: &Plume, magma: f64) -> f64 {
+    if magma >= 1.0 {
+        return 1.0;
+    }
+    1.0 - (1.0 - magma.max(0.0)) * magma_intensity(plume)
 }
 
 impl Simulation {
