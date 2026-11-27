@@ -280,6 +280,8 @@ pub struct EventCounts {
     /// Failed initiations: no consistent division, overriding (new) part too small,
     /// subducting (old) part too small.
     pub failed_initiation_reasons: [usize; 3],
+    /// New plate boundaries by the cause of the split (see [`SplitCause`]).
+    pub splits_by_cause: [SplitTally; SplitCause::COUNT],
     pub rift_far_contact_km: f64,
     pub initiation_contact_km: f64,
     pub initiation_far_contact_km: f64,
@@ -309,6 +311,73 @@ const UNDONE_INITIATION_TIME: f64 = 50.0;
 /// weak belt in the rift statistics: a strength of at most ~0.8 of undeformed lithosphere.
 pub const WEAK_BELT_THRESHOLD: f64 = 0.25;
 
+/// The extension fabric of a sample (none before #54).
+fn extension_fabric(_crust: &Crust) -> f64 {
+    0.0
+}
+
+/// Why a plate split (for the statistics of new plate boundaries, [`SplitTally`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitCause {
+    /// A plume rifted the plate (the rule of `rift_above_plumes`).
+    PlumeRift,
+    /// The plate broke by its internal stress (#182), mainly by opening.
+    BreakupOpening,
+    /// The plate broke by its internal stress, by sliding or closing.
+    BreakupOther,
+    /// The deforming zone between the blocks of a plate became a boundary (#163).
+    SheetSplit,
+    /// Subduction started at a passive margin or fracture zone and split the plate.
+    Initiation,
+}
+
+impl SplitCause {
+    pub const COUNT: usize = 5;
+    pub const ALL: [SplitCause; Self::COUNT] = [
+        SplitCause::PlumeRift,
+        SplitCause::BreakupOpening,
+        SplitCause::BreakupOther,
+        SplitCause::SheetSplit,
+        SplitCause::Initiation,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SplitCause::PlumeRift => "plume rule",
+            SplitCause::BreakupOpening => "stress opening",
+            SplitCause::BreakupOther => "stress other",
+            SplitCause::SheetSplit => "sheet",
+            SplitCause::Initiation => "initiation",
+        }
+    }
+}
+
+/// Distances (rad, ~500 and ~1000 km) from an active plume within which a new boundary counts
+/// as a split at that plume.
+pub const PLUME_SPLIT_DISTANCES: [f64; 2] = [0.0785, 0.157];
+
+/// Statistics of the new plate boundaries of one [`SplitCause`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SplitTally {
+    /// Splits.
+    pub count: usize,
+    /// Splits whose new boundary passes within [`PLUME_SPLIT_DISTANCES`] of an active plume.
+    pub near_plume: [usize; 2],
+    /// The same for the antipodes of the plumes: how often a boundary passes that close to a
+    /// plume by chance.
+    pub near_antipode: [usize; 2],
+    /// Sums of the distances (rad) from the new boundaries to the nearest plume and to the
+    /// nearest antipode of a plume (splits without plumes count π).
+    pub plume_distance: f64,
+    pub antipode_distance: f64,
+    /// Continental cells on the new boundaries: all, on orogenic belts (orogenic weakening at
+    /// least [`WEAK_BELT_THRESHOLD`]), on extension fabric (at least the same threshold).
+    pub boundary: [usize; 3],
+    /// The same over the two plates of each split: a weak zone is reactivated more often than
+    /// chance where its share on the boundaries is higher.
+    pub plates: [usize; 3],
+}
+
 /// Why two plates merge.
 #[derive(Clone, Copy, Debug)]
 enum Merge {
@@ -333,7 +402,17 @@ enum SplitAnchor {
 
 impl EventCounts {
     pub fn births(&self) -> usize {
-        self.rifts + self.initiations + self.breakups
+        self.rifts
+            + self.initiations
+            + self.breakups
+            + [
+                SplitCause::BreakupOpening,
+                SplitCause::BreakupOther,
+                SplitCause::SheetSplit,
+            ]
+            .iter()
+            .map(|&cause| self.splits_by_cause[cause as usize].count)
+            .sum::<usize>()
     }
 
     pub fn deaths(&self) -> usize {
@@ -560,6 +639,15 @@ impl Simulation {
         let new_plate = self.split_plate_cells(plate, &piece)?;
         let kind = usize::from(initiation);
         self.record_split_geometry(plate, new_plate, anchor);
+        self.record_split_cause(
+            plate,
+            new_plate,
+            if initiation {
+                SplitCause::Initiation
+            } else {
+                SplitCause::PlumeRift
+            },
+        );
         self.event_counts.split_deviation_km[kind] += self.boundary_deviation_km(plate, new_plate);
         self.event_counts.measured_splits[kind] += 1;
         if great_circle {
@@ -978,6 +1066,68 @@ impl Simulation {
             sizes.push(size);
         }
         (region, sizes)
+    }
+
+    /// Statistics of the new boundary between plates `a` (the old one) and `b` (split off) by
+    /// the cause of the split (see [`SplitTally`]).
+    pub(super) fn record_split_cause(&mut self, a: u32, b: u32, cause: SplitCause) {
+        let mut tally = SplitTally {
+            count: 1,
+            ..SplitTally::default()
+        };
+        let (mut nearest, mut nearest_antipode) = (std::f64::consts::PI, std::f64::consts::PI);
+        for cell in 0..self.mesh.len() as u32 {
+            let plate = self.owners[cell as usize].plate;
+            if plate != a && plate != b {
+                continue;
+            }
+            let other = if plate == a { b } else { a };
+            let on_boundary = self
+                .mesh
+                .neighbors(cell)
+                .iter()
+                .any(|&neighbor| self.owners[neighbor as usize].plate == other);
+            if on_boundary {
+                let r = self.mesh.vertex(cell);
+                for plume in self.mantle.plumes() {
+                    nearest = nearest.min(math::angle_between(r, plume.position));
+                    nearest_antipode =
+                        nearest_antipode.min(math::angle_between(r, -plume.position));
+                }
+            }
+            let crust = self.surface_crust(cell);
+            if !crust.is_continental_origin() {
+                continue;
+            }
+            let marks = [
+                1,
+                usize::from(crust.orogenic >= WEAK_BELT_THRESHOLD),
+                usize::from(extension_fabric(&crust) >= WEAK_BELT_THRESHOLD),
+            ];
+            for (k, mark) in marks.into_iter().enumerate() {
+                tally.plates[k] += mark;
+                if on_boundary {
+                    tally.boundary[k] += mark;
+                }
+            }
+        }
+        for (k, distance) in PLUME_SPLIT_DISTANCES.into_iter().enumerate() {
+            tally.near_plume[k] = usize::from(nearest <= distance);
+            tally.near_antipode[k] = usize::from(nearest_antipode <= distance);
+        }
+        debug!(a, b, ?cause, nearest, time = self.time, "Split by cause");
+        let total = &mut self.event_counts.splits_by_cause[cause as usize];
+        total.count += tally.count;
+        for k in 0..2 {
+            total.near_plume[k] += tally.near_plume[k];
+            total.near_antipode[k] += tally.near_antipode[k];
+        }
+        total.plume_distance += nearest;
+        total.antipode_distance += nearest_antipode;
+        for k in 0..3 {
+            total.boundary[k] += tally.boundary[k];
+            total.plates[k] += tally.plates[k];
+        }
     }
 
     /// Diagnostics of a new boundary between plates `a` and `b` (cells of `b` next to `a`): for

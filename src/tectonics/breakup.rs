@@ -887,6 +887,15 @@ impl Simulation {
                 } else if opening < -1.0 / 3.0 {
                     statistics.closing_splits += 1;
                 }
+                self.record_split_cause(
+                    plate,
+                    new_plate,
+                    if opening > 1.0 / 3.0 {
+                        events::SplitCause::BreakupOpening
+                    } else {
+                        events::SplitCause::BreakupOther
+                    },
+                );
                 tracing::debug!(
                     plate,
                     new_plate,
