@@ -12,6 +12,7 @@ use crate::climate::{Climate, ClimateParams, WaterCycle};
 use crate::erosion::{
     CrustClass, ErosionParams, Hydrology, Surface, SurfaceWater, WaveErosion, erode,
 };
+use crate::escape::{Escape, EscapeParams, EscapeState};
 use crate::tectonics::{
     CohortMasses, CoverBudget, CoverMasses, Crust, Simulation, Statistics, TectonicStep,
 };
@@ -26,6 +27,10 @@ pub struct Planet {
     /// Cells poleward of [`CarbonParams::deep_water_latitude`], whose ocean sets the bottom
     /// water temperature.
     deep_water_cells: Vec<bool>,
+    /// The loss of water to space (#210).
+    escape: Escape,
+    /// Cells within [`EscapeParams::tropics_latitude`], whose ocean sets the cold trap.
+    tropical_cells: Vec<bool>,
     /// `None` disables erosion.
     erosion: Option<ErosionParams>,
     planet_radius: f64,
@@ -303,6 +308,8 @@ pub struct PlanetStatistics {
     pub solar_constant: f64,
     /// The carbon cycle after the last step (#154): CO₂, forcing, sources and sinks.
     pub carbon: CarbonState,
+    /// The escape after the last step (#210); `None` when it is off.
+    pub escape: Option<EscapeState>,
     /// Fraction of the surface covered by permanent ice (sea ice, ice sheets).
     pub frozen_fraction: f64,
     /// Where the sediment sits and how much of the sea level it makes up.
@@ -412,6 +419,7 @@ impl Planet {
         climate: ClimateParams,
         temperature: TemperatureParams,
         carbon: CarbonParams,
+        escape: EscapeParams,
         erosion: Option<ErosionParams>,
         planet_radius: f64,
     ) -> Self {
@@ -423,6 +431,13 @@ impl Planet {
                     >= deep_water_latitude
             })
             .collect();
+        let tropics = escape.tropics_latitude.to_radians();
+        let tropical_cells = (0..tectonics.mesh().len() as u32)
+            .map(|cell| {
+                math::asin(tectonics.mesh().vertex(cell).z.clamp(-1.0, 1.0)).abs() <= tropics
+            })
+            .collect();
+        let escape = Escape::new(escape, tectonics.water_volume());
         let mut carbon = CarbonCycle::new(
             carbon,
             temperature.greenhouse_forcing,
@@ -454,6 +469,8 @@ impl Planet {
             temperature,
             carbon,
             deep_water_cells,
+            escape,
+            tropical_cells,
             erosion,
             planet_radius,
             precipitation: vec![0.0; cell_count],
@@ -938,6 +955,7 @@ impl Planet {
         }
         let start_carbon = Instant::now();
         self.update_carbon(view, &eroded, dt);
+        self.update_escape(dt);
         let carbon_time = start_carbon.elapsed();
         if self.cover_cohort.is_none() && self.tectonics.time() >= self.cover_cohort_time - 1e-9 {
             let mass = self.tectonics.start_cover_cohort();
@@ -1002,6 +1020,40 @@ impl Planet {
             self.temperature.params_mut().greenhouse_forcing = forcing;
         }
         info!(time = %format_args!("{time:.1}"), "{}", self.carbon.state().summary());
+    }
+
+    /// One step of the escape (#210) on the step's climate and CO₂: the water it loses is taken
+    /// from the ocean. Nothing happens when it is off.
+    fn update_escape(&mut self, dt: f64) {
+        if !self.escape.params().enabled {
+            return;
+        }
+        let fields = self.temperature.fields();
+        let ocean = &self.water.ocean;
+        // The tropical ocean, or any ocean if the tropics have none.
+        let mut temperatures: Vec<f64> = (0..ocean.len())
+            .filter(|&cell| ocean[cell] && self.tropical_cells[cell])
+            .map(|cell| fields.annual_mean[cell])
+            .collect();
+        if temperatures.is_empty() {
+            temperatures = (0..ocean.len())
+                .filter(|&cell| ocean[cell])
+                .map(|cell| fields.annual_mean[cell])
+                .collect();
+        }
+        let time = self.tectonics.time();
+        let volume = self.escape.step(&crate::escape::StepInput {
+            years: dt * 1e6,
+            tropical_temperatures: &temperatures,
+            co2_pressure: self.carbon.state().pressure,
+            sun_age: crate::sun::age_of_run(self.temperature.params().epoch, time),
+            planet_radius: self.planet_radius,
+            ocean_volume: self.tectonics.ocean_volume(),
+        });
+        if volume > 0.0 {
+            self.tectonics.remove_water(volume);
+        }
+        debug!(time = %format_args!("{time:.1}"), "{}", self.escape.state().summary());
     }
 
     /// The plate and the [`CrustClass`] of every cell.
@@ -1211,6 +1263,9 @@ impl Planet {
             gyre_transport: fields.gyre_transport,
             solar_constant: fields.solar_constant,
             carbon: *self.carbon.state(),
+            // Once it has taken a step.
+            escape: (self.escape.params().enabled && self.escape.state().xuv > 0.0)
+                .then_some(*self.escape.state()),
             heat_transport: {
                 let transport = &fields.meridional_transport;
                 let to_petawatts = |t: f64| t * self.planet_radius.powi(2) / 1e15;
@@ -1415,6 +1470,7 @@ mod tests {
             ClimateParams::default(),
             TemperatureParams::default(),
             CarbonParams::default(),
+            EscapeParams::default(),
             Some(ErosionParams {
                 planet_radius: RADIUS,
                 ..ErosionParams::default()
@@ -1461,6 +1517,7 @@ mod tests {
             ClimateParams::default(),
             TemperatureParams::default(),
             CarbonParams::default(),
+            EscapeParams::default(),
             Some(ErosionParams {
                 planet_radius: RADIUS,
                 ..ErosionParams::default()

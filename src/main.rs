@@ -7,6 +7,7 @@ mod climate;
 #[cfg(any(target_arch = "wasm32", test))]
 mod device;
 mod erosion;
+mod escape;
 mod hash;
 mod isostasy;
 mod koppen;
@@ -121,6 +122,13 @@ struct Cli {
     /// The fluxes are still computed and logged.
     #[arg(long)]
     no_carbon_cycle: bool,
+
+    /// Keep all the planet's water instead of losing hydrogen, and with it water, to space
+    /// (#210): by default the water vapour that passes the cold trap of the tropopause is split
+    /// and its hydrogen escapes (diffusion- or XUV-limited), slowly in a temperate climate and
+    /// fast in a moist greenhouse; the ocean and the sea level fall, the oxygen stays behind.
+    #[arg(long)]
+    no_escape: bool,
 
     /// Start with a bare planet instead of an initial sediment cover.
     #[arg(long)]
@@ -554,6 +562,7 @@ impl Cli {
         params.track_material_budget = self.material_budget;
         params.breakup.diagnose = self.plate_log.is_some();
         parameters.carbon.enabled = !self.no_carbon_cycle;
+        parameters.escape.enabled = !self.no_escape;
         let mut overrides = Vec::with_capacity(self.overrides.len());
         for assignment in &self.overrides {
             let (name, value) = assignment
@@ -604,8 +613,16 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
         warn!(
             "the Sun of this run (epoch {}, {} Myr) becomes more than {MOIST_GREENHOUSE} times as \
              bright as today's; a real ocean planet would lose its water in a moist greenhouse \
-             (Kasting, 1988), which the model does not simulate",
-            cli.epoch, cli.duration
+             (Kasting, 1988){}, and beyond ~1.2 times it would boil its ocean into a steam \
+             atmosphere (runaway greenhouse), which the model does not simulate: its ocean stays \
+             liquid at any temperature",
+            cli.epoch,
+            cli.duration,
+            if cli.no_escape {
+                ", which `--no-escape` turns off"
+            } else {
+                " (simulated: hydrogen escape from a wet stratosphere, #210)"
+            }
         );
     }
     for (name, value) in overrides {
@@ -626,6 +643,7 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
         climate,
         temperature,
         carbon,
+        escape,
     } = parameters;
     let simulation = Simulation::new(mesh, cli.plates, params, cli.seed);
     let erosion = (!cli.no_erosion).then_some(erosion);
@@ -634,6 +652,7 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
         climate,
         temperature,
         carbon,
+        escape,
         erosion,
         EARTH_RADIUS,
     );
@@ -1057,6 +1076,7 @@ fn snapshot(
             ),
             ("mantle", sea_level_budget.mantle, previous_sea_level.mantle),
             ("lakes", sea_level_budget.lakes, previous_sea_level.lakes),
+            ("escape", sea_level_budget.escape, previous_sea_level.escape),
         ];
         let parts: Vec<String> = terms
             .iter()
@@ -1452,6 +1472,9 @@ fn snapshot(
         planet_statistics.solar_constant,
     );
     info!("    {}", planet_statistics.carbon.summary());
+    if let Some(escape) = &planet_statistics.escape {
+        info!("    {}", escape.summary());
+    }
 
     let (groups, classes) = koppen::land_shares(&koppen::classes(planet));
     // The five most common classes, the more common first (ties by id).

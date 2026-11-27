@@ -60,6 +60,7 @@ const MAIN: &[&str] = &[
     "epoch",
     "no-erosion",
     "no-carbon-cycle",
+    "no-escape",
 ];
 
 /// Screens narrower than this (in points) start with the panel hidden, e.g. phones in portrait.

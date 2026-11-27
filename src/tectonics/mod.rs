@@ -599,6 +599,8 @@ pub struct SeaLevelBudget {
     pub mantle: f64,
     /// Water held in lakes, which the ocean lacks (see [`Simulation::set_lake_water`]).
     pub lakes: f64,
+    /// Water lost to space by atmospheric escape (see [`Simulation::remove_water`]).
+    pub escape: f64,
 }
 
 impl SeaLevelBudget {
@@ -610,6 +612,7 @@ impl SeaLevelBudget {
             + self.metamorphism
             + self.mantle
             + self.lakes
+            + self.escape
     }
 }
 
@@ -1270,6 +1273,18 @@ impl Simulation {
         self.sea_level = sea_level;
     }
 
+    /// Removes `volume` m³ of water from the ocean (lost to space, #210), at most what the ocean
+    /// holds besides the lakes; the planet's water ([`TectonicParams::ocean_volume`]) shrinks
+    /// and the sea level is solved again.
+    pub fn remove_water(&mut self, volume: f64) {
+        let volume = volume.clamp(0.0, self.ocean_volume().max(0.0));
+        self.params.ocean_volume -= volume;
+        self.lake_water = self.lake_water.min(self.params.ocean_volume);
+        let sea_level = self.solve_sea_level();
+        self.sea_level_budget.escape += sea_level - self.sea_level;
+        self.sea_level = sea_level;
+    }
+
     /// The active mantle plumes.
     pub fn plumes(&self) -> &[Plume] {
         self.mantle.plumes()
@@ -1907,6 +1922,36 @@ mod tests {
 
     fn simulation(seed: u64) -> Simulation {
         Simulation::new(SphereMesh::icosphere(4), 8, TectonicParams::default(), seed)
+    }
+
+    /// Water lost to space lowers the sea level by about its volume over the ocean's area, all
+    /// of it in the `escape` term of the budget; never more than the ocean holds.
+    #[test]
+    fn removed_water_lowers_the_sea_level() {
+        let mut simulation = simulation(3);
+        let before = simulation.sea_level;
+        let ocean_cells = simulation
+            .surface_elevations()
+            .iter()
+            .filter(|&&e| e < 0.0)
+            .count() as f64;
+        let cell_area = 4.0 * std::f64::consts::PI * simulation.params.planet_radius.powi(2)
+            / simulation.mesh.len() as f64;
+        let volume = 1e15;
+        simulation.remove_water(volume);
+        let drop = before - simulation.sea_level;
+        // The sea floor rises as the water's load goes (Airy).
+        let expected = volume / (ocean_cells * cell_area)
+            * (1.0 - crate::isostasy::WATER_DENSITY / crate::isostasy::MANTLE_DENSITY);
+        assert!((drop / expected - 1.0).abs() < 0.05, "{drop} {expected}");
+        let (budget, residual) = simulation.sea_level_budget();
+        assert_eq!(budget.escape, simulation.sea_level - before);
+        assert!(residual.abs() < 1e-6);
+        let water = simulation.water_volume();
+        simulation.set_lake_water(0.25 * water);
+        simulation.remove_water(2.0 * water);
+        assert!((simulation.water_volume() - 0.25 * water).abs() < 1e-6 * water);
+        assert!(simulation.ocean_volume().abs() < 1e-6 * water);
     }
 
     #[test]

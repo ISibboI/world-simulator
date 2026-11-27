@@ -27,6 +27,7 @@
 use crate::carbon::CarbonParams;
 use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
+use crate::escape::EscapeParams;
 use crate::math;
 use crate::sun::{self, MAX_EPOCH, PRESENT_EPOCH, PRESENT_SOLAR_CONSTANT};
 use crate::tectonics::TectonicParams;
@@ -282,6 +283,7 @@ pub struct Parameters {
     pub climate: ClimateParams,
     pub temperature: TemperatureParams,
     pub carbon: CarbonParams,
+    pub escape: EscapeParams,
 }
 
 impl Parameters {
@@ -296,6 +298,7 @@ impl Parameters {
             climate: ClimateParams::default(),
             temperature: TemperatureParams::default(),
             carbon: CarbonParams::default(),
+            escape: EscapeParams::default(),
         };
         biosphere.apply(
             &mut parameters.tectonics,
@@ -308,10 +311,12 @@ impl Parameters {
         parameters
     }
 
-    /// Overrides one parameter: `erosion.`, `climate.`, `temperature.` and `carbon.` select
-    /// those parameters, anything else is a tectonic parameter.
+    /// Overrides one parameter: `erosion.`, `climate.`, `temperature.`, `carbon.` and `escape.`
+    /// select those parameters, anything else is a tectonic parameter.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
-        if let Some(name) = name.strip_prefix("carbon.") {
+        if let Some(name) = name.strip_prefix("escape.") {
+            self.escape.set(name, value)
+        } else if let Some(name) = name.strip_prefix("carbon.") {
             self.carbon.set(name, value)
         } else if let Some(name) = name.strip_prefix("erosion.") {
             self.erosion.set(name, value)
@@ -333,13 +338,14 @@ mod tests {
 
     /// The parameters printed with `Debug`, which prints every f64 exactly (shortest
     /// round-trip representation), so equal strings mean bit-identical parameters.
-    fn fingerprint(parameters: &Parameters) -> [String; 5] {
+    fn fingerprint(parameters: &Parameters) -> [String; 6] {
         [
             format!("{:?}", parameters.tectonics),
             format!("{:?}", parameters.erosion),
             format!("{:?}", parameters.climate),
             format!("{:?}", parameters.temperature),
             format!("{:?}", parameters.carbon),
+            format!("{:?}", parameters.escape),
         ]
     }
 
@@ -353,6 +359,7 @@ mod tests {
             climate: ClimateParams::default(),
             temperature: TemperatureParams::default(),
             carbon: CarbonParams::default(),
+            escape: EscapeParams::default(),
         }
     }
 
