@@ -282,10 +282,17 @@ impl SectionEdge {
 const ITERATIONS: usize = 30;
 const REFINED: usize = 4;
 
-/// Orientations (evenly spaced over 180°) of the great circles through a plume searched as
-/// sections (#51): a resolution of the search, not a parameter of the physics; the best one is
-/// refined along the weakest lithosphere within [`BreakupParams::band`] cells.
-const PLUME_SECTION_ORIENTATIONS: usize = 6;
+/// Directions (evenly spaced over 360°) of the arms of the sections through a plume searched
+/// (#51): each section runs from the plume along two arms [`PLUME_SECTION_ANGLES`] apart, one of
+/// them a straight great circle (180°); a resolution of the search, not a parameter of the
+/// physics. The best one is refined along the weakest lithosphere within
+/// [`BreakupParams::band`] cells.
+const PLUME_SECTION_DIRECTIONS: usize = 12;
+
+/// Angles (in steps of 360° / [`PLUME_SECTION_DIRECTIONS`]) between the two arms of a section
+/// through a plume: 90°, 120°, 150° and straight. Plume rifts open along two of the arms of a
+/// triple junction (~120° apart; the third is the failed arm), or straight through.
+const PLUME_SECTION_ANGLES: [usize; 4] = [3, 4, 5, 6];
 
 /// The dissipation of the section `edges` at the yield traction (strength `force` of
 /// lithosphere of relative strength 1) in the relative rotation `omega`.
@@ -914,7 +921,8 @@ impl Simulation {
     }
 
     /// The most overloaded section along a great circle through one of the plumes `plumes`
-    /// above the piece, of [`PLUME_SECTION_ORIENTATIONS`] orientations each: (overload, (level,
+    /// above the piece, with two arms from the plume ([`PLUME_SECTION_DIRECTIONS`],
+    /// [`PLUME_SECTION_ANGLES`]): (overload, (level,
     /// a level field whose cells below the level are the side next to the plume), the torque
     /// of that side's loads), or `None` if no such section leaves both parts of at least
     /// `min_cells`. The side next to the plume is the connected part of the half of the piece
@@ -949,11 +957,34 @@ impl Simulation {
                 DVec3::X
             };
             let north = p.cross(east);
+            // Direction (in steps of the arms' directions) of every cell of the piece seen from
+            // the plume.
+            let step = std::f64::consts::TAU / PLUME_SECTION_DIRECTIONS as f64;
+            let direction: Vec<f64> = piece
+                .iter()
+                .map(|&cell| {
+                    let r = self.mesh.vertex(cell);
+                    let a = math::atan2(r.dot(north), r.dot(east)) / step;
+                    a.rem_euclid(PLUME_SECTION_DIRECTIONS as f64)
+                })
+                .collect();
+            let wedges = PLUME_SECTION_ANGLES.iter().flat_map(|&width| {
+                // A straight section and its complement are the same section.
+                let starts = if 2 * width == PLUME_SECTION_DIRECTIONS {
+                    PLUME_SECTION_DIRECTIONS / 2
+                } else {
+                    PLUME_SECTION_DIRECTIONS
+                };
+                (0..starts).map(move |start| (start, width))
+            });
             let mut candidates: Vec<(f64, Vec<bool>, DVec3)> = Vec::new();
-            for k in 0..PLUME_SECTION_ORIENTATIONS {
-                let angle = k as f64 * std::f64::consts::PI / PLUME_SECTION_ORIENTATIONS as f64;
-                let normal = east * math::cos(angle) + north * math::sin(angle);
-                // The plume's cell and the cells of the piece on the negative side, connected
+            for (first, width) in wedges {
+                let inside = |i: usize| {
+                    let d =
+                        (direction[i] - first as f64).rem_euclid(PLUME_SECTION_DIRECTIONS as f64);
+                    d < width as f64
+                };
+                // The plume's cell and the cells of the piece between the two arms, connected
                 // to it.
                 side.fill(false);
                 side[start as usize] = true;
@@ -961,10 +992,7 @@ impl Simulation {
                 while let Some(i) = stack.pop() {
                     for &m in self.mesh.neighbors(piece[i]) {
                         let j = index[m as usize];
-                        if j != u32::MAX
-                            && !side[j as usize]
-                            && self.mesh.vertex(m).dot(normal) < 0.0
-                        {
+                        if j != u32::MAX && !side[j as usize] && inside(j as usize) {
                             side[j as usize] = true;
                             stack.push(j as usize);
                         }
