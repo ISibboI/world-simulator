@@ -1,0 +1,1027 @@
+//! The long-term carbon cycle (#154): CO₂ of the atmosphere and ocean as a global state, with
+//! sources from the tectonics and sinks by weathering, which sets the greenhouse forcing of the
+//! temperature model in every step.
+//!
+//! On a planet without life, carbon leaves the interior by **tectonic degassing** (magmatic CO₂
+//! at ridges, arcs and plumes, and decarbonation of buried and collided sediment) and returns to
+//! the rock by **silicate weathering** followed by inorganic carbonate burial (on land: one C
+//! per Ca or Mg released; Walker et al., 1981; Berner, 2004) and by the **alteration of young
+//! oceanic crust** (seafloor weathering). Both sinks speed up as the climate warms and the CO₂
+//! rises, which stabilises the climate while the sun brightens: the carbonate–silicate feedback.
+//!
+//! - **State**: the exogenic carbon `N` (mol) of the atmosphere and the ocean, which the fluxes
+//!   change. The atmospheric CO₂ follows from it ([`exogenic_carbon`]): the atmosphere holds
+//!   `p A / (g M̄)`, the ocean `M (DIC₀ r^{1/3} + K₀ p)` (calcite-saturated, so the bicarbonate
+//!   grows with the cube root of the CO₂).
+//! - **Forcing**: [`crate::presets::co2_forcing`], with a quadratic term at high CO₂ (Byrne &
+//!   Goldblatt, 2014). The CO₂ at the start follows from the start's forcing, so the start is
+//!   continuous.
+//! - **Sources** ([`Sources`]): coefficients (mol C per unit of a tectonic rate) from Earth's
+//!   fluxes and rates, applied to the model's rates per step: new sea floor, subducted crust and
+//!   sediment, the plumes' flux, and metamorphosed and collided sediment.
+//! - **Sinks** ([`Sinks`]): silicate weathering of every land cell, kinetic (runoff, Arrhenius
+//!   temperature, CO₂, lithology, plants) but limited by the supply of fresh rock from the
+//!   erosion (`w = w_sup (1 − e^{−w_kin/w_sup})`); seafloor weathering per kg of new crust.
+//! - **Calibration**: one factor φ on both kinetic laws is set in the first step so that the
+//!   sinks balance the sources at the start's CO₂ and climate ([`CarbonParams::phi`]).
+//! - **Coupling**: an implicit (backward Euler) step for `ln r` with the temperature change the
+//!   new forcing will cause predicted by a fixed sensitivity λ, which is stable at the 1 Myr
+//!   step also when the feedback is faster than the step.
+//!
+//! See `notes/issue-154/plan.md` for the values and their sources.
+
+use tracing::warn;
+
+use crate::math;
+use crate::presets::{co2_forcing, co2_ratio_for_forcing};
+
+/// Pre-industrial partial pressure of CO₂ in bar (280 ppm of a 1 bar atmosphere), the reference
+/// of the CO₂ ratio `r`.
+pub const REFERENCE_PRESSURE: f64 = 280e-6;
+/// Mean molar mass of the air in kg/mol: a partial pressure `p` holds `p / (g M̄)` mol per m².
+const AIR_MOLAR_MASS: f64 = 0.029;
+/// Surface gravity in m/s².
+const GRAVITY: f64 = 9.81;
+/// Density of sea water in kg/m³.
+const SEA_WATER_DENSITY: f64 = 1025.0;
+/// Molar gas constant in J/(mol K).
+const GAS_CONSTANT: f64 = 8.314;
+/// 0 °C in K.
+const ZERO_CELSIUS: f64 = 273.15;
+/// Freezing point of sea water in °C: the coldest bottom water.
+const SEA_WATER_FREEZING: f64 = -1.8;
+
+/// Parameters of the carbon cycle; the defaults describe today's Earth (with plants, see
+/// [`crate::presets::Biosphere`] for a barren planet). Rates in mol C per year.
+#[derive(Clone, Debug)]
+pub struct CarbonParams {
+    /// Whether the CO₂ follows the carbon cycle (`--no-carbon-cycle` turns it off): otherwise
+    /// the forcing stays that of the start, and the fluxes at that CO₂ are only logged.
+    pub enabled: bool,
+    /// Ridge degassing per kg of new oceanic crust (mol/kg): ~2 Tmol/yr on Earth's ~65 Gt/yr.
+    pub ridge_carbon: f64,
+    /// Arc degassing per kg of subducted oceanic crust from the mantle wedge's own carbon
+    /// (mol/kg).
+    pub wedge_carbon: f64,
+    /// Share of the carbon of the altered oceanic crust (its seafloor uptake) that returns at
+    /// arcs when it subducts, and the time (Myr) over which the uptake is averaged for the
+    /// crust arriving at the trenches (about its mean age there).
+    pub slab_return: f64,
+    pub slab_age: f64,
+    /// Arc degassing per kg of subducted sediment (mol/kg): its carbonate, about half returns.
+    pub slab_sediment_carbon: f64,
+    /// Plume degassing per m²/s of plume flux ([`crate::tectonics::Plume::flux`]), mol/yr per
+    /// m²/s: 1 Tmol/yr for the model's typical ~9 plumes (0.036 m²/s).
+    pub plume_carbon: f64,
+    /// Metamorphic decarbonation per kg of sediment metamorphosed by burial or stacked in
+    /// collisions (mol/kg).
+    pub metamorphic_carbon: f64,
+    /// Kinetic silicate weathering of felsic rock in mol Ca+Mg per m² and year at the reference
+    /// temperature, today's CO₂, a runoff of 1 m/yr and with plants (scaled by
+    /// [`Self::plant_factor`] and the runoff to the power of [`Self::runoff_exponent`]).
+    pub land_weathering: f64,
+    /// Weathering with the plants of today's land relative to [`Self::land_weathering`]: 1
+    /// with plants, 0.25 on barren land.
+    pub plant_factor: f64,
+    /// Exponent of the CO₂ dependence of land weathering, and whether plants saturate it: with
+    /// plants the dependence is `(2r / (1 + r))^e` (roots raise the soil's CO₂; GEOCARB), on
+    /// barren land `r^e` (soil CO₂ is atmospheric). 1 or 0.
+    pub co2_exponent: f64,
+    pub soil_co2_saturation: f64,
+    /// Exponent of the runoff (m/yr) in the kinetic weathering.
+    pub runoff_exponent: f64,
+    /// Activation energy of land weathering in J/mol and the temperature (°C) of
+    /// [`Self::land_weathering`].
+    pub activation_energy: f64,
+    pub reference_temperature: f64,
+    /// Kinetic weathering of basalt relative to felsic rock (5–10× faster).
+    pub basalt_reactivity: f64,
+    /// Ca + Mg content (mol/kg) of felsic and of basaltic rock; mixed crust is interpolated by
+    /// its felsic fraction.
+    pub felsic_cations: f64,
+    pub basalt_cations: f64,
+    /// Weatherable part of eroded sediment relative to fresh felsic rock.
+    pub sediment_weatherable: f64,
+    /// Seafloor weathering: carbon taken up per kg of new oceanic crust (mol/kg) at today's CO₂
+    /// and the reference bottom water temperature (°C), its CO₂ exponent, activation energy
+    /// (J/mol) and the most the crust can take up (mol/kg).
+    pub seafloor_carbon: f64,
+    pub seafloor_co2_exponent: f64,
+    pub seafloor_activation_energy: f64,
+    pub seafloor_reference_temperature: f64,
+    pub seafloor_max_carbon: f64,
+    /// Latitude (degrees) poleward of which the ocean's surface sets the bottom water
+    /// temperature.
+    pub deep_water_latitude: f64,
+    /// Dissolved inorganic carbon of the ocean at today's CO₂ (mol/kg) and the solubility of
+    /// CO₂ (mol/(kg bar)).
+    pub ocean_dic: f64,
+    pub co2_solubility: f64,
+    /// Global temperature change (K) per W/m² of forcing that the implicit step predicts for
+    /// the next climate update; at least the model's own sensitivity (stability, see
+    /// `notes/issue-154/plan.md`).
+    pub climate_sensitivity: f64,
+    /// Relative change of the runoff per kelvin that the implicit step predicts.
+    pub runoff_sensitivity: f64,
+    /// Scale of both kinetic weathering laws. NaN (the default): set after
+    /// [`Self::calibration_time`] so that the sinks balance the sources over that time at the
+    /// start's CO₂ (a continuous start); 1 takes the laws as they are.
+    pub phi: f64,
+    /// The time (Myr) at the start over which φ is calibrated; the CO₂ stays that of the start
+    /// until then (the plates start at rest: the sea floor only opens after a few Myr).
+    pub calibration_time: f64,
+    /// The calibrated φ stays within `1/phi_range..=phi_range`.
+    pub phi_range: f64,
+    /// Time (Myr) over which the degassing is smoothed: the tectonic rates jump with the grid.
+    pub degassing_smoothing: f64,
+}
+
+impl Default for CarbonParams {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ridge_carbon: 0.03,
+            wedge_carbon: 0.015,
+            slab_return: 0.5,
+            slab_age: 100.0,
+            slab_sediment_carbon: 0.15,
+            plume_carbon: 1e12 / 0.036,
+            metamorphic_carbon: 0.5,
+            land_weathering: 0.073,
+            plant_factor: 1.0,
+            co2_exponent: 0.4,
+            soil_co2_saturation: 1.0,
+            runoff_exponent: 0.65,
+            activation_energy: 50e3,
+            reference_temperature: 15.0,
+            basalt_reactivity: 5.0,
+            felsic_cations: 1.3,
+            basalt_cations: 3.7,
+            sediment_weatherable: 0.3,
+            seafloor_carbon: 0.015,
+            seafloor_co2_exponent: 0.23,
+            seafloor_activation_energy: 92e3,
+            seafloor_reference_temperature: 2.0,
+            seafloor_max_carbon: 0.26,
+            deep_water_latitude: 55.0,
+            ocean_dic: 2.0e-3,
+            co2_solubility: 0.04,
+            climate_sensitivity: 0.8,
+            runoff_sensitivity: 0.03,
+            phi: f64::NAN,
+            calibration_time: 20.0,
+            phi_range: 1e3,
+            degassing_smoothing: 3.0,
+        }
+    }
+}
+
+impl CarbonParams {
+    /// Sets a parameter by its field name (`enabled` as 0 or 1).
+    pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
+        if name == "enabled" {
+            self.enabled = value != 0.0;
+            return Ok(());
+        }
+        let field = match name {
+            "ridge_carbon" => &mut self.ridge_carbon,
+            "wedge_carbon" => &mut self.wedge_carbon,
+            "slab_return" => &mut self.slab_return,
+            "slab_age" => &mut self.slab_age,
+            "slab_sediment_carbon" => &mut self.slab_sediment_carbon,
+            "plume_carbon" => &mut self.plume_carbon,
+            "metamorphic_carbon" => &mut self.metamorphic_carbon,
+            "land_weathering" => &mut self.land_weathering,
+            "plant_factor" => &mut self.plant_factor,
+            "co2_exponent" => &mut self.co2_exponent,
+            "soil_co2_saturation" => &mut self.soil_co2_saturation,
+            "runoff_exponent" => &mut self.runoff_exponent,
+            "activation_energy" => &mut self.activation_energy,
+            "reference_temperature" => &mut self.reference_temperature,
+            "basalt_reactivity" => &mut self.basalt_reactivity,
+            "felsic_cations" => &mut self.felsic_cations,
+            "basalt_cations" => &mut self.basalt_cations,
+            "sediment_weatherable" => &mut self.sediment_weatherable,
+            "seafloor_carbon" => &mut self.seafloor_carbon,
+            "seafloor_co2_exponent" => &mut self.seafloor_co2_exponent,
+            "seafloor_activation_energy" => &mut self.seafloor_activation_energy,
+            "seafloor_reference_temperature" => &mut self.seafloor_reference_temperature,
+            "seafloor_max_carbon" => &mut self.seafloor_max_carbon,
+            "deep_water_latitude" => &mut self.deep_water_latitude,
+            "ocean_dic" => &mut self.ocean_dic,
+            "co2_solubility" => &mut self.co2_solubility,
+            "climate_sensitivity" => &mut self.climate_sensitivity,
+            "runoff_sensitivity" => &mut self.runoff_sensitivity,
+            "phi" => &mut self.phi,
+            "calibration_time" => &mut self.calibration_time,
+            "phi_range" => &mut self.phi_range,
+            "degassing_smoothing" => &mut self.degassing_smoothing,
+            _ => anyhow::bail!("unknown carbon parameter {name}"),
+        };
+        *field = value;
+        Ok(())
+    }
+
+    /// The land weathering's dependence on the CO₂ ratio `r` (1 at `r = 1`).
+    fn land_co2_factor(&self, ratio: f64) -> f64 {
+        let base = if self.soil_co2_saturation > 0.0 {
+            2.0 * ratio / (1.0 + ratio)
+        } else {
+            ratio
+        };
+        math::powf(base, self.co2_exponent)
+    }
+}
+
+/// Cumulative tectonic quantities from which the degassing is computed, as the tectonics
+/// reports them (see [`crate::tectonics::Simulation::carbon_drivers`]): masses in kg so far,
+/// the plume flux now.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TectonicDrivers {
+    /// New oceanic crust at ridges.
+    pub new_sea_floor: f64,
+    /// Subducted oceanic and transitional crust.
+    pub subducted_crust: f64,
+    /// Subducted sediment.
+    pub subducted_sediment: f64,
+    /// Sediment metamorphosed by burial and stacked onto the upper plate in collisions.
+    pub metamorphic_sediment: f64,
+    /// Sum of the current plume fluxes in m²/s.
+    pub plume_flux: f64,
+}
+
+/// Degassing in mol C/yr.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Sources {
+    pub ridges: f64,
+    pub arcs: f64,
+    pub plumes: f64,
+    pub metamorphic: f64,
+}
+
+impl Sources {
+    pub fn total(&self) -> f64 {
+        self.ridges + self.arcs + self.plumes + self.metamorphic
+    }
+}
+
+/// Carbon removal in mol C/yr: silicate weathering on land (buried as carbonate in the ocean)
+/// and seafloor weathering (carbonate in the altered crust).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Sinks {
+    pub land: f64,
+    pub seafloor: f64,
+}
+
+impl Sinks {
+    pub fn total(&self) -> f64 {
+        self.land + self.seafloor
+    }
+}
+
+/// The state of the carbon cycle after a step, for the log and the statistics.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CarbonState {
+    /// CO₂ relative to the pre-industrial 280 ppm, and as a partial pressure in bar.
+    pub ratio: f64,
+    pub pressure: f64,
+    /// Greenhouse forcing of that CO₂ (W/m²), which the next climate update uses.
+    pub forcing: f64,
+    /// Exogenic carbon (mol) and the part of it in the atmosphere.
+    pub carbon: f64,
+    pub atmosphere: f64,
+    pub sources: Sources,
+    /// The sinks at the end of the step (the implicit step), i.e. with the new CO₂ and the
+    /// predicted temperature change.
+    pub sinks: Sinks,
+    /// The scale of the kinetic laws (see [`CarbonParams::phi`]); NaN before the first step.
+    pub phi: f64,
+    /// Temperature change (K) the step predicted for the next climate update.
+    pub predicted_warming: f64,
+    /// Bottom water temperature (°C) of the seafloor weathering.
+    pub deep_water_temperature: f64,
+    /// Share of the land weathering's supply limit that the kinetics use (0 to 1): near 1 the
+    /// weathering is supply-limited.
+    pub weathering_intensity: f64,
+}
+
+impl CarbonState {
+    /// One line for the log: CO₂, forcing, the sources and sinks in Tmol C/yr.
+    pub fn summary(&self) -> String {
+        let s = &self.sources;
+        let k = &self.sinks;
+        format!(
+            "carbon: pCO₂ {:.4} bar ({:.1}× PAL), forcing {:+.2} W/m² | sources {:.2} Tmol/yr \
+             (ridges {:.2}, arcs {:.2}, plumes {:.2}, metamorphic {:.2}) | sinks {:.2} (land \
+             {:.2}, seafloor {:.2}) | φ {:.3}, weathering intensity {:.2}, bottom water {:.1} °C, \
+             predicted ΔT {:+.3} K | exogenic carbon {:.3e} mol ({:.0}% in the air)",
+            self.pressure,
+            self.ratio,
+            self.forcing,
+            s.total() / 1e12,
+            s.ridges / 1e12,
+            s.arcs / 1e12,
+            s.plumes / 1e12,
+            s.metamorphic / 1e12,
+            k.total() / 1e12,
+            k.land / 1e12,
+            k.seafloor / 1e12,
+            self.phi,
+            self.weathering_intensity,
+            self.deep_water_temperature,
+            self.predicted_warming,
+            self.carbon,
+            100.0 * self.atmosphere / self.carbon,
+        )
+    }
+}
+
+/// One land cell as the weathering sees it.
+#[derive(Clone, Copy, Debug)]
+pub struct LandCell {
+    /// Area in m².
+    pub area: f64,
+    /// Annual mean surface temperature in °C.
+    pub temperature: f64,
+    /// Runoff in m/yr.
+    pub runoff: f64,
+    /// Permanent ice cover, 0 to 1.
+    pub ice: f64,
+    /// Bedrock and sediment eroded from the cell in the step, in m/yr (≥ 0).
+    pub bedrock_erosion: f64,
+    pub sediment_erosion: f64,
+    /// Density of the bedrock in kg/m³.
+    pub bedrock_density: f64,
+    /// Mafic (basaltic) share of the bedrock, 0 to 1: one minus its felsic fraction.
+    pub mafic: f64,
+}
+
+/// What one step of the carbon cycle needs of the planet.
+pub struct StepInput<'a> {
+    /// Length of the step in years.
+    pub years: f64,
+    pub drivers: TectonicDrivers,
+    pub land: &'a [LandCell],
+    /// Bottom water temperature in °C (before the predicted change).
+    pub deep_water_temperature: f64,
+    /// Mass of the ocean in kg.
+    pub ocean_mass: f64,
+    /// Area of the planet in m².
+    pub planet_area: f64,
+    /// Change of the absorbed sunlight (W/m², global mean) from this step's climate update to
+    /// the next, by the brightening sun.
+    pub sunlight_change: f64,
+    /// Net radiation at the top of the atmosphere (W/m²) of this step's climate update: the
+    /// warming it has not reached yet is about [`CarbonParams::climate_sensitivity`] times it.
+    pub toa_imbalance: f64,
+}
+
+/// The per-cell parts of the land weathering that do not depend on the CO₂ or the temperature
+/// change: supply limit (mol/m²/yr), the kinetic rate at φ = 1, r = 1 and no change, the
+/// temperature in K, and the area.
+#[derive(Clone, Debug)]
+struct WeatheringCell {
+    supply: f64,
+    kinetic: f64,
+    temperature: f64,
+    area: f64,
+}
+
+/// What the calibration of φ keeps of a step of its window.
+#[derive(Clone, Debug)]
+struct CalibrationStep {
+    years: f64,
+    cells: Vec<WeatheringCell>,
+    /// New and subducted oceanic crust in kg/yr.
+    ridge_crust: f64,
+    subducted_crust: f64,
+    deep_water_temperature: f64,
+    /// The degassing without the return of the seafloor's carbon at arcs (mol/yr).
+    degassing: f64,
+}
+
+/// The carbon cycle (see the module documentation).
+#[derive(Clone, Debug)]
+pub struct CarbonCycle {
+    params: CarbonParams,
+    /// Exogenic carbon in mol.
+    carbon: f64,
+    /// CO₂ ratio of the current forcing, and the forcing (W/m²): exactly the start's until the
+    /// CO₂ first changes.
+    ratio: f64,
+    forcing: f64,
+    /// The drivers at the end of the last step.
+    previous: Option<TectonicDrivers>,
+    /// Simulated years so far.
+    years: f64,
+    /// The steps of the calibration window, until φ is set.
+    calibration: Vec<CalibrationStep>,
+    /// φ once set.
+    phi: Option<f64>,
+    /// Carbon of the altered oceanic crust that arrives at the trenches (mol/kg): the seafloor
+    /// uptake, averaged over [`CarbonParams::slab_age`]. NaN until known.
+    slab_carbon: f64,
+    /// The sources smoothed over [`CarbonParams::degassing_smoothing`]; `None` before the first
+    /// step.
+    smoothed: Option<Sources>,
+    state: CarbonState,
+}
+
+impl CarbonCycle {
+    /// The carbon cycle of a planet whose climate starts with the greenhouse `forcing` (W/m²),
+    /// with an ocean of `ocean_mass` kg on a planet of `planet_area` m².
+    pub fn new(params: CarbonParams, forcing: f64, ocean_mass: f64, planet_area: f64) -> Self {
+        let ratio = co2_ratio_for_forcing(forcing);
+        let carbon = exogenic_carbon(&params, ratio, ocean_mass, planet_area);
+        let state = CarbonState {
+            ratio,
+            pressure: ratio * REFERENCE_PRESSURE,
+            forcing,
+            carbon,
+            atmosphere: atmospheric_carbon(ratio, planet_area),
+            phi: f64::NAN,
+            deep_water_temperature: f64::NAN,
+            ..CarbonState::default()
+        };
+        let phi = (!params.phi.is_nan()).then_some(params.phi);
+        Self {
+            params,
+            carbon,
+            ratio,
+            forcing,
+            previous: None,
+            years: 0.0,
+            calibration: Vec::new(),
+            phi,
+            slab_carbon: f64::NAN,
+            smoothed: None,
+            state,
+        }
+    }
+
+    pub fn params(&self) -> &CarbonParams {
+        &self.params
+    }
+
+    pub fn state(&self) -> &CarbonState {
+        &self.state
+    }
+
+    /// Records the tectonic drivers at the start of the run, so that the first step's degassing
+    /// covers only that step.
+    pub fn start(&mut self, drivers: TectonicDrivers) {
+        self.previous = Some(drivers);
+    }
+
+    /// Whether the CO₂ follows the carbon cycle in the next step: it is enabled and φ is known.
+    fn active(&self) -> bool {
+        self.params.enabled && self.phi.is_some()
+    }
+
+    /// Takes one step: degassing from the tectonics of the step, weathering from its climate
+    /// and erosion, and the new CO₂ by the implicit step. Returns the greenhouse forcing for the
+    /// next climate update: the new CO₂'s if the cycle is active, else the current.
+    ///
+    /// Until φ is set ([`CarbonParams::calibration_time`]), the CO₂ stays and the step is
+    /// recorded for the calibration.
+    pub fn step(&mut self, input: &StepInput) -> f64 {
+        let previous = self.previous.unwrap_or(input.drivers);
+        self.previous = Some(input.drivers);
+        self.years += input.years;
+        let rate = |now: f64, before: f64| (now - before).max(0.0) / input.years;
+        let drivers = input.drivers;
+        let ridge_crust = rate(drivers.new_sea_floor, previous.new_sea_floor);
+        let subducted_crust = rate(drivers.subducted_crust, previous.subducted_crust);
+        let cells = self.weathering_cells(input.land);
+        let current_forcing = self.forcing;
+        let x_now = math::ln(self.ratio);
+        let params = &self.params;
+        // Degassing without the slab's seafloor carbon (which depends on φ).
+        let raw = Sources {
+            ridges: params.ridge_carbon * ridge_crust,
+            arcs: params.wedge_carbon * subducted_crust
+                + params.slab_sediment_carbon
+                    * rate(drivers.subducted_sediment, previous.subducted_sediment),
+            plumes: params.plume_carbon * drivers.plume_flux,
+            metamorphic: params.metamorphic_carbon
+                * rate(drivers.metamorphic_sediment, previous.metamorphic_sediment),
+        };
+
+        if self.phi.is_none() {
+            self.calibration.push(CalibrationStep {
+                years: input.years,
+                cells: cells.clone(),
+                ridge_crust,
+                subducted_crust,
+                deep_water_temperature: input.deep_water_temperature,
+                degassing: raw.total(),
+            });
+            if self.years >= params.calibration_time * 1e6 - 1.0 {
+                let (phi, slab_carbon) = self.calibrate(x_now);
+                self.phi = Some(phi);
+                self.slab_carbon = slab_carbon;
+                self.calibration = Vec::new();
+            }
+        }
+        let params = &self.params;
+        let phi = self.phi.unwrap_or(1.0);
+
+        // The seafloor carbon returning at arcs: the slab's carbon, before it is known that
+        // of the step at φ = 1 (only logged).
+        let uptake_now = seafloor_uptake(params, phi, x_now, input.deep_water_temperature, 0.0);
+        if self.slab_carbon.is_nan() && self.phi.is_some() {
+            self.slab_carbon = uptake_now;
+        }
+        let slab_carbon = if self.slab_carbon.is_nan() {
+            uptake_now
+        } else {
+            self.slab_carbon
+        };
+        let mut sources = raw;
+        sources.arcs += params.slab_return * subducted_crust * slab_carbon;
+        // Smoothed over a few steps (the tectonic rates jump with the grid).
+        let weight = if params.degassing_smoothing > 0.0 {
+            1.0 - math::exp(-input.years / (params.degassing_smoothing * 1e6))
+        } else {
+            1.0
+        };
+        let smoothed = match self.smoothed {
+            None => sources,
+            Some(old) if self.phi.is_some() => Sources {
+                ridges: old.ridges + weight * (sources.ridges - old.ridges),
+                arcs: old.arcs + weight * (sources.arcs - old.arcs),
+                plumes: old.plumes + weight * (sources.plumes - old.plumes),
+                metamorphic: old.metamorphic + weight * (sources.metamorphic - old.metamorphic),
+            },
+            // Not smoothed during the calibration, which takes the window's mean.
+            Some(_) => sources,
+        };
+        self.smoothed = Some(smoothed);
+        let degassing = smoothed.total();
+
+        let sinks_at = |x: f64, warming: f64| {
+            sinks(
+                params,
+                &cells,
+                ridge_crust,
+                input.deep_water_temperature,
+                phi,
+                x,
+                warming,
+            )
+        };
+        // The equilibrium temperature change the forcing of `x` would bring: the change of the
+        // forcing and the sunlight, and the warming the last update has not reached yet.
+        let warming = |x: f64| {
+            params.climate_sensitivity
+                * (co2_forcing(math::exp(x)) - current_forcing
+                    + input.sunlight_change
+                    + input.toa_imbalance)
+        };
+        let active = self.active();
+        let x_new = if active {
+            let ocean_mass = input.ocean_mass;
+            let area = input.planet_area;
+            let target = self.carbon + input.years * degassing;
+            let excess = |x: f64| {
+                exogenic_carbon(params, math::exp(x), ocean_mass, area)
+                    + input.years * sinks_at(x, warming(x)).0.total()
+                    - target
+            };
+            solve_increasing(excess, x_now)
+        } else {
+            x_now
+        };
+        // Inactive, the sinks are those of the step's climate.
+        let predicted = if active { warming(x_new) } else { 0.0 };
+        let (sinks, intensity) = sinks_at(x_new, predicted);
+        if active {
+            // The carbon balance of the step: what the implicit step conserves.
+            self.carbon += input.years * (degassing - sinks.total());
+            self.ratio = math::exp(x_new);
+        }
+        if self.phi.is_some() && params.slab_age > 0.0 && ridge_crust > 0.0 {
+            let uptake = sinks.seafloor / ridge_crust;
+            let weight = 1.0 - math::exp(-input.years / (params.slab_age * 1e6));
+            self.slab_carbon += weight * (uptake - self.slab_carbon);
+        }
+        if active {
+            self.forcing = co2_forcing(self.ratio);
+        }
+        let forcing = self.forcing;
+        self.state = CarbonState {
+            ratio: self.ratio,
+            pressure: self.ratio * REFERENCE_PRESSURE,
+            forcing,
+            carbon: self.carbon,
+            atmosphere: atmospheric_carbon(self.ratio, input.planet_area),
+            sources: smoothed,
+            sinks,
+            phi: self.phi.unwrap_or(f64::NAN),
+            predicted_warming: predicted,
+            deep_water_temperature: input.deep_water_temperature,
+            weathering_intensity: intensity,
+        };
+        forcing
+    }
+
+    /// φ from the calibration window: the sinks of its steps, less the seafloor carbon that
+    /// returns at arcs, balance its degassing at the current CO₂ and the steps' climates. Also
+    /// returns the slab's carbon (mol/kg): the window's mean seafloor uptake at that φ.
+    fn calibrate(&self, x: f64) -> (f64, f64) {
+        let params = &self.params;
+        let steps = &self.calibration;
+        let years: f64 = steps.iter().map(|step| step.years).sum();
+        let degassing: f64 = steps.iter().map(|step| step.years * step.degassing).sum();
+        let net_sinks = |phi: f64| {
+            steps
+                .iter()
+                .map(|step| {
+                    let (sinks, _) = sinks(
+                        params,
+                        &step.cells,
+                        step.ridge_crust,
+                        step.deep_water_temperature,
+                        phi,
+                        x,
+                        0.0,
+                    );
+                    let uptake = seafloor_uptake(params, phi, x, step.deep_water_temperature, 0.0);
+                    step.years
+                        * (sinks.total() - params.slab_return * step.subducted_crust * uptake)
+                })
+                .sum::<f64>()
+        };
+        let phi = calibrate(net_sinks, degassing, params.phi_range);
+        let ridge: f64 = steps.iter().map(|s| s.years * s.ridge_crust).sum();
+        let slab_carbon = if ridge > 0.0 {
+            steps
+                .iter()
+                .map(|s| {
+                    s.years
+                        * s.ridge_crust
+                        * seafloor_uptake(params, phi, x, s.deep_water_temperature, 0.0)
+                })
+                .sum::<f64>()
+                / ridge
+        } else {
+            seafloor_uptake(params, phi, x, params.seafloor_reference_temperature, 0.0)
+        };
+        let _ = years;
+        (phi, slab_carbon)
+    }
+
+    fn weathering_cells(&self, land: &[LandCell]) -> Vec<WeatheringCell> {
+        let params = &self.params;
+        land.iter()
+            .filter(|cell| cell.ice < 1.0)
+            .map(|cell| {
+                let mafic = cell.mafic.clamp(0.0, 1.0);
+                let cations =
+                    params.felsic_cations + mafic * (params.basalt_cations - params.felsic_cations);
+                let reactivity = 1.0 + mafic * (params.basalt_reactivity - 1.0);
+                let supply = cell.bedrock_erosion * cell.bedrock_density * cations
+                    + params.sediment_weatherable
+                        * cell.sediment_erosion
+                        * crate::isostasy::SEDIMENT_ROCK_DENSITY
+                        * params.felsic_cations;
+                let kinetic = params.land_weathering
+                    * params.plant_factor
+                    * reactivity
+                    * math::powf(cell.runoff.max(0.0), params.runoff_exponent)
+                    * (1.0 - cell.ice);
+                WeatheringCell {
+                    supply,
+                    kinetic,
+                    temperature: cell.temperature + ZERO_CELSIUS,
+                    area: cell.area,
+                }
+            })
+            .filter(|cell| cell.supply > 0.0 && cell.kinetic > 0.0)
+            .collect()
+    }
+}
+
+/// Carbon (mol/kg) that new oceanic crust takes up at the CO₂ `e^x`, the bottom water
+/// temperature `deep` (°C) plus `warming` (K) and the scale `phi`.
+fn seafloor_uptake(params: &CarbonParams, phi: f64, x: f64, deep: f64, warming: f64) -> f64 {
+    let deep = (deep + warming).max(SEA_WATER_FREEZING) + ZERO_CELSIUS;
+    let deep_reference = params.seafloor_reference_temperature + ZERO_CELSIUS;
+    let kinetic = phi
+        * params.seafloor_carbon
+        * math::exp(params.seafloor_co2_exponent * x)
+        * math::exp(
+            params.seafloor_activation_energy / GAS_CONSTANT * (1.0 / deep_reference - 1.0 / deep),
+        );
+    let max = params.seafloor_max_carbon;
+    if max > 0.0 {
+        -max * math::exp_m1(-kinetic / max)
+    } else {
+        0.0
+    }
+}
+
+/// The sinks (mol/yr) at the CO₂ `e^x` with a predicted temperature change `warming` (K), with
+/// the share of the land's supply limit that is used.
+fn sinks(
+    params: &CarbonParams,
+    cells: &[WeatheringCell],
+    ridge_crust: f64,
+    deep_water_temperature: f64,
+    phi: f64,
+    x: f64,
+    warming: f64,
+) -> (Sinks, f64) {
+    let co2 = params.land_co2_factor(math::exp(x));
+    let runoff = math::exp(params.runoff_exponent * params.runoff_sensitivity * warming);
+    let reference = params.reference_temperature + ZERO_CELSIUS;
+    let activation = params.activation_energy / GAS_CONSTANT;
+    let mut land = 0.0;
+    let mut supply = 0.0;
+    for cell in cells {
+        let arrhenius =
+            math::exp(activation * (1.0 / reference - 1.0 / (cell.temperature + warming)));
+        let kinetic = phi * cell.kinetic * runoff * arrhenius * co2;
+        land -= cell.area * cell.supply * math::exp_m1(-kinetic / cell.supply);
+        supply += cell.area * cell.supply;
+    }
+    let seafloor = ridge_crust * seafloor_uptake(params, phi, x, deep_water_temperature, warming);
+    let intensity = if supply > 0.0 { land / supply } else { 0.0 };
+    (Sinks { land, seafloor }, intensity)
+}
+
+/// The scale φ at which `sinks(φ)` (increasing) equals `target`, by bisection on ln φ within
+/// `range`; the bound (with a warning) if there is none.
+fn calibrate(sinks: impl Fn(f64) -> f64, target: f64, range: f64) -> f64 {
+    let (mut low, mut high) = (-math::ln(range), math::ln(range));
+    if sinks(math::exp(high)) < target {
+        warn!(
+            phi = math::exp(high),
+            "the weathering cannot balance the degassing at the start even with the largest φ"
+        );
+        return math::exp(high);
+    }
+    if sinks(math::exp(low)) > target {
+        warn!(
+            phi = math::exp(low),
+            "the weathering exceeds the degassing at the start even with the smallest φ"
+        );
+        return math::exp(low);
+    }
+    for _ in 0..100 {
+        let middle = 0.5 * (low + high);
+        if sinks(math::exp(middle)) < target {
+            low = middle;
+        } else {
+            high = middle;
+        }
+        if high - low < 1e-12 {
+            break;
+        }
+    }
+    math::exp(0.5 * (low + high))
+}
+
+/// The root of an increasing function, starting the bracket at `start`: bisection to the
+/// precision of f64.
+fn solve_increasing(f: impl Fn(f64) -> f64, start: f64) -> f64 {
+    let at_start = f(start);
+    if at_start == 0.0 {
+        return start;
+    }
+    // Expand the bracket away from the start in the direction of the root.
+    let direction = if at_start > 0.0 { -1.0 } else { 1.0 };
+    let mut step = 0.5;
+    let mut near = start;
+    let mut far = start + direction * step;
+    let mut expansions = 0;
+    while (f(far) > 0.0) == (at_start > 0.0) {
+        near = far;
+        step *= 2.0;
+        far = start + direction * step;
+        expansions += 1;
+        if expansions > 60 {
+            return far;
+        }
+    }
+    let (mut low, mut high) = if direction > 0.0 {
+        (near, far)
+    } else {
+        (far, near)
+    };
+    for _ in 0..200 {
+        let middle = 0.5 * (low + high);
+        if middle <= low || middle >= high {
+            break;
+        }
+        if f(middle) > 0.0 {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    0.5 * (low + high)
+}
+
+/// Carbon (mol) in the atmosphere at the CO₂ ratio `ratio` on a planet of `area` m².
+fn atmospheric_carbon(ratio: f64, area: f64) -> f64 {
+    ratio * REFERENCE_PRESSURE * 1e5 * area / (GRAVITY * AIR_MOLAR_MASS)
+}
+
+/// Exogenic carbon (mol) of the atmosphere and the ocean at the CO₂ ratio `ratio`.
+pub fn exogenic_carbon(params: &CarbonParams, ratio: f64, ocean_mass: f64, area: f64) -> f64 {
+    let ocean = ocean_mass
+        * (params.ocean_dic * math::cbrt(ratio)
+            + params.co2_solubility * ratio * REFERENCE_PRESSURE);
+    atmospheric_carbon(ratio, area) + ocean
+}
+
+/// Mass of an ocean of `volume` m³ in kg.
+pub fn ocean_mass(volume: f64) -> f64 {
+    volume * SEA_WATER_DENSITY
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const AREA: f64 = 5.1e14;
+    const OCEAN: f64 = 1.37e21;
+
+    #[test]
+    fn todays_reservoirs() {
+        let params = CarbonParams::default();
+        let atmosphere = atmospheric_carbon(1.0, AREA);
+        // 600 GtC.
+        assert!(
+            (atmosphere * 12e-3 / 1e12 - 600.0).abs() < 30.0,
+            "{atmosphere}"
+        );
+        let total = exogenic_carbon(&params, 1.0, OCEAN, AREA);
+        // ~38 000 GtC of the ocean.
+        assert!((2.5e18..4.0e18).contains(&total), "{total}");
+    }
+
+    fn cell(temperature: f64) -> LandCell {
+        LandCell {
+            area: 1e12,
+            temperature,
+            runoff: 0.3,
+            ice: 0.0,
+            bedrock_erosion: 2e-5,
+            sediment_erosion: 0.0,
+            bedrock_density: 2800.0,
+            mafic: 0.2,
+        }
+    }
+
+    fn input(land: &[LandCell], drivers: TectonicDrivers, toa_imbalance: f64) -> StepInput<'_> {
+        StepInput {
+            years: 1e6,
+            drivers,
+            land,
+            deep_water_temperature: 2.0,
+            ocean_mass: OCEAN,
+            planet_area: AREA,
+            sunlight_change: 0.0,
+            toa_imbalance,
+        }
+    }
+
+    /// Cumulative drivers after `step` steps of `rate` times Earth's spreading.
+    fn drivers(step: f64, rate: f64) -> TectonicDrivers {
+        TectonicDrivers {
+            new_sea_floor: step * 65e18 * rate,
+            subducted_crust: step * 65e18 * rate,
+            subducted_sediment: step * 2e18,
+            metamorphic_sediment: step * 1e18,
+            plume_flux: 0.03,
+        }
+    }
+
+    /// The CO₂ stays through the calibration window, after which the sinks balance the
+    /// sources; the implicit step conserves carbon; more degassing raises the CO₂ to a new
+    /// balance without overshooting.
+    #[test]
+    fn calibrated_start_conservation_and_response() {
+        let land: Vec<LandCell> = (0..100).map(|i| cell(i as f64 * 0.3)).collect();
+        let forcing = 20.0;
+        let params = CarbonParams {
+            degassing_smoothing: 0.0,
+            ..CarbonParams::default()
+        };
+        let window = params.calibration_time as usize;
+        let mut cycle = CarbonCycle::new(params, forcing, OCEAN, AREA);
+        cycle.start(drivers(0.0, 1.0));
+        for step in 1..=window {
+            let next = cycle.step(&input(&land, drivers(step as f64, 1.0), 0.0));
+            // Exactly the start's until φ is set in the window's last step, which balances.
+            if step < window {
+                assert_eq!(next, forcing);
+            } else {
+                assert!((next - forcing).abs() < 1e-6, "{next}");
+            }
+        }
+        let state = *cycle.state();
+        assert!(state.phi.is_finite() && state.phi > 0.0);
+        assert!((state.sinks.total() / state.sources.total() - 1.0).abs() < 1e-6);
+
+        // Twice the spreading from now on.
+        let base = drivers(window as f64, 1.0);
+        let mut previous_ratio = state.ratio;
+        let mut previous_rise = f64::INFINITY;
+        for step in 1..80 {
+            let carbon = cycle.state().carbon;
+            let drivers = TectonicDrivers {
+                new_sea_floor: base.new_sea_floor + step as f64 * 130e18,
+                subducted_crust: base.subducted_crust + step as f64 * 130e18,
+                ..drivers((window + step) as f64, 1.0)
+            };
+            cycle.step(&input(&land, drivers, 0.0));
+            let state = cycle.state();
+            let balance = carbon + 1e6 * (state.sources.total() - state.sinks.total());
+            assert!((state.carbon - balance).abs() <= 1e-9 * carbon);
+            let rise = math::ln(state.ratio / previous_ratio);
+            assert!(rise >= -1e-12, "no overshoot");
+            assert!(rise <= previous_rise + 1e-12, "monotone approach");
+            previous_rise = rise;
+            previous_ratio = state.ratio;
+        }
+        let state = cycle.state();
+        assert!(state.ratio > 1.3 * co2_ratio_for_forcing(forcing));
+        assert!((state.sinks.total() / state.sources.total() - 1.0).abs() < 0.05);
+    }
+
+    /// A climate that reaches only part of its equilibrium in an update (the mixed layer), with
+    /// another sensitivity than the predicted one: the forcing settles without oscillating.
+    #[test]
+    fn lagged_climate_does_not_oscillate() {
+        for (sensitivity, response) in [(0.6, 0.5), (1.0, 0.5), (0.8, 0.3)] {
+            let params = CarbonParams {
+                degassing_smoothing: 0.0,
+                calibration_time: 1.0,
+                ..CarbonParams::default()
+            };
+            let mut cycle = CarbonCycle::new(params, 0.0, OCEAN, AREA);
+            cycle.start(drivers(0.0, 1.0));
+            let start = 10.0;
+            let mut temperature = start;
+            let mut forcing = 0.0;
+            let mut forcings = Vec::new();
+            for step in 1..120 {
+                // The degassing doubles after the calibration.
+                let rate = if step == 1 { 1.0 } else { 2.0 };
+                let cumulative = drivers(1.0, 1.0);
+                let now = TectonicDrivers {
+                    new_sea_floor: cumulative.new_sea_floor + (step - 1) as f64 * 65e18 * rate,
+                    subducted_crust: cumulative.subducted_crust + (step - 1) as f64 * 65e18 * rate,
+                    ..drivers(step as f64, 1.0)
+                };
+                let land: Vec<LandCell> = (0..50).map(|_| cell(temperature)).collect();
+                let equilibrium = start + sensitivity * forcing;
+                let imbalance = (equilibrium - temperature) / sensitivity;
+                forcing = cycle.step(&input(&land, now, imbalance));
+                // The climate update: part of the way to the new equilibrium.
+                temperature += response * (start + sensitivity * forcing - temperature);
+                forcings.push(forcing);
+            }
+            let changes: Vec<f64> = forcings.windows(2).map(|w| w[1] - w[0]).collect();
+            let reversals = changes
+                .windows(2)
+                .filter(|w| w[0] * w[1] < 0.0 && w[1].abs() > 1e-3)
+                .count();
+            assert_eq!(reversals, 0, "{sensitivity} {response}: {forcings:?}");
+            assert!(forcings.last().unwrap() > &1.0);
+        }
+    }
+
+    /// Switched off, the CO₂ and the forcing stay, the fluxes are still computed.
+    #[test]
+    fn disabled_keeps_the_forcing() {
+        let land = vec![cell(10.0); 10];
+        let params = CarbonParams {
+            enabled: false,
+            ..CarbonParams::default()
+        };
+        let mut cycle = CarbonCycle::new(params, 30.0, OCEAN, AREA);
+        cycle.start(drivers(0.0, 1.0));
+        for step in 1..40 {
+            assert_eq!(
+                cycle.step(&input(&land, drivers(step as f64, 1.0 + step as f64), 0.0)),
+                30.0
+            );
+        }
+        assert!(cycle.state().sources.total() > 0.0);
+        assert!(cycle.state().phi.is_finite());
+    }
+
+    #[test]
+    fn solver_finds_roots() {
+        let root = solve_increasing(|x| x - 7.3, 0.0);
+        assert!((root - 7.3).abs() < 1e-12);
+        let root = solve_increasing(|x| math::exp(x) - 1e-3, 3.0);
+        assert!((root - math::ln(1e-3)).abs() < 1e-12);
+        let phi = calibrate(|phi| 2.0 * phi, 5.0, 1e3);
+        assert!((phi - 2.5).abs() < 1e-9);
+    }
+}

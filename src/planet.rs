@@ -3,8 +3,9 @@
 use crate::math;
 use web_time::Instant;
 
-use tracing::{debug, debug_span};
+use tracing::{debug, debug_span, info};
 
+use crate::carbon::{CarbonCycle, CarbonParams, CarbonState, LandCell, StepInput};
 use crate::climate::{Climate, ClimateParams, WaterCycle};
 use crate::erosion::{
     CrustClass, ErosionParams, Hydrology, Surface, SurfaceWater, WaveErosion, erode,
@@ -16,6 +17,11 @@ pub struct Planet {
     tectonics: Simulation,
     climate: Climate,
     temperature: TemperatureModel,
+    /// The carbon cycle, which sets the greenhouse forcing (#154).
+    carbon: CarbonCycle,
+    /// Cells poleward of [`CarbonParams::deep_water_latitude`], whose ocean sets the bottom
+    /// water temperature.
+    deep_water_cells: Vec<bool>,
     /// `None` disables erosion.
     erosion: Option<ErosionParams>,
     planet_radius: f64,
@@ -240,6 +246,8 @@ pub struct PlanetStatistics {
     pub gyre_transport: f64,
     /// Solar constant of the climate in W/m² (the sun brightens during the run).
     pub solar_constant: f64,
+    /// The carbon cycle after the last step (#154): CO₂, forcing, sources and sinks.
+    pub carbon: CarbonState,
     /// Fraction of the surface covered by permanent ice (sea ice, ice sheets).
     pub frozen_fraction: f64,
     /// Where the sediment sits and how much of the sea level it makes up.
@@ -348,10 +356,25 @@ impl Planet {
         tectonics: Simulation,
         climate: ClimateParams,
         temperature: TemperatureParams,
+        carbon: CarbonParams,
         erosion: Option<ErosionParams>,
         planet_radius: f64,
     ) -> Self {
         let climate = Climate::new(tectonics.mesh(), planet_radius, climate);
+        let deep_water_latitude = carbon.deep_water_latitude.to_radians();
+        let deep_water_cells = (0..tectonics.mesh().len() as u32)
+            .map(|cell| {
+                math::asin(tectonics.mesh().vertex(cell).z.clamp(-1.0, 1.0)).abs()
+                    >= deep_water_latitude
+            })
+            .collect();
+        let mut carbon = CarbonCycle::new(
+            carbon,
+            temperature.greenhouse_forcing,
+            crate::carbon::ocean_mass(tectonics.ocean_volume()),
+            4.0 * std::f64::consts::PI * planet_radius * planet_radius,
+        );
+        carbon.start(tectonics.carbon_drivers());
         let mut temperature = TemperatureModel::new(tectonics.mesh(), temperature);
         let elevation = tectonics.surface_elevations();
         let seeds = crate::sea::ocean_seeds(
@@ -374,6 +397,8 @@ impl Planet {
             tectonics,
             climate,
             temperature,
+            carbon,
+            deep_water_cells,
             erosion,
             planet_radius,
             precipitation: vec![0.0; cell_count],
@@ -608,6 +633,8 @@ impl Planet {
         self.update_water_cycle(&view);
         let climate_time = start.elapsed();
 
+        // Bedrock and sediment eroded per cell in the step (m/yr), for the weathering.
+        let mut eroded = vec![(0.0, 0.0); elevation.len()];
         if let Some(params) = &self.erosion {
             let dt_years = dt * 1e6;
             let (plate, class) = self.plates_and_classes();
@@ -651,6 +678,12 @@ impl Planet {
                 params,
                 dt_years,
             );
+            for (cell, eroded) in eroded.iter_mut().enumerate() {
+                *eroded = (
+                    (-result.bedrock_delta[cell]).max(0.0) / dt_years,
+                    (-result.sediment_delta[cell]).max(0.0) / dt_years,
+                );
+            }
             for (delta, class) in result.sediment_delta.iter().zip(&class) {
                 if *class == CrustClass::Continental {
                     if *delta < 0.0 {
@@ -747,6 +780,9 @@ impl Planet {
                 open,
             ));
         }
+        let start_carbon = Instant::now();
+        self.update_carbon(&view, &eroded, dt);
+        let carbon_time = start_carbon.elapsed();
         if self.cover_cohort.is_none() && self.tectonics.time() >= self.cover_cohort_time - 1e-9 {
             let mass = self.tectonics.start_cover_cohort();
             self.cover_cohort = Some((
@@ -759,9 +795,63 @@ impl Planet {
         debug!(
             ?tectonics_time,
             ?climate_time,
-            erosion_time = ?start.elapsed() - climate_time,
+            erosion_time = ?start.elapsed() - climate_time - carbon_time,
+            ?carbon_time,
             "Step finished"
         );
+    }
+
+    /// One step of the carbon cycle on the step's climate (`elevation` as the climate saw it)
+    /// and erosion (`eroded`: bedrock and sediment per cell in m/yr), which sets the greenhouse
+    /// forcing of the next climate update unless the cycle is off.
+    fn update_carbon(&mut self, elevation: &[f64], eroded: &[(f64, f64)], dt: f64) {
+        let fields = self.temperature.fields();
+        let runoff = &self.climate.water_cycle().runoff;
+        let bedrock_density = self.tectonics.bedrock_densities();
+        let area = self.cell_area();
+        let land: Vec<LandCell> = (0..elevation.len())
+            .filter(|&cell| elevation[cell] >= 0.0)
+            .map(|cell| LandCell {
+                mafic: 1.0 - self.tectonics.surface_crust(cell as u32).felsic,
+                area,
+                temperature: fields.annual_mean[cell],
+                runoff: runoff[cell],
+                ice: fields.ice[cell],
+                bedrock_erosion: eroded[cell].0,
+                sediment_erosion: eroded[cell].1,
+                bedrock_density: bedrock_density[cell],
+            })
+            .collect();
+        let deep_water = |cells: &dyn Fn(usize) -> bool| {
+            let (sum, count) = (0..elevation.len())
+                .filter(|&cell| elevation[cell] < 0.0 && cells(cell))
+                .fold((0.0, 0usize), |(sum, count), cell| {
+                    (sum + fields.annual_mean[cell], count + 1)
+                });
+            (count > 0).then(|| sum / count as f64)
+        };
+        let deep_water_temperature = deep_water(&|cell| self.deep_water_cells[cell])
+            .or_else(|| deep_water(&|_| true))
+            .unwrap_or(0.0);
+        let params = self.temperature.params();
+        let time = self.tectonics.time();
+        let sunlight_change = (params.solar_constant(time + dt) - params.solar_constant(time))
+            * (1.0 - crate::presets::BOND_ALBEDO)
+            / 4.0;
+        let forcing = self.carbon.step(&StepInput {
+            years: dt * 1e6,
+            drivers: self.tectonics.carbon_drivers(),
+            land: &land,
+            deep_water_temperature,
+            ocean_mass: crate::carbon::ocean_mass(self.tectonics.ocean_volume()),
+            planet_area: 4.0 * std::f64::consts::PI * self.planet_radius * self.planet_radius,
+            sunlight_change,
+            toa_imbalance: fields.toa_imbalance,
+        });
+        if self.carbon.params().enabled {
+            self.temperature.params_mut().greenhouse_forcing = forcing;
+        }
+        info!(time, "{}", self.carbon.state().summary());
     }
 
     /// The plate and the [`CrustClass`] of every cell.
@@ -970,6 +1060,7 @@ impl Planet {
             land_seasonal_range: mean(&mut land.iter().copied(), &|c| fields.seasonal_range(c)),
             gyre_transport: fields.gyre_transport,
             solar_constant: fields.solar_constant,
+            carbon: *self.carbon.state(),
             heat_transport: {
                 let transport = &fields.meridional_transport;
                 let to_petawatts = |t: f64| t * self.planet_radius.powi(2) / 1e15;
@@ -1178,6 +1269,7 @@ mod tests {
             simulation,
             ClimateParams::default(),
             TemperatureParams::default(),
+            CarbonParams::default(),
             Some(ErosionParams {
                 planet_radius: RADIUS,
                 ..ErosionParams::default()
