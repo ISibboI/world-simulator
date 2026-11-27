@@ -63,8 +63,8 @@ chance, was missed): see [Decision](#decision).
 
 ## Runs
 
-* `base`: `agent/issue-51-base` = main (1418167) + diagnostics only (same state hash as main,
-  checked on seed 0 at 0/50/100 Myr). `new`: this branch (97ba534). `nofabric`: the branch with
+* `base`: main (1418167) + the diagnostics only (the tree of this branch's first commit c77fad9) (same state hash as main,
+  checked on seed 0 at 0/50/100 Myr). `new`: this branch (42f8aab, the code of the runs). `nofabric`: the branch with
   `--set rift_fabric=0` (4 seeds).
 * 8 seeds × 1000 Myr, 6 subdivisions, main's default flags (dispersed start, no `--epoch`),
   `--snapshot-interval 10`. Supercontinent arms: `--initial supercontinent`, 4 seeds × 500 Myr.

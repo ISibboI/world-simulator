@@ -1247,7 +1247,7 @@ fn stretch_rift(
     stretch_rift_marking(mesh, plate, local, rings, breakup_thickness, time, 1.0)
 }
 
-/// [`stretch_rift`], marking the extension fabric ([`Crust::rifted`]) with the factor `fabric`
+/// `stretch_rift`, marking the extension fabric ([`Crust::rifted`]) with the factor `fabric`
 /// ([`TectonicParams::rift_fabric`]).
 fn stretch_rift_marking(
     mesh: &SphereMesh,

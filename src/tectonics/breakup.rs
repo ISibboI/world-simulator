@@ -627,7 +627,7 @@ impl Simulation {
         distance
     }
 
-    /// The two halves of the section across the mesh edge `slot` (of [`SheetGeometry`]) from
+    /// The two halves of the section across the mesh edge `slot` (of `SheetGeometry`) from
     /// `cell` (see [`SectionEdge::halves`]).
     fn section_edge(&self, cell: u32, slot: usize, strength: &Strength) -> [SectionEdge; 2] {
         let geometry = &self.sheet_geometry;
