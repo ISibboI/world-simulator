@@ -43,6 +43,7 @@ def cells(path):
     out["plateau_frac"] = len(mafic_thick) / len(rows)
     out["plateau_mean_elev"] = st.mean(float(r["elev"]) for r in mafic_thick) if mafic_thick else None
     out["plateau_land_frac"] = sum(1 for r in mafic_thick if r["ocean"] != "1") / len(rows)
+    out["mafic_over_40km"] = sum(1 for r in rows if float(r["felsic"]) < 0.3 and float(r["thick"]) > 40000) / len(rows)
     out["max_mafic_thick_km"] = max((float(r["thick"]) for r in rows if float(r["felsic"]) < 0.3), default=0) / 1000
     cont = [r for r in rows if float(r["felsic"]) > 0.5 and float(r["thick"]) > 20000]
     out["cont_origin_frac"] = len(cont) / len(rows)
@@ -67,7 +68,7 @@ def summarise(directory, label):
               f"t=1000: cont {last['cont']}% land {last['land']}% T {last.get('temp')} °C pCO2 {last.get('pco2')} bar plumes {last.get('plumes')} Tmol/yr | "
               f"ocean p10/50/90 {c.get('ocean_depth_p10_50_90')} shallow<3km {c.get('ocean_shallower_3km', 0):.3f} "
               f"plateau {c.get('plateau_frac', 0):.4f} (land {c.get('plateau_land_frac', 0):.4f}, mean elev {c.get('plateau_mean_elev')}) "
-              f"max mafic {c.get('max_mafic_thick_km', 0):.1f} km cont-origin {c.get('cont_origin_frac', 0):.3f} felsic {c.get('cont_mean_felsic')} land p50/90/99 {c.get('land_p50_90_99')}")
+              f"max mafic {c.get('max_mafic_thick_km', 0):.1f} km (>40 km {c.get('mafic_over_40km', 0):.4f}) cont-origin {c.get('cont_origin_frac', 0):.3f} felsic {c.get('cont_mean_felsic')} land p50/90/99 {c.get('land_p50_90_99')}")
     all_lips = [l for _, _, lips, _, _ in per_seed for l in lips]
     if all_lips:
         vols = sorted(l["v"] for l in all_lips)

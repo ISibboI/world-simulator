@@ -181,3 +181,12 @@ main, runtime. Independent evaluation by a second agent.
   main and the accretion of plateaus.
 - Nice-to-haves not done: a separate sea-level budget term (volcanism is in "tectonics"),
   rift-thinned continental lid.
+
+## Changes after the evaluation runs (see [results.md](results.md))
+
+- Tail flux 10⁸ → 3 × 10⁷ km³/Myr per m²/s (all tails ~0.35 km³/yr, Earth's oceanic intraplate
+  rate; 10⁸ gave ~1.2 km³/yr and piled up mafic crust).
+- LIP volume spread ln(10)/2 → ln(10)/3 within a setting (the setting's lid factor gives the
+  rest of Earth's three decades; the wider spread made continental LIPs of up to 6 × 10⁷ km³).
+- New limit: plume crust only up to a 40 km mafic column (eclogite founders), after the
+  independent evaluation found 47–75 km basalt piles.
