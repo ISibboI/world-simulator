@@ -1243,7 +1243,8 @@ impl Simulation {
             subducted_sediment: -ledger.subducted_sediment * cell_area,
             metamorphic_sediment: (self.metamorphosed.0 + self.metamorphosed.1) * 1e12
                 + self.trench_sediment.stacked * cell_area,
-            plume_flux: self.plumes().iter().map(Plume::flux).sum(),
+            // `+ 0.0`: the empty sum is −0.
+            plume_flux: self.plumes().iter().map(Plume::flux).sum::<f64>() + 0.0,
         }
     }
 

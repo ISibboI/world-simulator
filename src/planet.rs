@@ -851,7 +851,7 @@ impl Planet {
         if self.carbon.params().enabled {
             self.temperature.params_mut().greenhouse_forcing = forcing;
         }
-        info!(time, "{}", self.carbon.state().summary());
+        info!(time = %format_args!("{time:.1}"), "{}", self.carbon.state().summary());
     }
 
     /// The plate and the [`CrustClass`] of every cell.

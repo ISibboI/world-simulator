@@ -531,6 +531,9 @@ impl CarbonCycle {
             self.phi = Some(phi);
             self.slab_carbon = slab_carbon;
             self.calibration = Vec::new();
+            // The degassing now includes the slab's carbon at φ: the smoothing starts afresh,
+            // or the jump would lag behind for a few steps and draw the CO₂ down meanwhile.
+            self.smoothed = None;
         }
         let params = &self.params;
         let phi = self.phi.unwrap_or(1.0);
