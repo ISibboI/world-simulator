@@ -76,7 +76,6 @@ PAT = [
     ('crustal flow per sample (% of per-cell request)', r'act once so far: crustal flow ([\d.]+)%'),
     ('subduction erosion on eroded samples (%)', r'events, ([\d.]+)% on the eroded samples'),
     ('subduction erosion on neighbours (%)', r'([\d.]+)% on their neighbours'),
-    ('crustal flow ledger gross (Gt)', r'crustal flow ([+-]?[\d.e+-]+)'),
     ('subduction erosion, crust budget (Gt/yr)', r'subduction erosion (-[\d.]+), additions lost'),
     ('arcs (Gt/yr)', r'arcs \+([\d.]+), subducted'),
     ('collision stacked (Gt/yr)', r'collision stacked \+([\d.]+)'),
