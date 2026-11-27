@@ -434,7 +434,7 @@ impl Planet {
         );
         carbon.start(tectonics.carbon_drivers());
         let ramp_up = RampUp::new(RampUpParams::default());
-        carbon.set_calibration_span(ramp_up.params().window);
+        carbon.set_calibration_span(ramp_up.params().span);
         let mut temperature = TemperatureModel::new(tectonics.mesh(), temperature);
         let elevation = tectonics.surface_elevations();
         let seeds = crate::sea::ocean_seeds(
@@ -491,7 +491,7 @@ impl Planet {
 
     /// Replaces the parameters of the ramp-up phase; before the first step.
     pub fn set_ramp_up(&mut self, params: RampUpParams) {
-        self.carbon.set_calibration_span(params.window);
+        self.carbon.set_calibration_span(params.span);
         self.ramp_up = RampUp::new(params);
     }
 

@@ -80,9 +80,10 @@ struct Cli {
     subdivisions: u32,
 
     /// Number of tectonic plates at the start, with the model's steady size distribution (a few
-    /// large and many small plates): about the model's steady plate count, so that the plate
-    /// count neither ramps up nor overshoots (#213).
-    #[arg(long, default_value_t = 18)]
+    /// large and many small plates). The default is where the model's plate count and
+    /// degassing change least over the first ~200 Myr (#213): between the count of its first
+    /// few hundred Myr (~25) and its long-term mean (~18).
+    #[arg(long, default_value_t = 21)]
     plates: usize,
 
     /// Fraction of the surface initially covered by continental crust.
