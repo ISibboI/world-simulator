@@ -123,13 +123,19 @@ pub struct CarbonParams {
     pub climate_sensitivity: f64,
     /// Relative change of the runoff per kelvin that the implicit step predicts.
     pub runoff_sensitivity: f64,
-    /// Scale of both kinetic weathering laws. NaN (the default): set after
-    /// [`Self::calibration_time`] so that the sinks balance the sources over that time at the
-    /// start's CO₂ (a continuous start); 1 takes the laws as they are.
+    /// Scale of both kinetic weathering laws. NaN (the default): set at
+    /// [`Self::calibration_time`] so that the sinks balance the sources over the last
+    /// [`Self::calibration_span`] before it, at the start's CO₂ (a continuous start); 1 takes
+    /// the laws as they are.
     pub phi: f64,
-    /// The time (Myr) at the start over which φ is calibrated; the CO₂ stays that of the start
-    /// until then (the plates start at rest: the sea floor only opens after a few Myr).
+    /// The time (Myr) after which the CO₂ follows the carbon cycle; until then it stays that of
+    /// the start, as with `--no-carbon-cycle`. The tectonics starts at rest: its degassing
+    /// doubles over the first ~150 Myr (plates speed up, the sea floor opens, plumes rise), so
+    /// a φ set earlier would balance too little degassing and the CO₂ would rise with the
+    /// spin-up of the model, not with the planet.
     pub calibration_time: f64,
+    /// The time (Myr) before [`Self::calibration_time`] whose sources and sinks φ balances.
+    pub calibration_span: f64,
     /// The calibrated φ stays within `1/phi_range..=phi_range`.
     pub phi_range: f64,
     /// Time (Myr) over which the degassing is smoothed: the tectonic rates jump with the grid.
@@ -169,7 +175,8 @@ impl Default for CarbonParams {
             climate_sensitivity: 0.8,
             runoff_sensitivity: 0.03,
             phi: f64::NAN,
-            calibration_time: 20.0,
+            calibration_time: 150.0,
+            calibration_span: 50.0,
             phi_range: 1e3,
             degassing_smoothing: 3.0,
         }
@@ -214,6 +221,7 @@ impl CarbonParams {
             "runoff_sensitivity" => &mut self.runoff_sensitivity,
             "phi" => &mut self.phi,
             "calibration_time" => &mut self.calibration_time,
+            "calibration_span" => &mut self.calibration_span,
             "phi_range" => &mut self.phi_range,
             "degassing_smoothing" => &mut self.degassing_smoothing,
             _ => anyhow::bail!("unknown carbon parameter {name}"),
@@ -507,7 +515,8 @@ impl CarbonCycle {
                 * rate(drivers.metamorphic_sediment, previous.metamorphic_sediment),
         };
 
-        if self.phi.is_none() {
+        let span_start = (params.calibration_time - params.calibration_span) * 1e6;
+        if self.phi.is_none() && self.years > span_start + 1.0 {
             self.calibration.push(CalibrationStep {
                 years: input.years,
                 cells: cells.clone(),
@@ -516,12 +525,12 @@ impl CarbonCycle {
                 deep_water_temperature: input.deep_water_temperature,
                 degassing: raw.total(),
             });
-            if self.years >= params.calibration_time * 1e6 - 1.0 {
-                let (phi, slab_carbon) = self.calibrate(x_now);
-                self.phi = Some(phi);
-                self.slab_carbon = slab_carbon;
-                self.calibration = Vec::new();
-            }
+        }
+        if self.phi.is_none() && self.years >= params.calibration_time * 1e6 - 1.0 {
+            let (phi, slab_carbon) = self.calibrate(x_now);
+            self.phi = Some(phi);
+            self.slab_carbon = slab_carbon;
+            self.calibration = Vec::new();
         }
         let params = &self.params;
         let phi = self.phi.unwrap_or(1.0);
@@ -1001,6 +1010,8 @@ mod tests {
         let land = vec![cell(10.0); 10];
         let params = CarbonParams {
             enabled: false,
+            calibration_time: 20.0,
+            calibration_span: 10.0,
             ..CarbonParams::default()
         };
         let mut cycle = CarbonCycle::new(params, 30.0, OCEAN, AREA);
