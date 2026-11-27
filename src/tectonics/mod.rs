@@ -599,7 +599,10 @@ pub struct SeaLevelBudget {
     pub mantle: f64,
     /// Water held in lakes, which the ocean lacks (see [`Simulation::set_lake_water`]).
     pub lakes: f64,
-    /// Water lost to space by atmospheric escape (see [`Simulation::remove_water`]).
+    /// Water lost to space by atmospheric escape (see [`Simulation::remove_water`]): the
+    /// change when the water is removed. A lower bound of its effect: while the sea level
+    /// stands at a pass (see [`Simulation::sea_level_deficit`]) the removed water first reduces
+    /// the deficit, and the level falls only when a later process unpins it (in that term).
     pub escape: f64,
 }
 

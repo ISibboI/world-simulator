@@ -37,6 +37,7 @@
 
 use tracing::warn;
 
+use crate::carbon::SEA_WATER_DENSITY;
 use crate::math;
 use crate::sun::SOLAR_AGE;
 
@@ -49,8 +50,6 @@ const HYDROGEN_MASS: f64 = 1.6735e-27;
 /// Molar masses in kg/mol.
 const WATER_MOLAR_MASS: f64 = 0.018_015;
 const OXYGEN_MOLAR_MASS: f64 = 0.032;
-/// Density of sea water in kg/m³ (as [`crate::carbon::ocean_mass`]).
-const SEA_WATER_DENSITY: f64 = 1025.0;
 /// 0 °C in K.
 const ZERO_CELSIUS: f64 = 273.15;
 /// Triple point of water: temperature (K) and pressure (Pa).
@@ -470,7 +469,7 @@ impl Escape {
         let seconds = input.years * 365.25 * 86400.0;
         let mut water_mass = hydrogen_flux * area * seconds / AVOGADRO / 2.0 * WATER_MOLAR_MASS;
         let available = ((input.ocean_volume - self.floor) * SEA_WATER_DENSITY).max(0.0);
-        let at_floor = water_mass >= available;
+        let at_floor = water_mass > 0.0 && water_mass >= available;
         if at_floor {
             if !self.state.at_floor {
                 warn!(
@@ -520,7 +519,7 @@ mod tests {
 
     #[test]
     fn saturation_pressure_values() {
-        // 3169 Pa at 25 °C, 101 kPa at 100 °C (the constant latent heat gives a few % less),
+        // 3169 Pa at 25 °C, 101 kPa at 100 °C (the linear latent heat gives ~2% less),
         // 0.03 Pa over ice at 190 K.
         assert!((saturation_pressure(298.15) / 3169.0 - 1.0).abs() < 0.05);
         assert!((saturation_pressure(373.15) / 101_325.0 - 1.0).abs() < 0.1);

@@ -43,7 +43,7 @@ const AIR_MOLAR_MASS: f64 = 0.029;
 /// Surface gravity in m/s².
 const GRAVITY: f64 = 9.81;
 /// Density of sea water in kg/m³.
-const SEA_WATER_DENSITY: f64 = 1025.0;
+pub const SEA_WATER_DENSITY: f64 = 1025.0;
 /// Molar gas constant in J/(mol K).
 const GAS_CONSTANT: f64 = 8.314;
 /// 0 °C in K.
