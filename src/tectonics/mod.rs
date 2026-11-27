@@ -502,8 +502,6 @@ impl TectonicParams {
                 &mut self.events.boundary_initiation_waiting_time
             }
             "events.initiation_age_contrast" => &mut self.events.initiation_age_contrast,
-            "events.min_oceanic_rift_area" => &mut self.events.min_oceanic_rift_area,
-            "events.rift_delay" => &mut self.events.rift_delay,
             "events.rift_continent_radius" => &mut self.events.rift_continent_radius,
             "events.suture_time" => &mut self.events.suture_time,
             "events.suture_convergence" => &mut self.events.suture_convergence,

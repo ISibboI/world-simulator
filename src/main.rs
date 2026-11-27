@@ -798,9 +798,9 @@ fn snapshot(
     );
     info!(
         "    trenches {:.0} km, ridges {:.0} km, collisions {:.0} km ({:.0} converging, {:.0} diverging) | slab pull {:.2e} N, ridge push {:.2e} N | \
-         rifts {}, initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
-         blocked splits {}, terranes {} ({} cells, {} slab break-offs) | continental contacts made by rifts {:.0} km ({:.0} far), by initiations {:.0} km ({:.0} far) | \
-         splits along weak zones {} ({} cut again, {} along the coast, {} rifts through the plume head; rift boundaries on sutures {:.0}% of their continental cells vs {:.0}% of the rifted plates), along great circles {}, boundary deviation from a great circle: rifts {:.0} km, initiations {:.0} km | \
+         initiations {}, breakups {}, induced {}, reversals {}, sutures {}, captures {} (+ {} pieces of {} cells; {} cells broke up), consumed {}, merge loss {:.0} km·cells, \
+         blocked splits {}, terranes {} ({} cells, {} slab break-offs) | continental contacts made by initiations {:.0} km ({:.0} far) | \
+         initiation splits along weak zones {} ({} cut again, {} along the coast), along great circles {}, boundary deviation from a great circle {:.0} km | \
          fracture-zone initiations {}, failed initiations (no division/overriding/subducting part too small) {}/{}/{}, \
          undone initiations (suture/capture/piece/terrane) {}/{}/{}/{}",
         statistics.trench_length,
@@ -810,7 +810,6 @@ fn snapshot(
         statistics.collision_diverging_length,
         statistics.slab_pull,
         statistics.ridge_push,
-        statistics.events.rifts,
         statistics.events.initiations,
         statistics.events.breakups,
         statistics.events.induced_subductions,
@@ -826,23 +825,13 @@ fn snapshot(
         statistics.events.terrane_accretions,
         statistics.events.accreted_terrane_cells,
         statistics.events.slab_breakoffs,
-        statistics.events.rift_contact_km,
-        statistics.events.rift_far_contact_km,
         statistics.events.initiation_contact_km,
         statistics.events.initiation_far_contact_km,
         statistics.events.weak_zone_splits,
         statistics.events.recut_splits,
         statistics.events.coastal_splits,
-        statistics.events.head_rifts,
-        100.0 * statistics.events.rift_suture_cells[0] as f64
-            / statistics.events.rift_suture_cells[1].max(1) as f64,
-        100.0 * statistics.events.rift_suture_cells[2] as f64
-            / statistics.events.rift_suture_cells[3].max(1) as f64,
         statistics.events.great_circle_splits,
-        statistics.events.split_deviation_km[0]
-            / statistics.events.measured_splits[0].max(1) as f64,
-        statistics.events.split_deviation_km[1]
-            / statistics.events.measured_splits[1].max(1) as f64,
+        statistics.events.split_deviation_km / statistics.events.measured_splits.max(1) as f64,
         statistics.events.fracture_zone_initiations,
         statistics.events.failed_initiation_reasons[0],
         statistics.events.failed_initiation_reasons[1],
@@ -853,22 +842,6 @@ fn snapshot(
         statistics.events.undone_initiations[3],
     );
     let events = &statistics.events;
-    info!(
-        "    rift belts (continental cells, boundary/plates): ever marked {}/{} of {}/{}, orogenic weakening {:.1}/{:.1}, weak (≥ {}) {}/{} | \
-         plume rifts failed {}, break vs plate motion |cos| {:.3} over {} rifts",
-        events.rift_suture_cells[0],
-        events.rift_suture_cells[2],
-        events.rift_suture_cells[1],
-        events.rift_suture_cells[3],
-        events.rift_orogenic[0],
-        events.rift_orogenic[1],
-        tectonics::WEAK_BELT_THRESHOLD,
-        events.rift_weak_cells[0],
-        events.rift_weak_cells[1],
-        events.failed_plume_rifts,
-        events.rift_motion_alignment.0 / events.rift_motion_alignment.1.max(1) as f64,
-        events.rift_motion_alignment.1,
-    );
     {
         let tallies: Vec<String> = tectonics::SplitCause::ALL
             .iter()

@@ -1,19 +1,25 @@
-//! Where plates break: along the weakest lithosphere between the parts that move apart.
+//! The strength of the lithosphere, and where plates break along its weakest parts.
 //!
-//! A plate splits (above a plume, or where old lithosphere starts to subduct) into two parts that
-//! the driving forces pull apart. Far from the break they move as rigid blocks; the break forms
-//! where separating them takes the least force: the line of least integrated lithospheric strength
-//! between them, from plate boundary to plate boundary (a minimum cut). It follows weak zones:
-//! young sea floor, rifted margins, young arcs and accreted belts (sutures) rather than old
-//! cratons and old ocean (rifts follow mobile belts around cratons: Vauchez et al. 1998; Tommasi
-//! & Vauchez 2001; Wilson-cycle reactivation of sutures: Buiter & Torsvik 2014). The rigid blocks
-//! are the parts of the plate farther than [`BAND_WIDTH`] from the split's reference great circle
-//! (through the plume, or along the margin), which stands in for the stress field: the break
+//! [`lithosphere_strength`] combines the strength history of the lithosphere: its thermal age
+//! (sea-floor age, stretching, plume heating), the thinning of stretched continental crust, the
+//! orogenic weakening of collision belts and sutures, and the extension fabric of rifted
+//! margins and failed rifts (#54). The breakup of plates by their stress
+//! ([`super::breakup`]) and the deforming plates ([`super::sheet`]) use it; so does the split
+//! of a plate where old lithosphere starts to subduct: the plate breaks into two parts that the
+//! driving forces pull apart. Far from the break they move as rigid blocks; the break forms
+//! where separating them takes the least force: the line of least integrated lithospheric
+//! strength between them, from plate boundary to plate boundary (a minimum cut). It follows weak
+//! zones: young sea floor, rifted margins, young arcs and accreted belts (sutures) rather than
+//! old cratons and old ocean (rifts follow mobile belts around cratons: Vauchez et al. 1998;
+//! Tommasi & Vauchez 2001; Wilson-cycle reactivation of sutures: Buiter & Torsvik 2014). The
+//! rigid blocks are the parts of the plate farther than [`BAND_WIDTH`] from the split's
+//! reference great circle (along the margin), which stands in for the stress field: the break
 //! may wander from it within that band.
 //!
-//! Above a plume the lithosphere is heated and thinned (see [`plume_heating_age`]), so
-//! plume rifts break through the plume where that is the weakest way, and their arms leave it
-//! along whatever weak zones lie around it: the angle at the plume is an outcome of the cut.
+//! Above a plume the lithosphere is heated and thinned (see [`plume_heating_age`]), carried with
+//! the plate, and while the plume supplies magma its lithosphere opens more easily (see
+//! [`magma_weakening`], in the mantle's frame). Plume rifts are breakups by the plates' own stress
+//! (#51), which these weaknesses and the swell's push help.
 
 use std::collections::VecDeque;
 
@@ -79,9 +85,9 @@ const PLUME_TAIL_RADIUS: f64 = 0.0785;
 /// Age (Myr) of a plume up to which its head heats the lithosphere over [`PLUME_HEAD_RADIUS`]:
 /// the head arrives over 10 Myr ([`Plume::head_growth`]) and spreads; its flood basalts erupt
 /// within a few Myr (Courtillot & Renne 2003), and the ponded head is sheared off by the moving
-/// plate. Afterwards only the tail heats ([`PLUME_TAIL_RADIUS`]). It equals the default
-/// `rift_delay`; a plume rifting later finds the head-heated lithosphere where the plate has
-/// carried it, cooled by the time since (the reset is kept, see [`Crust::reheated`]).
+/// plate. Afterwards only the tail heats ([`PLUME_TAIL_RADIUS`]); the lithosphere the head
+/// heated keeps the reset where the plate carries it and cools from there (see
+/// [`Crust::reheated`]).
 const PLUME_HEAD_STAGE: f64 = 20.0;
 
 /// Weakest lithosphere (the axis of a spreading ridge) relative to old lithosphere.
@@ -773,7 +779,6 @@ mod tests {
             age,
             lifetime: 200.0,
             peak_flux: 5e-3,
-            has_rifted: false,
         };
         let at = |angle: f64| DVec3::new(math::sin(angle), 0.0, math::cos(angle));
         let strength = |plume: &Plume, r: DVec3| {
@@ -825,7 +830,6 @@ mod tests {
             age,
             lifetime: 200.0,
             peak_flux: 5e-3,
-            has_rifted: false,
         };
         let at = |angle: f64| DVec3::new(math::sin(angle), 0.0, math::cos(angle));
         let head = [plume(15.0)];
@@ -948,7 +952,6 @@ mod tests {
             age: 15.0,
             lifetime: 200.0,
             peak_flux: 5e-3,
-            has_rifted: false,
         });
         let cell = simulation.mesh.nearest(position);
         assert_eq!(simulation.lithosphere_strength(cell), 1.0);
@@ -974,7 +977,6 @@ mod tests {
             age: 12.0,
             lifetime: 200.0,
             peak_flux: 5e-3,
-            has_rifted: true,
         });
         for _ in 0..5 {
             simulation.step(1.0);

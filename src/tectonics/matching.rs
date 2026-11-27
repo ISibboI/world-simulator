@@ -687,7 +687,9 @@ mod tests {
         params.events.boundary_initiation_waiting_time = 1.0;
         params.events.initiation_age = 30.0;
         params.events.initiation_full_age = 40.0;
-        params.events.rift_delay = 1.0;
+        // Weak plates break by their stress (#182), so that splits happen early.
+        params.breakup.strength = 1e12;
+        params.breakup.time = 1.0;
         params.events.suture_time = 5.0;
         params.events.min_plate_area_before_capture = 0.02;
         params.mantle.plume_interval = 2.0;
