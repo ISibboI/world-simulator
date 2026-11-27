@@ -18,7 +18,9 @@
 //! with the buffers transferred rather than copied, or `{ error }` if the simulation fails. A restart from the
 //! parameter panel terminates the worker and starts a new one with the new query string, which
 //! also replaces the query of the page URL, so that the setting can be shared as a link. Each
-//! update after the first also carries `step_seconds`, the time of the step in the worker.
+//! update after the first also carries `step_seconds`, the time of the step in the worker, and
+//! every update the global state of the run ([`viewer::GlobalStatus`]: `ramp_up_end`, NaN while
+//! the ramp-up phase runs, `ramp_up_settled` and `co2_held`).
 //!
 //! Updates also carry the extra fields of the render mode ([`viewer::Layer`]s, each as a
 //! transferred `Float32Array` buffer under its key): at first those of the mode in the
@@ -638,6 +640,11 @@ fn start_worker(
                 mesh,
                 step_seconds,
                 fields,
+                global: viewer::GlobalStatus {
+                    ramp_up_end: get(&data, "ramp_up_end").as_f64().unwrap_or(f64::NAN),
+                    ramp_up_settled: get(&data, "ramp_up_settled").as_bool() == Some(true),
+                    co2_held: get(&data, "co2_held").as_bool() == Some(true),
+                },
             }));
         });
     worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
@@ -691,6 +698,10 @@ impl WorkerState {
         let planet = &self.run.planet;
         let message = js_sys::Object::new();
         set(&message, "time", &planet.tectonics().time().into());
+        let global = viewer::GlobalStatus::of(planet);
+        set(&message, "ramp_up_end", &global.ramp_up_end.into());
+        set(&message, "ramp_up_settled", &global.ramp_up_settled.into());
+        set(&message, "co2_held", &global.co2_held.into());
         if let Some(step_time) = step_time {
             set(&message, "step_seconds", &step_time.as_secs_f64().into());
         }

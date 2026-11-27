@@ -72,6 +72,7 @@ pub use modes::{
 };
 use overlay::OverlayBuilder;
 use pace::{HintAction, Pace};
+pub use parameters::GlobalStatus;
 pub use parameters::with_random_seed;
 use parameters::{ParameterPanel, SimulationStatus};
 #[cfg(target_arch = "wasm32")]
@@ -122,6 +123,8 @@ pub struct SurfaceUpdate {
     pub step_seconds: Option<f64>,
     /// The extra fields the view requested (see [`SimulationControl::request_layers`]).
     pub fields: Fields,
+    /// The global state of the run (the ramp-up phase), shown with its time.
+    pub global: GlobalStatus,
 }
 
 /// The icosphere of a simulation: the directions of its vertices (one per cell, unit length)
@@ -569,6 +572,8 @@ struct Viewer {
     adapted_at: Option<web_time::Instant>,
     /// Simulated time of the newest state of the running simulation.
     time: Option<f64>,
+    /// The global state of the newest state of the running simulation (see [`GlobalStatus`]).
+    global: Option<GlobalStatus>,
     /// Simulated duration of the running simulation in Myr.
     duration: f64,
     /// Why the running simulation failed, if it did.
@@ -730,6 +735,7 @@ impl Viewer {
             adaptation: sky::Adaptation::default(),
             adapted_at: None,
             time: None,
+            global: None,
             duration: initial.cli.run_duration(),
             failure: None,
             runs: 0,
@@ -758,6 +764,7 @@ impl Viewer {
         let (sender, receiver) = std::sync::mpsc::channel();
         self.events = receiver;
         self.time = None;
+        self.global = None;
         self.duration = launch.cli.run_duration();
         self.exaggeration = launch.cli.exaggeration;
         self.abiotic = launch.cli.biosphere == crate::presets::Biosphere::Abiotic;
@@ -942,6 +949,7 @@ impl Viewer {
             self.request_time = Some(web_time::Instant::now());
         }
         self.time = Some(update.time);
+        self.global = Some(update.global);
         self.pace.record(update.step_seconds);
         if self.finished() {
             // The simulation does not hold its last state.
@@ -1790,6 +1798,7 @@ impl eframe::App for Viewer {
             failure: self.failure.as_deref(),
             starting: banner::starting_text(restarted, self.generating),
             step_seconds: self.pace.median(),
+            global: self.global,
         };
         let pace = &mut self.pace;
         let mut hint_action = None;

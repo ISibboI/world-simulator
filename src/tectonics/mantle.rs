@@ -105,6 +105,12 @@ pub struct MantleParams {
     pub plume_swell_height: f64,
     /// Standard deviation in metres of a plume swell (swell half-widths 500–1000 km).
     pub plume_swell_width: f64,
+    /// Start the mantle in its steady state (#213): at the first step, the downwellings and the
+    /// sunken slabs are filled as if the trenches of that step had been active for longer than
+    /// the mantle remembers, and the plumes that a steady birth process leaves alive are there
+    /// (see [`MantleFlow::prime`]). Without it (`mantle.steady_start=0`), the mantle starts
+    /// empty and fills over ~150 Myr.
+    pub steady_start: bool,
 }
 
 /// A depth range of the mantle that sunken slabs pass through. Its mass loads the surface
@@ -170,6 +176,7 @@ impl Default for MantleParams {
             kernel_degree: 100,
             plume_swell_height: 650.0,
             plume_swell_width: 450e3,
+            steady_start: true,
         }
     }
 }
@@ -219,6 +226,8 @@ pub struct MantleFlow {
     /// Interpolation from the evaluation grid to the cells of the simulation mesh: per cell,
     /// evaluation cells and their weights.
     interpolation: Option<(SphereMesh, Vec<Weights>)>,
+    /// Whether the mantle was primed (see [`MantleFlow::prime`]).
+    primed: bool,
     /// Green's functions of the slab stages, for the planet radius they were computed for.
     slab_green: Option<(f64, GreenTable)>,
 }
@@ -238,12 +247,103 @@ impl MantleFlow {
             slab_grid,
             slab_mass,
             interpolation: None,
+            primed: false,
             slab_green: None,
         }
     }
 
     pub fn plumes(&self) -> &[Plume] {
         &self.plumes
+    }
+
+    /// Whether the mantle still waits for [`Self::prime`].
+    pub fn needs_priming(&self) -> bool {
+        self.params.steady_start && !self.primed
+    }
+
+    /// Puts the mantle into the steady state of the current trenches, after the first step
+    /// `dt` (Myr) with its `subduction` rates and sinking `slabs` (as for [`Self::step`]),
+    /// instead of an empty start (#213):
+    ///
+    /// * the downwellings hold the trenches' subduction rates (the fixed point of their
+    ///   moving average);
+    /// * every slab stage holds what a constant inflow leaves in it, the step's deposit over
+    ///   the fraction of its mass that leaves it per step (≈ mass flux × residence time), as
+    ///   if the trenches had been active for longer than the mantle remembers;
+    /// * the plumes are those that the birth process of [`Self::step`] (one per
+    ///   `plume_interval` on average) would have left alive over the longest plume lifetime
+    ///   before: ~mean lifetime / interval plumes of all ages. Their positions follow the same
+    ///   rule as new plumes (far from the downwellings).
+    ///
+    /// Happens once; later calls do nothing.
+    pub fn prime(
+        &mut self,
+        dt: f64,
+        subduction: &[(DVec3, f64)],
+        slabs: &[(DVec3, f64)],
+        rng: &mut impl Rng,
+    ) {
+        if self.primed || dt <= 0.0 {
+            return;
+        }
+        self.primed = true;
+        let mut hint = 0;
+        self.downwelling.fill(0.0);
+        for &(position, rate) in subduction {
+            let cell = self.grid.nearest_from(position, hint);
+            hint = cell;
+            self.downwelling[cell as usize] += rate;
+        }
+        let seconds = dt * SECONDS_PER_MYR;
+        let mut deposit = vec![0.0; self.slab_grid.len()];
+        let mut hint = 0;
+        for &(position, flux) in slabs {
+            hint = self.slab_grid.nearest_from(position, hint);
+            for (cell, weight) in tent_weights(&self.slab_grid, hint, position) {
+                deposit[cell as usize] += flux * seconds * weight;
+            }
+        }
+        for (stage, masses) in self.params.slab_stages.iter().zip(&mut self.slab_mass) {
+            let leave = 1.0 - math::exp(-dt / stage.residence);
+            for (mass, &deposit) in masses.iter_mut().zip(&deposit) {
+                *mass = deposit / leave;
+            }
+        }
+        // The plumes born `age` ago that are still alive, oldest first.
+        let params = self.params.clone();
+        let oldest = params.plume_lifetime.0.max(params.plume_lifetime.1);
+        let steps = (oldest / dt).ceil() as usize;
+        let mut plumes = Vec::new();
+        for step in (1..=steps).rev() {
+            let age = step as f64 * dt;
+            if rng.random_bool((dt / params.plume_interval).clamp(0.0, 1.0)) {
+                let mut plume = self.new_plume(rng);
+                if age < plume.lifetime {
+                    plume.age = age;
+                    plumes.push(plume);
+                }
+            }
+        }
+        self.plumes.extend(plumes);
+    }
+
+    /// A new plume, where no slabs have sunk recently.
+    fn new_plume(&self, rng: &mut impl Rng) -> Plume {
+        let params = &self.params;
+        let candidates: Vec<(DVec3, f64)> = (0..params.plume_candidates.max(1))
+            .map(|_| random_unit_vector(rng))
+            .map(|candidate| (candidate, self.downwelling_inflow(candidate)))
+            .collect();
+        let (position, _) = candidates
+            .into_iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1).reverse())
+            .expect("at least one candidate");
+        Plume {
+            position,
+            age: 0.0,
+            lifetime: rng.random_range(params.plume_lifetime.0..=params.plume_lifetime.1),
+            peak_flux: rng.random_range(params.plume_flux.0..=params.plume_flux.1),
+        }
     }
 
     #[cfg(test)]
@@ -310,20 +410,8 @@ impl MantleFlow {
 
         if rng.random_bool((dt / params.plume_interval).clamp(0.0, 1.0)) {
             // Plumes rise where no slabs have sunk recently.
-            let candidates: Vec<(DVec3, f64)> = (0..params.plume_candidates.max(1))
-                .map(|_| random_unit_vector(rng))
-                .map(|candidate| (candidate, self.downwelling_inflow(candidate)))
-                .collect();
-            let (position, _) = candidates
-                .into_iter()
-                .max_by(|a, b| a.1.total_cmp(&b.1).reverse())
-                .expect("at least one candidate");
-            self.plumes.push(Plume {
-                position,
-                age: 0.0,
-                lifetime: rng.random_range(params.plume_lifetime.0..=params.plume_lifetime.1),
-                peak_flux: rng.random_range(params.plume_flux.0..=params.plume_flux.1),
-            });
+            let plume = self.new_plume(rng);
+            self.plumes.push(plume);
         }
     }
 
@@ -1055,5 +1143,48 @@ mod tests {
         let mean = counts[300..].iter().sum::<usize>() as f64 / 700.0;
         // About lifetime / interval ≈ 140 / 15 plumes at a time.
         assert!((4.0..16.0).contains(&mean), "{mean}");
+    }
+
+    /// Priming gives the steady state at once: the downwellings hold the rates, every slab stage
+    /// the fixed point of its turnover (so a further step changes nothing), and the plumes are a
+    /// steady population of all ages.
+    #[test]
+    fn priming_starts_in_the_steady_state() {
+        let subduction = [(DVec3::X, 0.05), (DVec3::Y, 0.02)];
+        let slabs = [(DVec3::X, 4e7), (DVec3::Z, 1e7)];
+        let mut counts = Vec::new();
+        for seed in 0..40 {
+            let params = MantleParams {
+                plume_interval: 1e12,
+                ..MantleParams::default()
+            };
+            let mut mantle = MantleFlow::new(params);
+            assert!(mantle.needs_priming());
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            mantle.step(1.0, &subduction, &slabs, &mut rng);
+            // Births only in the priming (they are switched off in the steps).
+            mantle.params.plume_interval = 15.0;
+            mantle.prime(1.0, &subduction, &slabs, &mut rng);
+            mantle.params.plume_interval = 1e12;
+            assert!(!mantle.needs_priming());
+            let total: f64 = mantle.downwelling.iter().sum();
+            assert!((total - 0.07).abs() < 1e-12, "{total}");
+            let before = mantle.slab_mass.clone();
+            let plumes = mantle.plumes.clone();
+            for plume in &plumes {
+                assert!(plume.age > 0.0 && plume.age < plume.lifetime);
+            }
+            counts.push(plumes.len());
+            mantle.step(1.0, &subduction, &slabs, &mut rng);
+            for (stage, (now, then)) in mantle.slab_mass.iter().zip(&before).enumerate() {
+                let (now, then): (f64, f64) = (now.iter().sum(), then.iter().sum());
+                assert!(then > 0.0 && (now / then - 1.0).abs() < 1e-9, "{stage}");
+            }
+            let total: f64 = mantle.downwelling.iter().sum();
+            assert!((total - 0.07).abs() < 1e-12, "{total}");
+        }
+        let mean = counts.iter().sum::<usize>() as f64 / counts.len() as f64;
+        // Mean lifetime / interval = 140 / 15 ≈ 9.3.
+        assert!((7.5..11.0).contains(&mean), "{mean}");
     }
 }

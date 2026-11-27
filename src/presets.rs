@@ -29,6 +29,7 @@ use crate::climate::ClimateParams;
 use crate::erosion::ErosionParams;
 use crate::escape::EscapeParams;
 use crate::math;
+use crate::ramp_up::RampUpParams;
 use crate::sun::{self, MAX_EPOCH, MAX_LUMINOSITY, PRESENT_EPOCH, PRESENT_SOLAR_CONSTANT};
 use crate::tectonics::TectonicParams;
 use crate::temperature::TemperatureParams;
@@ -287,6 +288,7 @@ pub struct Parameters {
     pub climate: ClimateParams,
     pub temperature: TemperatureParams,
     pub carbon: CarbonParams,
+    pub ramp_up: RampUpParams,
     pub escape: EscapeParams,
 }
 
@@ -302,6 +304,7 @@ impl Parameters {
             climate: ClimateParams::default(),
             temperature: TemperatureParams::default(),
             carbon: CarbonParams::default(),
+            ramp_up: RampUpParams::default(),
             escape: EscapeParams::default(),
         };
         biosphere.apply(
@@ -315,10 +318,12 @@ impl Parameters {
         parameters
     }
 
-    /// Overrides one parameter: `erosion.`, `climate.`, `temperature.`, `carbon.` and `escape.`
-    /// select those parameters, anything else is a tectonic parameter.
+    /// Overrides one parameter: `erosion.`, `climate.`, `temperature.`, `carbon.`, `escape.`
+    /// and `ramp_up.` select those parameters, anything else is a tectonic parameter.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
-        if let Some(name) = name.strip_prefix("escape.") {
+        if let Some(name) = name.strip_prefix("ramp_up.") {
+            self.ramp_up.set(name, value)
+        } else if let Some(name) = name.strip_prefix("escape.") {
             self.escape.set(name, value)
         } else if let Some(name) = name.strip_prefix("carbon.") {
             self.carbon.set(name, value)
@@ -363,6 +368,7 @@ mod tests {
             climate: ClimateParams::default(),
             temperature: TemperatureParams::default(),
             carbon: CarbonParams::default(),
+            ramp_up: RampUpParams::default(),
             escape: EscapeParams::default(),
         }
     }
