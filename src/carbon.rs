@@ -138,8 +138,14 @@ pub struct CarbonParams {
     /// the planet's degassing, not that of the model's transient. 1 takes the laws as they are,
     /// without a hold.
     pub phi: f64,
-    /// The calibrated φ stays within `1/phi_range..=phi_range`.
-    pub phi_range: f64,
+    /// The calibrated φ is clamped to `phi_min..=phi_max` (with a warning). φ only absorbs the
+    /// residual uncertainty of the barren laws, mainly the seafloor uptake (×3) and the
+    /// kinetics (×2), so a plausible φ lies within ~0.3–3 (`notes/issue-154/phi-barren.md`).
+    /// Where the clamp binds, the sinks do not balance the sources at the start's CO₂, and the
+    /// CO₂ moves after the ramp-up to where they do.
+    pub phi_min: f64,
+    /// See [`Self::phi_min`].
+    pub phi_max: f64,
     /// Time (Myr) over which the tectonic rates (of the degassing and of the new crust that the
     /// seafloor weathering alters) are smoothed: they jump with the grid. The smoothing starts at
     /// the end of the ramp-up from the mean rates of the calibration.
@@ -179,7 +185,8 @@ impl Default for CarbonParams {
             climate_sensitivity: 0.8,
             runoff_sensitivity: 0.03,
             phi: f64::NAN,
-            phi_range: 1e3,
+            phi_min: 0.3,
+            phi_max: 3.0,
             degassing_smoothing: 3.0,
         }
     }
@@ -222,7 +229,8 @@ impl CarbonParams {
             "climate_sensitivity" => &mut self.climate_sensitivity,
             "runoff_sensitivity" => &mut self.runoff_sensitivity,
             "phi" => &mut self.phi,
-            "phi_range" => &mut self.phi_range,
+            "phi_min" => &mut self.phi_min,
+            "phi_max" => &mut self.phi_max,
             "degassing_smoothing" => &mut self.degassing_smoothing,
             _ => anyhow::bail!("unknown carbon parameter {name}"),
         };
@@ -733,7 +741,7 @@ impl CarbonCycle {
                 })
                 .sum::<f64>()
         };
-        let phi = calibrate(net_sinks, degassing, params.phi_range);
+        let phi = calibrate(net_sinks, degassing, params.phi_min, params.phi_max);
         let ridge: f64 = steps.iter().map(|s| s.years * s.rates.ridge).sum();
         let slab_carbon = if ridge > 0.0 {
             steps
@@ -830,22 +838,30 @@ fn sinks(
     (Sinks { land, seafloor }, intensity)
 }
 
-/// The scale φ at which `sinks(φ)` (increasing) equals `target`, by bisection on ln φ within
-/// `range`; the bound (with a warning) if there is none.
-fn calibrate(sinks: impl Fn(f64) -> f64, target: f64, range: f64) -> f64 {
-    let (mut low, mut high) = (-math::ln(range), math::ln(range));
-    if sinks(math::exp(high)) < target {
+/// The scale φ at which `sinks(φ)` (increasing) equals `target`, by bisection on ln φ, clamped
+/// to `min..=max` with a warning that names the balancing φ.
+fn calibrate(sinks: impl Fn(f64) -> f64, target: f64, min: f64, max: f64) -> f64 {
+    let balancing = balancing_phi(sinks, target);
+    let phi = balancing.clamp(min, max);
+    if phi != balancing {
         warn!(
-            phi = math::exp(high),
-            "the weathering cannot balance the degassing at the start even with the largest φ"
+            calibrated = balancing,
+            clamped = phi,
+            "the calibrated φ lies outside its plausible range and is clamped: the sinks will not \
+             balance the sources at the start's CO₂, which then drifts after the calibration"
         );
+    }
+    phi
+}
+
+/// The φ at which `sinks(φ)` (increasing) equals `target`, by bisection on ln φ within
+/// 10^±6; that bound if there is none.
+fn balancing_phi(sinks: impl Fn(f64) -> f64, target: f64) -> f64 {
+    let (mut low, mut high) = (-math::ln(1e6), math::ln(1e6));
+    if sinks(math::exp(high)) < target {
         return math::exp(high);
     }
     if sinks(math::exp(low)) > target {
-        warn!(
-            phi = math::exp(low),
-            "the weathering exceeds the degassing at the start even with the smallest φ"
-        );
         return math::exp(low);
     }
     for _ in 0..100 {
@@ -1091,8 +1107,12 @@ mod tests {
     #[test]
     fn co2_approaches_zero_without_negative_forcing_beyond_zero_co2() {
         let land = vec![cell(10.0); 50];
+        // Balancing at this low CO₂ needs a φ beyond the plausible range: unclamped here, so
+        // that the start is continuous.
         let params = CarbonParams {
             degassing_smoothing: 0.0,
+            phi_min: 1e-3,
+            phi_max: 1e3,
             ..CarbonParams::default()
         };
         let start = ZERO_CO2_FORCING + 5.0;
@@ -1157,7 +1177,16 @@ mod tests {
         assert!((root - 7.3).abs() < 1e-12);
         let root = solve_increasing(|x| math::exp(x) - 1e-3, 3.0);
         assert!((root - math::ln(1e-3)).abs() < 1e-12);
-        let phi = calibrate(|phi| 2.0 * phi, 5.0, 1e3);
+        let phi = calibrate(|phi| 2.0 * phi, 5.0, 0.3, 3.0);
         assert!((phi - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn calibrated_phi_is_clamped() {
+        // Balancing would need φ = 8 (or 0.05): clamped to the plausible range.
+        assert_eq!(calibrate(|phi| 2.0 * phi, 16.0, 0.3, 3.0), 3.0);
+        assert_eq!(calibrate(|phi| 2.0 * phi, 0.1, 0.3, 3.0), 0.3);
+        let balancing = balancing_phi(|phi| 2.0 * phi, 16.0);
+        assert!((balancing - 8.0).abs() < 1e-9);
     }
 }
