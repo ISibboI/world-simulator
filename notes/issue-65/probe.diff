@@ -1,0 +1,260 @@
+diff --git a/src/temperature.rs b/src/temperature.rs
+index 177cb5b..0e7fa97 100644
+--- a/src/temperature.rs
++++ b/src/temperature.rs
+@@ -364,6 +364,17 @@ impl TemperatureParams {
+ }
+ 
+ const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
++
++#[cfg(test)]
++thread_local! {
++    /// Diagnostic (#65, test builds only): per coarse cell, the sums over the last year of the
++    /// land and ocean energy terms; see `probe::lowland_budget`.
++    pub(crate) static DIAG: std::cell::RefCell<Option<Vec<[f64; 16]>>> =
++        const { std::cell::RefCell::new(None) };
++    /// Experiment (#65, test builds only): coupling (W/m²/K) of every surface to the mean air of
++    /// its latitude band, full up to 20°, fading out by 35°.
++    pub(crate) static WTG: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
++}
+ /// Number of longitude sectors of the thermal equator.
+ pub const THERMAL_EQUATOR_SECTORS: usize = 24;
+ 
+@@ -1001,6 +1012,12 @@ impl TemperatureModel {
+                         let neighbor_sum: f64 = neighbors.iter().map(|&n| mean[n as usize]).sum();
+                         let local = coupling * neighbors.len() as f64;
+                         let transport = band_flux[self.band[cell]] + coupling * neighbor_sum;
++                        #[cfg(test)]
++                        let (local, transport) = {
++                            let lat = self.coarse_latitude[cell].abs().to_degrees();
++                            let k = WTG.with(|w| w.get()) * ((35.0 - lat) / 15.0).clamp(0.0, 1.0);
++                            (local + k, transport + k * band_temperature[self.band[cell]])
++                        };
+                         // Heat exchange through the air with the other surfaces of the cell, in
+                         // proportion to their shares (exactly today's land–ocean exchange
+                         // without lakes).
+@@ -1024,6 +1041,8 @@ impl TemperatureModel {
+                                     + to_lake * self.lake_surface[cell]))
+                             / (1.0 + rate * (b + local + to_ocean + to_lake));
+ 
++                        #[cfg(test)]
++                        let ocean_before = self.ocean_surface[cell];
+                         // Ocean column (Wagner & Eisenman, 2015).
+                         let ocean = WaterColumn {
+                             heat_capacity: params.ocean_heat_capacity,
+@@ -1052,6 +1071,36 @@ impl TemperatureModel {
+                         (self.ocean_surface[cell], self.ocean[cell]) =
+                             ocean.step(params, self.ocean[cell], forcing, damping, currents, dt);
+ 
++                        #[cfg(test)]
++                        if last_year {
++                            DIAG.with(|d| {
++                                if let Some(d) = d.borrow_mut().as_mut() {
++                                    let (tl, to) = (self.land[cell], self.ocean_surface[cell]);
++                                    let (al, bl) = radiation(tl);
++                                    let (ao, bo) = radiation(to);
++                                    let e = &mut d[cell];
++                                    e[0] += q * (1.0 - land_albedo[cell]);
++                                    e[1] += al + bl * tl;
++                                    e[2] += band_flux[self.band[cell]];
++                                    e[3] += transport - band_flux[self.band[cell]] - local * tl;
++                                    e[4] += to_ocean * (ocean_before - tl)
++                                        + to_lake * (self.lake_surface[cell] - tl);
++                                    e[5] += tl;
++                                    e[6] += q * (1.0 - albedo);
++                                    e[7] += ao + bo * to;
++                                    e[8] += transport - band_flux[self.band[cell]] - local * to;
++                                    e[9] += to_land * (tl - to)
++                                        + to_lake * (self.lake_surface[cell] - to);
++                                    e[10] += currents;
++                                    e[11] += to;
++                                    e[12] += 1.0;
++                                    e[13] = f;
++                                    e[14] = ocean_fraction[cell];
++                                    e[15] = self.coarse_latitude[cell];
++                                }
++                            });
++                        }
++
+                         // Lake column: the same physics without currents, in fresh water.
+                         if params.open_water_lakes {
+                             let lake = WaterColumn {
+@@ -2024,4 +2073,178 @@ mod probe {
+             eprintln!("SWEEP {file}:{line}");
+         }
+     }
++
++    /// Energy budget of tropical lowland against the sea of its latitude (#65, diagnostic):
++    /// `PROBE_CELLS=cells.csv PROBE_BIO=abiotic|modern PROBE_EPOCH=0 PROBE_TIME=1000
++    /// PROBE_FORCING=61.8 [PROBE_SET=name=v,..] cargo test --release lowland_budget -- --ignored
++    /// --nocapture`.
++    #[test]
++    #[ignore]
++    fn lowland_budget() {
++        use crate::presets::{Biosphere, Epoch, Parameters};
++        let Ok(file) = std::env::var("PROBE_CELLS") else {
++            return;
++        };
++        let env = |k: &str| std::env::var(k).unwrap();
++        let text = std::fs::read_to_string(&file).expect("cell dump");
++        let mut lines = text.lines();
++        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
++        let column = |name: &str| header.iter().position(|&h| h == name).unwrap();
++        let (e, p, l, la, ta) = (
++            column("elev"),
++            column("precip"),
++            column("lake"),
++            column("lat"),
++            column("t_annual"),
++        );
++        let (mut elevation, mut precipitation, mut lake, mut lat, mut dumped) =
++            (vec![], vec![], vec![], vec![], vec![]);
++        for line in lines {
++            let f: Vec<&str> = line.split(',').collect();
++            let v = |i: usize| f[i].parse::<f64>().unwrap();
++            elevation.push(v(e));
++            precipitation.push(v(p));
++            lake.push(v(l));
++            lat.push(v(la));
++            dumped.push(v(ta));
++        }
++        // Lakes at their water surface, as the model sees them.
++        let view: Vec<f64> = (0..elevation.len())
++            .map(|i| {
++                if lake[i] >= LAKE_DEPTH {
++                    elevation[i] + lake[i]
++                } else {
++                    elevation[i]
++                }
++            })
++            .collect();
++        let bio = if env("PROBE_BIO") == "modern" {
++            Biosphere::Modern
++        } else {
++            Biosphere::Abiotic
++        };
++        let epoch = Epoch::new(env("PROBE_EPOCH").parse().unwrap(), None).unwrap();
++        let mut params = Parameters::new(6.371e6, bio, epoch).temperature;
++        params.greenhouse_forcing = env("PROBE_FORCING").parse().unwrap();
++        if let Ok(overrides) = std::env::var("PROBE_SET") {
++            for assignment in overrides.split(',').filter(|a| !a.is_empty()) {
++                let (name, value) = assignment.split_once('=').unwrap();
++                params.set(name, value.parse().unwrap()).unwrap();
++            }
++        }
++        let time: f64 = env("PROBE_TIME").parse().unwrap();
++        let b = params.radiation_b;
++        let lapse = params.lapse_rate;
++        let mesh = SphereMesh::icosphere(6);
++        WTG.with(|w| w.set(std::env::var("PROBE_WTG").map_or(0.0, |v| v.parse().unwrap())));
++        let mut model = TemperatureModel::new(&mesh, params);
++        model.params.spin_up_years = 30;
++        model.update(&view, Some(&precipitation), Some(&lake), time);
++        let coarse = model.coarse.len();
++        DIAG.with(|d| *d.borrow_mut() = Some(vec![[0.0; 16]; coarse]));
++        model.update(&view, Some(&precipitation), Some(&lake), time);
++        let diag: Vec<[f64; 16]> = DIAG.with(|d| d.borrow_mut().take().unwrap())
++            .into_iter()
++            .map(|mut x| {
++                let steps = x[12];
++                for v in x.iter_mut().take(12) {
++                    *v /= steps;
++                }
++                x
++            })
++            .collect();
++        // Fine-mesh gap, as measured on the dumps: lowland (0..300 m, no lake) at |lat| < 25°
++        // minus the mean sea surface of its 5° band.
++        let fields = model.fields();
++        let gap = |t: &dyn Fn(usize) -> f64, top: f64| {
++            let mut sea = std::collections::HashMap::<i64, (f64, f64)>::new();
++            for i in 0..view.len() {
++                if lat[i].abs() < 25.0 && elevation[i] < 0.0 && lake[i] < LAKE_DEPTH {
++                    let s = sea.entry((lat[i] / 5.0).floor() as i64).or_default();
++                    s.0 += t(i);
++                    s.1 += 1.0;
++                }
++            }
++            let (mut sum, mut n) = (0.0f64, 0.0f64);
++            for i in 0..view.len() {
++                if lat[i].abs() < 25.0 && (0.0..top).contains(&elevation[i]) && lake[i] < LAKE_DEPTH
++                {
++                    if let Some(s) = sea.get(&((lat[i] / 5.0).floor() as i64)) {
++                        if s.1 > 5.0 {
++                            sum += t(i) - s.0 / s.1;
++                            n += 1.0;
++                        }
++                    }
++                }
++            }
++            (sum / n.max(1.0), n)
++        };
++        let (g_model, n) = gap(&|i| fields.annual_mean[i], 300.0);
++        let (g_dump, _) = gap(&|i| dumped[i], 300.0);
++        let g_sealevel = gap(&|i| fields.annual_mean[i] + lapse * elevation[i].max(0.0), 300.0).0;
++        // Coarse budget: mostly-land tropical coarse cells against the mean sea surface of the
++        // mostly-ocean coarse cells of the same model band.
++        let tropical = |x: &[f64; 16]| x[15].abs().to_degrees() < 25.0;
++        let mut band_sea = std::collections::HashMap::<usize, (f64, [f64; 16])>::new();
++        for (c, x) in diag.iter().enumerate() {
++            if tropical(x) && x[14] >= 0.9 {
++                let s = band_sea.entry(model.band[c]).or_insert((0.0, [0.0; 16]));
++                s.0 += 1.0;
++                for k in 0..16 {
++                    s.1[k] += x[k];
++                }
++            }
++        }
++        let mut sums = [0.0f64; 8];
++        let mut cells = 0.0f64;
++        for (c, x) in diag.iter().enumerate() {
++            if !(tropical(x) && x[13] >= 0.5) {
++                continue;
++            }
++            let Some((m, s)) = band_sea.get(&model.band[c]) else {
++                continue;
++            };
++            let o = |k: usize| s[k] / m;
++            // B ΔT = ΔSW + Δlocal + Δexchange − currents (A and the band flux cancel), plus the
++            // storage of the year (≈ 0).
++            let d = [
++                x[5] - o(11),
++                (x[0] - o(6)) / b,
++                (x[3] - o(8)) / b,
++                (x[4] - o(9)) / b,
++                -o(10) / b,
++                (x[2] - o(2)) / b,
++                (x[0] - x[1] + x[2] + x[3] + x[4]) / b,
++                x[13],
++            ];
++            for k in 0..8 {
++                sums[k] += d[k];
++            }
++            cells += 1.0;
++        }
++        let m = |k: usize| sums[k] / cells.max(1.0);
++        let (mut range, mut rn) = (0.0f64, 0.0f64);
++        for i in 0..view.len() {
++            if (10.0..25.0).contains(&lat[i].abs()) && (0.0..300.0).contains(&elevation[i]) {
++                let m = fields.monthly.iter().map(|m| m[i]);
++                range += m.clone().fold(f64::MIN, f64::max) - m.fold(f64::MAX, f64::min);
++                rn += 1.0;
++            }
++        }
++        let global = fields.annual_mean.iter().sum::<f64>() / fields.annual_mean.len() as f64;
++        eprintln!("PROBE2 lowland 10-25 seasonal range {:.2} K, global {global:.2} C", range / rn.max(1.0));
++        eprintln!(
++            "PROBE {file} set={:?}: fine lowland<300 n={n:.0} gap model {g_model:+.2} (dump {g_dump:+.2}), at sea level {g_sealevel:+.2} | coarse land>=50% n={cells:.0} (land frac {:.2}): dT {:+.2} = SW {:+.2} + local {:+.2} + exchange {:+.2} + currents(sea) {:+.2} + band {:+.2}; land storage {:+.2}",
++            std::env::var("PROBE_SET").unwrap_or_default(),
++            m(7),
++            m(0),
++            m(1),
++            m(2),
++            m(3),
++            m(4),
++            m(5),
++            m(6),
++        );
++    }
++
+ }
