@@ -33,11 +33,13 @@ def viscosity(depth, profile):
 
 
 def propagate(y, l, x0, x1, profile, steps):
+    # Constant viscosity per segment (segments end at the layer boundaries). Fixed 2026-11-27:
+    # the first version read the viscosity at the Runge-Kutta points, i.e. the deeper layer's at
+    # a boundary, which put layered kernels ~1% off.
     h = (x1 - x0) / steps
-    f = lambda x, v: a_matrix(l, viscosity(R - math.exp(x) * R, profile)) @ v
+    A = a_matrix(l, viscosity(R - math.exp((x0 + x1) / 2) * R, profile))
     for i in range(steps):
-        x = x0 + i * h
-        k1 = f(x, y); k2 = f(x + h / 2, y + h / 2 * k1); k3 = f(x + h / 2, y + h / 2 * k2); k4 = f(x + h, y + h * k3)
+        k1 = A @ y; k2 = A @ (y + h / 2 * k1); k3 = A @ (y + h / 2 * k2); k4 = A @ (y + h * k3)
         y = y + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
     return y
 

@@ -19,9 +19,12 @@
 //!
 //! The same density anomalies deflect the surface: **dynamic topography**
 //! `h = −σ_rr / (Δρ g)` (Hager et al. 1985; Gurnis 1990; Flament et al. 2013). Sunken slabs
-//! (the mass excess of the cold lithosphere, remembered like the downwellings) pull the surface
-//! down over a width of about their depth; plume heads ponding below the lithosphere lift it in
-//! swells. The field lives in the mantle frame, so plates move over it: continental interiors
+//! (the mass excess of the cold lithosphere) sink through four depth stages to the core–mantle
+//! boundary and pull the surface down through the surface kernels of a layered viscous mantle
+//! (see [`super::kernels`]; no calibration factor); plume heads ponding below the lithosphere
+//! lift it in swells. Known simplifications: no self-gravitation (~10% at the lowest degrees),
+//! no compensation by the 660 km phase boundary (~25% of the upper-mantle stage while slabs
+//! cross it, partly offset at 410 km), radial viscosity only (no weak mantle wedge). The field lives in the mantle frame, so plates move over it: continental interiors
 //! rise and fall by a few hundred metres over 10–100 Myr, and rivers strip the cover of uplifted
 //! platforms (see [`MantleFlow::dynamic_topography`]).
 
@@ -32,6 +35,7 @@ use rand::{Rng, RngExt};
 use crate::sphere::SphereMesh;
 
 use super::generation::random_unit_vector;
+use super::kernels::{GreenTable, LANES, LayeredMantle, stage_kernels};
 use crate::isostasy::MANTLE_DENSITY;
 
 const SECONDS_PER_MYR: f64 = 1e6 * 365.25 * 24.0 * 3600.0;
@@ -67,11 +71,32 @@ pub struct MantleParams {
     pub slab_offset: f64,
     /// Depth stages a sunken slab passes through (see [`SlabStage`]), from the top. Slabs sink
     /// at ~5 cm/yr through the upper mantle and ~1.2 cm/yr through the lower mantle (van der
-    /// Meer et al. 2010); below ~2000 km the surface hardly feels them.
+    /// Meer et al. 2010). Mass leaving the last stage rests on the core–mantle boundary, where
+    /// it no longer deflects the surface (the kernel is zero there).
     pub slab_stages: Vec<SlabStage>,
     /// Scales the slab part of the dynamic topography (1 = physical, 0 disables it, for
-    /// comparison runs).
+    /// comparison runs). Not a calibration: the response follows from the kernels.
     pub topography_response: f64,
+    /// Viscosity layers of the mantle from the top for the dynamic-topography kernels (see
+    /// [`super::kernels`]): bottom depth in metres and viscosity relative to the upper mantle;
+    /// the last layer reaches the core–mantle boundary. Lithosphere 100× (Hager & Richards
+    /// 1989), weak asthenosphere 0.1× (post-glacial rebound and geoid models, e.g. Steinberger
+    /// & Calderwood 2006), lower mantle 30× (Hager 1984; inversions give 30–100×, Mitrovica &
+    /// Forte 2004).
+    pub viscosity_layers: Vec<(f64, f64)>,
+    /// Thermal expansivity of the mantle (1/K) against depth (m), piecewise linear: the excess
+    /// mass of a slab follows it as the slab sinks. The value at the surface is the one implied
+    /// by the depth–age curve of the slab mass (GDH1). Lower-mantle values along the adiabat
+    /// after Katsura et al. 2009 and Steinberger & Calderwood 2006 (±20%).
+    pub expansivity: Vec<(f64, f64)>,
+    /// Depth of the core–mantle boundary in metres.
+    pub cmb_depth: f64,
+    /// Standard deviation in metres of the horizontal extent of a slab load (the upper-mantle
+    /// slab spans ~660 km horizontally, lower-mantle slabs fold into piles several hundred km
+    /// wide, van der Meer et al. 2018). It also ends the truncated kernel sum smoothly.
+    pub slab_load_width: f64,
+    /// Highest spherical-harmonic degree of the slab Green's functions.
+    pub kernel_degree: u32,
     /// Dry height in metres of the swell above a plume at the top of the range of
     /// [`MantleParams::plume_flux`]: the buoyancy of a ponded plume head, α ΔT L with
     /// α = 3 × 10⁻⁵ K⁻¹, ΔT ≈ 150 K and L ≈ 150 km (hotspot swells are 0.5–1.5 km high under
@@ -82,18 +107,16 @@ pub struct MantleParams {
     pub plume_swell_width: f64,
 }
 
-/// A depth range of the mantle that sunken slabs pass through.
+/// A depth range of the mantle that sunken slabs pass through. Its mass loads the surface
+/// through the stage's dynamic-topography kernel (see [`super::kernels::stage_kernels`]).
 #[derive(Clone, Debug)]
 pub struct SlabStage {
     /// Mean time in Myr a slab spends in the range (its thickness over the sinking speed).
     pub residence: f64,
-    /// Fraction of the slab's weight that the surface supports by its deflection, the rest
-    /// being supported deeper (core–mantle boundary, viscous lower mantle): the surface
-    /// response kernel for a viscosity increase at 660 km, which falls with depth from ~0.7 in
-    /// the upper mantle to ~0.2 at mid-mantle depths (Hager 1984; Richards & Hager 1984).
-    pub response: f64,
-    /// Standard deviation in metres of the surface deflection: about the depth of the load.
-    pub width: f64,
+    /// Top of the depth range in metres.
+    pub top: f64,
+    /// Bottom of the depth range in metres.
+    pub bottom: f64,
 }
 
 impl Default for MantleParams {
@@ -108,29 +131,43 @@ impl Default for MantleParams {
             plume_flux: (2e-3, 6e-3),
             core_radius: 0.1,
             plume_candidates: 16,
-            slab_grid_subdivisions: 3,
+            slab_grid_subdivisions: 4,
             slab_offset: 660e3,
             slab_stages: vec![
-                // 0–660 km at ~5 cm/yr; spread over the slab's own horizontal reach.
+                // The slab from the base of the lithosphere to 660 km at ~5 cm/yr.
                 SlabStage {
                     residence: 13.0,
-                    response: 0.5,
-                    width: 600e3,
+                    top: 100e3,
+                    bottom: 660e3,
                 },
-                // 660–1200 km at ~1.2 cm/yr.
+                // Lower mantle at ~1.2 cm/yr.
                 SlabStage {
                     residence: 45.0,
-                    response: 0.4,
-                    width: 900e3,
+                    top: 660e3,
+                    bottom: 1200e3,
                 },
-                // 1200–2000 km.
                 SlabStage {
                     residence: 67.0,
-                    response: 0.2,
-                    width: 1500e3,
+                    top: 1200e3,
+                    bottom: 2000e3,
+                },
+                SlabStage {
+                    residence: 74.0,
+                    top: 2000e3,
+                    bottom: 2891e3,
                 },
             ],
             topography_response: 1.0,
+            viscosity_layers: vec![(100e3, 100.0), (300e3, 0.1), (660e3, 1.0), (2891e3, 30.0)],
+            expansivity: vec![
+                (0.0, 3.1e-5),
+                (660e3, 2.0e-5),
+                (1500e3, 1.45e-5),
+                (2891e3, 1.0e-5),
+            ],
+            cmb_depth: 2891e3,
+            slab_load_width: 300e3,
+            kernel_degree: 100,
             plume_swell_height: 650.0,
             plume_swell_width: 450e3,
         }
@@ -184,6 +221,8 @@ pub struct MantleFlow {
     /// Interpolation from the evaluation grid to the cells of the simulation mesh: per cell,
     /// evaluation cells and their weights.
     interpolation: Option<(SphereMesh, Vec<Weights>)>,
+    /// Green's functions of the slab stages, for the planet radius they were computed for.
+    slab_green: Option<(f64, GreenTable)>,
 }
 
 impl MantleFlow {
@@ -201,6 +240,7 @@ impl MantleFlow {
             slab_grid,
             slab_mass,
             interpolation: None,
+            slab_green: None,
         }
     }
 
@@ -231,8 +271,8 @@ impl MantleFlow {
         let params = &self.params;
         let keep = math::exp(-dt / params.slab_memory);
         // Slabs pass through the depth stages: each stage hands on the share of its mass that
-        // sank out of it during the step (mass-conserving), the last one loses it to depths the
-        // surface does not feel.
+        // sank out of it during the step (mass-conserving); what leaves the last one rests on
+        // the core–mantle boundary, where it no longer deflects the surface.
         let mut handed_on: Option<Vec<f64>> = None;
         for (stage, masses) in params.slab_stages.iter().zip(&mut self.slab_mass) {
             let leave = 1.0 - math::exp(-dt / stage.residence);
@@ -363,24 +403,23 @@ impl MantleFlow {
             let weights = interpolation_weights(&grid, mesh);
             self.interpolation = Some((grid, weights));
         }
-        let (grid, weights) = self.interpolation.as_ref().expect("interpolation exists");
-        // Loads: sunken slabs pull down by f · M K(θ) / ρ_m with a normalised Gaussian K.
-        let mut sources: Vec<(DVec3, f64, f64)> = Vec::new();
-        for (stage, masses) in params.slab_stages.iter().zip(&self.slab_mass) {
-            let scale = -params.topography_response * stage.response
-                / (MANTLE_DENSITY * 2.0 * std::f64::consts::PI * stage.width.powi(2));
-            sources.extend(
-                (0..self.slab_grid.len() as u32)
-                    .filter(|&cell| masses[cell as usize] > 0.0 && scale != 0.0)
-                    .map(|cell| {
-                        (
-                            self.slab_grid.vertex(cell),
-                            scale * masses[cell as usize],
-                            stage.width / planet_radius,
-                        )
-                    }),
-            );
+        if params.topography_response != 0.0
+            && !params.slab_stages.is_empty()
+            && self
+                .slab_green
+                .as_ref()
+                .is_none_or(|(radius, _)| *radius != planet_radius)
+        {
+            self.slab_green = Some((planet_radius, slab_green_table(params, planet_radius)));
         }
+        let (grid, weights) = self.interpolation.as_ref().expect("interpolation exists");
+        // Sunken slabs: their masses through the Green's function of each stage.
+        let slab_field = self
+            .slab_green
+            .as_ref()
+            .filter(|_| params.topography_response != 0.0)
+            .map(|(_, green)| slab_field(grid, &self.slab_grid, &self.slab_mass, green));
+        let mut sources: Vec<(DVec3, f64, f64)> = Vec::new();
         let peak_flux = params.plume_flux.1.max(1e-12);
         sources.extend(self.plumes.iter().map(|plume| {
             (
@@ -392,7 +431,10 @@ impl MantleFlow {
         let coarse: Vec<f64> = (0..grid.len() as u32)
             .map(|cell| {
                 let r = grid.vertex(cell);
-                sources
+                let slab = slab_field.as_ref().map_or(0.0, |field| {
+                    params.topography_response * field[cell as usize]
+                });
+                slab + sources
                     .iter()
                     .map(|&(position, height, width)| {
                         // θ² ≈ 2 (1 − cos θ), cut off beyond 4 widths.
@@ -403,7 +445,7 @@ impl MantleFlow {
                             height * math::exp(-angle_squared / (2.0 * width * width))
                         }
                     })
-                    .sum()
+                    .sum::<f64>()
             })
             .collect();
         let mut field: Vec<f64> = weights
@@ -450,6 +492,102 @@ impl MantleFlow {
             })
             .collect()
     }
+}
+
+/// The Green's functions of the slab stages of `params` on a planet of `planet_radius`.
+fn slab_green_table(params: &MantleParams, planet_radius: f64) -> GreenTable {
+    let mantle = LayeredMantle {
+        radius: planet_radius,
+        cmb_depth: params.cmb_depth,
+        layers: &params.viscosity_layers,
+    };
+    let ranges: Vec<(f64, f64)> = params
+        .slab_stages
+        .iter()
+        .map(|stage| (stage.top, stage.bottom))
+        .collect();
+    let kernels = stage_kernels(&mantle, &ranges, &params.expansivity, params.kernel_degree);
+    for (stage, kernel) in kernels.iter().enumerate() {
+        let at = |l: usize| kernel.get(l).copied().unwrap_or(0.0);
+        tracing::debug!(
+            stage,
+            "slab kernel × α/α₀ at l = 2, 5, 10, 20: {:.3}, {:.3}, {:.3}, {:.3}",
+            at(2),
+            at(5),
+            at(10),
+            at(20),
+        );
+    }
+    GreenTable::new(
+        &kernels,
+        planet_radius,
+        params.slab_load_width,
+        MANTLE_DENSITY,
+    )
+}
+
+/// Slab cells whose load is below this fraction of the largest are left out of the slab field
+/// (they would change it by far less than a millimetre).
+const NEGLIGIBLE_SLAB_LOAD: f64 = 1e-9;
+
+/// Dynamic topography (m) of the slab masses (`masses[stage][slab cell]`) at the cells of `grid`.
+/// When `grid` is the slab grid itself, each pair of cells is visited once.
+fn slab_field(
+    grid: &SphereMesh,
+    slab_grid: &SphereMesh,
+    masses: &[Vec<f64>],
+    green: &GreenTable,
+) -> Vec<f64> {
+    let chunks = green.chunks();
+    let cells = slab_grid.len();
+    let total = |cell: usize| masses.iter().map(|stage| stage[cell]).sum::<f64>();
+    let largest = (0..cells).map(total).fold(0.0, f64::max);
+    let occupied: Vec<bool> = (0..cells)
+        .map(|cell| total(cell) > NEGLIGIBLE_SLAB_LOAD * largest)
+        .collect();
+    // Masses per cell and stage, in chunks of `LANES` stages.
+    let loads: Vec<[f64; LANES]> = (0..cells)
+        .flat_map(|cell| {
+            (0..chunks).map(move |chunk| {
+                std::array::from_fn(|lane| {
+                    masses
+                        .get(chunk * LANES + lane)
+                        .map_or(0.0, |stage| stage[cell])
+                })
+            })
+        })
+        .collect();
+    let load = |cell: usize| &loads[cell * chunks..(cell + 1) * chunks];
+    if grid.len() == cells {
+        // The same icosphere: symmetric pairs.
+        let mut sums = vec![[0.0; LANES]; cells];
+        for i in 0..cells {
+            let r = slab_grid.vertex(i as u32);
+            let mut sum_i = sums[i];
+            if occupied[i] {
+                green.add(r, r, load(i), &mut sum_i);
+            }
+            for j in i + 1..cells {
+                if occupied[i] || occupied[j] {
+                    let p = slab_grid.vertex(j as u32);
+                    green.add_pair(r, p, load(i), load(j), &mut sum_i, &mut sums[j]);
+                }
+            }
+            sums[i] = sum_i;
+        }
+        return sums.iter().map(|sum| sum.iter().sum()).collect();
+    }
+    let sources: Vec<usize> = (0..cells).filter(|&cell| occupied[cell]).collect();
+    (0..grid.len() as u32)
+        .map(|cell| {
+            let r = grid.vertex(cell);
+            let mut sum = [0.0; LANES];
+            for &source in &sources {
+                green.add(r, slab_grid.vertex(source as u32), load(source), &mut sum);
+            }
+            sum.iter().sum()
+        })
+        .collect()
 }
 
 /// Weights that interpolate a field on `grid` to the cells of `mesh`: tent weights over the
@@ -601,7 +739,7 @@ mod tests {
                 )
             })
             .collect();
-        for _ in 0..300 {
+        for _ in 0..1000 {
             mantle.step(1.0, &[], &slabs, &mut rng);
         }
         // The slab mass approaches the steady state flux × total residence.
@@ -624,9 +762,10 @@ mod tests {
         let at = |target: DVec3| field[mesh.nearest_from(target, 0) as usize];
         let mean = field.iter().sum::<f64>() / field.len() as f64;
         assert!(mean.abs() < 1e-6);
-        // Hundreds of metres down over the slabs, up over the plume.
+        // About −1.7 km dry on the slab line with the physical kernels (converged; ~10% less
+        // on the default subdivision-4 grids, see `slab_field_sensitivity`), up over the plume.
         assert!(
-            (-1500.0..-300.0).contains(&at(DVec3::X)),
+            (-1900.0..-1350.0).contains(&at(DVec3::X)),
             "{}",
             at(DVec3::X)
         );
@@ -640,6 +779,212 @@ mod tests {
             for &n in mesh.neighbors(cell) {
                 assert!((field[cell as usize] - field[n as usize]).abs() < 150.0);
             }
+        }
+    }
+
+    /// The slab field of the 5000 km trench of [`slabs_depress_and_plumes_lift_the_surface`],
+    /// rotated by `tilt` about +x (to test trenches oblique to the grids), on a subdivision-6
+    /// mesh, without plumes: (field, mesh).
+    fn trench_field(params: MantleParams, tilt: f64) -> (Vec<f64>, SphereMesh, Vec<DVec3>) {
+        let mesh = SphereMesh::icosphere(6);
+        let mut mantle = MantleFlow::new(params);
+        let mut rng = ChaCha8Rng::seed_from_u64(3);
+        let flux = 5e6 * 0.05 / (365.25 * 24.0 * 3600.0) * 7e6;
+        let (sin_tilt, cos_tilt) = (math::sin(tilt), math::cos(tilt));
+        let line: Vec<DVec3> = (-25..=25)
+            .map(|i| {
+                let angle = f64::from(i) * 100e3 / 6.371e6;
+                let (s, c) = (math::sin(angle), math::cos(angle));
+                DVec3::new(c, -s * sin_tilt, s * cos_tilt)
+            })
+            .collect();
+        let slabs: Vec<(DVec3, f64)> = line.iter().map(|&p| (p, flux / 51.0)).collect();
+        for _ in 0..1000 {
+            mantle.step(1.0, &[], &slabs, &mut rng);
+        }
+        mantle.plumes.clear();
+        (mantle.dynamic_topography(&mesh, 6.371e6), mesh, line)
+    }
+
+    /// Diagnostics of the slab field's sensitivity to the grids and the load width (see
+    /// `notes/issue-37/results-kernels.md`): `cargo test --release slab_field_sensitivity --
+    /// --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn slab_field_sensitivity() {
+        let profile = |params: MantleParams, tilt: f64| {
+            let start = std::time::Instant::now();
+            let (field, mesh, line) = trench_field(params, tilt);
+            let seconds = start.elapsed().as_secs_f64();
+            let along: Vec<f64> = line[10..41]
+                .iter()
+                .map(|&p| field[mesh.nearest_from(p, 0) as usize])
+                .collect();
+            (along, field.iter().copied().fold(0.0, f64::min), seconds)
+        };
+        // Reference: fine slab grid, evaluated on the cells.
+        let references: Vec<Vec<f64>> = [0.0, 0.4]
+            .iter()
+            .map(|&tilt| {
+                let params = MantleParams {
+                    slab_grid_subdivisions: 5,
+                    evaluation_subdivisions: 6,
+                    ..MantleParams::default()
+                };
+                profile(params, tilt).0
+            })
+            .collect();
+        let report = |name: &str, params: MantleParams| {
+            for (tilt, reference) in [0.0, 0.4].into_iter().zip(&references) {
+                let (along, deepest, seconds) = profile(params.clone(), tilt);
+                let centre = along[15];
+                let error = along
+                    .iter()
+                    .zip(reference)
+                    .map(|(a, r)| (a - r).abs())
+                    .fold(0.0, f64::max);
+                tracing::info!(
+                    "{name:42} tilt {tilt:.1}: centre {centre:6.0} m (reference {:6.0}), deepest {deepest:6.0} m, largest deviation along the central 3000 km {:4.1}% ({seconds:.2} s)",
+                    reference[15],
+                    100.0 * error / reference[15].abs()
+                );
+            }
+        };
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        report("default", MantleParams::default());
+        report(
+            "evaluation on the cells (subdivision 6)",
+            MantleParams {
+                evaluation_subdivisions: 6,
+                ..MantleParams::default()
+            },
+        );
+        report(
+            "evaluation subdivision 5",
+            MantleParams {
+                evaluation_subdivisions: 5,
+                ..MantleParams::default()
+            },
+        );
+        report(
+            "slab grid 4, evaluation on the cells",
+            MantleParams {
+                slab_grid_subdivisions: 4,
+                evaluation_subdivisions: 6,
+                ..MantleParams::default()
+            },
+        );
+        report(
+            "slab grid 4, evaluation 4",
+            MantleParams {
+                slab_grid_subdivisions: 4,
+                ..MantleParams::default()
+            },
+        );
+        report(
+            "slab grid 6, evaluation on the cells",
+            MantleParams {
+                slab_grid_subdivisions: 6,
+                evaluation_subdivisions: 6,
+                ..MantleParams::default()
+            },
+        );
+        // Mixed: stage 1 on slab grid 4, stages 2–4 on slab grid 3.
+        let only = |keep: &[usize], slab: u32, evaluation: u32| {
+            let mut params = MantleParams {
+                slab_grid_subdivisions: slab,
+                evaluation_subdivisions: evaluation,
+                ..MantleParams::default()
+            };
+            for (s, slab_stage) in params.slab_stages.iter_mut().enumerate() {
+                if !keep.contains(&s) {
+                    slab_stage.top = 2890e3;
+                    slab_stage.bottom = 2890.9e3;
+                }
+            }
+            params
+        };
+        for evaluation in [4, 6] {
+            for (stage1, rest) in [(4, 3), (3, 4)] {
+                let (a, _, _) = profile(only(&[0], stage1, evaluation), 0.0);
+                let (b, _, _) = profile(only(&[1, 2, 3], rest, evaluation), 0.0);
+                tracing::info!(
+                    "stage 1 on grid {stage1}, rest on grid {rest}, evaluation {evaluation}: centre {:.0} m (stage 1 {:.0}, rest {:.0})",
+                    a[15] + b[15],
+                    a[15],
+                    b[15]
+                );
+            }
+        }
+        // Cost of one evaluation with every slab cell loaded (the worst case).
+        for (slab, evaluation) in [(3, 4), (4, 4), (4, 5), (5, 4)] {
+            let mut mantle = MantleFlow::new(MantleParams {
+                slab_grid_subdivisions: slab,
+                evaluation_subdivisions: evaluation,
+                ..MantleParams::default()
+            });
+            for stage in &mut mantle.slab_mass {
+                stage.fill(1e15);
+            }
+            let mesh = SphereMesh::icosphere(6);
+            mantle.dynamic_topography(&mesh, 6.371e6);
+            let start = std::time::Instant::now();
+            for _ in 0..10 {
+                std::hint::black_box(mantle.dynamic_topography(&mesh, 6.371e6));
+            }
+            tracing::info!(
+                "slab grid {slab}, evaluation {evaluation}: {:.1} ms per call, all slab cells loaded",
+                start.elapsed().as_secs_f64() * 100.0
+            );
+        }
+        report(
+            "slab grid 4, evaluation 5",
+            MantleParams {
+                slab_grid_subdivisions: 4,
+                evaluation_subdivisions: 5,
+                ..MantleParams::default()
+            },
+        );
+        for width in [200e3, 450e3] {
+            report(
+                &format!("load width {} km, evaluation on the cells", width / 1e3),
+                MantleParams {
+                    slab_load_width: width,
+                    evaluation_subdivisions: 6,
+                    ..MantleParams::default()
+                },
+            );
+        }
+        report(
+            "lower mantle 100×, evaluation on the cells",
+            MantleParams {
+                viscosity_layers: vec![(100e3, 100.0), (300e3, 0.1), (660e3, 1.0), (2891e3, 100.0)],
+                evaluation_subdivisions: 6,
+                ..MantleParams::default()
+            },
+        );
+        report(
+            "no asthenosphere, evaluation on the cells",
+            MantleParams {
+                viscosity_layers: vec![(100e3, 100.0), (660e3, 1.0), (2891e3, 30.0)],
+                evaluation_subdivisions: 6,
+                ..MantleParams::default()
+            },
+        );
+        for stage in 0..4 {
+            let mut params = MantleParams {
+                evaluation_subdivisions: 6,
+                ..MantleParams::default()
+            };
+            // Only one stage loads the surface: the others keep their residence but get a
+            // depth range at the CMB, where the kernel is zero.
+            for (s, slab_stage) in params.slab_stages.iter_mut().enumerate() {
+                if s != stage {
+                    slab_stage.top = 2890e3;
+                    slab_stage.bottom = 2890.9e3;
+                }
+            }
+            report(&format!("only stage {}, on the cells", stage + 1), params);
         }
     }
 
