@@ -248,6 +248,8 @@ pub struct PlanetView<'a> {
     pub time: f64,
     pub epoch: f64,
     pub series: &'a Series,
+    /// A narrow screen (a phone): the sparklines get rows of their own.
+    pub narrow: bool,
 }
 
 /// A value for the panel: `—` for NaN.
@@ -266,7 +268,12 @@ pub fn planet_rows(ui: &mut egui::Ui, view: &PlanetView) {
     let global = view.global;
     let sun = crate::sun::Sun::of_run(view.epoch, view.time);
     let epoch = view.epoch + view.time / 1000.0;
+    // Beside the value, or on a narrow screen under it, so that the panel fits.
     let spark = |ui: &mut egui::Ui, of: fn(&GlobalStatus) -> f32| {
+        if view.narrow {
+            ui.end_row();
+            ui.label("");
+        }
         sparkline(ui, view.series, view.time, of);
     };
     let group = |ui: &mut egui::Ui, title: &str| {
@@ -274,7 +281,7 @@ pub fn planet_rows(ui: &mut egui::Ui, view: &PlanetView) {
         ui.end_row();
     };
     egui::Grid::new("planet rows")
-        .num_columns(3)
+        .num_columns(if view.narrow { 2 } else { 3 })
         .striped(true)
         .show(ui, |ui| {
             group(ui, "Time");
@@ -289,13 +296,15 @@ pub fn planet_rows(ui: &mut egui::Ui, view: &PlanetView) {
             row(
                 ui,
                 "Star",
-                format!(
-                    "{:.0}% of today's Sun · {}",
-                    100.0 * sun.luminosity,
-                    value(global.solar_constant, |s| format!("{s:.0} W/m²"))
-                ),
-                "Luminosity of the Sun-like star at its age (it brightens on the main sequence), \
-                 and the solar constant the climate uses.",
+                format!("{:.0}% of today's Sun", 100.0 * sun.luminosity),
+                "Luminosity of the Sun-like star at its age: it brightens on the main sequence.",
+            );
+            ui.end_row();
+            row(
+                ui,
+                "Solar constant",
+                value(global.solar_constant, |s| format!("{s:.0} W/m²")),
+                "The sunlight at the planet's mean distance that the climate uses.",
             );
             ui.end_row();
             row(
@@ -326,21 +335,15 @@ pub fn planet_rows(ui: &mut egui::Ui, view: &PlanetView) {
                 "Annual mean surface temperature between 10°S and 10°N, and poleward of 70°.",
             );
             ui.end_row();
-            let co2_note = if !global.carbon_cycle {
-                " (fixed)"
-            } else if global.co2_held {
-                " (held)"
-            } else {
-                ""
-            };
+            // Held during the ramp-up phase: its line above says so.
+            let co2_note = if global.carbon_cycle { "" } else { " (fixed)" };
             row(
                 ui,
                 "CO₂",
-                value(global.co2, |ratio| {
-                    format!("{ratio:.2}× ({:.0} ppm){co2_note}", 280.0 * ratio)
-                }),
-                "CO₂ of the atmosphere relative to the pre-industrial 280 ppm: set by the carbon \
-                 cycle, held during the ramp-up phase, fixed without the carbon cycle.",
+                value(global.co2, |ratio| format!("{}{co2_note}", co2(ratio))),
+                "CO₂ of the atmosphere as a partial pressure, and relative to the pre-industrial \
+                 280 ppm (PAL): set by the carbon cycle, held during the ramp-up phase, fixed \
+                 without the carbon cycle. A young planet under a fainter Sun needs far more.",
             );
             spark(ui, |g| g.co2);
             ui.end_row();
@@ -399,11 +402,8 @@ pub fn planet_rows(ui: &mut egui::Ui, view: &PlanetView) {
                 "Lakes",
                 format!(
                     "{} · {}",
-                    value(global.lake_area, |area| format!("{:.2} M km²", area / 1e6)),
-                    value(global.lake_volume, |volume| format!(
-                        "{:.0}k km³",
-                        volume / 1e3
-                    ))
+                    value(global.lake_area, |area| quantity(area, "km²")),
+                    value(global.lake_volume, |volume| quantity(volume, "km³"))
                 ),
                 "Area and volume of the lakes (sea water poured into basins below their sill \
                  included).",
@@ -426,6 +426,31 @@ pub fn planet_rows(ui: &mut egui::Ui, view: &PlanetView) {
             );
             ui.end_row();
         });
+}
+
+/// CO₂ from its ratio to the pre-industrial level: in ppm up to a few times that, as a partial
+/// pressure in bar above.
+fn co2(ratio: f32) -> String {
+    let ppm = 280.0 * ratio;
+    if ratio < 10.0 {
+        format!("{ppm:.0} ppm ({ratio:.2}× PAL)")
+    } else {
+        format!(
+            "{:.3} bar ({ratio:.0}× PAL)",
+            f64::from(ratio) * crate::carbon::REFERENCE_PRESSURE
+        )
+    }
+}
+
+/// A non-negative quantity with a unit, in thousands or millions where large.
+fn quantity(value: f32, unit: &str) -> String {
+    if value >= 1e6 {
+        format!("{:.2} M {unit}", value / 1e6)
+    } else if value >= 1e4 {
+        format!("{:.0}k {unit}", value / 1e3)
+    } else {
+        format!("{value:.0} {unit}")
+    }
 }
 
 /// A label and its value, with an explanation on hover.
@@ -590,6 +615,15 @@ mod tests {
         };
         assert_eq!(GlobalStatus::from_bytes(&ended.to_bytes()), Some(ended));
         assert_eq!(GlobalStatus::from_bytes(&[0; 3]), None);
+    }
+
+    #[test]
+    fn large_values_are_shown_in_larger_units() {
+        assert_eq!(quantity(1.9e6, "km²"), "1.90 M km²");
+        assert_eq!(quantity(1.2e5, "km³"), "120k km³");
+        assert_eq!(quantity(350.0, "km³"), "350 km³");
+        assert_eq!(co2(1.0), "280 ppm (1.00× PAL)");
+        assert!(co2(1760.0).ends_with("bar (1760× PAL)"), "{}", co2(1760.0));
     }
 
     #[test]

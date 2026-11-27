@@ -112,6 +112,7 @@ fn global_status(ui: &mut egui::Ui, status: &SimulationStatus, global: &GlobalSt
                     time: status.shown_time,
                     epoch: status.epoch,
                     series: &status.series,
+                    narrow: !wide,
                 },
             );
         });
