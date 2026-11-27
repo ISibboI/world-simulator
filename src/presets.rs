@@ -28,11 +28,15 @@ use crate::temperature::TemperatureParams;
 pub const BOND_ALBEDO: f64 = 0.3;
 /// Radiative forcing per e-fold of CO₂ in W/m² (Myhre et al., 1998: `F = 5.35 ln(C/C₀)`).
 pub const CO2_FORCING_PER_E_FOLD: f64 = 5.35;
-/// The lowest CO₂, relative to the pre-industrial 280 ppm, to which the weathering feedback
-/// draws the atmosphere down under a brighter future Sun: 10 ppm, the limit of C4
-/// photosynthesis (Caldeira & Kasting, 1992). Bounds the default greenhouse forcing of future
-/// epochs (see [`Epoch::greenhouse_forcing`]).
-pub const MIN_CO2: f64 = 10.0 / 280.0;
+/// The forcing (W/m²) of an atmosphere without any CO₂, relative to today's: the lowest
+/// greenhouse forcing that removing CO₂ can give. Radiative transfer puts the effect of all of
+/// today's CO₂ at ~30 W/m² (clear sky ~30–32 W/m²: Kiehl & Trenberth, 1997; van Wijngaarden &
+/// Happer, 2020; ~20% of the 155 W/m² greenhouse effect: Lacis et al., 2010; Schmidt et al.,
+/// 2010), about a fifth of the model's own greenhouse effect `σT⁴ − (A + B T)` = 155 W/m² at
+/// 14.5 °C. Bounds [`Epoch::greenhouse_forcing`]: `5.35 ln(C/C₀)` diverges for `C → 0` and
+/// reaches this value at ~1 ppm, below which the logarithmic fit does not hold (the absorption
+/// of the 15 µm band is no longer saturated and the forcing tends to a finite limit).
+pub const ZERO_CO2_FORCING: f64 = -30.0;
 
 /// Which life the planet carries, as far as the physical parameters see it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -176,16 +180,19 @@ impl Epoch {
     /// greenhouse down.
     ///
     /// After today the Sun is brighter and the forcing negative: the weathering feedback draws
-    /// CO₂ down, but not below [`MIN_CO2`] (`5.35 ln(10/280)` = −17.8 W/m², reached at about
-    /// epoch 4.8, 0.8 Gyr from today), so later epochs are warmer than today. The model has no
-    /// loss of water: beyond ~1.1 S₀ a real ocean planet enters a moist greenhouse (Kasting,
-    /// 1988; Kopparapu et al., 2013).
+    /// CO₂ down, at most to none at all, so the forcing is bounded below by
+    /// [`ZERO_CO2_FORCING`] (−30 W/m², reached at epoch ~5.3, 1.3 Gyr from today); later epochs
+    /// are warmer than today. Life does not limit the drawdown (the default planet is barren,
+    /// #190). The model has no loss of water: beyond ~1.1 S₀ a real ocean planet enters a moist
+    /// greenhouse (Kasting, 1988; Kopparapu et al., 2013).
+    ///
+    /// Both forcings are bounded below by [`ZERO_CO2_FORCING`].
     pub fn greenhouse_forcing(&self) -> f64 {
         match self.co2 {
             Some(co2) => CO2_FORCING_PER_E_FOLD * math::ln(co2),
-            None => ((PRESENT_SOLAR_CONSTANT - self.solar_constant()) * (1.0 - BOND_ALBEDO) / 4.0)
-                .max(CO2_FORCING_PER_E_FOLD * math::ln(MIN_CO2)),
+            None => (PRESENT_SOLAR_CONSTANT - self.solar_constant()) * (1.0 - BOND_ALBEDO) / 4.0,
         }
+        .max(ZERO_CO2_FORCING)
     }
 
     /// Sets the solar constant of the run's start, the epoch (from which the sun brightens
@@ -371,21 +378,27 @@ mod tests {
         assert_eq!(temperature.greenhouse_forcing, forcing);
         assert_eq!(temperature.orbit.solar_constant, archean.solar_constant());
         assert_eq!(temperature.epoch, 0.5);
-        // A brighter future Sun: the forcing offsets it down to the CO₂ floor, then stays there.
-        let floor = CO2_FORCING_PER_E_FOLD * math::ln(MIN_CO2);
-        assert!((floor + 17.83).abs() < 0.01, "{floor}");
-        let soon = Epoch::new(4.5, None).unwrap();
-        assert!(
-            (absorbed(soon.solar_constant()) + soon.greenhouse_forcing()
-                - absorbed(PRESENT_SOLAR_CONSTANT))
-            .abs()
-                < 1e-9
-        );
-        assert_eq!(Epoch::new(5.0, None).unwrap().greenhouse_forcing(), floor);
-        assert_eq!(
-            Epoch::new(MAX_EPOCH, None).unwrap().greenhouse_forcing(),
-            floor
-        );
+        // A brighter future Sun: the forcing offsets it down to the atmosphere without CO₂
+        // (epoch ~5.3), then stays there.
+        for gyr in [4.5, 5.0, 5.25] {
+            let soon = Epoch::new(gyr, None).unwrap();
+            assert!(soon.greenhouse_forcing() > ZERO_CO2_FORCING, "{gyr}");
+            assert!(
+                (absorbed(soon.solar_constant()) + soon.greenhouse_forcing()
+                    - absorbed(PRESENT_SOLAR_CONSTANT))
+                .abs()
+                    < 1e-9
+            );
+        }
+        for gyr in [5.3, 7.0, MAX_EPOCH] {
+            let late = Epoch::new(gyr, None).unwrap();
+            assert_eq!(late.greenhouse_forcing(), ZERO_CO2_FORCING, "{gyr}");
+        }
+        // The logarithmic fit reaches it at ~1 ppm; less CO₂ changes nothing.
+        let ppm = 280.0 * math::exp(ZERO_CO2_FORCING / CO2_FORCING_PER_E_FOLD);
+        assert!((0.9..1.2).contains(&ppm), "{ppm}");
+        let traces = Epoch::new(PRESENT_EPOCH, Some(1e-6)).unwrap();
+        assert_eq!(traces.greenhouse_forcing(), ZERO_CO2_FORCING);
     }
 
     #[test]

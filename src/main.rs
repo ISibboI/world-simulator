@@ -184,12 +184,12 @@ struct Cli {
     /// the solar constant of the Sun, which then brightens during the run (~1% per 100 Myr;
     /// `--set temperature.solar_brightening=0` keeps it), and, unless `--co2` is given, a
     /// greenhouse forcing that offsets the difference to today's Sun at the start (in the future
-    /// down to a CO₂ floor) and then stays fixed. See `presets::Epoch`.
+    /// at most down to an atmosphere without CO₂, −30 W/m²) and then stays fixed. See `presets::Epoch`.
     #[arg(long, default_value_t = sun::PRESENT_EPOCH)]
     epoch: f64,
 
     /// CO₂ relative to the pre-industrial 280 ppm; the greenhouse forcing becomes
-    /// 5.35 ln(ratio) W/m² instead of the default of the epoch.
+    /// 5.35 ln(ratio) W/m² (at least −30 W/m², no CO₂) instead of the default of the epoch.
     #[arg(long)]
     co2: Option<f64>,
 
