@@ -498,7 +498,7 @@ struct Viewer {
     /// Whether the running simulation has no life (`--biosphere abiotic`).
     abiotic: bool,
     dt: f64,
-    /// The epoch of the running simulation (Gyr before present), for the sun.
+    /// The epoch of the running simulation (`--epoch`), for the sun.
     epoch: f64,
     /// Simulated time (Myr) of the displayed state, for the age of the sun.
     shown_time: f64,
