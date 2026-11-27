@@ -308,11 +308,12 @@ pub(super) fn continents(
 /// The shape of the steady plate-size distribution of the model (#213): the plate of rank `r`
 /// (from 0, the largest) covers a share ∝ `exp(−r^PLATE_SIZE_STRETCH / PLATE_SIZE_SCALE)`, a
 /// stretched exponential in the rank, fitted to the model's steady rank–area distribution
-/// (`notes/issue-213/results.md`): a few large plates and many small ones, like Earth's (Bird
+/// (with #195's plume rifts: 18 plates, the largest ~31%, a third of them below 1%;
+/// `notes/issue-213/results.md`): a few large plates and many small ones, like Earth's (Bird
 /// 2003), whose ranks fall off faster than any power law over the large plates and slower over
 /// the small ones. It depends on the rank only, so `--plates` picks the first ranks.
-const PLATE_SIZE_STRETCH: f64 = 0.85;
-const PLATE_SIZE_SCALE: f64 = 3.8;
+const PLATE_SIZE_STRETCH: f64 = 0.74;
+const PLATE_SIZE_SCALE: f64 = 1.8;
 
 /// Plates smaller than this share of the surface start in the ocean where possible.
 const SMALL_PLATE_SHARE: f64 = 0.02;
@@ -661,7 +662,7 @@ mod tests {
         // The web's resolution (5) and the coarse one of quick runs (4).
         for subdivisions in [5, 4] {
             let mesh = SphereMesh::icosphere(subdivisions);
-            let plate_count = 25;
+            let plate_count = 18;
             let (mut largest, mut small) = (Vec::new(), Vec::new());
             for seed in 0..6 {
                 let is_continental = generate(&mesh, seed, InitialConfiguration::Dispersed);
@@ -681,10 +682,10 @@ mod tests {
                 largest.push(sizes[plate_count - 1]);
                 small.push(sizes.iter().filter(|&&s| s < 0.01).count() as f64);
             }
-            // The model's steady distribution: the largest ~20%, about a third below 1%.
+            // The model's steady distribution: the largest ~30%, about a third below 1%.
             let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
-            assert!((0.13..0.3).contains(&mean(&largest)), "{largest:?}");
-            assert!((4.0..13.0).contains(&mean(&small)), "{small:?}");
+            assert!((0.2..0.45).contains(&mean(&largest)), "{largest:?}");
+            assert!((3.0..10.0).contains(&mean(&small)), "{small:?}");
         }
     }
 

@@ -82,7 +82,7 @@ struct Cli {
     /// Number of tectonic plates at the start, with the model's steady size distribution (a few
     /// large and many small plates): about the model's steady plate count, so that the plate
     /// count neither ramps up nor overshoots (#213).
-    #[arg(long, default_value_t = 25)]
+    #[arg(long, default_value_t = 18)]
     plates: usize,
 
     /// Fraction of the surface initially covered by continental crust.
