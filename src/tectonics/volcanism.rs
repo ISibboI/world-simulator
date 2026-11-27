@@ -57,8 +57,11 @@ pub struct VolcanismParams {
     /// is a few 10⁶ km³, under continents (~0.08) ~1.5 × 10⁶ km³; Earth's LIPs span
     /// 10⁵–10⁸ km³ with a median near 10⁶ (Bryan & Ernst 2008; Ernst 2014).
     pub lip_volume: f64,
-    /// Standard deviation of the natural logarithm of the LIP volume: ln(10)/2, so that ±2σ span
-    /// two decades.
+    /// Standard deviation of the natural logarithm of the LIP volume within one setting:
+    /// ln(10)/3, so that ±1.5σ span a decade. Earth's LIPs span three decades in all, but most
+    /// of that is the setting (oceanic plateaus vs. flood basalts), which the lid factor gives;
+    /// a wider spread made continental provinces of > 10⁷ km³ (first evaluation,
+    /// `notes/issue-106/results.md`), while Earth's largest are ~4 × 10⁶ km³ (Siberia).
     pub lip_volume_spread: f64,
     /// Smallest and largest LIP volume (km³).
     pub lip_volume_range: (f64, f64),
@@ -71,9 +74,11 @@ pub struct VolcanismParams {
     /// 30–35 km against 7 km of normal oceanic crust).
     pub lip_plateau_thickness: f64,
     /// Volume flux (km³/Myr) of the tail per m²/s of plume flux under no lid. A typical plume
-    /// (4 × 10⁻³ m²/s) below old ocean (lid factor ~0.2) adds ~9 × 10⁴ km³/Myr, magma with its
-    /// intrusions and underplate (Hawaii 0.01–0.25 km³/yr, Iceland ~0.1–0.2; Earth's intraplate
-    /// magmatism ~1–2.5 km³/yr; Crisp 1984, White et al. 2006).
+    /// (4 × 10⁻³ m²/s) below old ocean (lid factor ~0.2) adds ~2.5 × 10⁴ km³/Myr, magma with its
+    /// intrusions (Hawaii 0.01–0.04 km³/yr for most of its history, 0.2 recently; Iceland
+    /// ~0.1–0.2), and all plumes together ~0.3–0.5 km³/yr, Earth's oceanic intraplate
+    /// magmatism (0.3–0.4 km³/yr extrusive and intrusive; Crisp 1984). The first evaluation's
+    /// 10⁸ gave ~1.2 km³/yr and piled up mafic crust (`notes/issue-106/results.md`).
     pub tail_volume_flux: f64,
     /// Standard deviation (m) of the footprint of a tail (cut at 2.5 times this): edifices and
     /// their underplate span ~200–400 km.
@@ -93,11 +98,11 @@ impl Default for VolcanismParams {
             enabled: true,
             lip_age: 10.0,
             lip_volume: 2e7,
-            lip_volume_spread: std::f64::consts::LN_10 / 2.0,
+            lip_volume_spread: std::f64::consts::LN_10 / 3.0,
             lip_volume_range: (1e5, 1e8),
             lip_width: 400e3,
             lip_plateau_thickness: 25e3,
-            tail_volume_flux: 1e8,
+            tail_volume_flux: 3e7,
             tail_width: 150e3,
             melting_depth: 180e3,
             continental_lid: 130e3,
