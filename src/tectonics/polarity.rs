@@ -819,6 +819,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         }
@@ -1003,6 +1004,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -1046,6 +1048,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };

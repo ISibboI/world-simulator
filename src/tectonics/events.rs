@@ -311,9 +311,9 @@ const UNDONE_INITIATION_TIME: f64 = 50.0;
 /// weak belt in the rift statistics: a strength of at most ~0.8 of undeformed lithosphere.
 pub const WEAK_BELT_THRESHOLD: f64 = 0.25;
 
-/// The extension fabric of a sample (none before #54).
-fn extension_fabric(_crust: &Crust) -> f64 {
-    0.0
+/// The extension fabric of a sample ([`Crust::rifted`]).
+fn extension_fabric(crust: &Crust) -> f64 {
+    crust.rifted
 }
 
 /// Why a plate split (for the statistics of new plate boundaries, [`SplitTally`]).
@@ -371,11 +371,13 @@ pub struct SplitTally {
     pub plume_distance: f64,
     pub antipode_distance: f64,
     /// Continental cells on the new boundaries: all, on orogenic belts (orogenic weakening at
-    /// least [`WEAK_BELT_THRESHOLD`]), on extension fabric (at least the same threshold).
-    pub boundary: [usize; 3],
+    /// least [`WEAK_BELT_THRESHOLD`]), on extension fabric (at least the same threshold), and on
+    /// extension fabric deep inside a continent (see [`Simulation::deep_in_continent`]: failed
+    /// rifts rather than rifted margins).
+    pub boundary: [usize; 4],
     /// The same over the two plates of each split: a weak zone is reactivated more often than
     /// chance where its share on the boundaries is higher.
-    pub plates: [usize; 3],
+    pub plates: [usize; 4],
 }
 
 /// Why two plates merge.
@@ -429,7 +431,9 @@ impl Simulation {
         self.capture_tiny_plates();
         // Splits append plates, so plates from here on are born in this step.
         let first_new_plate = self.plates.len() as u32;
-        self.rift_above_plumes();
+        if self.params.events.rift_delay.is_finite() {
+            self.rift_above_plumes();
+        }
         self.split_deforming_plates();
         self.break_overloaded_plates();
         if self.configuration_changes == configuration {
@@ -1068,6 +1072,18 @@ impl Simulation {
         (region, sizes)
     }
 
+    /// Whether the continental crust at `cell` lies deep inside a continent: no crust that is
+    /// not of continental origin within two rings (so away from rifted margins and coasts).
+    pub fn deep_in_continent(&self, cell: u32) -> bool {
+        let continental = |cell: u32| self.surface_crust(cell).is_continental_origin();
+        continental(cell)
+            && self
+                .mesh
+                .neighbors(cell)
+                .iter()
+                .all(|&n| continental(n) && self.mesh.neighbors(n).iter().all(|&m| continental(m)))
+    }
+
     /// Statistics of the new boundary between plates `a` (the old one) and `b` (split off) by
     /// the cause of the split (see [`SplitTally`]).
     pub(super) fn record_split_cause(&mut self, a: u32, b: u32, cause: SplitCause) {
@@ -1099,10 +1115,12 @@ impl Simulation {
             if !crust.is_continental_origin() {
                 continue;
             }
+            let fabric = extension_fabric(&crust) >= WEAK_BELT_THRESHOLD;
             let marks = [
                 1,
                 usize::from(crust.orogenic >= WEAK_BELT_THRESHOLD),
-                usize::from(extension_fabric(&crust) >= WEAK_BELT_THRESHOLD),
+                usize::from(fabric),
+                usize::from(fabric && self.deep_in_continent(cell)),
             ];
             for (k, mark) in marks.into_iter().enumerate() {
                 tally.plates[k] += mark;
@@ -1124,7 +1142,7 @@ impl Simulation {
         }
         total.plume_distance += nearest;
         total.antipode_distance += nearest_antipode;
-        for k in 0..3 {
+        for k in 0..4 {
             total.boundary[k] += tally.boundary[k];
             total.plates[k] += tally.plates[k];
         }
@@ -2315,6 +2333,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    rifted: 0.0,
                     reheated: NO_REHEATING,
                     cohort: Cohort::NONE,
                 }
@@ -2527,6 +2546,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    rifted: 0.0,
                     reheated: NO_REHEATING,
                     cohort: Cohort::NONE,
                 }
@@ -2590,6 +2610,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    rifted: 0.0,
                     reheated: NO_REHEATING,
                     cohort: Cohort::NONE,
                 }
@@ -2856,6 +2877,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: if suture { -500.0 } else { NO_OROGENY },
                     orogenic: if suture { 1.0 } else { 0.0 },
+                    rifted: 0.0,
                     reheated: NO_REHEATING,
                     cohort: Cohort::NONE,
                 });
@@ -2986,6 +3008,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -3126,6 +3149,7 @@ mod tests {
                     metasediment: 0.0,
                     orogeny: NO_OROGENY,
                     orogenic: 0.0,
+                    rifted: 0.0,
                     reheated: NO_REHEATING,
                     cohort: Cohort::NONE,
                 };

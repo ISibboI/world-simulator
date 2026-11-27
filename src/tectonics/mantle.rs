@@ -381,11 +381,10 @@ impl MantleFlow {
                     }),
             );
         }
-        let peak_flux = params.plume_flux.1.max(1e-12);
         sources.extend(self.plumes.iter().map(|plume| {
             (
                 plume.position,
-                params.plume_swell_height * plume.flux() / peak_flux,
+                self.plume_swell_height(plume),
                 params.plume_swell_width / planet_radius,
             )
         }));
@@ -415,6 +414,37 @@ impl MantleFlow {
             *value -= mean;
         }
         field
+    }
+
+    /// Dry height (m) of the swell above `plume` at its centre (see
+    /// [`MantleParams::plume_swell_height`]).
+    fn plume_swell_height(&self, plume: &Plume) -> f64 {
+        let params = &self.params;
+        params.plume_swell_height * plume.flux() / params.plume_flux.1.max(1e-12)
+    }
+
+    /// Gradient of the plumes' swells (dry height, m per radian of the unit sphere, tangent at
+    /// `r`, pointing uphill towards the plumes): the same Gaussian swells as in
+    /// [`Self::dynamic_topography`] (without its global mean, which has no gradient), cut off
+    /// at the same 4 widths. The swells' potential energy loads the lithosphere (#51).
+    pub fn plume_swell_gradient(&self, r: DVec3, planet_radius: f64) -> DVec3 {
+        let width = self.params.plume_swell_width / planet_radius;
+        if width <= 0.0 {
+            return DVec3::ZERO;
+        }
+        let mut gradient = DVec3::ZERO;
+        for plume in &self.plumes {
+            // θ² ≈ 2 (1 − cos θ), so h = H exp(−(1 − r·p) / w²) and ∇h = h / w² ∇(r·p).
+            let cos = r.dot(plume.position);
+            let angle_squared = 2.0 * (1.0 - cos);
+            if angle_squared > 16.0 * width * width {
+                continue;
+            }
+            let height =
+                self.plume_swell_height(plume) * math::exp(-angle_squared / (2.0 * width * width));
+            gradient += (plume.position - r * cos) * (height / (width * width));
+        }
+        gradient
     }
 
     /// Evaluates the flow at every cell of `mesh`.
@@ -641,6 +671,42 @@ mod tests {
                 assert!((field[cell as usize] - field[n as usize]).abs() < 150.0);
             }
         }
+    }
+
+    #[test]
+    fn swell_gradients_point_uphill_to_the_plume() {
+        let mut mantle = MantleFlow::new(MantleParams::default());
+        let plume = Plume {
+            position: DVec3::Z,
+            age: 50.0,
+            lifetime: 200.0,
+            peak_flux: 6e-3,
+            has_rifted: false,
+        };
+        mantle.plumes.push(plume.clone());
+        let radius = 6.371e6;
+        let width = mantle.params.plume_swell_width / radius;
+        let height = |r: DVec3| {
+            mantle.plume_swell_height(&plume)
+                * math::exp(-2.0 * (1.0 - r.dot(DVec3::Z)) / (2.0 * width * width))
+        };
+        for angle in [0.02, 0.05, 0.1, 0.2] {
+            let r = DVec3::new(math::sin(angle), 0.0, math::cos(angle));
+            let g = mantle.plume_swell_gradient(r, radius);
+            // Towards the plume (−x at this point), and as steep as the swell.
+            let towards = DVec3::new(-math::cos(angle), 0.0, math::sin(angle));
+            let e = 1e-5;
+            let step = |a: f64| DVec3::new(math::sin(a), 0.0, math::cos(a));
+            let slope = (height(step(angle - e)) - height(step(angle + e))) / (2.0 * e);
+            assert!(
+                (g.dot(towards) / slope - 1.0).abs() < 1e-3,
+                "{angle}: {g} vs {slope}"
+            );
+            assert!(g.dot(r).abs() < 1e-9 * g.length().max(1.0));
+        }
+        // Nothing beyond four widths.
+        let far = DVec3::new(math::sin(5.0 * width), 0.0, math::cos(5.0 * width));
+        assert_eq!(mantle.plume_swell_gradient(far, radius), DVec3::ZERO);
     }
 
     #[test]

@@ -876,7 +876,7 @@ fn snapshot(
             .map(|(cause, tally)| {
                 format!(
                     "{} {} ({}/{} at plumes, {}/{} at antipodes, mean distance {:.3}/{:.3} rad; \
-                     boundary {}/{}/{}, plates {}/{}/{})",
+                     boundary {}/{}/{}/{}, plates {}/{}/{}/{})",
                     cause.name(),
                     tally.count,
                     tally.near_plume[0],
@@ -888,17 +888,51 @@ fn snapshot(
                     tally.boundary[0],
                     tally.boundary[1],
                     tally.boundary[2],
+                    tally.boundary[3],
                     tally.plates[0],
                     tally.plates[1],
                     tally.plates[2],
+                    tally.plates[3],
                 )
             })
             .collect();
         info!(
-            "    splits by cause (within {:.3}/{:.3} rad of a plume; continental cells all/belts/fabric): {}",
+            "    splits by cause (within {:.3}/{:.3} rad of a plume; continental cells all/belts/fabric/interior fabric): {}",
             tectonics::PLUME_SPLIT_DISTANCES[0],
             tectonics::PLUME_SPLIT_DISTANCES[1],
             tallies.join(" | "),
+        );
+    }
+    {
+        // Extension fabric (#54): continental cells marked at least as much as a weak belt,
+        // near coasts and margins or deep inside continents (failed rifts, aulacogens).
+        let (mut continental, mut margin, mut interior, mut sum) = (0usize, 0usize, 0usize, 0.0);
+        for cell in 0..simulation.mesh().len() as u32 {
+            let crust = simulation.surface_crust(cell);
+            if !crust.is_continental_origin() {
+                continue;
+            }
+            continental += 1;
+            sum += crust.rifted;
+            if crust.rifted >= tectonics::WEAK_BELT_THRESHOLD {
+                if simulation.deep_in_continent(cell) {
+                    interior += 1;
+                } else {
+                    margin += 1;
+                }
+            }
+        }
+        let sheet = simulation.sheet_statistics();
+        info!(
+            "    extension fabric: mean {:.3} on continental crust, ≥ {} on {:.1}% near margins and \
+             {:.1}% deep inside continents (of the continental cells) | sheet shortening on fabric \
+             {:.1}% of {:.3e}",
+            sum / continental.max(1) as f64,
+            tectonics::WEAK_BELT_THRESHOLD,
+            100.0 * margin as f64 / continental.max(1) as f64,
+            100.0 * interior as f64 / continental.max(1) as f64,
+            100.0 * sheet.shortening.1 / sheet.shortening.0.max(f64::MIN_POSITIVE),
+            sheet.shortening.0,
         );
     }
     log_sediment_reservoirs(&planet_statistics);
@@ -1204,11 +1238,14 @@ fn snapshot(
     let breakup = simulation.breakup_statistics();
     info!(
         "    breakup by stress: {} plates broken ({} cells; {} opening, {} closing, the others \
-         sliding), {} plates overloaded at the last analysis (largest overload {:.2}), {:.1} s",
+         sliding; {} through a plume), plume sections by overload (< 0.25, < 0.5, < 1, ≥ 1) {:?}, \
+         {} plates overloaded at the last analysis (largest overload {:.2}), {:.1} s",
         breakup.splits,
         breakup.split_cells,
         breakup.opening_splits,
         breakup.closing_splits,
+        breakup.plume_splits,
+        breakup.plume_overloads,
         breakup.overloaded,
         breakup.max_overload,
         breakup.seconds,
@@ -1524,13 +1561,13 @@ fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Res
         writeln!(
             file,
             "time,plate,cells,overload,level_overload,cut_overload,length_km,piece_cells,\
-             strength,piece_continental,opening,residual,timer"
+             strength,piece_continental,opening,residual,timer,through_plume,plume_overload"
         )?;
     }
     for record in simulation.section_records() {
         writeln!(
             file,
-            "{},{},{},{:.4},{:.4},{:.4},{:.0},{},{:.3},{:.3},{:.3},{:.3},{}",
+            "{},{},{},{:.4},{:.4},{:.4},{:.0},{},{:.3},{:.3},{:.3},{:.3},{},{},{:.4}",
             simulation.time(),
             record.plate_id,
             record.cells,
@@ -1544,6 +1581,8 @@ fn append_plate_sections(planet: &Planet, path: &std::path::Path) -> anyhow::Res
             record.opening,
             record.residual,
             record.timer,
+            u8::from(record.through_plume),
+            record.plume_overload,
         )?;
     }
     Ok(())
@@ -1755,7 +1794,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain,ice"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,rifted,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain,ice"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -1781,7 +1820,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
         writeln!(
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
-             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
+             {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
              {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1},{:.3}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
@@ -1810,6 +1849,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             },
             simulation.dynamic_topography()[cell as usize],
             crust.orogenic,
+            crust.rifted,
             crust.strength_age(simulation.time()).min(1e4),
             simulation.lithosphere_strength(cell),
             u8::from(marine),

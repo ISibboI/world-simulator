@@ -44,6 +44,19 @@ use super::deformation::excess_potential_energy;
 use super::dynamics::{BoundaryKind, SECONDS_PER_MYR};
 use super::ledger::Term;
 use super::*;
+use crate::isostasy::MANTLE_DENSITY;
+
+/// Thickness (m) of fully cooled lithosphere (the plate model's, see
+/// `weak_zones::FULL_STRENGTH_AGE`) over which the potential energy of a plume swell acts.
+const SWELL_LITHOSPHERE_THICKNESS: f64 = 100e3;
+
+/// Dilatation rate (1/s) from which stretching marks the extension fabric ([`Crust::rifted`]):
+/// rifts stretch at 10⁻¹⁵–10⁻¹⁴ s⁻¹ (3–30% per Myr); slower creep of the sheet, which
+/// oscillates in sign, would otherwise add up to a fabric everywhere over the healing time.
+const RIFT_FABRIC_MIN_RATE: f64 = 1e-15;
+
+/// Gravitational acceleration (m/s²).
+const SWELL_GRAVITY: f64 = 9.81;
 
 /// Parameters of the deforming plates (`--set sheet.NAME=VALUE`).
 #[derive(Clone, Debug)]
@@ -196,6 +209,8 @@ pub(super) struct PlateSheet {
     pub(super) pending_breakup: Option<Vec<u32>>,
     /// How the plate's most overloaded section fails (see `breakup::SectionRecord::opening`).
     pub(super) breakup_opening: f64,
+    /// Whether that section runs through a plume.
+    pub(super) breakup_through_plume: bool,
 }
 
 impl PlateSheet {
@@ -215,6 +230,7 @@ impl PlateSheet {
             breakup_timer: 0.0,
             pending_breakup: None,
             breakup_opening: 0.0,
+            breakup_through_plume: false,
         }
     }
 
@@ -357,6 +373,10 @@ pub struct SheetStatistics {
     pub collision_convergence: (f64, f64),
     /// Mass moved by the transport so far (areal mass summed over samples, kg/m²).
     pub moved: f64,
+    /// Shortening strain of continental samples so far (summed over samples), and the part on
+    /// samples with an extension fabric of at least `events::WEAK_BELT_THRESHOLD`: inversion of
+    /// rifts.
+    pub shortening: (f64, f64),
 }
 
 /// Accumulates columns of crust mixed together (by mass, as the other mixing code does).
@@ -370,6 +390,7 @@ struct Mixture {
     /// Cohort amounts (rock-equivalent m, `[mixed, lifo]`, see [`Cohort`]).
     cohort: [f64; 2],
     orogenic: f64,
+    rifted: f64,
     orogeny: f64,
     reheated: f64,
     heat: f64,
@@ -403,6 +424,7 @@ impl Mixture {
         self.cohort[0] += cohort[0];
         self.cohort[1] += cohort[1];
         self.orogenic += mass * crust.orogenic;
+        self.rifted += mass * crust.rifted;
         self.orogeny = self.orogeny.max(crust.orogeny);
         self.reheated = self.reheated.max(crust.reheated);
         self.heat += mass.max(1e-9 * share) * thermal_fraction(crust.age(time));
@@ -430,6 +452,7 @@ impl Mixture {
             metasediment: (self.metasediment / mass).clamp(0.0, 1.0),
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: self.reheated,
             cohort: if self.sediment > 0.0 {
                 Cohort {
@@ -441,7 +464,7 @@ impl Mixture {
             },
         };
         crust.metasediment = crust.metasediment.min(crust.felsic);
-        crust.mix_orogeny(self.orogeny, self.orogenic / mass);
+        crust.mix_orogeny(self.orogeny, self.orogenic / mass, self.rifted / mass);
         crust
     }
 }
@@ -509,6 +532,7 @@ impl Simulation {
             super::weak_zones::thermal_strength(crust.strength_age(self.time)),
             1.0,
             crust.orogenic,
+            crust.rifted,
         );
         if crust.is_continental_origin() {
             strength *= self.params.sheet.continental_strength;
@@ -526,11 +550,17 @@ impl Simulation {
     /// Effective depth-integrated viscosity (Pa·s·m) of the lithosphere under `crust` straining
     /// at `strain_rate` (1/s): `B_strong · s^p`, softened above the reference strain rate by
     /// power-law creep.
-    pub(super) fn sheet_viscosity(&self, crust: &Crust, strain_rate: f64) -> f64 {
+    ///
+    /// `magma` is the magma weakening of the lithosphere at the sample's position
+    /// (`weak_zones::magma_weakening`): a factor on the depth-integrated strength, so on the
+    /// viscosity, not on the relative strength. The viscosity is isotropic, so it softens
+    /// shear and shortening too, unlike in the breakup analysis; above a swell the lithosphere
+    /// is stretched, so this matters little.
+    pub(super) fn sheet_viscosity(&self, crust: &Crust, strain_rate: f64, magma: f64) -> f64 {
         let params = &self.params.sheet;
         let strength = self.sheet_strength(crust).max(1e-6);
         let mut viscosity =
-            params.strong_viscosity * math::powf(strength, params.strength_exponent);
+            params.strong_viscosity * math::powf(strength, params.strength_exponent) * magma;
         if strain_rate > params.reference_strain_rate && params.stress_exponent > 1.0 {
             viscosity *= math::powf(
                 strain_rate / params.reference_strain_rate,
@@ -682,6 +712,34 @@ impl Simulation {
                 }
             }
         }
+        // The potential energy of the plume swells (#51): a column lifted by the dry height h
+        // carries ρ_m g h more overburden at every depth of its lithosphere (also under water,
+        // where the dry height is the one that sets the pressure at depth), so its potential
+        // energy exceeds its surroundings' by ρ_m g h L for lithosphere of thickness L (the
+        // plate model's, thinned where it is young or a plume heated it). Its gradient pushes
+        // the lithosphere away from the swell's crest (Artyushkov 1973; Fleitout & Froidevaux
+        // 1982; Bott 1993), like the potential energy of thickened crust; the swell is the
+        // normal traction of the plume's flow, its outflow drag (above) the shear traction.
+        // Unlike the crustal term it gets no `gpe_factor`, which stands in for parts of a
+        // thickened column's energy that are not modelled.
+        if params.swell_load > 0.0 && !self.mantle.plumes().is_empty() {
+            let scale = params.swell_load * MANTLE_DENSITY * SWELL_GRAVITY * cell_area / radius;
+            for cell in 0..cell_count as u32 {
+                if !deforming[self.owners[cell as usize].plate as usize] {
+                    continue;
+                }
+                let r = self.mesh.vertex(cell);
+                let g = self.mantle.plume_swell_gradient(r, radius);
+                if g == DVec3::ZERO {
+                    continue;
+                }
+                let thickness = SWELL_LITHOSPHERE_THICKNESS
+                    * super::weak_zones::thermal_strength(
+                        crusts[cell as usize].strength_age(self.time),
+                    );
+                force[cell as usize] -= g * (scale * thickness);
+            }
+        }
         force
     }
 
@@ -742,11 +800,22 @@ impl Simulation {
                 }
             })
             .collect();
+        let magma_at = |plate: &Plate, local: u32| {
+            if self.mantle.plumes().is_empty() {
+                1.0
+            } else {
+                self.magma_weakening_at(plate.rotation * mesh.vertex(local))
+            }
+        };
         for (plate, w) in self.plates.iter().zip(work.iter_mut()) {
             for (i, &local) in w.samples.iter().enumerate() {
                 let l = local as usize;
                 let crust = plate.crust[l].expect("samples have crust");
-                let target = self.sheet_viscosity(&crust, plate.sheet.strain_rate[l] as f64);
+                let target = self.sheet_viscosity(
+                    &crust,
+                    plate.sheet.strain_rate[l] as f64,
+                    magma_at(plate, local),
+                );
                 let old = plate.sheet.viscosity[l] as f64;
                 // Under-relaxed (geometric mean): the strain rate is the last step's.
                 w.viscosity[i] = if old.is_finite() && old > 0.0 {
@@ -1486,6 +1555,8 @@ impl Simulation {
         let cell_count = self.mesh.len();
         let time = self.time;
         let max_thickness = self.params.max_crust_thickness;
+        let rift_fabric = self.params.rift_fabric;
+        let mut shortening_total = (0.0, 0.0);
         let (mut moved, mut change) = (0.0, 0.0);
         // Scratch per local vertex, reset after each use.
         let mut outflow = vec![0.0f64; cell_count];
@@ -1582,9 +1653,18 @@ impl Simulation {
                             if let Some(age) = age_for_thermal_fraction(fraction) {
                                 new.birth = new.birth.max(time - age);
                             }
+                            // And leaves an extension fabric where it rifts (#54); slow
+                            // background creep does not (it would add up over time).
+                            if plate.sheet.dilatation[v] as f64 >= RIFT_FABRIC_MIN_RATE {
+                                new.mark_extension(strain * rift_fabric);
+                            }
                         } else if new.is_continental_origin() {
                             // Shortening deforms it: orogenic in proportion to the strain.
                             let shortening = -strain;
+                            shortening_total.0 += shortening;
+                            if old.rifted >= events::WEAK_BELT_THRESHOLD {
+                                shortening_total.1 += shortening;
+                            }
                             new.orogenic = (new.orogenic + shortening).min(1.0);
                             if shortening > 1e-3 {
                                 new.orogeny = time;
@@ -1602,6 +1682,8 @@ impl Simulation {
             change += self.move_fronts(dt);
         }
         self.sheet_statistics.moved += moved;
+        self.sheet_statistics.shortening.0 += shortening_total.0;
+        self.sheet_statistics.shortening.1 += shortening_total.1;
         self.ledger.record(Term::Deformation, change);
         self.sheet_statistics.transport_seconds += start.elapsed().as_secs_f64();
     }
@@ -2011,6 +2093,41 @@ mod tests {
             marks(&simulation) <= before,
             "advection marked crust as orogenic"
         );
+    }
+
+    #[test]
+    fn rifting_marks_an_extension_fabric_but_creep_does_not() {
+        // Diverging from the centre of plate 0; the dilatation rate is set directly (the solve
+        // computes it from the velocities).
+        let run = |rate: f64| {
+            let centre = DVec3::new(0.3, 0.4, 0.8).normalize();
+            let mut simulation = with_velocity(|r| (r - centre) * 0.005);
+            simulation.params.sheet.fronts = 0;
+            simulation.plates[0].sheet.dilatation.fill(rate as f32);
+            for _ in 0..5 {
+                simulation.transport_crust(1.0);
+            }
+            let continental: Vec<f64> = simulation.plates[0]
+                .crust
+                .iter()
+                .flatten()
+                .filter(|c| c.is_continental_origin())
+                .map(|c| c.rifted)
+                .collect();
+            assert!(!continental.is_empty());
+            let oceanic = simulation.plates[0]
+                .crust
+                .iter()
+                .flatten()
+                .filter(|c| !c.is_continental_origin())
+                .all(|c| c.rifted == 0.0);
+            assert!(oceanic, "only continental lithosphere carries a fabric");
+            continental.iter().copied().fold(0.0, f64::max)
+        };
+        // 3 × 10⁻¹⁵ s⁻¹ for 5 Myr: a strain of ~0.5.
+        let rifted = run(3e-15);
+        assert!(rifted > 0.2 && rifted <= 1.0, "{rifted}");
+        assert_eq!(run(3e-16), 0.0);
     }
 
     #[test]

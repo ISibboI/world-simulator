@@ -56,6 +56,9 @@ fn add_crystalline(receiver: &mut Crust, thickness: f64, crust: &Crust) {
     let orogenic = (receiver.thickness * receiver.density * receiver.orogenic
         + thickness * crust.density * crust.orogenic)
         / mass.max(1e-9);
+    let rifted = (receiver.thickness * receiver.density * receiver.rifted
+        + thickness * crust.density * crust.rifted)
+        / mass.max(1e-9);
     receiver.felsic =
         (receiver.felsic_mass() + thickness * crust.density * crust.felsic) / mass.max(1e-9);
     receiver.metasediment = (receiver.metasediment_mass()
@@ -63,7 +66,7 @@ fn add_crystalline(receiver: &mut Crust, thickness: f64, crust: &Crust) {
         / mass.max(1e-9);
     receiver.thickness += thickness;
     receiver.density = mass / receiver.thickness.max(1e-9);
-    receiver.mix_orogeny(crust.orogeny, orogenic);
+    receiver.mix_orogeny(crust.orogeny, orogenic, rifted);
 }
 
 /// Adds `crust` to the sample of `plate` at `target` and its neighbours with crust in equal
@@ -482,6 +485,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: 400.0,
             orogenic: 1.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -498,6 +502,7 @@ mod tests {
             plate.crust[vertex as usize] = Some(Crust {
                 orogeny: NO_OROGENY,
                 orogenic: 0.0,
+                rifted: 0.0,
                 reheated: NO_REHEATING,
                 ..suture
             });

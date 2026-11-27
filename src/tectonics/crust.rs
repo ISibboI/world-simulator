@@ -87,6 +87,14 @@ pub struct Crust {
     /// leaves it unchanged: the weakness is in the lithosphere. The lithosphere is weakened in
     /// proportion (see `weak_zones`).
     pub orogenic: f64,
+    /// Remaining extension fabric of the sample's lithosphere (0 to 1), the counterpart of
+    /// [`Crust::orogenic`] for stretching (#54): the faults and shear zones of a rift, softened
+    /// by their strain, and the fabric of the stretched mantle lithosphere. It grows with the
+    /// extensional strain of continental lithosphere (see [`Crust::mark_extension`]; full at a
+    /// strain of 1), is mixed by mass like [`Crust::orogenic`] (only on continental
+    /// lithosphere) and heals like it. Rifts that opened (rifted margins) and arms that did
+    /// not (failed rifts, aulacogens) keep it as an inherited weak zone (see `weak_zones`).
+    pub rifted: f64,
     /// Simulated time in Myr to which a plume last reset the thermal age of the lithosphere,
     /// or [`NO_REHEATING`]: a plume heats and thins the lithosphere above it as if it had
     /// formed at this time (thermal rejuvenation), and it cools again from there. Carried with
@@ -175,6 +183,16 @@ impl Crust {
     /// `weak_zones::OROGENIC_HEALING_TIME`).
     pub(super) fn heal_orogenic(&mut self, factor: f64) {
         self.orogenic *= factor;
+        self.rifted *= factor;
+    }
+
+    /// Records an extensional strain `strain` (dilatation, > 0) of the sample's lithosphere in
+    /// its extension fabric ([`Crust::rifted`]), at most 1: strain softening of faults and
+    /// shear zones saturates over plastic strains of ~0.5–1.5 (Huismans & Beaumont 2003).
+    pub(super) fn mark_extension(&mut self, strain: f64) {
+        if strain > 0.0 && self.is_continental_origin() {
+            self.rifted = (self.rifted + strain).min(1.0);
+        }
     }
 
     /// Elevation of the surface relative to sea level in metres at the simulated time `time`
@@ -301,13 +319,18 @@ impl Crust {
     ///
     /// `orogenic` is the mass fraction of the mixture that stands on orogenic lithosphere (see
     /// [`Crust::orogenic`]).
-    pub(super) fn mix_orogeny(&mut self, orogeny: f64, orogenic: f64) {
+    ///
+    /// `rifted` is the mass-weighted extension fabric of the mixture ([`Crust::rifted`]),
+    /// passed on in the same way.
+    pub(super) fn mix_orogeny(&mut self, orogeny: f64, orogenic: f64, rifted: f64) {
         if self.is_continental_origin() {
             self.orogeny = self.orogeny.max(orogeny);
             self.orogenic = orogenic.clamp(0.0, 1.0);
+            self.rifted = rifted.clamp(0.0, 1.0);
         } else {
             self.orogeny = NO_OROGENY;
             self.orogenic = 0.0;
+            self.rifted = 0.0;
         }
     }
 
@@ -525,6 +548,7 @@ pub(super) fn new_oceanic_crust(time: f64) -> Crust {
         metasediment: 0.0,
         orogeny: NO_OROGENY,
         orogenic: 0.0,
+        rifted: 0.0,
         reheated: NO_REHEATING,
         cohort: Cohort::NONE,
     }
@@ -554,21 +578,22 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
         // A share of an old belt mixed in: the latest orogeny, a part of the lithosphere.
-        crust.mix_orogeny(-500.0, 0.2);
+        crust.mix_orogeny(-500.0, 0.2, 0.0);
         assert_eq!((crust.orogeny, crust.orogenic), (-500.0, 0.2));
         // An older mark does not replace the time.
-        crust.mix_orogeny(-800.0, 0.3);
+        crust.mix_orogeny(-800.0, 0.3, 0.0);
         assert_eq!((crust.orogeny, crust.orogenic), (-500.0, 0.3));
         // A collision at the sample deforms all of it.
         crust.mark_orogeny(-100.0);
         assert_eq!((crust.orogeny, crust.orogenic), (-100.0, 1.0));
         // Oceanic lithosphere carries no mark.
         let mut ocean = new_oceanic_crust(-50.0);
-        ocean.mix_orogeny(-100.0, 0.5);
+        ocean.mix_orogeny(-100.0, 0.5, 0.0);
         assert_eq!((ocean.orogeny, ocean.orogenic), (NO_OROGENY, 0.0));
     }
 
@@ -617,6 +642,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
@@ -645,11 +671,12 @@ mod tests {
             metasediment: 0.0,
             orogeny: 200.0,
             orogenic: 1.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };
         let mut mixed = belt;
-        mixed.mix_orogeny(400.0, 0.3);
+        mixed.mix_orogeny(400.0, 0.3, 0.0);
         assert_eq!(mixed.orogeny, 400.0);
         assert_eq!(mixed.orogenic, 0.3);
         // A metamorphosed wedge on oceanic basement is felsic and buoyant as a whole, but its
@@ -657,7 +684,7 @@ mod tests {
         let mut wedge = new_oceanic_crust(-100.0);
         wedge.add_crust(15_000.0, METASEDIMENT_DENSITY, (1.0, 1.0), 75_000.0);
         assert!(wedge.is_continental_origin_column() && wedge.is_oceanic());
-        wedge.mix_orogeny(400.0, 0.3);
+        wedge.mix_orogeny(400.0, 0.3, 0.0);
         assert_eq!(wedge.orogeny, NO_OROGENY);
         assert_eq!(wedge.orogenic, 0.0);
     }
@@ -673,6 +700,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         };

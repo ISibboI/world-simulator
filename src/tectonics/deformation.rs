@@ -154,6 +154,7 @@ mod tests {
             metasediment: 0.0,
             orogeny: NO_OROGENY,
             orogenic: 0.0,
+            rifted: 0.0,
             reheated: NO_REHEATING,
             cohort: Cohort::NONE,
         }
@@ -184,7 +185,7 @@ mod tests {
     fn weak_lithosphere_takes_up_more_shortening() {
         let old = continental(35e3);
         let mut belt = old;
-        belt.mix_orogeny(-500.0, 1.0);
+        belt.mix_orogeny(-500.0, 1.0, 0.0);
         let strong = band_weight(&old, 0.0, 0, 4);
         let weak = band_weight(&belt, 0.0, 0, 4);
         // A fresh belt (strength 0.25) is bounded at 0.5 → softness 2³.

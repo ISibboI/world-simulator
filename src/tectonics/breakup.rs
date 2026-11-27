@@ -48,7 +48,7 @@
 use glam::{DMat3, DVec3};
 
 use super::dynamics::SECONDS_PER_MYR;
-use super::weak_zones::{Network, UNBREAKABLE, lithosphere_strength};
+use super::weak_zones::{MIN_STRENGTH, Network, UNBREAKABLE, lithosphere_strength};
 use super::*;
 
 /// Parameters of the breakup of plates by their internal stress (`--set breakup.NAME=VALUE`).
@@ -167,6 +167,10 @@ pub struct SectionRecord {
     /// How the section fails at its limit load: the net opening of the mechanism relative to
     /// all its motion, from −1 (closing: thrusting) through 0 (sliding) to 1 (opening: rifting).
     pub opening: f64,
+    /// Whether the section runs through a plume (see [`Simulation::plume_sections`]), and the
+    /// overload of the most overloaded section through a plume (0 if the plate has none).
+    pub through_plume: bool,
+    pub plume_overload: f64,
     /// The net torque of the piece's loads that was removed before the analysis, relative to
     /// the torque the section carries.
     pub residual: f64,
@@ -184,11 +188,24 @@ pub struct BreakupStatistics {
     pub split_cells: u64,
     pub opening_splits: u64,
     pub closing_splits: u64,
+    /// Splits along a section through a plume (see [`Simulation::plume_sections`]).
+    pub plume_splits: u64,
+    /// Analyses of plates with a section through a plume, by the overload of the most
+    /// overloaded such section: below 0.25, 0.5, 1, and from 1 on.
+    pub plume_overloads: [u64; 4],
     /// At the last step: plates with an overloaded section, and the largest overload.
     pub overloaded: usize,
     pub max_overload: f64,
     /// Wall time (s) of the analysis so far.
     pub seconds: f64,
+}
+
+/// The relative strength of the lithosphere per cell: in sliding (and, times
+/// [`BreakupParams::compression`], in closing), and in opening, where a plume's magma helps
+/// (see `weak_zones::magma_weakening`).
+pub(super) struct Strength {
+    pub(super) shear: Vec<f64>,
+    pub(super) tension: Vec<f64>,
 }
 
 /// A candidate section: the cells of one side (indices into the piece) and its overload.
@@ -202,16 +219,24 @@ struct Section {
     strength: f64,
     /// How the section fails (see [`SectionRecord::opening`]).
     opening: f64,
+    /// Whether it was found among the sections through a plume, and the overload of the most
+    /// overloaded section through a plume (0 if none).
+    through_plume: bool,
+    plume_overload: f64,
 }
 
 /// An edge of the mesh crossed by a section, from the side whose loads are summed to the other:
 /// lever vectors of the sliding (`ω · p`) and of the opening (`ω · q`) of a relative rotation `ω`
-/// of that side, and the section's relative strength × length there (unit sphere).
+/// of that side, and the section's relative strength × length there (unit sphere), as the
+/// dissipation `weight · |ω · p| + a · |ω · q| + b · ω · q` of a relative rotation: `weight` in
+/// sliding, `a + b` in opening, `a − b` in closing.
 #[derive(Clone, Copy)]
 struct SectionEdge {
     p: DVec3,
     q: DVec3,
     weight: f64,
+    a: f64,
+    b: f64,
     length: f64,
     /// Where it is (unit vector).
     r: DVec3,
@@ -219,9 +244,17 @@ struct SectionEdge {
 
 impl SectionEdge {
     /// The section across the mesh edge from `r` towards `other` (unit vectors) with the dual
-    /// face length `face` and relative strength `strength`, as its two halves (so that a section
-    /// of one edge also carries a moment about its middle).
-    fn halves(r: DVec3, other: DVec3, face: f64, strength: f64) -> [Self; 2] {
+    /// face length `face`, relative strength `strength` in sliding, `tension` in opening and
+    /// `compression · strength` in closing, as its two halves (so that a section of one edge
+    /// also carries a moment about its middle).
+    fn halves(
+        r: DVec3,
+        other: DVec3,
+        face: f64,
+        strength: f64,
+        tension: f64,
+        compression: f64,
+    ) -> [Self; 2] {
         let mid = (r + other).normalize();
         let chord = other - r;
         let normal = (chord - mid * chord.dot(mid)).normalize();
@@ -230,10 +263,13 @@ impl SectionEdge {
         // slides by (ω × x) · (x × n) = −ω · n and opens by −(ω × x) · n = ω · (n × x) (n points
         // away from the loaded side, which moves with ω relative to the other). The two
         // points lie ±ℓ/4 from the middle (off the sphere by ~(ℓ/4)², negligible).
+        let (open, close) = (0.5 * face * tension, 0.5 * face * compression * strength);
         [mid - along, mid + along].map(|point| Self {
             p: -normal,
             q: normal.cross(point),
             weight: 0.5 * face * strength,
+            a: 0.5 * (open + close),
+            b: 0.5 * (open - close),
             length: 0.5 * face,
             r: point,
         })
@@ -246,32 +282,33 @@ impl SectionEdge {
 const ITERATIONS: usize = 30;
 const REFINED: usize = 4;
 
+/// Orientations (evenly spaced over 180°) of the great circles through a plume searched as
+/// sections (#51): a resolution of the search, not a parameter of the physics; the best one is
+/// refined along the weakest lithosphere within [`BreakupParams::band`] cells.
+const PLUME_SECTION_ORIENTATIONS: usize = 6;
+
+/// The dissipation of the section `edges` at the yield traction (strength `force` of
+/// lithosphere of relative strength 1) in the relative rotation `omega`.
+fn dissipation(edges: &[SectionEdge], force: f64, omega: DVec3) -> f64 {
+    edges
+        .iter()
+        .map(|e| {
+            let open = omega.dot(e.q);
+            e.weight * omega.dot(e.p).abs() + e.a * open.abs() + e.b * open
+        })
+        .sum::<f64>()
+        * force
+}
+
 /// A quick lower bound of [`limit_overload`]: the best of three mechanisms, the rotation about
 /// the torque's axis (the net force across the section), the rotation about the section's
 /// middle (bending) and `warm` (the best one of the last section, updated).
-fn quick_overload(
-    torque: DVec3,
-    edges: &[SectionEdge],
-    force: f64,
-    compression: f64,
-    warm: &mut DVec3,
-) -> f64 {
+fn quick_overload(torque: DVec3, edges: &[SectionEdge], force: f64, warm: &mut DVec3) -> f64 {
     let magnitude2 = torque.length_squared();
     if magnitude2 == 0.0 || edges.is_empty() || force <= 0.0 {
         return 0.0;
     }
-    let a = 0.5 * (1.0 + compression);
-    let b = 0.5 * (1.0 - compression);
-    let dissipation = |omega: DVec3| -> f64 {
-        edges
-            .iter()
-            .map(|e| {
-                let open = omega.dot(e.q);
-                e.weight * (omega.dot(e.p).abs() + a * open.abs() + b * open)
-            })
-            .sum::<f64>()
-            * force
-    };
+    let dissipation = |omega: DVec3| dissipation(edges, force, omega);
     let middle: DVec3 = edges.iter().map(|e| e.r * e.weight).sum();
     let mut best = (f64::INFINITY, DVec3::ZERO);
     for candidate in [torque / magnitude2, middle, *warm] {
@@ -301,7 +338,6 @@ fn limit_overload(
     torque: DVec3,
     edges: &[SectionEdge],
     force: f64,
-    compression: f64,
     warm: &mut DVec3,
     iterations: usize,
 ) -> (f64, f64) {
@@ -309,18 +345,7 @@ fn limit_overload(
     if magnitude2 == 0.0 || edges.is_empty() || force <= 0.0 {
         return (0.0, 0.0);
     }
-    let a = 0.5 * (1.0 + compression);
-    let b = 0.5 * (1.0 - compression);
-    let dissipation = |omega: DVec3| -> f64 {
-        edges
-            .iter()
-            .map(|e| {
-                let open = omega.dot(e.q);
-                e.weight * (omega.dot(e.p).abs() + a * open.abs() + b * open)
-            })
-            .sum::<f64>()
-            * force
-    };
+    let dissipation = |omega: DVec3| dissipation(edges, force, omega);
     let mut omega = torque / magnitude2;
     let mut best = dissipation(omega);
     let along = warm.dot(torque);
@@ -332,7 +357,7 @@ fn limit_overload(
             omega = candidate;
         }
     }
-    let linear: DVec3 = edges.iter().map(|e| e.q * (e.weight * b)).sum::<DVec3>();
+    let linear: DVec3 = edges.iter().map(|e| e.q * e.b).sum::<DVec3>();
     for _ in 0..iterations {
         let scale = edges
             .iter()
@@ -342,7 +367,7 @@ fn limit_overload(
         let mut q = DMat3::IDENTITY * 1e-12 * edges.iter().map(|e| e.weight).sum::<f64>();
         for e in edges {
             q += dynamics::outer(e.p, e.p) * (e.weight / omega.dot(e.p).abs().max(floor))
-                + dynamics::outer(e.q, e.q) * (a * e.weight / omega.dot(e.q).abs().max(floor));
+                + dynamics::outer(e.q, e.q) * (e.a / omega.dot(e.q).abs().max(floor));
         }
         if q.determinant().abs() <= 0.0 {
             break;
@@ -405,7 +430,10 @@ impl Simulation {
         // Per cell: external load (N) at the material velocity, drag coefficient, strength.
         let mut load = vec![DVec3::ZERO; cell_count];
         let mut drag = vec![0.0; cell_count];
-        let mut strength = vec![0.0; cell_count];
+        let mut strength = Strength {
+            shear: vec![0.0; cell_count],
+            tension: vec![0.0; cell_count],
+        };
         let mut continental = vec![false; cell_count];
         let mut plate_cells: Vec<Vec<u32>> = vec![Vec::new(); self.plates.len()];
         for cell in 0..cell_count as u32 {
@@ -426,12 +454,28 @@ impl Simulation {
                 * to_metres_per_second;
             let f = forces[c] - v * drag[c];
             load[c] = f - r * f.dot(r);
-            strength[c] = lithosphere_strength(&crust, self.time);
+            let s = lithosphere_strength(&crust, self.time);
+            strength.shear[c] = s;
+            // Magma-assisted opening, but never weaker than a ridge axis.
+            let magma = self.magma_weakening_at(r);
+            strength.tension[c] = if magma < 1.0 {
+                (s * magma).max(MIN_STRENGTH.min(s))
+            } else {
+                s
+            };
             continental[c] = crust.is_continental_origin();
             plate_cells[owner.plate as usize].push(cell);
         }
 
         let now = self.time;
+        // Active plumes, whose sections are searched (#51).
+        let plumes: Vec<DVec3> = self
+            .mantle
+            .plumes()
+            .iter()
+            .filter(|plume| plume.flux() > 0.0)
+            .map(|plume| plume.position)
+            .collect();
         let mut records = Vec::new();
         let mut statistics = std::mem::take(&mut self.breakup_statistics);
         statistics.overloaded = 0;
@@ -451,7 +495,7 @@ impl Simulation {
                     index[cell as usize] = i as u32;
                 }
                 best = self.most_overloaded_section(
-                    &piece, &index, &load, &drag, &strength, min_cells, &params,
+                    &piece, &index, &load, &drag, &strength, &plumes, min_cells, &params,
                 );
                 for &cell in &piece {
                     index[cell as usize] = u32::MAX;
@@ -479,6 +523,14 @@ impl Simulation {
                 plate.sheet.breakup_timer = (plate.sheet.breakup_timer - dt).max(0.0);
             }
             plate.sheet.breakup_opening = section.opening;
+            plate.sheet.breakup_through_plume = section.through_plume;
+            if section.plume_overload > 0.0 {
+                let bin = [0.25, 0.5, 1.0]
+                    .iter()
+                    .filter(|&&limit| section.plume_overload >= limit)
+                    .count();
+                statistics.plume_overloads[bin] += 1;
+            }
             statistics.max_overload = statistics.max_overload.max(section.overload);
             if params.enabled
                 && now >= params.from
@@ -510,6 +562,8 @@ impl Simulation {
                     strength: section.strength,
                     piece_continental: continental_cells as f64 / piece_cells.max(1) as f64,
                     opening: section.opening,
+                    through_plume: section.through_plume,
+                    plume_overload: section.plume_overload,
                     residual,
                     timer: plate.sheet.breakup_timer,
                 });
@@ -573,6 +627,22 @@ impl Simulation {
         distance
     }
 
+    /// The two halves of the section across the mesh edge `slot` (of [`SheetGeometry`]) from
+    /// `cell` (see [`SectionEdge::halves`]).
+    fn section_edge(&self, cell: u32, slot: usize, strength: &Strength) -> [SectionEdge; 2] {
+        let geometry = &self.sheet_geometry;
+        let n = geometry.neighbor[slot];
+        let (c, m) = (cell as usize, n as usize);
+        SectionEdge::halves(
+            self.mesh.vertex(cell),
+            self.mesh.vertex(n),
+            geometry.face[slot],
+            0.5 * (strength.shear[c] + strength.shear[m]),
+            0.5 * (strength.tension[c] + strength.tension[m]),
+            self.params.breakup.compression,
+        )
+    }
+
     /// The strength (N per unit length on the unit sphere) of lithosphere of relative strength
     /// 1.
     fn section_force(&self) -> f64 {
@@ -588,7 +658,7 @@ impl Simulation {
         index: &[u32],
         side: &[bool],
         loads: &[DVec3],
-        strength: &[f64],
+        strength: &Strength,
     ) -> (f64, f64, f64, f64) {
         let geometry = &self.sheet_geometry;
         let mut torque = DVec3::ZERO;
@@ -603,25 +673,13 @@ impl Simulation {
                 let n = geometry.neighbor[slot];
                 let j = index[n as usize];
                 if j != u32::MAX && !side[j as usize] {
-                    let s = 0.5 * (strength[cell as usize] + strength[n as usize]);
-                    edges.extend(SectionEdge::halves(
-                        r,
-                        self.mesh.vertex(n),
-                        geometry.face[slot],
-                        s,
-                    ));
+                    edges.extend(self.section_edge(cell, slot, strength));
                 }
             }
         }
         let mut warm = DVec3::ZERO;
-        let (overload, opening) = limit_overload(
-            torque,
-            &edges,
-            self.section_force(),
-            self.params.breakup.compression,
-            &mut warm,
-            ITERATIONS,
-        );
+        let (overload, opening) =
+            limit_overload(torque, &edges, self.section_force(), &mut warm, ITERATIONS);
         let length: f64 = edges.iter().map(|e| e.length).sum();
         let mean_strength = if length > 0.0 {
             edges.iter().map(|e| e.weight).sum::<f64>() / length
@@ -633,7 +691,8 @@ impl Simulation {
 
     /// The most overloaded section of a piece of a plate (see the module documentation) and the
     /// net torque of the loads that was removed, relative to the section's torque; `None` if the
-    /// piece has no section with both parts of at least `min_cells`.
+    /// piece has no section with both parts of at least `min_cells`. `plumes` are the positions
+    /// of the active plumes (sections through those above the piece are searched too).
     #[allow(clippy::too_many_arguments)]
     fn most_overloaded_section(
         &self,
@@ -641,7 +700,8 @@ impl Simulation {
         index: &[u32],
         load: &[DVec3],
         drag: &[f64],
-        strength: &[f64],
+        strength: &Strength,
+        plumes: &[DVec3],
         min_cells: usize,
         params: &BreakupParams,
     ) -> Option<(Section, f64)> {
@@ -677,13 +737,15 @@ impl Simulation {
 
         let geometry = &self.sheet_geometry;
         let force = self.section_force();
-        // Best level section: (overload, field, level, its torque).
-        let mut best: Option<(f64, usize, u32, DVec3)> = None;
-        let fields = [d1, d2, d3];
+        // Best section: (overload, field, level, its torque, whether it runs through a plume).
+        let mut best: Option<(f64, usize, u32, DVec3, bool)> = None;
+        let mut fields = vec![d1, d2, d3];
         let empty = SectionEdge {
             p: DVec3::ZERO,
             q: DVec3::ZERO,
             weight: 0.0,
+            a: 0.0,
+            b: 0.0,
             length: 0.0,
             r: DVec3::ZERO,
         };
@@ -711,14 +773,11 @@ impl Simulation {
             let mut fill = edge_count.clone();
             for (i, &cell) in piece.iter().enumerate() {
                 let d = distance[i] as usize;
-                let r = self.mesh.vertex(cell);
                 for slot in geometry.edges(cell) {
                     let m = geometry.neighbor[slot];
                     let j = index[m as usize];
                     if j != u32::MAX && distance[j as usize] as usize == d + 1 {
-                        let s = 0.5 * (strength[cell as usize] + strength[m as usize]);
-                        let halves =
-                            SectionEdge::halves(r, self.mesh.vertex(m), geometry.face[slot], s);
+                        let halves = self.section_edge(cell, slot, strength);
                         edges[fill[d + 1]..fill[d + 1] + 2].copy_from_slice(&halves);
                         fill[d + 1] += 2;
                     }
@@ -737,27 +796,33 @@ impl Simulation {
                     continue;
                 }
                 let crossing = &edges[edge_count[level]..edge_count[level + 1]];
-                let overload =
-                    quick_overload(torque, crossing, force, params.compression, &mut warm);
+                let overload = quick_overload(torque, crossing, force, &mut warm);
                 candidates.push((overload, level, torque, warm));
             }
             candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
             for &(_, level, torque, mut warm) in candidates.iter().take(REFINED) {
                 let crossing = &edges[edge_count[level]..edge_count[level + 1]];
-                let (overload, _) = limit_overload(
-                    torque,
-                    crossing,
-                    force,
-                    params.compression,
-                    &mut warm,
-                    ITERATIONS,
-                );
-                if best.is_none_or(|(o, _, _, _)| overload > o) {
-                    best = Some((overload, f, level as u32, torque));
+                let (overload, _) = limit_overload(torque, crossing, force, &mut warm, ITERATIONS);
+                if best.is_none_or(|(o, ..)| overload > o) {
+                    best = Some((overload, f, level as u32, torque, false));
                 }
             }
         }
-        let (level_overload, field, level, level_torque) = best?;
+        // Sections through the plumes above the piece (#51): a plume's swell pushes its
+        // lithosphere apart and its magma weakens it in opening, so the most overloaded section
+        // may run through it, which the level sets above rarely do.
+        let mut plume_overload = 0.0;
+        if let Some((overload, field, torque)) =
+            self.plume_sections(piece, index, &loads, strength, plumes, min_cells)
+        {
+            plume_overload = overload;
+            if best.is_none_or(|(o, ..)| overload > o) {
+                let level = field.0;
+                fields.push(field.1);
+                best = Some((overload, fields.len() - 1, level, torque, true));
+            }
+        }
+        let (level_overload, field, level, level_torque, through_plume) = best?;
         let residual = net.length() / level_torque.length().max(f64::MIN_POSITIVE);
         let distance = &fields[field];
         let level_side: Vec<bool> = distance.iter().map(|&d| d < level).collect();
@@ -771,6 +836,8 @@ impl Simulation {
             length: level_length,
             strength: level_strength,
             opening: level_opening,
+            through_plume,
+            plume_overload,
         };
         // Refined along the weakest lithosphere, where it matters.
         if level_overload > 0.5 {
@@ -801,7 +868,9 @@ impl Simulation {
                     if j == u32::MAX || m < cell || node[j as usize] == u32::MAX {
                         continue;
                     }
-                    let s = 0.5 * (strength[cell as usize] + strength[m as usize]);
+                    // The break opens where it can (most sections fail mainly by opening):
+                    // the strength in opening, which a plume's magma lowers.
+                    let s = 0.5 * (strength.tension[cell as usize] + strength.tension[m as usize]);
                     network.link(k, node[j as usize] as usize, geometry.face[slot] * s);
                 }
             }
@@ -844,6 +913,139 @@ impl Simulation {
         Some((section, residual))
     }
 
+    /// The most overloaded section along a great circle through one of the plumes `plumes`
+    /// above the piece, of [`PLUME_SECTION_ORIENTATIONS`] orientations each: (overload, (level,
+    /// a level field whose cells below the level are the side next to the plume), the torque
+    /// of that side's loads), or `None` if no such section leaves both parts of at least
+    /// `min_cells`. The side next to the plume is the connected part of the half of the piece
+    /// on one side of the circle that touches the plume's cell, the other side the rest; the
+    /// level field is the distance in cell steps from the section (so that the section can be
+    /// refined like the level sections).
+    fn plume_sections(
+        &self,
+        piece: &[u32],
+        index: &[u32],
+        loads: &[DVec3],
+        strength: &Strength,
+        plumes: &[DVec3],
+        min_cells: usize,
+    ) -> Option<(f64, (u32, Vec<u32>), DVec3)> {
+        let n = piece.len();
+        let force = self.section_force();
+        let geometry = &self.sheet_geometry;
+        let mut best: Option<(f64, Vec<bool>, DVec3)> = None;
+        let mut side = vec![false; n];
+        for &position in plumes {
+            let centre = self.mesh.nearest(position);
+            let start = index[centre as usize];
+            if start == u32::MAX {
+                continue;
+            }
+            let p = self.mesh.vertex(centre);
+            let east = DVec3::Z.cross(p);
+            let east = if east.length_squared() > 1e-12 {
+                east.normalize()
+            } else {
+                DVec3::X
+            };
+            let north = p.cross(east);
+            let mut candidates: Vec<(f64, Vec<bool>, DVec3)> = Vec::new();
+            for k in 0..PLUME_SECTION_ORIENTATIONS {
+                let angle = k as f64 * std::f64::consts::PI / PLUME_SECTION_ORIENTATIONS as f64;
+                let normal = east * math::cos(angle) + north * math::sin(angle);
+                // The plume's cell and the cells of the piece on the negative side, connected
+                // to it.
+                side.fill(false);
+                side[start as usize] = true;
+                let mut stack = vec![start as usize];
+                while let Some(i) = stack.pop() {
+                    for &m in self.mesh.neighbors(piece[i]) {
+                        let j = index[m as usize];
+                        if j != u32::MAX
+                            && !side[j as usize]
+                            && self.mesh.vertex(m).dot(normal) < 0.0
+                        {
+                            side[j as usize] = true;
+                            stack.push(j as usize);
+                        }
+                    }
+                }
+                let cells = side.iter().filter(|&&a| a).count();
+                if cells < min_cells || n - cells < min_cells {
+                    continue;
+                }
+                let mut torque = DVec3::ZERO;
+                let mut edges: Vec<SectionEdge> = Vec::new();
+                for (i, &cell) in piece.iter().enumerate() {
+                    if !side[i] {
+                        continue;
+                    }
+                    torque += self.mesh.vertex(cell).cross(loads[i]);
+                    for slot in geometry.edges(cell) {
+                        let j = index[geometry.neighbor[slot] as usize];
+                        if j != u32::MAX && !side[j as usize] {
+                            edges.extend(self.section_edge(cell, slot, strength));
+                        }
+                    }
+                }
+                let mut warm = DVec3::ZERO;
+                let overload = quick_overload(torque, &edges, force, &mut warm);
+                candidates.push((overload, side.clone(), torque));
+            }
+            // The most overloaded orientation in full.
+            let Some((_, side, torque)) = candidates.into_iter().max_by(|a, b| a.0.total_cmp(&b.0))
+            else {
+                continue;
+            };
+            let (overload, ..) = self.section_overload(piece, index, &side, loads, strength);
+            if best.as_ref().is_none_or(|(o, ..)| overload > *o) {
+                best = Some((overload, side, torque));
+            }
+        }
+        let (overload, side, torque) = best?;
+        // Distances from the section: within the side, counted down from the level; outside,
+        // up from it.
+        let mut distance = vec![u32::MAX; n];
+        let mut queue: Vec<usize> = Vec::new();
+        for i in 0..n {
+            let crosses = self.mesh.neighbors(piece[i]).iter().any(|&m| {
+                let j = index[m as usize];
+                j != u32::MAX && side[j as usize] != side[i]
+            });
+            if crosses {
+                distance[i] = 0;
+                queue.push(i);
+            }
+        }
+        let mut next = 0;
+        while next < queue.len() {
+            let i = queue[next];
+            next += 1;
+            for &m in self.mesh.neighbors(piece[i]) {
+                let j = index[m as usize];
+                if j != u32::MAX && distance[j as usize] == u32::MAX && side[j as usize] == side[i]
+                {
+                    distance[j as usize] = distance[i] + 1;
+                    queue.push(j as usize);
+                }
+            }
+        }
+        // Cells not reached (pieces of a side cut off by the other) count as far.
+        let inside = (0..n)
+            .filter(|&i| side[i] && distance[i] != u32::MAX)
+            .map(|i| distance[i])
+            .max()
+            .unwrap_or(0);
+        let level = inside + 1;
+        let field = (0..n)
+            .map(|i| {
+                let d = distance[i].min(inside);
+                if side[i] { level - 1 - d } else { level + d }
+            })
+            .collect();
+        Some((overload, (level, field), torque))
+    }
+
     /// Splits the plates that have been overloaded for long enough (see
     /// [`super::sheet::PlateSheet::pending_breakup`]) along their most overloaded section, if both parts are
     /// still large enough.
@@ -876,12 +1078,14 @@ impl Simulation {
                 continue;
             }
             let opening = self.plates[plate as usize].sheet.breakup_opening;
+            let through_plume = self.plates[plate as usize].sheet.breakup_through_plume;
             if let Some(new_plate) = self.split_plate_cells(plate, &piece) {
                 self.plates[plate as usize].sheet.breakup_timer = 0.0;
                 self.plates[new_plate as usize].sheet.breakup_timer = 0.0;
                 let statistics = &mut self.breakup_statistics;
                 statistics.splits += 1;
                 statistics.split_cells += piece.len() as u64;
+                statistics.plume_splits += u64::from(through_plume);
                 if opening > 1.0 / 3.0 {
                     statistics.opening_splits += 1;
                 } else if opening < -1.0 / 3.0 {
@@ -944,10 +1148,13 @@ mod tests {
             })
             .collect();
         let drag = vec![1.0; n];
-        let strength = vec![1.0; n];
+        let strength = Strength {
+            shear: vec![1.0; n],
+            tension: vec![1.0; n],
+        };
         let params = simulation.params.breakup.clone();
         let section = simulation
-            .most_overloaded_section(cells, &index, &loads, &drag, &strength, 5, &params)
+            .most_overloaded_section(cells, &index, &loads, &drag, &strength, &[], 5, &params)
             .expect("a section")
             .0;
         let side = cells
@@ -960,8 +1167,9 @@ mod tests {
     }
 
     /// A straight section along the meridian through (1, 0, 0), 0.02 rad long in 200 edges,
-    /// between the loaded side (west) and the other: opening along +y.
-    fn straight_section() -> Vec<SectionEdge> {
+    /// between the loaded side (west) and the other: opening along +y; `tension` the strength
+    /// in opening, `compression` times as strong in closing.
+    fn straight_section(tension: f64, compression: f64) -> Vec<SectionEdge> {
         (0..200)
             .flat_map(|i| {
                 let z = 0.02 * ((i as f64 + 0.5) / 200.0 - 0.5);
@@ -969,67 +1177,68 @@ mod tests {
                 let east = DVec3::new(0.0, 1e-3, 0.0);
                 let a = (r - east).normalize();
                 let b = (r + east).normalize();
-                SectionEdge::halves(a, b, 0.02 / 200.0, 1.0)
+                SectionEdge::halves(a, b, 0.02 / 200.0, 1.0, tension, compression)
             })
             .collect()
     }
 
     #[test]
     fn limit_loads_of_a_straight_section_match_plastic_beam_theory() {
-        let edges = straight_section();
+        let edges = straight_section(1.0, 3.0);
         let (force, length) = (1.0, 0.02);
         let mut warm = DVec3::ZERO;
         // A pull west on the loaded side (tension across the section) at (1, 0, 0): torque
         // r × f.
         let pull = |n: f64| DVec3::X.cross(DVec3::new(0.0, -n, 0.0));
-        let (s, opening) = limit_overload(pull(0.02), &edges, force, 3.0, &mut warm, ITERATIONS);
+        let (s, opening) = limit_overload(pull(0.02), &edges, force, &mut warm, ITERATIONS);
         assert!((s - 1.0).abs() < 0.02, "tension: {s}");
         assert!(opening > 0.9, "{opening}");
         // Pushed east: compression, three times as strong.
-        let (s, opening) = limit_overload(pull(-0.06), &edges, force, 3.0, &mut warm, ITERATIONS);
+        let (s, opening) = limit_overload(pull(-0.06), &edges, force, &mut warm, ITERATIONS);
         assert!((s - 1.0).abs() < 0.02, "compression: {s}");
         assert!(opening < -0.9, "{opening}");
         // Sheared north–south.
-        let (s, _) = limit_overload(
-            DVec3::X.cross(DVec3::Z * 0.02),
-            &edges,
-            force,
-            3.0,
-            &mut warm,
-            ITERATIONS,
-        );
+        let shear = DVec3::X.cross(DVec3::Z * 0.02);
+        let (s, _) = limit_overload(shear, &edges, force, &mut warm, ITERATIONS);
         assert!((s - 1.0).abs() < 0.02, "shear: {s}");
         // A bending moment about the radial axis: the plastic moment of a section of length L
         // in tension on one half and compression (k = 3) on the other is F L² · k / (2 (1 + k)).
         let plastic = force * length * length * 3.0 / (2.0 * 4.0);
-        let (s, _) = limit_overload(
-            DVec3::X * plastic,
-            &edges,
-            force,
-            3.0,
-            &mut warm,
-            ITERATIONS,
-        );
+        let (s, _) = limit_overload(DVec3::X * plastic, &edges, force, &mut warm, ITERATIONS);
         assert!((s - 1.0).abs() < 0.03, "bending: {s}");
         // With equal strengths: F L² / 4.
-        let (s, _) = limit_overload(
-            DVec3::X * (force * length * length / 4.0),
-            &edges,
-            force,
-            1.0,
-            &mut warm,
-            ITERATIONS,
-        );
+        let symmetric = straight_section(1.0, 1.0);
+        let moment = DVec3::X * (force * length * length / 4.0);
+        let (s, _) = limit_overload(moment, &symmetric, force, &mut warm, ITERATIONS);
         assert!((s - 1.0).abs() < 0.03, "symmetric bending: {s}");
     }
 
     #[test]
+    fn magma_weakens_sections_only_in_opening() {
+        // A tenth of the strength in opening (magma-assisted rifting): ten times the overload
+        // in tension, the same in shear and compression.
+        let (plain, magmatic) = (straight_section(1.0, 3.0), straight_section(0.1, 3.0));
+        let pull = |n: f64| DVec3::X.cross(DVec3::new(0.0, -n, 0.0));
+        let shear = DVec3::X.cross(DVec3::Z * 0.02);
+        for (torque, ratio) in [(pull(0.02), 10.0), (pull(-0.06), 1.0), (shear, 1.0)] {
+            let mut warm = DVec3::ZERO;
+            let (s0, _) = limit_overload(torque, &plain, 1.0, &mut warm, ITERATIONS);
+            let mut warm = DVec3::ZERO;
+            let (s1, _) = limit_overload(torque, &magmatic, 1.0, &mut warm, ITERATIONS);
+            assert!(
+                (s1 / s0 / ratio - 1.0).abs() < 0.03,
+                "{torque}: {s0} → {s1}"
+            );
+        }
+    }
+
+    #[test]
     fn quick_estimates_see_bending_either_way_round() {
-        let edges = straight_section();
+        let edges = straight_section(1.0, 3.0);
         let plastic = 0.02f64 * 0.02 * 3.0 / 8.0;
         for sign in [1.0, -1.0] {
             let mut warm = DVec3::ZERO;
-            let s = quick_overload(DVec3::X * (sign * plastic), &edges, 1.0, 3.0, &mut warm);
+            let s = quick_overload(DVec3::X * (sign * plastic), &edges, 1.0, &mut warm);
             // About the middle (the full analysis shifts the hinge towards the stronger,
             // compressed side): (3/8) / (1/2) of the limit.
             assert!((0.74..=1.0).contains(&s), "bending ({sign}): {s}");
@@ -1073,6 +1282,80 @@ mod tests {
         // The strip breaks near its middle, where the bending moment is largest.
         let fraction = side.len() as f64 / strip.len() as f64;
         assert!((0.3..0.7).contains(&fraction), "{fraction}");
+    }
+
+    #[test]
+    fn plume_swells_open_sections_through_the_plume() {
+        let simulation = Simulation::new(SphereMesh::icosphere(4), 4, TectonicParams::default(), 1);
+        let mesh = &simulation.mesh;
+        // A cap of 40° radius with a plume at its centre, pushing the lithosphere away from it
+        // (a swell) and weakening it in opening within ~10° (magma).
+        let plume = DVec3::new(0.2, 0.1, 1.0).normalize();
+        let cap: Vec<u32> = (0..mesh.len() as u32)
+            .filter(|&c| mesh.vertex(c).dot(plume) > math::cos(40f64.to_radians()))
+            .collect();
+        let n = mesh.len();
+        let mut index = vec![u32::MAX; n];
+        for (i, &cell) in cap.iter().enumerate() {
+            index[cell as usize] = i as u32;
+        }
+        let loads: Vec<DVec3> = (0..n as u32)
+            .map(|cell| {
+                let r = mesh.vertex(cell);
+                let angle = math::angle_between(r, plume);
+                let away = r * r.dot(plume) - plume;
+                if angle > 0.0 && angle < 0.3 {
+                    away.normalize() * (1e19 * math::exp(-angle * angle / 0.01) * angle / 0.1)
+                } else {
+                    DVec3::ZERO
+                }
+            })
+            .collect();
+        let magma = |cell: u32| {
+            let x = math::angle_between(mesh.vertex(cell), plume) / 0.17;
+            1.0 - 0.9 * (1.0 - x * x).max(0.0)
+        };
+        let strength = Strength {
+            shear: vec![1.0; n],
+            tension: (0..n as u32).map(magma).collect(),
+        };
+        let drag = vec![1.0; n];
+        let params = simulation.params.breakup.clone();
+        let section_of = |plumes: &[DVec3]| {
+            simulation
+                .most_overloaded_section(
+                    &cap, &index, &loads, &drag, &strength, plumes, 20, &params,
+                )
+                .expect("a section")
+                .0
+        };
+        let section = section_of(&[plume]);
+        // The most overloaded section runs through the plume and opens; so does the one found
+        // among the sections through the plume
+        // (a curved level section through the head may do slightly better than the great
+        // circles).
+        assert!(
+            section.plume_overload >= 0.8 * section.overload,
+            "{} vs {}",
+            section.plume_overload,
+            section.overload
+        );
+        assert!(section.opening > 0.5, "{}", section.opening);
+        let nearest = cap
+            .iter()
+            .enumerate()
+            .filter(|&(i, &cell)| {
+                mesh.neighbors(cell).iter().any(|&m| {
+                    let j = index[m as usize];
+                    j != u32::MAX && section.side[j as usize] != section.side[i]
+                })
+            })
+            .map(|(_, &cell)| math::angle_between(mesh.vertex(cell), plume))
+            .fold(f64::INFINITY, f64::min);
+        assert!(nearest < 0.05, "{nearest}");
+        // The level sections alone find no more overloaded one.
+        let plain = section_of(&[]);
+        assert!(plain.overload <= section.overload * (1.0 + 1e-9));
     }
 
     /// Owners and rotations, bit for bit.

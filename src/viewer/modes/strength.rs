@@ -35,6 +35,7 @@ enum Shown {
     Thermal,
     Thinning,
     Orogenic,
+    Fabric,
 }
 
 impl Shown {
@@ -44,6 +45,7 @@ impl Shown {
             2 => Shown::Thermal,
             3 => Shown::Thinning,
             4 => Shown::Orogenic,
+            5 => Shown::Fabric,
             _ => Shown::Strength,
         }
     }
@@ -55,6 +57,7 @@ impl Shown {
             Shown::Thermal => cell.strength_thermal,
             Shown::Thinning => cell.strength_thinning,
             Shown::Orogenic => cell.strength_orogenic(),
+            Shown::Fabric => cell.strength_fabric(),
         }
     }
 }
@@ -70,8 +73,16 @@ const OPTIONS: [ModeOption; 4] = [
         label: "Show",
         hover: "The strength; the weakest of its terms (what weakens the lithosphere most); or \
                 one term: thermal (young or plume-heated lithosphere), thinning (stretched \
-                continental crust), orogenic (unhealed collision belts and sutures)",
-        kind: OptionKind::Choice(&["Strength", "Weakest", "Thermal", "Thinning", "Orogenic"]),
+                continental crust), orogenic (unhealed collision belts and sutures), rift \
+                fabric (rifted margins and failed rifts)",
+        kind: OptionKind::Choice(&[
+            "Strength",
+            "Weakest",
+            "Thermal",
+            "Thinning",
+            "Orogenic",
+            "Rift fabric",
+        ]),
     },
     ModeOption {
         label: "Plate boundaries",
@@ -112,6 +123,7 @@ fn weakness_color(weakness: Weakness) -> [u8; 3] {
         Weakness::Plume => [230, 159, 0],
         Weakness::Thinned => [0, 158, 115],
         Weakness::Orogenic => [204, 121, 167],
+        Weakness::Rifted => [213, 94, 0],
     }
 }
 
@@ -155,6 +167,7 @@ fn scale(shown: Shown) -> ColorScale {
             Shown::Thermal => "Thermal term (√ of thermal age / 100 Myr)",
             Shown::Thinning => "Thinning term (crystalline crust without metasediment / 35 km)",
             Shown::Orogenic => "Orogenic term",
+            Shown::Fabric => "Rift fabric term",
         }
         .into(),
         ticks: [0.0, 0.25, 0.5, 0.75, 1.0]
@@ -262,6 +275,7 @@ impl RenderMode for LithosphereStrength {
                         Weakness::Plume => "Plume-heated",
                         Weakness::Thinned => "Thinned continental crust",
                         Weakness::Orogenic => "Orogenic belt, suture",
+                        Weakness::Rifted => "Rifted margin, failed rift",
                     }
                     .into(),
                 )
@@ -298,8 +312,9 @@ impl RenderMode for LithosphereStrength {
             Shown::Strength => format!(
                 "Strength of the lithosphere relative to old, undeformed lithosphere (at least \
                  {MIN_STRENGTH}): where plates break and collisions deform. Young or \
-                 plume-heated lithosphere, stretched continental crust and unhealed orogenic \
-                 belts and sutures are weak; old ocean and cratons are strong."
+                 plume-heated lithosphere, stretched continental crust, unhealed orogenic \
+                 belts and sutures, and rifted margins and failed rifts are weak; old ocean and \
+                 cratons are strong."
             ),
             Shown::Weakest => format!(
                 "What weakens the lithosphere most, where its strength is below \
@@ -317,6 +332,10 @@ impl RenderMode for LithosphereStrength {
             Shown::Orogenic => "The orogenic term: collision belts, sutures and accreted \
                                 terranes are weak (0.25 when fresh) and heal as they cool, \
                                 over ~200 Myr."
+                .to_owned(),
+            Shown::Fabric => "The rift-fabric term: the faults and fabric of stretched \
+                              continental lithosphere (rifted margins, failed rifts) weaken it \
+                              (0.5 when fully stretched) and heal over ~200 Myr."
                 .to_owned(),
         };
         Legend {

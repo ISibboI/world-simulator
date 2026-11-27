@@ -477,6 +477,7 @@ mod tests {
                 age: step as f32,
                 sediment: 0.0,
                 orogenic: 0.0,
+                rifted: 0.0,
                 since_orogeny: f32::NAN,
                 strength_thermal: 1.0,
                 strength_thinning: 1.0,
