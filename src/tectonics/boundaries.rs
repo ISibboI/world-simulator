@@ -611,7 +611,7 @@ impl Simulation {
                     continue;
                 }
                 filled.push((plate_index, neighbor));
-                let spreading = opens_away(
+                let opening = opens_away(
                     &mut rings,
                     mesh,
                     &new_owners,
@@ -620,6 +620,7 @@ impl Simulation {
                     plate_index,
                     min_opening,
                 );
+                let spreading = opening.is_some();
                 let local = plates[plate_index as usize].local_vertex(
                     mesh,
                     inverse_rotations[plate_index as usize],
@@ -646,7 +647,8 @@ impl Simulation {
                                 neighbor,
                                 plate_index,
                                 min_stretching_opening,
-                            ))
+                            )
+                            .is_some())
                 };
                 let plate = &mut plates[plate_index as usize];
                 if rifting
@@ -669,7 +671,12 @@ impl Simulation {
                 } else if spreading {
                     gap_statistics.new_crust_cells += 1;
                     if plate.crust[local as usize].is_none() {
-                        ledger.record(Term::NewSeaFloor, new_oceanic_crust(time).mass());
+                        let mass = new_oceanic_crust(time).mass();
+                        ledger.record(Term::NewSeaFloor, mass);
+                        // Full spreading rate in cm/yr.
+                        let rate = opening.unwrap_or(0.0) * params.planet_radius * 100.0 / 1e6;
+                        let bin = (rate.max(0.0) as usize).min(SPREADING_RATE_BINS - 1);
+                        gap_statistics.new_crust_by_rate[bin] += mass;
                     }
                     plate.crust[local as usize].get_or_insert_with(|| new_oceanic_crust(time));
                     plate.consumed[local as usize] = false;
@@ -1122,10 +1129,18 @@ pub struct GapStatistics {
     pub hole_cells: usize,
     /// Cells whose surface crust was consumed while visible (should stay zero).
     pub freed_cells: usize,
+    /// Mass of the new oceanic crust made where plates spread apart (per unit area, as the
+    /// ledger), by the full spreading rate: bin `i` holds rates of `i` to `i + 1` cm/yr, the
+    /// last all faster ones. For the serpentinization of slow ridges (#202).
+    pub new_crust_by_rate: [f64; SPREADING_RATE_BINS],
 }
 
+/// Number of the bins of [`GapStatistics::new_crust_by_rate`], 1 cm/yr wide.
+pub const SPREADING_RATE_BINS: usize = 11;
+
 /// Whether `plate` moves away from any other plate near `cell` faster than `min_opening`
-/// (rad/Myr), so that new sea floor forms at `cell`. The direction between two plates is taken
+/// (rad/Myr), so that new sea floor forms at `cell`: the fastest such opening (rad/Myr), or
+/// `None`. The direction between two plates is taken
 /// from the centroids of their cells within a few rings around `cell`, which is smoother than
 /// single mesh edges, and the motion must not be too oblique (transform faults do not spread).
 fn opens_away(
@@ -1136,7 +1151,7 @@ fn opens_away(
     cell: u32,
     plate: u32,
     min_opening: f64,
-) -> bool {
+) -> Option<f64> {
     const RINGS: usize = 3;
     /// Opening must be at least this fraction of the relative speed.
     const MIN_OBLIQUITY: f64 = 0.25;
@@ -1182,19 +1197,19 @@ fn opens_away(
 
     let r = mesh.vertex(cell);
     let tangent = |v: DVec3| (v - r * r.dot(v)).normalize_or_zero();
-    let Some(&(_, own)) = centroids.iter().find(|(p, _)| *p == plate) else {
-        return false;
-    };
-    centroids.iter().any(|&(other, centroid)| {
-        if other == plate {
-            return false;
-        }
-        let normal = tangent(centroid.normalize() - own.normalize());
-        let relative =
-            (angular_velocities[other as usize] - angular_velocities[plate as usize]).cross(r);
-        let opening = relative.dot(normal);
-        opening > min_opening && opening > MIN_OBLIQUITY * relative.length()
-    })
+    let &(_, own) = centroids.iter().find(|(p, _)| *p == plate)?;
+    centroids
+        .iter()
+        .filter(|&&(other, _)| other != plate)
+        .filter_map(|&(other, centroid)| {
+            let normal = tangent(centroid.normalize() - own.normalize());
+            let relative =
+                (angular_velocities[other as usize] - angular_velocities[plate as usize]).cross(r);
+            let opening = relative.dot(normal);
+            (opening > min_opening && opening > MIN_OBLIQUITY * relative.length())
+                .then_some(opening)
+        })
+        .reduce(f64::max)
 }
 
 /// Reusable buffers for [`opens_away`].
@@ -2931,6 +2946,7 @@ mod tests {
             1,
             min_opening,
         )
+        .is_some()
     }
 
     #[test]

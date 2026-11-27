@@ -19,6 +19,7 @@ mod presets;
 #[cfg(any(test, target_arch = "wasm32"))]
 mod query;
 mod ramp_up;
+mod reduced;
 mod render;
 mod sea;
 mod sparse;
@@ -136,6 +137,13 @@ struct Cli {
     /// fast in a moist greenhouse; the ocean and the sea level fall, the oxygen stays behind.
     #[arg(long)]
     no_escape: bool,
+
+    /// Leave out the reduced gases (#202): by default volcanoes (with the mantle's redox state)
+    /// and the serpentinization of slowly spreading sea floor release H₂ and a little CH₄,
+    /// which meet the O₂, escape to space and add their greenhouse forcing. They need the
+    /// escape, so `--no-escape` also leaves them out.
+    #[arg(long)]
+    no_reduced_gases: bool,
 
     /// Start with a bare planet instead of an initial sediment cover.
     #[arg(long)]
@@ -588,6 +596,7 @@ impl Cli {
         params.breakup.diagnose = self.plate_log.is_some();
         parameters.carbon.enabled = !self.no_carbon_cycle;
         parameters.escape.enabled = !self.no_escape;
+        parameters.escape.gases.enabled = !self.no_reduced_gases;
         let mut overrides = Vec::with_capacity(self.overrides.len());
         for assignment in &self.overrides {
             let (name, value) = assignment

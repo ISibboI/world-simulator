@@ -549,6 +549,37 @@ impl CarbonCycle {
         self.tectonic_degassing
     }
 
+    /// Adds `carbon` mol to the exogenic carbon (negative: takes it): the carbon that the
+    /// reduced gases (#202) gave back as CO₂ or took to make CH₄ in a step.
+    pub fn exchange(&mut self, carbon: f64) {
+        self.carbon += carbon;
+        self.state.carbon = self.carbon;
+    }
+
+    /// While the CO₂ is held ([`Self::holds_co2`]), sets it to the CO₂ whose forcing is
+    /// `forcing` (W/m²), with its exogenic carbon in an ocean of `ocean_mass` kg on a planet
+    /// of `planet_area` m²: the CO₂ then makes up the change of other greenhouse gases (#202),
+    /// so that the total forcing of the start is held. Does nothing otherwise.
+    pub fn hold_forcing(&mut self, forcing: f64, ocean_mass: f64, planet_area: f64) {
+        if !self.holds_co2() {
+            return;
+        }
+        self.ratio = co2_ratio_for_forcing(forcing);
+        self.forcing = forcing;
+        self.carbon = exogenic_carbon(&self.params, self.ratio, ocean_mass, planet_area);
+        let state = &mut self.state;
+        state.ratio = self.ratio;
+        state.pressure = self.ratio * REFERENCE_PRESSURE;
+        state.forcing = forcing;
+        state.carbon = self.carbon;
+        state.atmosphere = atmospheric_carbon(self.ratio, planet_area);
+    }
+
+    /// The forcing (W/m²) of the current CO₂.
+    pub fn forcing(&self) -> f64 {
+        self.forcing
+    }
+
     /// Ends the hold of the CO₂ at the end of the ramp-up phase: φ is set so that the sinks
     /// balance the sources over the recorded steps (the last [`Self::calibration_span`]) at the
     /// current CO₂, and the smoothing of the tectonic
