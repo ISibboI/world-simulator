@@ -162,3 +162,31 @@ step is a few bisections per step. The GitHub-runner times (main 985 s, #202 105
    water sink: 1.1% of the ocean per Gyr. Keep `reduced.serpentinite` = 0.08?
 2. **The redox parameter.** `--set reduced.mantle_redox=-4` gives a "reduced planet": 0.3%
    H₂, still no climate effect. Is a CLI option or a preset wanted, or is `--set` enough?
+
+## Independent evaluation and what changed
+
+An independent agent checked these results against the logs and the code. It found that the
+numbers reproduce, the physics is plausible for an Earth-like barren planet and the budgets
+close. Its findings and the changes:
+
+1. **`--no-carbon-cycle` (must-fix):** the CO₂ forcing was held at the start's total minus the
+   "no CH₄" forcing, a permanent offset of +0.5–0.7 W/m². *Fixed* (`6c12102`, see above).
+2. **Temperature wording:** unpaired means were reported as "no change". *Reworded* to the
+   paired −0.24 ± 0.14 K (barren) and −0.22 ± 0.07 K (ΔFMQ −4 against the same seeds), marginal.
+3. **Falling serpentinization:** *explained* by the plates speeding up (3.6 → 4.5 cm/yr).
+4. **Sea-level numbers:** the ocean-depth equivalent and the sea level are now *stated
+   separately*.
+5. **Juvenile volcanic H₂:** its water is not tracked. *Stated*: the loss numbers are lower
+   bounds, and the modern run's water gain comes from the undebited background O₂.
+6. **Logged diffusion limit:** it used the last step's gases, so the flux could exceed it.
+   *Fixed*: it now logs the step's.
+7. **The gases' water bypasses the escape's 1% ocean floor.** *Kept*: it matters only near
+   the floor, and `remove_water` still never takes more than the ocean holds.
+8. **XUV limit numbers in the reduced case:** *corrected*.
+
+## Overlap with open PRs
+
+PR #221 (LIPs and plume tails, CO₂ through #196's plume source) raises
+`arc_plume_mantle_degassing`. The volcanic H₂ and CO of this issue scale with it
+automatically, by design without double counting. No code conflicts are expected beyond
+`planet.rs` context.
