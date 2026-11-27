@@ -26,7 +26,7 @@
 //! [`RampUpParams::max_duration`] it ends anyway (a safety net, with a warning). Everything is
 //! computed from the simulation's own state at the end of each step, so the end is as
 //! deterministic as the run. The tolerances were set on the 8-seed runs of #213
-//! (`notes/issue-213/results.md`): the generated start of #213 ends after ~30–60 Myr, the old
+//! (`notes/issue-213/results.md`): the generated start of #213 ends after 30–90 Myr, the old
 //! 12-plate start after ~100 Myr.
 
 use std::collections::VecDeque;
