@@ -2,9 +2,22 @@
 
 ## What the viewer shows
 
-The parameter panel has a collapsible **Planet** section under the time and #217's ramp-up
-lines (open by default on wide screens, collapsed on phones, like the panel itself). Every value
-belongs to the state on screen: live, or the past frame the time bar shows.
+After Sebastian's review on #218 (the parameter panel is for inputs only), the outputs have their
+own panel, **Simulation and planet**, in the bottom right corner above the time bar:
+
+- the run's time and pace (`t = X of Y Myr · s per step`), or why it failed, or what it does
+  before its first state, and the step-time hint (all moved out of the parameter panel);
+- #217's ramp-up line (moved out of the parameter panel);
+- the global statistics below.
+
+It is open by default on wide screens and hidden on phones (< 600 pt), where a button
+"Planet · 30 Myr (ramp-up)" remains (with the step-time hint above it), so nothing is lost.
+On a phone the open panel sits above the cell widget's button, and the sparklines get rows of
+their own when the panel is narrower than 25 × the body text size. The parameter panel holds
+only the options of the simulation and the restart buttons; it keeps clear of the new panel.
+The time bar is unchanged.
+
+Every value belongs to the state on screen: live, or the past frame the time bar shows.
 
 | Group | Rows |
 | --- | --- |
@@ -36,12 +49,13 @@ temperature and heat flow, a day length that changes (the climate uses a fixed r
 - Local CI with `CARGO_BUILD_WARNINGS=deny`: fmt, clippy (desktop and wasm32, all targets), doc,
   tests; `trunk build --release`.
 - Screenshots (virtual screen):
-  - [desktop-past-frame.png](desktop-past-frame.png): the view at 20 Myr while the run is at
-    60 Myr — the panel shows the 20-Myr values, the sparkline dots sit at 20 Myr;
+  - [desktop-past-frame.png](desktop-past-frame.png): the view at 42 Myr while the run is at
+    60 Myr — the panel shows the 42-Myr values, the sparkline dots sit at 42 Myr;
   - [desktop-live.png](desktop-live.png): live at 60 Myr;
-  - [web-phone-collapsed.png](web-phone-collapsed.png): web at 390×844, section collapsed;
-  - [web-phone-planet.png](web-phone-planet.png): the same, expanded; the sparklines sit under
-    their values so that the panel fits.
+  - [web-phone-collapsed.png](web-phone-collapsed.png): web at 390×844, both panels hidden;
+  - [web-phone-planet.png](web-phone-planet.png): the same with the planet panel open; the
+    sparklines sit under their values so that the panel fits;
+  - [web-phone-parameters.png](web-phone-parameters.png): the parameter panel, inputs only.
 
 ## Notes on the values
 

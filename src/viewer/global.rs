@@ -1,5 +1,6 @@
-//! The global state of the planet that the view shows beside the time (#209): the ramp-up phase
-//! (#213), the Sun, the climate, the surface and the plates, as a few numbers per state.
+//! The global state of the planet that the view shows in its own panel ([`PlanetPanel`], #209):
+//! the ramp-up phase (#213), the Sun, the climate, the surface and the plates, as a few numbers
+//! per state.
 //!
 //! The simulation computes a [`GlobalStatus`] with every state it sends, from the planet and
 //! the cell attributes it sends anyway (read only: the simulation is not affected). The record
@@ -258,15 +259,159 @@ pub const SPARKLINE_POINTS: usize = 160;
 /// Size of a sparkline in points.
 const SPARKLINE_SIZE: egui::Vec2 = egui::vec2(64.0, 16.0);
 
-/// What the "Planet" section shows: the global state of the displayed state, when that is (Myr)
+/// What the planet panel shows: the global state of the displayed state, when that is (Myr)
 /// and the run's epoch, and the series of the sparklines.
 pub struct PlanetView<'a> {
     pub global: &'a GlobalStatus,
     pub time: f64,
     pub epoch: f64,
     pub series: &'a Series,
-    /// A narrow screen (a phone): the sparklines get rows of their own.
-    pub narrow: bool,
+}
+
+/// Screens narrower than this (in points) start with the panel hidden, as the other panels.
+const NARROW_SCREEN: f32 = 600.0;
+/// Largest width of the panel in points: room for a label, a value and a sparkline.
+const MAX_WIDTH: f32 = 360.0;
+/// Narrower than this many times the size of body text, the sparklines get rows of their own
+/// (a label, a value and a sparkline need about that much).
+const SPARKLINES_BESIDE: f32 = 25.0;
+/// Distance of the panel and its button from the edges of the window, in points.
+const MARGIN: f32 = 8.0;
+
+/// What the planet panel shows about the running simulation: its state, not its inputs (those
+/// are in the parameter panel).
+pub struct SimulationStatus<'a> {
+    /// Simulated time of the newest state, if there is one yet.
+    pub time: Option<f64>,
+    /// Simulated duration of the running simulation in Myr.
+    pub duration: f64,
+    /// Why the simulation failed, if it did.
+    pub failure: Option<&'a str>,
+    /// What the simulation does until its first update (see `banner::starting_text`).
+    pub starting: &'a str,
+    /// The median time per step in seconds, once known.
+    pub step_seconds: Option<f64>,
+}
+
+/// The panel of the simulation's state in the bottom right corner of the view, above the time
+/// bar (#209): the time of the run and its pace (or why it failed), the step-time hint, the
+/// ramp-up phase (#213) and the global statistics of the displayed state. Like the cell widget
+/// it can be hidden, and starts hidden on narrow screens; hidden, a button with the time
+/// remains, with the step-time hint above it, so that nothing is lost on a phone.
+#[derive(Default)]
+pub struct PlanetPanel {
+    /// Whether the panel is shown; decided by the screen width on the first frame.
+    open: Option<bool>,
+}
+
+impl PlanetPanel {
+    /// Shows the panel or its button, `above` points above the bottom edge of the window (the
+    /// time bar); the panel also above `cell` (the area of the cell widget in the bottom left
+    /// corner) where the two would overlap (phones). `view` is `None` before the first state.
+    /// `hint` draws the step-time hint, which is shown in either case. Returns the area it
+    /// covers.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        status: &SimulationStatus,
+        view: Option<&PlanetView>,
+        above: f32,
+        cell: Option<egui::Rect>,
+        hint: Option<impl FnOnce(&mut egui::Ui)>,
+    ) -> egui::Rect {
+        let screen = ctx.content_rect();
+        let open = *self.open.get_or_insert(screen.width() >= NARROW_SCREEN);
+        let width = (screen.width() - 4.0 * MARGIN).clamp(100.0, MAX_WIDTH);
+        if !open {
+            let state = match (status.failure, status.time) {
+                (Some(_), _) => "failed".to_owned(),
+                (None, Some(time)) => format!("{time:.0} Myr"),
+                (None, None) => "starting".to_owned(),
+            };
+            let ramp_up = view.is_some_and(|view| view.global.ramp_up_end.is_nan());
+            let text = format!(
+                "Planet · {state}{}",
+                if ramp_up { " (ramp-up)" } else { "" }
+            );
+            return egui::Area::new(egui::Id::unique("planet panel button"))
+                .anchor(egui::Align2::RIGHT_BOTTOM, [-MARGIN, -MARGIN - above])
+                .show(ctx, |ui| {
+                    ui.set_max_width(width);
+                    // The hint above the button, both right-aligned in the corner.
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                        if let Some(hint) = hint {
+                            hint(ui);
+                        }
+                        if ui
+                            .button(text)
+                            .on_hover_text("Show the state of the simulation and the planet")
+                            .clicked()
+                        {
+                            self.open = Some(true);
+                        }
+                    });
+                })
+                .response
+                .rect;
+        }
+        // Above the cell widget if they would overlap (the button is narrow enough beside it).
+        let above = match cell {
+            Some(cell) if cell.right() + MARGIN > screen.right() - MARGIN - width => {
+                above.max(screen.bottom() - cell.top() + MARGIN)
+            }
+            _ => above,
+        };
+        let mut open = true;
+        let response = egui::Window::new("Simulation and planet")
+            .id(egui::Id::unique("planet panel"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-MARGIN, -MARGIN - above])
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            // A fixed width, so that values of other lengths do not resize it.
+            .min_width(width)
+            .max_width(width)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(((screen.height() - above) * 0.6).max(100.0))
+                    .show(ui, |ui| {
+                        run_status(ui, status);
+                        if let Some(hint) = hint {
+                            hint(ui);
+                        }
+                        if let Some(view) = view {
+                            let (line, detail) = view.global.ramp_up_lines();
+                            ui.label(line);
+                            ui.label(egui::RichText::new(detail).weak());
+                            ui.separator();
+                            let body = egui::TextStyle::Body.resolve(ui.style()).size;
+                            planet_rows(ui, view, width < SPARKLINES_BESIDE * body);
+                        }
+                    });
+            });
+        self.open = Some(open);
+        response.map_or(egui::Rect::NOTHING, |response| response.response.rect)
+    }
+}
+
+/// The time of the run and its pace, why it failed, or what it does before its first state.
+fn run_status(ui: &mut egui::Ui, status: &SimulationStatus) {
+    match (status.failure, status.time) {
+        (Some(failure), _) => {
+            ui.colored_label(ui.visuals().error_fg_color, "Simulation failed:");
+            ui.colored_label(ui.visuals().error_fg_color, failure);
+        }
+        (None, Some(time)) => {
+            let pace = status
+                .step_seconds
+                .map(|seconds| format!(" · {seconds:.2} s per step"))
+                .unwrap_or_default();
+            ui.label(format!("t = {time:.0} of {:.0} Myr{pace}", status.duration));
+        }
+        (None, None) => {
+            ui.label(status.starting);
+        }
+    }
 }
 
 /// A value for the panel: `—` for NaN.
@@ -278,16 +423,18 @@ fn value(value: f32, format: impl FnOnce(f32) -> String) -> String {
     }
 }
 
-/// The rows of the "Planet" section: the epoch and the Sun, the climate, the surface and the
+/// The rows of the planet panel: the epoch and the Sun, the climate, the surface and the
 /// plates, each value with its unit; sparklines for the mean temperature, the CO₂ and the sea
 /// level over the recorded frames, with a mark at the displayed one.
-pub fn planet_rows(ui: &mut egui::Ui, view: &PlanetView) {
+///
+/// On a `narrow` panel the sparklines get rows of their own, under their values.
+fn planet_rows(ui: &mut egui::Ui, view: &PlanetView, narrow: bool) {
     let global = view.global;
     let sun = crate::sun::Sun::of_run(view.epoch, view.time);
     let epoch = view.epoch + view.time / 1000.0;
     // Beside the value, or on a narrow screen under it, so that the panel fits.
     let spark = |ui: &mut egui::Ui, of: fn(&GlobalStatus) -> f32| {
-        if view.narrow {
+        if narrow {
             ui.end_row();
             ui.label("");
         }
@@ -298,7 +445,7 @@ pub fn planet_rows(ui: &mut egui::Ui, view: &PlanetView) {
         ui.end_row();
     };
     egui::Grid::new("planet rows")
-        .num_columns(if view.narrow { 2 } else { 3 })
+        .num_columns(if narrow { 2 } else { 3 })
         .striped(true)
         .show(ui, |ui| {
             group(ui, "Time");

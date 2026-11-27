@@ -21,7 +21,6 @@ use clap::{ArgAction, CommandFactory, Parser};
 use eframe::egui;
 
 use super::Launch;
-use super::global::{GlobalStatus, PlanetView, Series};
 use crate::Cli;
 
 /// The long name of the subdivisions option.
@@ -72,52 +71,6 @@ const MAX_WIDTH: f32 = 360.0;
 
 /// Distance of the panel and its button from the corner of the window, in points.
 const MARGIN: f32 = 8.0;
-
-/// What the panel shows about the running simulation.
-pub struct SimulationStatus<'a> {
-    /// Simulated time of the displayed state, if there is one yet.
-    pub time: Option<f64>,
-    /// Simulated duration of the running simulation in Myr.
-    pub duration: f64,
-    /// Why the simulation failed, if it did.
-    pub failure: Option<&'a str>,
-    /// What the simulation does until its first update (see `banner::starting_text`).
-    pub starting: &'a str,
-    /// The median time per step in seconds, once known.
-    pub step_seconds: Option<f64>,
-    /// The global state of the displayed state (live or a past frame), once known.
-    pub global: Option<GlobalStatus>,
-    /// Simulated time of the displayed state (Myr) and the epoch of the run (`--epoch`).
-    pub shown_time: f64,
-    pub epoch: f64,
-    /// The global states of the recorded frames for the sparklines (#209).
-    pub series: Series,
-}
-
-/// The global state under the time of the panel: the ramp-up phase in plain lines, short
-/// enough for a phone, and the collapsible "Planet" section with the global statistics (#209),
-/// open by default on wide screens.
-fn global_status(ui: &mut egui::Ui, status: &SimulationStatus, global: &GlobalStatus) {
-    let (line, detail) = global.ramp_up_lines();
-    ui.label(line);
-    ui.label(egui::RichText::new(detail).weak());
-    let wide = ui.ctx().content_rect().width() >= NARROW_SCREEN;
-    egui::CollapsingHeader::new("Planet")
-        .id_salt("parameter panel planet")
-        .default_open(wide)
-        .show(ui, |ui| {
-            super::global::planet_rows(
-                ui,
-                &PlanetView {
-                    global,
-                    time: status.shown_time,
-                    epoch: status.epoch,
-                    series: &status.series,
-                    narrow: !wide,
-                },
-            );
-        });
-}
 
 /// How an option is edited.
 #[derive(Debug, Clone, PartialEq)]
@@ -331,21 +284,18 @@ impl ParameterPanel {
     }
 
     /// Shows the panel (or the button that shows it) and returns the simulation to start if
-    /// the user asked for a restart. The panel stays above `avoid` (the area reserved for the
-    /// cell widget in the bottom left corner) where the two could overlap, on narrow screens,
-    /// and always above `time_bar` (along the bottom edge).
-    /// The button and the hint under it stay clear of `switcher` (the render-mode switcher in
-    /// the top left corner): beside it if there is room, else below it. `hint` draws the
-    /// step-time hint: under the status line of the panel, or under the button while the panel
-    /// is hidden, so that it is always visible.
+    /// the user asked for a restart. The panel stays above the areas of `avoid` (those reserved
+    /// for the cell widget in the bottom left corner and the planet panel in the bottom right
+    /// one) where they could overlap, and always above `time_bar` (along the bottom edge).
+    /// The button stays clear of `switcher` (the render-mode switcher in the top left corner):
+    /// beside it if there is room, else below it. The panel holds only the inputs of the
+    /// simulation; its time and state are in the planet panel (`super::global`).
     pub fn show(
         &mut self,
         ctx: &egui::Context,
-        status: &SimulationStatus,
-        avoid: Option<egui::Rect>,
+        avoid: &[egui::Rect],
         time_bar: Option<egui::Rect>,
         switcher: egui::Rect,
-        hint: Option<impl FnOnce(&mut egui::Ui)>,
     ) -> Option<Launch> {
         let args = self.args();
         if args != self.checked {
@@ -372,9 +322,6 @@ impl ParameterPanel {
                         {
                             self.open = Some(true);
                         }
-                        if let Some(hint) = hint {
-                            hint(ui);
-                        }
                     });
                 });
             return None;
@@ -383,13 +330,12 @@ impl ParameterPanel {
         let max_width = (screen.width() - 4.0 * MARGIN).clamp(100.0, MAX_WIDTH);
         // Beside the switcher if the panel fits there, else below it (phones).
         let (top, max_width) = beside_or_below(screen, switcher, max_width, MIN_PANEL_BESIDE);
-        let bottom = match avoid {
-            Some(avoid) if avoid.right() + MARGIN > screen.right() - MARGIN - max_width => {
-                avoid.top().min(screen.bottom())
-            }
-            _ => screen.bottom(),
-        }
-        .min(time_bar.map_or(screen.bottom(), |bar| bar.top()));
+        let bottom = avoid
+            .iter()
+            .filter(|avoid| avoid.right() + MARGIN > screen.right() - MARGIN - max_width)
+            .map(|avoid| avoid.top())
+            .fold(screen.bottom(), f32::min)
+            .min(time_bar.map_or(screen.bottom(), |bar| bar.top()));
         let mut open = true;
         let mut launch = None;
         egui::Window::new("Simulation parameters")
@@ -404,7 +350,7 @@ impl ParameterPanel {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .max_height((bottom - screen.top() - top - 9.0 * MARGIN).max(100.0))
-                    .show(ui, |ui| launch = self.contents(ui, status, hint));
+                    .show(ui, |ui| launch = self.contents(ui));
             });
         self.open = Some(open);
         if launch.is_some() {
@@ -421,36 +367,7 @@ impl ParameterPanel {
         }
     }
 
-    fn contents(
-        &mut self,
-        ui: &mut egui::Ui,
-        status: &SimulationStatus,
-        hint: Option<impl FnOnce(&mut egui::Ui)>,
-    ) -> Option<Launch> {
-        match (status.failure, status.time) {
-            (Some(failure), _) => {
-                ui.colored_label(ui.visuals().error_fg_color, "Simulation failed:");
-                ui.colored_label(ui.visuals().error_fg_color, failure);
-            }
-            (None, Some(time)) => {
-                let pace = status
-                    .step_seconds
-                    .map(|seconds| format!(" · {seconds:.2} s per step"))
-                    .unwrap_or_default();
-                ui.label(format!("t = {time:.0} of {:.0} Myr{pace}", status.duration));
-            }
-            (None, None) => {
-                ui.label(status.starting);
-            }
-        }
-        if let (None, Some(global)) = (status.failure, &status.global) {
-            global_status(ui, status, global);
-        }
-        if let Some(hint) = hint {
-            hint(ui);
-        }
-        ui.separator();
-
+    fn contents(&mut self, ui: &mut egui::Ui) -> Option<Launch> {
         let (main, more): (Vec<&mut Field>, Vec<&mut Field>) = self
             .fields
             .iter_mut()
@@ -505,13 +422,13 @@ impl ParameterPanel {
     }
 }
 
-/// Narrowest room (points) beside the switcher for the button and the hint of the hidden panel,
-/// and for the open panel.
+/// Narrowest room (points) beside the switcher for the button of the hidden panel, and for the
+/// open panel.
 const MIN_BESIDE: f32 = 160.0;
 const MIN_PANEL_BESIDE: f32 = 300.0;
 
 /// Where the panel or its button goes, as the distance of its top from the top of the screen,
-/// and how wide it (and the hint under the button) may be (at most `width`): beside `switcher`
+/// and how wide it may be (at most `width`): beside `switcher`
 /// in the top right corner if there are at least `min_beside` points of room, else below it.
 fn beside_or_below(
     screen: egui::Rect,
@@ -658,9 +575,6 @@ fn clap_message(error: &clap::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// No step-time hint.
-    const NO_HINT: Option<fn(&mut egui::Ui)> = None;
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|&arg| arg.to_owned()).collect()
@@ -861,32 +775,21 @@ mod tests {
         }
         let ctx = egui::Context::default();
         let mut panel = ParameterPanel::new(&strings(&["world-simulator"]), None);
-        let status = SimulationStatus {
-            time: Some(10.0),
-            duration: 500.0,
-            failure: None,
-            starting: "Starting the simulation…",
-            step_seconds: Some(0.4),
-            global: Some(super::super::global::example()),
-            shown_time: 10.0,
-            epoch: 0.0,
-            series: Vec::new(),
-        };
         let mut launch = None;
         run(&ctx, egui::RawInput::default(), |ui| {
-            launch = panel.show(ui.ctx(), &status, None, None, egui::Rect::NOTHING, NO_HINT);
+            launch = panel.show(ui.ctx(), &[], None, egui::Rect::NOTHING);
         });
         assert!(launch.is_none());
         assert!(panel.error.is_none());
         field(&mut panel, "plates").text = "0".to_owned();
         run(&ctx, egui::RawInput::default(), |ui| {
-            panel.show(ui.ctx(), &status, None, None, egui::Rect::NOTHING, NO_HINT);
+            panel.show(ui.ctx(), &[], None, egui::Rect::NOTHING);
         });
         assert!(panel.error.as_deref().unwrap().contains("plate"));
         // Hidden, the panel keeps its values.
         panel.open = Some(false);
         run(&ctx, egui::RawInput::default(), |ui| {
-            panel.show(ui.ctx(), &status, None, None, egui::Rect::NOTHING, NO_HINT);
+            panel.show(ui.ctx(), &[], None, egui::Rect::NOTHING);
         });
         assert_eq!(field(&mut panel, "plates").text, "0");
 
@@ -901,7 +804,7 @@ mod tests {
             ..Default::default()
         };
         run(&ctx, phone, |ui| {
-            panel.show(ui.ctx(), &status, None, None, egui::Rect::NOTHING, NO_HINT);
+            panel.show(ui.ctx(), &[], None, egui::Rect::NOTHING);
         });
         assert_eq!(panel.open, Some(false));
     }
