@@ -187,10 +187,11 @@ impl RampUp {
         let (plate_mean, degassing_mean) = self.current.means();
         self.current = Window::default();
         let passed = self.previous.map(|(plates_before, degassing_before)| {
-            let growth = (degassing_mean - degassing_before) / degassing_mean.max(f64::MIN_POSITIVE);
+            let growth =
+                (degassing_mean - degassing_before) / degassing_mean.max(f64::MIN_POSITIVE);
             let change = (plate_mean - plates_before).abs() / plate_mean.max(f64::MIN_POSITIVE);
-            let pass = growth <= self.params.degassing_tolerance
-                && change <= self.params.plate_tolerance;
+            let pass =
+                growth <= self.params.degassing_tolerance && change <= self.params.plate_tolerance;
             (pass, growth, change)
         });
         self.previous = Some((plate_mean, degassing_mean));

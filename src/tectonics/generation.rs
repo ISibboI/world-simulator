@@ -338,7 +338,9 @@ fn target_areas(plate_count: usize, cell_count: usize, rng: &mut impl Rng) -> Ve
         .min(1.0 / n);
     for _ in 0..4 {
         let total: f64 = targets.iter().sum();
-        targets.iter_mut().for_each(|t| *t = (*t / total).max(floor));
+        targets
+            .iter_mut()
+            .for_each(|t| *t = (*t / total).max(floor));
     }
     let total: f64 = targets.iter().sum();
     targets.iter_mut().for_each(|t| *t /= total);

@@ -8,11 +8,11 @@ use web_time::Instant;
 use tracing::{debug, debug_span, info};
 
 use crate::carbon::{CarbonCycle, CarbonParams, CarbonState, LandCell, StepInput};
-use crate::ramp_up::{RampUp, RampUpParams, RampUpStatus};
 use crate::climate::{Climate, ClimateParams, WaterCycle};
 use crate::erosion::{
     CrustClass, ErosionParams, Hydrology, Surface, SurfaceWater, WaveErosion, erode,
 };
+use crate::ramp_up::{RampUp, RampUpParams, RampUpStatus};
 use crate::tectonics::{
     CohortMasses, CoverBudget, CoverMasses, Crust, Simulation, Statistics, TectonicStep,
 };
