@@ -547,6 +547,15 @@ impl Cli {
         );
         ensure!(self.dt > 0.0, "the time step must be positive");
         ensure!(self.duration >= 0.0, "the duration must not be negative");
+        ensure!(
+            self.duration == 0.0 || self.run_duration() > 0.0,
+            "a run from epoch {} would end at once: runs end by epoch {:.2}, when the Sun is {} \
+             times as bright as today (beyond, an ocean planet enters a runaway greenhouse, which \
+             the model does not simulate)",
+            self.epoch,
+            sun::MAX_EPOCH,
+            sun::MAX_LUMINOSITY,
+        );
         ensure!(self.width >= 2, "the image width must be at least 2");
         Ok(())
     }
@@ -623,10 +632,12 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
     let duration = cli.run_duration();
     if duration < cli.duration {
         warn!(
-            "the run is shortened from {} to {duration} Myr: it ends at epoch {:.2}, when the Sun \
-             is {} times as bright as today; beyond, an ocean planet enters a runaway greenhouse \
-             (its ocean boils into a steam atmosphere), which the model does not simulate",
+            "the run is shortened from {} to {duration} Myr: it ends at epoch {:.3}, by epoch {:.2}, \
+             when the Sun is {} times as bright as today; beyond, an ocean planet enters a runaway \
+             greenhouse (its ocean boils into a steam atmosphere), which the model does not \
+             simulate",
             cli.duration,
+            cli.epoch + duration / 1000.0,
             sun::MAX_EPOCH,
             sun::MAX_LUMINOSITY,
         );

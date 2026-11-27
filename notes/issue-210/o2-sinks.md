@@ -76,7 +76,7 @@ source; `s` → 1 at high O₂).
 
 ## Code
 
-- `EscapeParams`: `oxygen_sink` goes; new `degassing_reductants` (0.15), `seafloor_oxidation`
+- `EscapeParams`: `oxygen_sink` goes; new `volcanic_reductants` (0.15), `seafloor_oxidation`
   (0.008), `felsic_ferrous`, `basalt_ferrous`, `felsic_sulfide`, `basalt_sulfide`,
   `ferrous_oxidised` (0.5), `sediment_reduced` (0.3), `oxidation_pressure` (2e-5 bar); all
   settable as `escape.NAME`.

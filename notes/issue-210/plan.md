@@ -86,7 +86,8 @@ Per step of `Δt` years and planet area `A`:
 - oxygen left behind: `Φ(H)/4` O₂. No oxygen escapes with the hydrogen (no drag of O: the
   crossover mass at these fluxes stays below 16 amu; Hunten et al., 1987): an upper bound.
 - O₂ budget (#201 placeholder): `dN_O₂/dt = source − sink`, the sink a constant capacity of
-  reduced volcanic gases and crust oxidation, `oxygen_sink` = 1 Tmol O₂/yr (Earth's reductant
+  reduced volcanic gases and crust oxidation, `oxygen_sink` = 1 Tmol O₂/yr (replaced by the
+  physical sinks of [o2-sinks.md](o2-sinks.md) since `e25e269`) (Earth's reductant
   flux is of order 1–5 Tmol O₂-eq/yr; Catling & Kasting, 2017), never more than the O₂ there.
   The accumulated O₂ is reported (mol, bar) and adds to `p_a` of the cold trap (it dilutes the
   vapour). With a cold trap the source (~0.01 Tmol/yr) is far below the sink, so a barren

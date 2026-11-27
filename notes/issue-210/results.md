@@ -1,5 +1,87 @@
 # #210 results: atmospheric escape
 
+## Update: decisions 1 and 2 of PR #212 (commit `e25e269`)
+
+Sebastian on [PR #212](https://github.com/ISibboI/world-simulator/pull/212#issuecomment-7222797289):
+**decision 1** "yes" (the O₂ sink follows the tectonic and weathering rates, as the abiotic O₂
+budget of #201) and **decision 2** "cap runs at 1.2 S₀"
+([answer](https://github.com/ISibboI/world-simulator/pull/212#issuecomment-7222820567)). Both are
+implemented.
+
+- **O₂ sinks** ([plan and review](o2-sinks.md)): reduced gases of arc and plume volcanoes
+  (0.15 mol O₂ per mol of their mantle CO₂), hydrothermal oxidation of new oceanic crust (0.008
+  mol O₂/kg) and oxidative weathering of eroded bedrock (felsic 0.089, basalt 0.23 mol O₂/kg,
+  oxidised share `1 − exp(−√(p/2e-5 bar))`), in an implicit step that closes the budget
+  (unit-tested to 1e-12 over 400 steps of changing inputs).
+- **Cap at 1.2 S₀** (`sun::MAX_LUMINOSITY`; the age solves Gough's luminosity for 1.2: 6.47
+  Gyr, `MAX_EPOCH` = 5.90 instead of 9.43): later `--epoch` values are refused with the reason
+  (runaway greenhouse, not simulated), a run that would pass the cap is shortened to whole steps
+  ending there, with a warning (e.g. `--epoch 5.5 --duration 1000` → 404 Myr). The panel and the
+  web URL go through the same parsing and checks, so they refuse and shorten alike; the panel's
+  "t of N Myr" shows the shortened duration. The moist-greenhouse warning above 1.1 S₀ stays.
+- `--no-escape` gives the same state hashes as #196's head (`afc4046`; 20 Myr, 5 subdivisions).
+
+### Runs (1000 Myr unless noted, 6 subdivisions, through `runs`; [run tables](runs-o2.txt))
+
+Epochs 7 and 8.4 are past the cap now; they are replaced by `--epoch 4.9` (1000 Myr, ends at
+5.9) and `--epoch 5.5` (400 Myr), each also at the old commit `a99a9d5` (constant 3 Tmol/yr
+sink) for the comparison. Seed means at the end:
+
+| | default (8) | modern ep. 4 (4) | ep. 4.9 (4) | ep. 5.5, 400 Myr (4) |
+|---|---|---|---|---|
+| global / tropical T (°C) | 17.6 / 29.7 | 21.6 / 37.7 | 22.8 / 41.3 | 20.8 / 39.5 |
+| stratospheric H₂O | 2.6e-6 | 6.5e-6 | 8.9e-6 | 7.7e-6 |
+| regime | diffusion | diffusion | diffusion | diffusion |
+| water lost (% of the ocean) | 0.019 | 0.045 | 0.051 (old 0.053) | 0.020 (old 0.021) |
+| sea level, lost water (m) | −0.3 | −0.9 | −0.7 (old −0.8) | −0.3 (old −0.2) |
+| escape's O₂ (Tmol/yr) | 0.009 | 0.02 | 0.03 | 0.026 |
+| O₂ in the air | 0 at every snapshot | 0 | 0 | 0 |
+| sink capacity: volcanic / seafloor / weathering (Tmol/yr) | 0.46 / 1.13 / 1.19 | 0.40 / 1.08 / 0.63 | 0.45 / 1.01 / 1.07 | 0.45 / 1.09 / 1.00 |
+| ocean loss time at the end's rate (Gyr) | ~4400 | ~1800 | 1100–1400 | 1300–1800 |
+
+- **Sizes of the sinks.** Capacity 2.1–2.8 Tmol O₂/yr in all sets, steady after the first ~150
+  Myr (the tectonics starts at rest): sea floor ~1.1 (the model's ~1.4e14 kg/yr of new crust,
+  ~2× Earth's), weathering 0.6–1.2 (only where O₂ is present), volcanic ~0.45. The placeholder's 3
+  Tmol/yr was the right order. Without O₂ in the air only the volcanic and seafloor sinks act
+  (1.0–1.6 Tmol/yr); the escape's O₂ (≤ 0.03 Tmol/yr) is 2–3% of that, so they take it all and
+  the air keeps **0 O₂ at every snapshot** in every run, the temperate default included (the
+  weathering takes only the start-up pulse, see the caveats).
+- **Within the cap nothing reaches the moist greenhouse.** At 1.2 S₀ the carbon cycle has drawn
+  the CO₂ down to ~0 and the planet is temperate (global 20–25 °C, tropical ocean ~40 °C), so the
+  cold trap holds the stratosphere at ≤ 1e-5 and the escape is diffusion-limited: 0.05% of the
+  ocean per Gyr, loss times > 1000 Gyr. New and old commit differ only by the start-up pulse
+  (caveats), from which the runs diverge chaotically; e55 seed 1, which had no pulse, is
+  identical in both. So the O₂ sinks, which set the late loss beyond the cap (epochs 7 and 8.4 below),
+  do not change anything a run can reach now; they matter only for the O₂ budget's bookkeeping
+  and for later sources (#201 photosynthesis, #202 volcanic H₂).
+- **Where the sinks would act.** The O₂ builds up only when the escape exceeds ~1e11 kg of
+  water per year (2.6 Tmol O₂/yr), i.e. a wet stratosphere (f ≳ 5e-4, tropical ocean ≳ 60 °C),
+  which the earlier runs reached only at epochs ≥ 7 (1.29 S₀ and more). The unit test of the
+  budget runs such a phase: the fixed sinks take their capacity, the weathering is fully
+  oxidising at bars of O₂, and the O₂ falls again when the climate cools.
+
+### Caveats
+
+- The sinks are calibrated on Earth's rock and gas chemistry; each is uncertain by ~2×. With the
+  cap this does not change any result.
+- With `--biosphere modern` the weathering sees only the escape's O₂, not the background 0.21
+  bar (the living planet's own O₂ cycle is #201's).
+- **Start-up pulse.** In the first step the carbon cycle has no tectonic rates yet (they are
+  rates between steps), so the volcanic and seafloor sinks are ~0 and that step's escape O₂
+  (0.6–1.4e16 mol, one Myr of it) goes to the weathering, at ~1e-9 bar in the air; nothing is
+  left at the first snapshot. It perturbs the runs slightly (they then diverge chaotically) and
+  is otherwise harmless. The tectonic rates, and with them the sinks, reach their level after
+  ~150 Myr.
+- Cells partly under permanent ice count their full bedrock erosion in the weathering's demand
+  (only fully frozen cells are left out), as the carbon cycle's supply does.
+- No evaluation run went through the shortening (the unit test does: `--epoch 5.5 --duration
+  1000` → 404 Myr; a 54 Myr check run from epoch 5.85 ended at 54 Myr with the warning).
+  An `--epoch` less than one step before the cap (e.g. 5.904 at `--dt 1`) is refused.
+- Ocean loss times are at the end's rate; the real end of the oceans (runaway greenhouse beyond
+  1.2 S₀) is outside what the model now runs.
+
+## Before decisions 1 and 2 (commit `4ad1d29`)
+
 Commit `4ad1d29`, 6 subdivisions, 1000 Myr, snapshots every 50 Myr, through `runs` (all on
 GitHub runners). Per-snapshot seed means and per-seed end states:
 [`runs.txt`](runs.txt) (from [`analyse.py`](analyse.py)).
@@ -10,7 +92,7 @@ GitHub runners). Per-snapshot seed means and per-seed end states:
 | modern | `--duration 1000 --biosphere modern --epoch 4` | 4 |
 | epoch 7 | `--duration 1000 --epoch 7` | 4 |
 | epoch 8.4 | `--duration 1000 --epoch 8.4` (ends at 9.4, the end of the sun model) | 4 |
-| sensitivity | epoch 7 with `escape.cold_point_temperature=180` / `200`; epoch 8.4 with `escape.oxygen_sink=1e12` | 2 each |
+| sensitivity | epoch 7 with `escape.cold_point_temperature=180` / `200`; epoch 8.4 with `escape.oxygen_sink=1e12` (that parameter is gone since `e25e269`) | 2 each |
 | off | epoch 7 and 8.4 with `--no-escape` | 2 each |
 
 `--no-escape` gives the same state hashes as #196's head (`afc4046`), checked on a 20 Myr run.
@@ -136,3 +218,20 @@ findings and what was done:
 5. **Boiling above 100 °C and the climate not seeing the O₂.** Added to the caveats.
 6. **Minor.** The density is now shared with the carbon cycle, a test comment is fixed, and
    `at_floor` is no longer set by a zero loss.
+
+## Evaluation of decisions 1 and 2
+
+An independent agent checked the code and the runs at `e25e269`/`0376f92`: nothing to fix. The
+O₂ budget closes by construction, units (mol/yr × years) and the bisection are right, the step
+is deterministic (`math::exp_m1`, IEEE `sqrt`, a fixed order), `--no-escape` runs none of the new
+code, and the cap's arithmetic (age 6.4742 Gyr, epoch 5.9042) and the shortening to whole steps
+never pass the cap. Spot checks of the tables against the logs passed. Its findings and what was
+done:
+
+1. **The new–old difference is the start-up pulse, not plain chaos.** Explained in the caveats.
+2. **Size of the start-up trace and the capacity share** (0.6–1.4e16 mol; 2–3% of the active
+   1.0–1.6 Tmol/yr, not 1% of the total). Corrected.
+3. **`--epoch` at the cap gave a 0 Myr run.** Now refused; the shortening warning gives the run's
+   real end epoch.
+4. **Minor:** end temperatures 20–25 °C, partial ice, stale parameter names in the notes.
+   Corrected or stated.

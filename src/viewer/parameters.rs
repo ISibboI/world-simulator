@@ -797,6 +797,7 @@ mod tests {
         assert!(error(&["world-simulator", "--epoch=-1"]).contains("epoch"));
         // Past 1.2 S₀ (#212): later epochs are refused, longer runs shortened to end there.
         assert!(error(&["world-simulator", "--epoch=7"]).contains("runaway greenhouse"));
+        assert!(error(&["world-simulator", "--epoch=5.904"]).contains("end at once"));
         let late = launch_from(
             strings(&["world-simulator", "--epoch=5.5", "--duration=1000"]),
             None,
