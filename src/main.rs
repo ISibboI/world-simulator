@@ -119,9 +119,10 @@ struct Cli {
 
     /// Keep the greenhouse forcing of the start for the whole run instead of letting the carbon
     /// cycle (#154) change it: by default, tectonic degassing and weathering set the CO₂ in
-    /// every step after the first 150 Myr (`carbon.calibration_time`), during which the
-    /// tectonics spins up from rest and the weathering is calibrated to balance the degassing.
-    /// The fluxes are still computed and logged.
+    /// every step after the ramp-up phase (#213: until the tectonics has settled from the
+    /// generated start, typically a few tens of Myr, at most `ramp_up.max_duration`), at whose
+    /// end the weathering is calibrated to balance the degassing. The fluxes are still computed
+    /// and logged.
     #[arg(long)]
     no_carbon_cycle: bool,
 
