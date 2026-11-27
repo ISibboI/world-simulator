@@ -919,7 +919,7 @@ impl Planet {
             for (cell, eroded) in eroded.iter_mut().enumerate() {
                 // The regolith was counted as fresh rock when it was made (the bedrock lowering),
                 // so its removal is not counted again as eroded sediment.
-                let regolith_removed = self.regolith.thickness[cell] - result.regolith[cell];
+                let regolith_removed = result.regolith_start[cell] - result.regolith[cell];
                 *eroded = (
                     (-result.bedrock_delta[cell]).max(0.0) / dt_years,
                     (-result.sediment_delta[cell] - regolith_removed).max(0.0) / dt_years,

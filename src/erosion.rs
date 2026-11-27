@@ -414,8 +414,10 @@ pub struct ErosionResult {
     pub sea_level_change: SurfaceSeaLevel,
     /// Sediment moved by waves.
     pub wave: WaveErosion,
-    /// Regolith at the bottom of each cell's sediment at the end of the step (rock-equivalent
-    /// m, at most the sediment; zero without regolith).
+    /// Regolith at the bottom of each cell's sediment at the start of the step as the step saw
+    /// it ([`Surface::regolith`] clamped to the sediment, zero at sea) and at its end
+    /// (rock-equivalent m, at most the sediment; zero without regolith).
+    pub regolith_start: Vec<f64>,
     pub regolith: Vec<f64>,
     /// Fraction of the step each land cell's rock was bare (0 where a deposit or lake covered
     /// it, and for the sea).
@@ -631,6 +633,7 @@ pub fn erode(
     let mut bare = vec![0.0; cell_count];
     let mut production = vec![0.0; cell_count];
     let mut regolith_stats = RegolithStats::default();
+    let mut regolith_start = vec![0.0; cell_count];
     if weathering.enabled {
         for cell in 0..cell_count {
             if ocean[cell] {
@@ -640,6 +643,7 @@ pub fn erode(
                 .regolith
                 .get(cell)
                 .map_or(0.0, |&r| r.clamp(0.0, sediment[cell]));
+            regolith_start[cell] = regolith[cell];
             production[cell] = weathering.production_scale(
                 surface
                     .temperature
@@ -1137,6 +1141,7 @@ pub fn erode(
         deposited,
         sea_level_change: SurfaceSeaLevel { fluvial, coastal },
         wave,
+        regolith_start,
         regolith,
         bare,
         production,
