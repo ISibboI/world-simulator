@@ -129,6 +129,13 @@ impl Biosphere {
                 // ~0.1. The top of the atmosphere sees about half of a change of the surface
                 // albedo (Donohoe & Battisti, 2011): +0.05 for the planetary albedo of land.
                 temperature.land_albedo = 0.37;
+                // No cloud nuclei of life (#204): no DMS sulfate or marine organics of plankton,
+                // no secondary organic aerosol of plants and no smoke of wildfires. Sea salt,
+                // volcanic sulfate and the dust of bare land remain (see [`crate::aerosol`]); the
+                // clouds above bare land see its brighter surface (~0.3).
+                temperature.aerosol.marine_biogenic = 0.0;
+                temperature.aerosol.land_biogenic = 0.0;
+                temperature.aerosol.land_surface_albedo = 0.3;
                 // Without transpiration (~60% of today's land evapotranspiration; Jasechko et
                 // al., 2013; Schlesinger & Jasechko, 2014) and without the water storage of a
                 // root zone, less of the rain returns to the air. Fu's ω grows with plant
@@ -530,6 +537,8 @@ mod tests {
         let modern = Parameters::new(RADIUS, Biosphere::Modern, Epoch::PRESENT);
         let abiotic = Parameters::new(RADIUS, Biosphere::Abiotic, Epoch::PRESENT);
         assert_eq!(abiotic.temperature.land_albedo, 0.37);
+        assert_eq!(abiotic.temperature.aerosol.marine_biogenic, 0.0);
+        assert_eq!(abiotic.temperature.aerosol.land_biogenic, 0.0);
         assert_eq!(abiotic.climate.budyko_omega, 1.6);
         assert_eq!(
             abiotic.erosion.erodibility,
@@ -540,6 +549,7 @@ mod tests {
         // Everything else stays: undo the preset's changes and compare.
         let mut undone = Parameters::new(RADIUS, Biosphere::Abiotic, Epoch::PRESENT);
         undone.temperature.land_albedo = modern.temperature.land_albedo;
+        undone.temperature.aerosol = modern.temperature.aerosol.clone();
         undone.climate.budyko_omega = modern.climate.budyko_omega;
         undone.erosion.erodibility = modern.erosion.erodibility;
         undone.erosion.sediment_diffusivity = modern.erosion.sediment_diffusivity;

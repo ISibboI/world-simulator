@@ -315,6 +315,10 @@ pub struct PlanetStatistics {
     pub escape: Option<EscapeState>,
     /// Fraction of the surface covered by permanent ice (sea ice, ice sheets).
     pub frozen_fraction: f64,
+    /// Global planetary (Bond) albedo of the last climate update.
+    pub planetary_albedo: f64,
+    /// The cloud nuclei of the last climate update (#204).
+    pub aerosol: crate::aerosol::AerosolDiagnostics,
     /// Where the sediment sits and how much of the sea level it makes up.
     pub sediment_reservoirs: SedimentReservoirs,
     /// Sediment moved by waves so far, in Gt.
@@ -757,10 +761,12 @@ impl Planet {
                     .then_some(&self.water);
                 let view =
                     climate_elevations(self.tectonics.mesh(), &elevation, &seeds, open, lakes);
+                let open_lakes = lakes.is_some();
+                self.update_aerosol_sources(&view, step.dt);
                 self.temperature.update(
                     &view,
                     Some(&self.precipitation),
-                    lakes.map(|water| &water.lake_depth[..]),
+                    open_lakes.then_some(&self.water.lake_depth[..]),
                     self.tectonics.time(),
                 );
                 (
@@ -1057,6 +1063,12 @@ impl Planet {
             self.carbon.tectonic_degassing(),
         ) {
             self.carbon.end_hold();
+            // The volcanic cloud nuclei of this degassing are Earth's (#204), as for φ.
+            let sources = self.temperature.aerosol_sources().calibrate(
+                &self.temperature.params().aerosol,
+                self.carbon.state().arc_plume_mantle_degassing,
+            );
+            self.temperature.set_aerosol_sources(sources);
             if holds_co2 {
                 info!(
                     phi = self.carbon.state().phi,
@@ -1065,6 +1077,45 @@ impl Planet {
             }
         }
         land
+    }
+
+    /// The volcanic and dust sources of cloud nuclei for the step's climate (#204), from the
+    /// carbon cycle's degassing and the climate of the previous step on the climate's view of
+    /// the surface `elevation`: its land without lakes.
+    fn update_aerosol_sources(&mut self, elevation: &[f64], dt: f64) {
+        let params = &self.temperature.params().aerosol;
+        let fields = self.temperature.fields();
+        let state = self.carbon.state();
+        // None before the carbon cycle's first step.
+        let degassing = (state.ratio > 0.0).then_some(state.arc_plume_mantle_degassing);
+        let lake = |cell: usize| {
+            self.water
+                .lake_depth
+                .get(cell)
+                .is_some_and(|&depth| depth >= crate::temperature::LAKE_DEPTH)
+        };
+        let dust = (fields.annual_mean.len() == elevation.len()
+            && self.precipitation.len() == elevation.len())
+        .then(|| {
+            crate::aerosol::dust_source(
+                params,
+                (0..elevation.len())
+                    .filter(|&cell| elevation[cell] >= 0.0 && !lake(cell))
+                    .map(|cell| {
+                        (
+                            fields.annual_mean[cell],
+                            self.precipitation[cell],
+                            fields.ice[cell],
+                        )
+                    }),
+                elevation.len(),
+            )
+        });
+        let sources = self
+            .temperature
+            .aerosol_sources()
+            .advance(params, degassing, dust, dt);
+        self.temperature.set_aerosol_sources(sources);
     }
 
     /// One step of the escape (#210) on the step's climate and CO₂: the water it loses is taken
@@ -1334,6 +1385,8 @@ impl Planet {
             },
             frozen_fraction: all().filter(|&c| fields.ice[c] > 0.5).count() as f64
                 / elevation.len() as f64,
+            planetary_albedo: fields.planetary_albedo,
+            aerosol: fields.aerosol,
             tectonics: self.tectonics.statistics(),
             mean_land_precipitation,
             midlatitude_land_precipitation,
