@@ -51,14 +51,15 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::erosion::WaveErosion;
+use crate::isostasy::{ARC_DENSITY, OCEANIC_DENSITY};
 use crate::planet::{
     CoverCohort, CoverExport, CoverTurnover, EXPORT_DESTINATIONS, Planet, PlanetStatistics,
 };
 use crate::presets::{Biosphere, Epoch, Parameters};
 use crate::sphere::SphereMesh;
 use crate::tectonics::{
-    CoverBudget, CoverTerm, InitialConfiguration, MassLedger, MaterialBudget, SeaLevelBudget,
-    Simulation, TrenchSediment,
+    CoverBudget, CoverTerm, InitialConfiguration, MassLedger, MaterialBudget, PLUME_CRUST_DENSITY,
+    SeaLevelBudget, Simulation, TrenchSediment,
 };
 
 /// The planet radius in metres; used for erosion, climate and to report linear speeds.
@@ -423,8 +424,9 @@ fn run_simulation_thread(
         let fields_built = start.elapsed() - cells_built;
         let time = planet.tectonics().time();
         let plates = viewer::plate_infos(planet);
+        let global = viewer::GlobalStatus::of(planet, &cells, &plates);
         // The frame of the history, here rather than in the view (#174).
-        let frame = encoder.encode(time, &cells, &plates);
+        let frame = encoder.encode(time, global, &cells, &plates);
         debug!(
             ?cells_built,
             ?fields_built,
@@ -441,7 +443,7 @@ fn run_simulation_thread(
             mesh: std::mem::take(&mut first_update).then(|| Arc::new(MeshUpdate::of(planet))),
             step_seconds: step_time.map(|time| time.as_secs_f64()),
             fields,
-            global: viewer::GlobalStatus::of(planet),
+            global,
         };
         // Sending fails once the view started another simulation or was closed.
         if events.send(SimulationEvent::Surface(update)).is_err() {
@@ -877,6 +879,62 @@ impl Run {
     }
 }
 
+/// Logs the magmatic volume rates by source since the last snapshot (#106): new sea floor at
+/// ridges, arc crust, LIPs and plume tails (km³/yr of crust, gross), and the LIPs emplaced.
+fn log_magmatism(
+    statistics: &tectonics::Statistics,
+    previous: &MassLedger,
+    previous_time: f64,
+    cell_area: f64,
+    years: f64,
+) {
+    let ledger = &statistics.ledger;
+    let rate =
+        |now: f64, before: f64, density: f64| (now - before) * cell_area / density / 1e9 / years;
+    let lips: Vec<_> = statistics
+        .volcanism
+        .lips
+        .iter()
+        .filter(|lip| lip.time > previous_time)
+        .collect();
+    let volumes: Vec<String> = lips
+        .iter()
+        .map(|lip| {
+            format!(
+                "{:.1e}{}",
+                lip.volume,
+                if lip.continental {
+                    " (continental)"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect();
+    info!(
+        "    magmatism (km³/yr): ridges {:.2}, arcs {:.2}, LIPs {:.3}, plume tails {:.3} | {} LIPs \
+         since the last snapshot{}{} | {} LIPs so far, {:.2e} km³ LIP and {:.2e} km³ tail crust",
+        rate(
+            ledger.new_sea_floor,
+            previous.new_sea_floor,
+            OCEANIC_DENSITY
+        ),
+        rate(ledger.arcs, previous.arcs, ARC_DENSITY),
+        rate(ledger.lips, previous.lips, PLUME_CRUST_DENSITY),
+        rate(
+            ledger.plume_tails,
+            previous.plume_tails,
+            PLUME_CRUST_DENSITY
+        ),
+        lips.len(),
+        if lips.is_empty() { "" } else { " (km³): " },
+        volumes.join(", "),
+        statistics.volcanism.lips.len(),
+        statistics.volcanism.lip_volume,
+        statistics.volcanism.tail_volume,
+    );
+}
+
 fn snapshot(
     planet: &Planet,
     cli: &Cli,
@@ -1267,6 +1325,7 @@ fn snapshot(
             .map(|(name, rate)| format!("{name} {rate:+.2}"))
             .collect();
         info!("    crust mass budget (Gt/yr): {}", rates.join(", "));
+        log_magmatism(statistics, previous, *previous_time, cell_area, years);
         let trench = &statistics.trench_sediment;
         let arrived: f64 = trench.by_thickness.iter().sum::<f64>()
             - previous_trench.by_thickness.iter().sum::<f64>();
@@ -1454,6 +1513,17 @@ fn snapshot(
         sharing.gross,
         100.0 * sharing.kept / sharing.gross.max(1e-30),
         sharing.clamped,
+    );
+    let rates = simulation.shared_sample_rates();
+    info!(
+        "    duplicated samples act once so far: crustal flow {:.2}% of the per-cell request \
+         ({:.3e} kg/m² per cell) | subduction erosion {:.0} events, {:.2}% on the eroded samples, \
+         {:.2}% on their neighbours",
+        100.0 * rates.flow_per_sample / rates.flow_per_cell.max(1e-30),
+        rates.flow_per_cell,
+        rates.erosion_events,
+        100.0 * rates.erosion_per_sample / rates.erosion_events.max(1e-30),
+        100.0 * rates.erosion_to_neighbours / rates.erosion_events.max(1e-30),
     );
     info!(
         "    land masses {} ({} specks, largest {:.0}%) | continental crust masses {} ({} specks, \

@@ -2,13 +2,13 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (57 bytes per cell
-//! instead of 148, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (63 bytes per cell
+//! instead of 168, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
 
-use super::super::{CellInfo, PlateInfo};
+use super::super::{CellInfo, GlobalStatus, PlateInfo};
 
 /// The quantisation of one attribute.
 #[derive(Debug, Clone, Copy)]
@@ -28,6 +28,10 @@ enum Code {
     /// ln(1 + value) with this step, 2 bytes, for values spanning many orders of magnitude;
     /// `u16::MAX` is NaN.
     Logarithmic(f32),
+    /// A non-negative value on a logarithmic axis from `10^low` over `decades` decades in 253
+    /// steps, 1 byte: 0 is zero (and anything below `10^low`), 255 is NaN; for values that span
+    /// many orders of magnitude and are zero in most cells (#110).
+    Decades { low: f32, decades: f32 },
     /// An integer of up to 16 bits.
     Integer16,
     /// An integer of up to 8 bits (the low 8 bits are kept).
@@ -37,14 +41,18 @@ enum Code {
 impl Code {
     const fn bytes(self) -> usize {
         match self {
-            Code::Share | Code::Root(_) | Code::Signed8(_) | Code::Integer8 => 1,
+            Code::Share
+            | Code::Root(_)
+            | Code::Signed8(_)
+            | Code::Decades { .. }
+            | Code::Integer8 => 1,
             _ => 2,
         }
     }
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 38] = [
+const CHANNELS: [Code; 42] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -114,6 +122,24 @@ const CHANNELS: [Code; 38] = [
     Code::Integer16,
     Code::Integer8,
     Code::Integer8,
+    // Seismic moment rate (#110): 10⁶ to 10¹⁸ N·m yr⁻¹ km⁻² in steps of 0.047 decades (11 %,
+    // against colour classes of a decade).
+    Code::Decades {
+        low: 6.0,
+        decades: 12.0,
+    },
+    // Magma supply: 10⁻⁶ to 10² mm/yr in steps of 0.032 decades (8 %).
+    Code::Decades {
+        low: -6.0,
+        decades: 8.0,
+    },
+    // Eruption rate: as the magma supply.
+    Code::Decades {
+        low: -6.0,
+        decades: 8.0,
+    },
+    // The dominant sources of the three (12 bits).
+    Code::Integer16,
 ];
 
 /// The channels of the integer attributes: plate, flags, drainage and climate class.
@@ -121,6 +147,7 @@ const PLATE: usize = 34;
 const FLAGS: usize = 35;
 const DRAINAGE: usize = 36;
 const CLIMATE_CLASS: usize = 37;
+const ACTIVITY: usize = 41;
 
 /// The value of an integer channel of a cell.
 fn integer(channel: usize, cell: &CellInfo) -> u16 {
@@ -129,6 +156,7 @@ fn integer(channel: usize, cell: &CellInfo) -> u16 {
         FLAGS => (cell.flags & 0xFFFF) as u16,
         DRAINAGE => (cell.drainage & 0xFF) as u16,
         CLIMATE_CLASS => cell.climate_class.min(0xFF) as u16,
+        ACTIVITY => (cell.activity & 0xFFFF) as u16,
         _ => unreachable!("not an integer channel"),
     }
 }
@@ -185,6 +213,10 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         0.0,
         0.0,
         0.0,
+        cell.seismicity,
+        cell.magma_supply,
+        cell.eruptions,
+        0.0,
     ]
 }
 
@@ -238,6 +270,20 @@ fn quantise(code: Code, value: f32) -> u16 {
                 .round()
                 .clamp(0.0, (88.0 / step).floor().min(f32::from(u16::MAX - 1))) as u16
         }
+        Code::Decades { low, decades } => {
+            if value.is_nan() {
+                return 255;
+            }
+            if value <= 0.0 {
+                return 0;
+            }
+            let position = (value.log10() - low) / decades;
+            if position < 0.0 {
+                0
+            } else {
+                (1.0 + position * 253.0).round().clamp(1.0, 254.0) as u16
+            }
+        }
         Code::Integer16 | Code::Integer8 => unreachable!("integers are not quantised"),
     }
 }
@@ -288,6 +334,11 @@ fn dequantise(code: Code, value: u16) -> f32 {
                 (f32::from(value) * step).exp_m1()
             }
         }
+        Code::Decades { low, decades } => match value {
+            0 => 0.0,
+            255 => f32::NAN,
+            _ => 10f32.powf(low + (f32::from(value) - 1.0) / 253.0 * decades),
+        },
         Code::Integer16 | Code::Integer8 => unreachable!("integers are not quantised"),
     }
 }
@@ -383,6 +434,10 @@ impl Planes {
                     plate: u32::from(values[PLATE]),
                     flags: u32::from(values[FLAGS]),
                     drainage: u32::from(values[DRAINAGE]),
+                    seismicity: value(38),
+                    magma_supply: value(39),
+                    eruptions: value(40),
+                    activity: u32::from(values[ACTIVITY]),
                 }
             })
             .collect()
@@ -396,21 +451,23 @@ pub enum Kind {
     Delta,
 }
 
-/// The state of a frame as the history keeps it: its time, the quantised cells and the
-/// angular velocity of every plate (rad/Myr, by plate id).
+/// The state of a frame as the history keeps it: its time, the global state of the planet
+/// (#209), the quantised cells and the angular velocity of every plate (rad/Myr, by plate id).
 #[derive(Debug, Clone, PartialEq)]
 pub struct State {
     pub time: f64,
+    pub global: GlobalStatus,
     pub planes: Planes,
     pub plates: Vec<PlateInfo>,
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 13;
+const VERSION: u8 = 15;
 /// Bytes per plate: its rotation (angular velocity), id and orientation.
 pub const PLATE_BYTES: usize = 32;
-/// Bytes before the compressed part: version, kind, time, cells, plates.
-const HEADER: usize = 2 + 8 + 4 + 4;
+/// Bytes before the compressed part: version, kind, time, cells, plates and the global state
+/// (uncompressed, so that the history reads it without decoding the frame, #209).
+const HEADER: usize = 2 + 8 + 4 + 4 + GlobalStatus::BYTES;
 
 /// Encodes a frame: as the difference to `previous` (the state of the frame before it, of the
 /// same cells), or as a keyframe if there is none.
@@ -453,6 +510,7 @@ pub fn encode(state: &State, previous: Option<&State>) -> Vec<u8> {
     frame.extend_from_slice(&state.time.to_le_bytes());
     frame.extend_from_slice(&(state.planes.cells as u32).to_le_bytes());
     frame.extend_from_slice(&(state.plates.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&state.global.to_bytes());
     frame.extend_from_slice(&compressed);
     frame
 }
@@ -466,9 +524,9 @@ pub fn kind(frame: &[u8]) -> Result<Kind, String> {
     }
 }
 
-/// What the header of a frame says: its kind, its time, and its size before compression (the
-/// plates and the quantised cells).
-pub fn header(frame: &[u8]) -> Result<(Kind, f64, usize), String> {
+/// What the header of a frame says: its kind, its time, its size before compression (the
+/// plates and the quantised cells) and the global state.
+pub fn header(frame: &[u8]) -> Result<(Kind, f64, usize, GlobalStatus), String> {
     let kind = kind(frame)?;
     let header = frame.get(..HEADER).ok_or("truncated frame")?;
     let number = |range: std::ops::Range<usize>| {
@@ -483,7 +541,12 @@ pub fn header(frame: &[u8]) -> Result<(Kind, f64, usize), String> {
         .zip(number(10..14).checked_mul(BYTES_PER_CELL))
         .and_then(|(plates, cells)| plates.checked_add(cells))
         .ok_or("a frame of an impossible size")?;
-    Ok((kind, time, raw))
+    Ok((kind, time, raw, global(header)?))
+}
+
+/// The global state in a header.
+fn global(header: &[u8]) -> Result<GlobalStatus, String> {
+    GlobalStatus::from_bytes(&header[18..HEADER]).ok_or_else(|| "truncated frame".to_owned())
 }
 
 /// Decodes a frame: a keyframe alone, a delta frame on the state of the frame before it.
@@ -528,6 +591,7 @@ pub fn decode(frame: &[u8], previous: Option<&State>) -> Result<State, String> {
     }
     Ok(State {
         time,
+        global: global(header)?,
         planes: Planes { cells, bytes },
         plates,
     })
@@ -618,6 +682,22 @@ mod tests {
             flags: (index * 37 % 512) as u32,
             // Every receiver slot (7 is none) and every combination of the bits.
             drainage: (index % 64) as u32,
+            seismicity: if index.is_multiple_of(5) {
+                0.0
+            } else {
+                10f32.powf(8.0 + (x * 0.07).sin().abs() * 8.0)
+            },
+            magma_supply: if index.is_multiple_of(4) {
+                0.0
+            } else {
+                10f32.powf(-4.0 + (x * 0.09).cos().abs() * 5.0)
+            },
+            eruptions: if index.is_multiple_of(3) {
+                0.0
+            } else {
+                10f32.powf(-5.0 + (x * 0.05).sin().abs() * 5.0)
+            },
+            activity: (index * 11 % 4096) as u32,
         }
     }
 
@@ -748,6 +828,22 @@ mod tests {
         assert_eq!(original.flags, decoded.flags);
         assert_eq!(original.climate_class, decoded.climate_class);
         assert_eq!(original.drainage, decoded.drainage);
+        assert_eq!(original.activity, decoded.activity);
+        // Half a step of the logarithmic codes: 0.024 and 0.016 decades; zero stays zero.
+        for (a, b, step) in [
+            (original.seismicity, decoded.seismicity, 12.0 / 253.0),
+            (original.magma_supply, decoded.magma_supply, 8.0 / 253.0),
+            (original.eruptions, decoded.eruptions, 8.0 / 253.0),
+        ] {
+            if a == 0.0 {
+                assert_eq!(b, 0.0);
+            } else {
+                assert!(
+                    (a.log10() - b.log10()).abs() <= 0.5 * step * 1.01,
+                    "{a} → {b}"
+                );
+            }
+        }
         // Land stays land and sea stays sea, lakes stay lakes (#128).
         assert_eq!(original.elevation >= 0.0, decoded.elevation >= 0.0);
         assert_eq!(original.is_sea(), decoded.is_sea());
@@ -762,7 +858,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 58);
+        assert_eq!(BYTES_PER_CELL, 63);
     }
 
     #[test]
@@ -793,6 +889,11 @@ mod tests {
         let states: Vec<State> = (0..5)
             .map(|step| State {
                 time: f64::from(step),
+                global: GlobalStatus {
+                    ramp_up_end: step as f32,
+                    temperature: 14.0 + step as f32,
+                    ..crate::viewer::global::example()
+                },
                 planes: Planes::new(&cells(300, step as f32)),
                 plates: vec![
                     PlateInfo {
@@ -817,6 +918,9 @@ mod tests {
             );
             let decoded = decode(&frame, previous.as_ref()).unwrap();
             assert_eq!(&decoded, state);
+            // The header carries the time and the global state.
+            let (_, time, _, global) = header(&frame).unwrap();
+            assert_eq!((time, global), (state.time, state.global));
             // A delta frame cannot be decoded alone.
             if previous.is_some() {
                 assert!(decode(&frame, None).is_err());
@@ -826,6 +930,7 @@ mod tests {
         // Another number of cells (a restart) starts with a keyframe.
         let other = State {
             time: 0.0,
+            global: crate::viewer::global::example(),
             planes: Planes::new(&cells(10, 0.0)),
             plates: Vec::new(),
         };
@@ -839,6 +944,7 @@ mod tests {
     fn unchanged_frames_compress_to_almost_nothing() {
         let state = State {
             time: 1.0,
+            global: crate::viewer::global::example(),
             planes: Planes::new(&cells(10_000, 0.0)),
             plates: vec![
                 PlateInfo {
@@ -880,10 +986,15 @@ mod tests {
             format!("--subdivisions={subdivisions}"),
         ]);
         let mut planet = crate::build_planet(&cli).unwrap();
-        let state = |planet: &crate::planet::Planet| State {
-            time: planet.tectonics().time(),
-            planes: Planes::new(&crate::viewer::cell_infos(planet)),
-            plates: crate::viewer::fields::plate_infos(planet),
+        let state = |planet: &crate::planet::Planet| {
+            let cells = crate::viewer::cell_infos(planet);
+            let plates = crate::viewer::fields::plate_infos(planet);
+            State {
+                time: planet.tectonics().time(),
+                global: GlobalStatus::of(planet, &cells, &plates),
+                planes: Planes::new(&cells),
+                plates,
+            }
         };
         let mut previous = state(&planet);
         let cells = previous.planes.cells;
