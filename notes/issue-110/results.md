@@ -120,6 +120,43 @@ desktop screenshot of the cell widget (a subduction cell: 3.4·10¹⁴ N·m/yr/k
 
 ## Frames
 
-`CellInfo` 152 → 164 bytes (live updates); frame history 58 → 61 bytes per cell before lz4
-(two 1-byte logarithmic channels and the sources), codec version 15; the global record +8 bytes
-per frame.
+`CellInfo` 152 → 168 bytes (live updates); frame history 58 → 63 bytes per cell before lz4
+(three 1-byte logarithmic channels and a 16-bit source field), codec version 15 (main is at 14);
+the global record +12 bytes per frame.
+
+## Addendum: eruption rate and large igneous provinces (#222 review)
+
+Decided with Sebastian: the magma supply stays, an eruption rate is added (method in the
+[plan's addendum](plan.md#addendum-eruption-rate-and-lips-222-review-sebastian-an-additional-eruption-rate-view-and-number)).
+Main now has #221's volcanism; the plume term reads its tails and the LIP record.
+
+Seed 0, 6 subdivisions, default parameters, on main + this branch (km³/yr; sources arc / ridge /
+hotspot / rift / LIP):
+
+| Time (Myr) | Magma supply | of it | Eruptions | of it | LIPs so far |
+| --- | --- | --- | --- | --- | --- |
+| 50 | 38.9 | 2.1 / 30.8 / 0.24 / 0.07 / 5.7 | 7.7 | 0.34 / 4.4 / 0.06 / 0.01 / 2.8 | 5 |
+| 100 | 43.3 | 2.5 / 40.4 / 0.30 / 0.15 / 0 | 6.3 | 0.42 / 5.8 / 0.10 / 0.01 / 0 | 10 |
+| 150 | 45.8 | 2.5 / 39.7 / 0.56 / 0.16 / 2.9 | 7.8 | 0.42 / 5.7 / 0.19 / 0.01 / 1.4 | 19 |
+| 200 | 37.9 | 2.2 / 35.2 / 0.46 / 0.07 / 0 | 5.6 | 0.37 / 5.1 / 0.15 / 0.01 / 0 | 21 |
+| 250 | 31.4 | 1.7 / 28.8 / 0.30 / 0.04 / 0.5 | 4.8 | 0.28 / 4.1 / 0.10 / 0.00 / 0.25 | 27 |
+| 300 | 38.3 | 2.3 / 35.7 / 0.29 / 0.04 / 0 | 5.6 | 0.39 / 5.1 / 0.10 / 0.00 / 0 | 29 |
+
+- Eruptions 5–8 km³/yr against Earth's 3–4: the same ~1.5–2× as the magma supply, from the
+  model's sea-floor turnover (see above); ~75–90 % of it at the ridges, as on Earth.
+- LIPs show for 3 Myr after each (~1 per 10 Myr): while one is in its pulse it adds 0.5–6
+  km³/yr of magma and up to ~3 km³/yr of eruptions, a large share of the planet's eruptions for
+  those Myr, as Earth's flood-basalt pulses (Deccan ~1–2 km³/yr in its main phase).
+- Hotspots supply 0.2–0.6 km³/yr with #221's tail flux (Earth's oceanic intraplate magmatism
+  0.3–0.4 km³/yr, Crisp 1984).
+- State hashes identical to main (seed 3, 5 subdivisions, 40 Myr: `348fb443…`, `a0a6ff00…`).
+
+Screenshots: [desktop eruptions with the cell widget and the planet panel's totals](desktop-eruptions.png),
+[desktop Both with the LIP marker in the legend](desktop-both.png),
+[phone eruptions](phone-eruptions.png), [phone legend with the four choices](phone-earthquakes-legend.png).
+The four choices wrap to two rows of the switcher on the phone and the desktop.
+
+Caveats: the I/E ratios are literature means with wide ranges (ridges 5–10, arcs 3–10,
+White et al. 2006); the LIP share of 1/2 is an assumption (flood basalts are mostly lava, but
+their sills and underplate are poorly known). A LIP is placed in the mantle frame at its plume
+and not carried with the plate during its 3 Myr pulse (≤ 150 km at 5 cm/yr, about a cell).

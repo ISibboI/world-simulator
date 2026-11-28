@@ -233,3 +233,28 @@ not used.
   Mw is labelled per century per 100 × 100 km; marker size follows the arrow spacing (zoom) as the
   other overlays. The reversed-segment rule for arcs is approximated by staying on the overriding
   plate.
+
+## Addendum: eruption rate and LIPs (#222 review, Sebastian: "an additional eruption rate view and number")
+
+Decided: the magma supply (intrusions included) stays; an **eruption rate** is added next to it.
+
+- Eruption rate = magma supply × the erupted share of its setting, 1 / (1 + I/E) with the
+  intrusive-to-extrusive ratio I/E (Crisp 1984; White, Crisp & Spera 2006, G³ 7, Q03010):
+  ridges I/E ≈ 6 (oceanic crust is ~1 km of lavas over ~6 km of dikes and gabbro: 1/7), arcs
+  I/E ≈ 5 (1/6), oceanic hotspots I/E ≈ 2 (1/3), continental settings (hotspots under
+  continents, rifts) I/E ≈ 10 (1/11), large igneous provinces mostly extrusive, I/E ≈ 1 assumed
+  for a province with its sills and underplate (1/2). Earth: ~20 km³/yr at ridges and ~5 at arcs
+  give ~3.7 km³/yr with the hotspots, within Earth's 3–4 km³/yr of eruptions (most of it unseen
+  on the sea floor).
+- Plumes now read #221's volcanism (in main): the tail of every plume past `lip_age` with
+  `volcanism.tail_volume_flux`, `tail_width` and its `lid_factor` (the same numbers the model
+  emplaces; nothing when `volcanism.enabled=0`), and a fifth source, **large igneous
+  province**, from the LIP record: each LIP's volume over a pulse of 3 Myr after its time
+  (LIPs emplace ≥ 75 % of their volume within 1–5 Myr, Bryan & Ernst 2008), on its emplacement
+  footprint (σ = max(lip_width, √(V / (2π · lip_plateau_thickness)))).
+- Frames: one more 1-byte logarithmic channel (eruptions) and the source field grows to 16 bits
+  (12 used: the eruption source differs from the magma source where a hotspot sits on a ridge):
+  61 → 63 bytes per cell; `CellInfo` 164 → 168 bytes; the global record +4 bytes.
+- UI: "Eruptions" in the mode's Show choice (Earthquakes / Volcanism / Eruptions / Both), on
+  the magma colours shifted one decade down; an "Eruptions" row in the cell widget; a global
+  "Eruptions" number with a sparkline in the Simulation and planet panel; LIP markers in "Both".
