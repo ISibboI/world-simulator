@@ -581,7 +581,7 @@ mod tests {
         let mean = (0..1000)
             .map(|bin| {
                 let x: f64 = -1.0 + (bin as f64 + 0.5) / 500.0;
-                salt_emission(x.asin().to_degrees()) / clouds.salt_mean
+                salt_emission(math::asin(x).to_degrees()) / clouds.salt_mean
             })
             .sum::<f64>()
             / 1000.0;
