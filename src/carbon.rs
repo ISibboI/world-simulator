@@ -114,6 +114,11 @@ pub struct CarbonParams {
     pub basalt_cations: f64,
     /// Weatherable part of eroded sediment relative to fresh felsic rock.
     pub sediment_weatherable: f64,
+    /// Kinetic weathering of bare rock relative to rock under regolith (#197): water runs off
+    /// bare rock with little contact time, but still dissolves some of it. The kinetic rate is
+    /// scaled by `b + (1 − b)(1 − bare)` with the bare fraction [`LandCell::bare`] (West 2012:
+    /// weathering grows with the regolith's thickness and residence time; Gabet & Mudd 2009).
+    pub bare_rock_weathering: f64,
     /// Seafloor weathering: carbon taken up per kg of new oceanic crust (mol/kg) at today's CO₂
     /// and the reference bottom water temperature (°C), its CO₂ exponent, activation energy
     /// (J/mol) and the most the crust can take up (mol/kg).
@@ -182,6 +187,7 @@ impl Default for CarbonParams {
             felsic_cations: 1.3,
             basalt_cations: 3.7,
             sediment_weatherable: 0.3,
+            bare_rock_weathering: 0.1,
             seafloor_carbon: 0.015,
             seafloor_co2_exponent: 0.23,
             seafloor_activation_energy: 92e3,
@@ -227,6 +233,7 @@ impl CarbonParams {
             "felsic_cations" => &mut self.felsic_cations,
             "basalt_cations" => &mut self.basalt_cations,
             "sediment_weatherable" => &mut self.sediment_weatherable,
+            "bare_rock_weathering" => &mut self.bare_rock_weathering,
             "seafloor_carbon" => &mut self.seafloor_carbon,
             "seafloor_co2_exponent" => &mut self.seafloor_co2_exponent,
             "seafloor_activation_energy" => &mut self.seafloor_activation_energy,
@@ -379,9 +386,15 @@ pub struct LandCell {
     pub runoff: f64,
     /// Permanent ice cover, 0 to 1.
     pub ice: f64,
-    /// Bedrock and sediment eroded from the cell in the step, in m/yr (≥ 0).
+    /// Bedrock and sediment eroded from the cell in the step, in m/yr (≥ 0). The bedrock
+    /// includes the rock turned into regolith (#197); the sediment excludes the regolith, which
+    /// was counted when it was made.
     pub bedrock_erosion: f64,
     pub sediment_erosion: f64,
+    /// Fraction of the step the cell's rock was bare of regolith (#197; 0 without regolith):
+    /// water on bare rock runs off with little contact, so the kinetic rate scales with the
+    /// covered fraction (see [`CarbonParams::bare_rock_weathering`]).
+    pub bare: f64,
     /// Density of the bedrock in kg/m³.
     pub bedrock_density: f64,
     /// Mafic (basaltic) share of the bedrock, 0 to 1: one minus its felsic fraction.
@@ -830,7 +843,8 @@ impl CarbonCycle {
                     * params.plant_factor
                     * reactivity
                     * math::powf(cell.runoff.max(0.0), params.runoff_exponent)
-                    * (1.0 - cell.ice);
+                    * (1.0 - cell.ice)
+                    * (1.0 - (1.0 - params.bare_rock_weathering) * cell.bare.clamp(0.0, 1.0));
                 WeatheringCell {
                     supply,
                     kinetic,
@@ -1022,6 +1036,7 @@ mod tests {
             sediment_erosion: 0.0,
             bedrock_density: 2800.0,
             mafic: 0.2,
+            bare: 0.0,
         }
     }
 
@@ -1286,5 +1301,27 @@ mod tests {
         assert_eq!(calibrate(|phi| 2.0 * phi, 0.1, 0.3, 3.0), 0.3);
         let balancing = balancing_phi(|phi| 2.0 * phi, 16.0);
         assert!((balancing - 8.0).abs() < 1e-9);
+    }
+
+    /// Bare rock (#197) weathers at `bare_rock_weathering` of the kinetic rate of rock under
+    /// regolith; the supply stays.
+    #[test]
+    fn bare_rock_slows_the_kinetics() {
+        let params = CarbonParams::default();
+        let cycle = CarbonCycle::new(params.clone(), 0.0, OCEAN, AREA);
+        let covered = cycle.weathering_cells(&[cell(15.0)]);
+        let bare = cycle.weathering_cells(&[LandCell {
+            bare: 1.0,
+            ..cell(15.0)
+        }]);
+        let half = cycle.weathering_cells(&[LandCell {
+            bare: 0.5,
+            ..cell(15.0)
+        }]);
+        assert_eq!(covered[0].supply, bare[0].supply);
+        let ratio = bare[0].kinetic / covered[0].kinetic;
+        assert!((ratio - params.bare_rock_weathering).abs() < 1e-12);
+        let ratio = half[0].kinetic / covered[0].kinetic;
+        assert!((ratio - 0.5 * (1.0 + params.bare_rock_weathering)).abs() < 1e-12);
     }
 }

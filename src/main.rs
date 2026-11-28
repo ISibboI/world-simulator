@@ -1260,6 +1260,7 @@ fn snapshot(
             rivers,
             100.0 * cliff_bedrock / rivers.max(1e-9),
         );
+        log_regolith(planet);
         let trench = &statistics.trench_sediment;
         info!(
             "    sediment turned into crust (Gt/yr): burial metamorphism {:.2} on continental \
@@ -2024,6 +2025,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             .get(slot)
             .map_or(0.0, |p| p[cell as usize])
     };
+    let regolith = planet.regolith();
     let mut shown = hash::HashMap::default();
     for cell in 0..cell_count {
         *shown.entry(simulation.owner(cell)).or_insert(0u32) += 1;
@@ -2032,7 +2034,8 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
     writeln!(
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
-             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,rifted,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain,ice"
+             lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,rifted,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain,ice,\
+             regolith,bare,production,bed_erosion"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -2059,7 +2062,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
              {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
-             {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1},{:.3}",
+             {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1},{:.3},{:.3},{:.3},{:.3e},{:.3e}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -2116,10 +2119,68 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             simulation.owner(cell).local,
             drain[cell as usize],
             temperature.ice[cell as usize],
+            regolith.thickness[cell as usize],
+            regolith.bare[cell as usize],
+            regolith.production[cell as usize],
+            regolith.bedrock_erosion[cell as usize],
         )?;
     }
     file.flush()?;
     Ok(())
+}
+
+/// Logs the regolith of the last step (#197): thickness and bare fraction on eroding and
+/// accumulating land by climate, the regimes and the bedrock lowering.
+fn log_regolith(planet: &Planet) {
+    let regolith = planet.regolith();
+    let stats = &regolith.stats;
+    if stats.land_cells == 0 {
+        return;
+    }
+    let temperature = &planet.temperature().annual_mean;
+    let runoff = &planet.water_cycle().runoff;
+    let ocean = &planet.surface_water().ocean;
+    let quantiles = |filter: &dyn Fn(usize) -> bool| -> String {
+        let mut values: Vec<f64> = (0..ocean.len())
+            .filter(|&cell| !ocean[cell] && filter(cell))
+            .map(|cell| regolith.thickness[cell])
+            .collect();
+        if values.is_empty() {
+            return "-".to_string();
+        }
+        values.sort_by(f64::total_cmp);
+        let at = |q: f64| values[((values.len() - 1) as f64 * q) as usize];
+        format!(
+            "{:.2}/{:.2}/{:.2} (n {})",
+            at(0.1),
+            at(0.5),
+            at(0.9),
+            values.len()
+        )
+    };
+    let total = stats.transport_limited_bedrock
+        + stats.weathering_limited_bedrock
+        + stats.untransported_bedrock;
+    info!(
+        "    regolith (rock-equivalent m, 10/50/90%) on land: cold < 0 °C {}, 0–15 °C dry \
+         (runoff < 0.1 m/yr) {}, 0–15 °C wet {}, warm ≥ 15 °C dry {}, warm wet {} | cells \
+         eroding: transport-limited {}, weathering-limited {} of {} land cells | bedrock \
+         lowered (m/Myr per eroding cell): transport-limited {:.1}, weathering-limited {:.1}; \
+         share of all bedrock lowering {:.0}% / {:.0}% / {:.0}% under cover or flat",
+        quantiles(&|c| temperature[c] < 0.0),
+        quantiles(&|c| (0.0..15.0).contains(&temperature[c]) && runoff[c] < 0.1),
+        quantiles(&|c| (0.0..15.0).contains(&temperature[c]) && runoff[c] >= 0.1),
+        quantiles(&|c| temperature[c] >= 15.0 && runoff[c] < 0.1),
+        quantiles(&|c| temperature[c] >= 15.0 && runoff[c] >= 0.1),
+        stats.transport_limited_cells,
+        stats.weathering_limited_cells,
+        stats.land_cells,
+        1e6 * stats.transport_limited_bedrock / stats.transport_limited_cells.max(1) as f64,
+        1e6 * stats.weathering_limited_bedrock / stats.weathering_limited_cells.max(1) as f64,
+        100.0 * stats.transport_limited_bedrock / total.max(1e-30),
+        100.0 * stats.weathering_limited_bedrock / total.max(1e-30),
+        100.0 * stats.untransported_bedrock / total.max(1e-30),
+    );
 }
 
 /// Appends the closed depressions of the current step to `path`: the time, then
