@@ -4,7 +4,7 @@ over 200-1000 Myr and at 0-50 Myr of the snapshot lines, phi, runtime.
 Usage: analyse.py DIR [DIR...]"""
 import re, sys, glob, os, statistics as st
 
-num = r'([-+]?[0-9.]+|NaN)'
+num = r'([-+]?[0-9.]+|NaN|n/a ?)'
 T = re.compile(r't = +' + num + r' Myr')
 TEMP = re.compile(r'temperature global +' + num + r' °C, equator +' + num + r' °C, poles +' + num +
                   r' °C .*permanently frozen +' + num + r'%(?: \| planetary albedo ' + num + ')?')
@@ -30,7 +30,7 @@ def parse(log):
         elif (m := CARB.search(line)) and 'INFO world_simulator:' in line:
             row.update(zip(['pCO2', 'CO2x', 'forcing'], map(float, m.groups())))
         elif m := AER.search(line):
-            row.update(zip(KEYS[8:], map(float, m.groups())))
+            row.update(zip(KEYS[8:], [float('nan') if g.startswith('n/a') else float(g) for g in m.groups()]))
     if t is not None: rows.append((t, row))
     return rows, phi
 

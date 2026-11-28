@@ -491,11 +491,15 @@ impl AerosolDiagnostics {
     /// One line for the log.
     pub fn summary(&self) -> String {
         format!(
-            "aerosol: sources volcanic {:.2} (degassing {:.2}× Earth's), dust {:.2} × Earth | marine \
+            "aerosol: sources volcanic {:.2} (degassing {}× Earth's), dust {:.2} × Earth | marine \
              CCN {:.0}, droplets {:.0} cm⁻³, cloud albedo {:.3}, ocean albedo {:+.4} | continental \
              CCN {:.0}, droplets {:.0} cm⁻³, cloud albedo {:.3}, land albedo {:+.4}",
             self.sources.volcanic,
-            self.sources.degassing / EARTH_VOLCANIC_DEGASSING,
+            if self.sources.degassing.is_finite() {
+                format!("{:.2}", self.sources.degassing / EARTH_VOLCANIC_DEGASSING)
+            } else {
+                "n/a ".to_owned()
+            },
             self.sources.dust,
             self.marine.ccn,
             self.marine.droplets,

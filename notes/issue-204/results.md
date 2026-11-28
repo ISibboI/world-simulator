@@ -29,18 +29,22 @@ stated; per-seed numbers in [analysis.txt](analysis.txt) (made by [analyse.py](a
 | runtime (s, GitHub runners) | 854 (main: 883) | 926 | 972 |
 
 - The albedo falls by 0.009, i.e. **~2.3 W/m² more absorbed sunlight** (mean insolation
-  ~255–275 W/m² under the young sun), almost all over the ocean: marine droplets 83 → 49 cm⁻³,
+  ~255–275 W/m² under the young sun), of which the cloud forcing itself is ~2.1 W/m²
+  (0.7 · 0.0101 + 0.3 · 0.0043) and the rest the ice-albedo feedback; almost all over the ocean: marine droplets 83 → 49 cm⁻³,
   effective radius ×1.19 (12 → 14.3 µm). Within the few to ~10 W/m² that Goldblatt & Zahnle
   (2011) and later Archean studies give, at its low end (Twomey effect only).
 - **The planet warms by ~1.0 K**, with ~1/3 less permanent ice. No φ hits its clamp.
-- **The CO₂ barely changes (−2%)**; φ drops by ~15% instead. The carbon cycle holds the CO₂ of
+- **The CO₂ is unchanged within the seed scatter** (−2% dynamic, +3% static); φ drops by ~15%
+  instead (in every seed). The carbon cycle holds the CO₂ of
   the start through the ramp-up and calibrates φ there, so that the sinks balance the sources at
   that CO₂ in the ramp-up's climate. The darker clouds are already active then, so the warmer
   climate is built into φ (faster weathering per unit φ) and the long-term CO₂ stays where the
   epoch's start forcing put it. The effect therefore shows as temperature, not as less CO₂. With
   the greenhouse forcing of an epoch read as a prediction rather than a prescribed start, the
   carbon cycle would instead have drawn the CO₂ down by roughly 2.3 W/m² ≈ 0.25 e-folds at this
-  forcing level; that is a property of the calibration (#154/#213), not of this change.
+  forcing level; that is a property of the calibration (#154/#213), not of this change. So the
+  +1 K follows from this calibration convention; a free weathering thermostat would cancel most
+  of it.
 - **Dynamic vs static sources:** nearly the same mean (18.06 vs 18.13 °C). The bare land emits
   ~1.9× Earth's dust (more in the drier seeds, 1.4–2.3×), which adds a few continental CCN and a
   direct cooling of ~−0.2 W/m²; the volcanic source varies ±30% between seeds and in time
@@ -52,7 +56,7 @@ stated; per-seed numbers in [analysis.txt](analysis.txt) (made by [analyse.py](a
 | | off (= main) | new |
 |---|---|---|
 | planetary albedo | 0.3048 | 0.3037 |
-| Δ albedo ocean / land | 0 / 0 | −0.00003 / −0.00003 (mean); per update within ±0.003 |
+| Δ albedo ocean / land | 0 / 0 | −0.00003 / −0.00003 (mean); per update −0.003…+0.004 |
 | droplets marine / continental | (83 / 198) | 83 / 198 |
 | global mean T (°C) | 22.17 | 22.47 (seeds −0.2…+1.0 K) |
 | permanently frozen | 3.5% | 3.2% |
@@ -65,8 +69,10 @@ stated; per-seed numbers in [analysis.txt](analysis.txt) (made by [analyse.py](a
   (small albedo changes perturb the climate, the carbon cycle and through erosion the tectonics),
   and the seed means differ by 0.3 K with a spread of −0.2…+1.0 K per seed, with no systematic
   albedo change (mean Δ ≈ 0). The modern dust source comes out at 0.9–1.3× Earth's (dust
-  reference from Köppen group B; the model's modern B share is close to Earth's), which confirms
-  the reference.
+  reference from Köppen group B; the model's modern B share is close to Earth's), consistent
+  with the reference (both use the same Köppen-B rule). Each seed keeps an offset of about
+  ±0.001 in albedo (±0.3 W/m²) from its volcanic source drifting after the ramp-up (seed 2
+  reaches 1.7× its reference): physical, as the degassing changes.
 - **φ = 3 (clamped) in every modern run, also on main**: a pre-existing issue of the modern
   preset since the ramp-up (#213), not caused by this change. The modern runs then warm to
   ~22 °C because the sinks cannot balance the sources at today's CO₂. Worth its own issue.
@@ -89,6 +95,9 @@ stated; per-seed numbers in [analysis.txt](analysis.txt) (made by [analyse.py](a
 7. Sea ice: the change is part of the open-water albedo, so partial ice weights it by the open
    share.
 
+An independent evaluation found the numbers supported and no bugs; its wording corrections
+are applied above.
+
 ## Caveats
 
 - Cloud albedo effect only: no adjustments of liquid water path or cloud cover (their sign and
@@ -99,6 +108,10 @@ stated; per-seed numbers in [analysis.txt](analysis.txt) (made by [analyse.py](a
   numbers (d ln N_d / d ln N_a ≈ 0.9) is at the high end of observations.
 - The calibrated albedos are today's, so they contain the anthropogenic aerosol (~0.5–1 W/m²);
   the reference is pre-industrial.
+- The volcanic reference is the planet's own degassing at the end of the ramp-up (the carbon
+  cycle's, smoothed over 3 Myr), ~1.3× Earth's absolute value in these runs. Against Earth's
+  absolute value the barren clouds would be ~0.002 brighter and the effect ~20% smaller
+  (`temperature.aerosol.volcanic_reference=1.975e12`).
 - Volcanic sulfate pulses (LIPs, #106/#221) are not included; `Sources` can take them as an
   extra term once the volcanism record is merged.
 - The Earth shares of the CCN sources are literature estimates with wide ranges (plan.md).
