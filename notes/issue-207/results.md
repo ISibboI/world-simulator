@@ -214,7 +214,7 @@ with a non-negative balance counts as permanent ice.
 - Overlap with #204 (cloud albedo): this change adds a surface term on top of `land_albedo`. If
   #204 changes the cloud masking, `surface_albedo_share` is the parameter where the two meet.
 
-## Decisions for Sebastian
+## Decisions for Sebastian (both decided "yes" on #226; see the last section)
 
 1. **Perennial snow as permanent ice** (on by default, `temperature.perennial_snow_ice`): it
    largely resolves #107 and stops weathering under the snow. Keep it on, or treat #107
@@ -223,3 +223,63 @@ with a non-negative balance counts as permanent ice.
    snowfall) and the snow mass balance now disagree on ~3–4% of land late, and on ~20% in cold
    states. A follow-up could let the snow mass balance (overflow above the cap) decide ice
    sheets and drop the −10 °C rule.
+
+## After the decisions on #226 (both yes) and the merge of main
+
+Sebastian decided both points on #226: perennial snow stays permanent ice
+(`perennial_snow_ice` on), and **the snow mass balance replaces the annual-mean ice-sheet rule**.
+Implementation (merge commit `97a9268`, docs `b60f0c2`):
+- With the snow pack, ice sheets *are* the perennial snow: the land albedo has no separate
+  ice-sheet term, the snow carries all the brightening (perennial snow at ≤ −10 °C is as bright
+  as the old ice sheet, 0.62; melting perennial snow is darker, ~0.53), and `ice` on land is the
+  perennial snow cover.
+- The old rule (`land_ice_temperature`, −10 °C annual mean scaled by snowfall) is **kept only as
+  the fallback without the snow pack** (`seasonal_snow=0`, still bit-identical to main's
+  physics) and as a diagnostic field (`ice_sheet`, the "ice sheet without perennial snow" share
+  in the log).
+- Water budget unchanged: the ice sheets carry no mass; snow beyond 1 m flows off as runoff.
+- Merge with main (#220–#225): #225's cloud correction of land (`land_albedo + land_change`) is
+  applied once, to snow-free land; snow brightens on top against the same snow-free surface
+  albedo (`aerosol.land_surface_albedo`, 0.3 bare / 0.17 today; my separate parameter was
+  dropped) and is capped at `ice_albedo`. The cloud correction stays in full under snow (as it
+  does not under the old ice term); on the barren preset, where it is negative, snowy land is
+  up to |`land_change`| darker than before — small, documented.
+- Independent check of the change: [review-ice-sheets.md](review-ice-sheets.md) (no must-fix;
+  docs fixed).
+
+Runs, 1000 Myr, both from merged main: **base** = merge with conflict resolution only (old
+ice-sheet rule, commit `7382c29` on a temporary branch), **new** = `97a9268`. Barren default 8
+seeds, modern (`--biosphere modern --epoch 4`) 4 seeds as a regression check.
+
+| | barren base | barren new | modern base | modern new |
+|---|---|---|---|---|
+| global mean, late (°C) | 15.8 (14.6–16.6) | **16.1** (15.0–17.1) | 22.4 | 22.7 |
+| global mean at t0 (°C) | 9.8 | 10.4 | 8.6 | 10.1 |
+| permanently frozen, late / t0 | 3.4% / 19.0% | **2.0% / 14.7%** | 4.0% / 23.2% | 1.9% / 18.4% |
+| coldest snapshot / most frozen | 7.8 °C / 23.4% | 8.4 °C / 20.3% | 6.5 °C / 28.5% | 7.3 °C / 25.4% |
+| perennial snow (% of land), late / t0 | 3.9 / 39.0 | 3.1 / 29.8 | 4.0 / 37.3 | 0.7 / 25.5 |
+| snow cover NH land Jan / Jul, late | 25% / 5% | 30% / 5% | 12% / 1% | 31% / 1% |
+| CO₂ late (bar) / φ | 0.424 / 1.45 | 0.422 / 1.40 | 7e-4 / 3 | 8e-4 / 3 |
+| warmest month < 0 °C, % of land (late) | 5.5 | 4.3 | 4.3 | 0.8 |
+| … with ice < 0.5 (late / t0) | 22% / 4% | **42% / 11%** | 11% / 1% | 46% / 3% |
+
+("Reflected by snow" is not comparable between the columns: with the new rule it includes the
+former ice-sheet area, 2.1 vs 1.5 W/m² late, 7.5 W/m² at t0.)
+
+- **No glaciation or snowball.** The coldest barren state is 8.4 °C with 20% frozen, at the
+  start. The new rule makes the planet slightly warmer, +0.3 K late and +0.6 K at the start, with
+  less permanent ice: 2.0% instead of 3.4% late, 14.7% instead of 19.0% at the start.
+- **Why less ice.** The old rule put year-round ice albedo on land with an annual mean below
+  about −10 °C, even where the summers melt the snow. That land now has seasonal snow only
+  ("ice sheet without perennial snow": 2.8% → 2.0% of land late).
+- **#107 gets worse again with the mass balance.** Frozen-summer land without ice: 42% (barren)
+  and 46% (modern), against 22% and 11% with the old rule as a floor. That land is small (1–4%
+  of land late), so the shares are noisy.
+- **Why #107 regresses.** The cause is the constant daily spread σ = 5 K. With a warmest month
+  of about −2 °C it still gives ~1 K·day/day of positive degree days, ~0.1 m of melt in a summer,
+  which dry polar land (0.1–0.2 m/yr of snowfall) does not outlast. Summer temperatures vary
+  less than 5 K from day to day in polar regions (~2.5–3.5 K on Greenland; Fausto et al.,
+  2009). A seasonal σ would let more of this land keep its snow. That is a follow-up candidate,
+  not tuned here. Sublimation, also not modelled, would work the other way.
+- **Modern regression check:** +0.3 K and half the permanent ice late; nothing else changes
+  beyond the seed spread.
