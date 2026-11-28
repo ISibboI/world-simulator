@@ -607,7 +607,7 @@ mod tests {
         let mut parameters = Parameters::new(RADIUS, biosphere, epoch);
         parameters.temperature.spin_up_years = 60;
         let mut model = TemperatureModel::new(&mesh, parameters.temperature);
-        model.update(&elevation, None, None, 0.0);
+        model.update(&elevation, None, &[], None, 0.0);
         let fields = model.fields();
         let count = mesh.len() as f64;
         let global = fields.annual_mean.iter().sum::<f64>() / count;

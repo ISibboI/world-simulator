@@ -254,6 +254,34 @@ pub struct CoverTurnover {
     pub deposited: f64,
 }
 
+/// The snow on land (not lakes) in the last update of the temperature model (#207).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SnowStatistics {
+    /// Mean snow cover of the land of the northern and the southern hemisphere in January,
+    /// April, July and October.
+    pub cover_north: [f64; 4],
+    pub cover_south: [f64; 4],
+    /// Share of land with perennial snow cover above 0.5.
+    pub perennial: f64,
+    /// Global mean sunlight reflected by the snow (W/m²).
+    pub radiative_effect: f64,
+    /// Snow stored at the end of the update in km³ of water, and in metres of sea level.
+    pub storage: f64,
+    pub storage_sea_level: f64,
+    /// Snowfall, melt and overflow (glacier flow) in km³ of water per year.
+    pub snowfall: f64,
+    pub melt: f64,
+    pub overflow: f64,
+    /// Share of land whose warmest month is below 0 °C, and the share of that land with ice
+    /// cover below 0.5 (#107).
+    pub frozen_summer_land: f64,
+    pub frozen_summer_without_ice: f64,
+    /// Share of land under an ice sheet (> 0.5) by the annual-mean criterion without perennial
+    /// snow (< 0.5), and with perennial snow (> 0.5) but no ice sheet (< 0.5).
+    pub ice_sheet_only: f64,
+    pub perennial_only: f64,
+}
+
 /// Statistics of the planet, extending the tectonic statistics.
 pub struct PlanetStatistics {
     pub tectonics: Statistics,
@@ -313,8 +341,10 @@ pub struct PlanetStatistics {
     pub carbon: CarbonState,
     /// The escape after the last step (#210); `None` when it is off.
     pub escape: Option<EscapeState>,
-    /// Fraction of the surface covered by permanent ice (sea ice, ice sheets).
+    /// Fraction of the surface covered by permanent ice (sea ice, ice sheets, perennial snow).
     pub frozen_fraction: f64,
+    /// The seasonal snow on land (#207).
+    pub snow: SnowStatistics,
     /// Where the sediment sits and how much of the sea level it makes up.
     pub sediment_reservoirs: SedimentReservoirs,
     /// Sediment moved by waves so far, in Gt.
@@ -460,7 +490,7 @@ impl Planet {
         );
         let open = open_sills(&erosion);
         let view = climate_elevations(tectonics.mesh(), &elevation, &seeds, open, None);
-        temperature.update(&view, None, None, tectonics.time());
+        temperature.update(&view, None, &[], None, tectonics.time());
         let cell_count = tectonics.mesh().len();
         let water = SurfaceWater::ocean_only(crate::sea::ocean_from(
             tectonics.mesh(),
@@ -760,6 +790,7 @@ impl Planet {
                 self.temperature.update(
                     &view,
                     Some(&self.precipitation),
+                    &self.climate.water_cycle().monthly_precipitation,
                     lakes.map(|water| &water.lake_depth[..]),
                     self.tectonics.time(),
                 );
@@ -1164,6 +1195,7 @@ impl Planet {
                 model.update(
                     &view,
                     Some(&self.precipitation),
+                    &self.climate.water_cycle().monthly_precipitation,
                     lakes.map(|water| &water.lake_depth[..]),
                     self.tectonics.time(),
                 );
@@ -1247,6 +1279,66 @@ impl Planet {
     /// [`crate::sea::ocean_from`]).
     pub fn open_sills(&self) -> bool {
         open_sills(&self.erosion)
+    }
+
+    fn snow_statistics(&self, ocean: &[bool], latitude: &dyn Fn(usize) -> f64) -> SnowStatistics {
+        let fields = self.temperature.fields();
+        let land: Vec<usize> = (0..ocean.len())
+            .filter(|&c| !ocean[c] && self.water.lake_depth[c] < crate::temperature::LAKE_DEPTH)
+            .collect();
+        let share = |cells: &[usize], test: &dyn Fn(usize) -> bool| {
+            cells.iter().filter(|&&c| test(c)).count() as f64 / cells.len().max(1) as f64
+        };
+        let mut stats = SnowStatistics::default();
+        let north: Vec<usize> = land
+            .iter()
+            .copied()
+            .filter(|&c| latitude(c) >= 0.0)
+            .collect();
+        let south: Vec<usize> = land
+            .iter()
+            .copied()
+            .filter(|&c| latitude(c) < 0.0)
+            .collect();
+        if fields.monthly_snow.len() == 12 {
+            let mean = |cells: &[usize], month: usize| {
+                cells
+                    .iter()
+                    .map(|&c| fields.monthly_snow[month][c])
+                    .sum::<f64>()
+                    / cells.len().max(1) as f64
+            };
+            for (slot, month) in [0, 3, 6, 9].into_iter().enumerate() {
+                stats.cover_north[slot] = mean(&north, month);
+                stats.cover_south[slot] = mean(&south, month);
+            }
+        }
+        let perennial = |c: usize| fields.perennial_snow.get(c).is_some_and(|&p| p > 0.5);
+        let sheet = |c: usize| fields.ice_sheet.get(c).is_some_and(|&i| i > 0.5);
+        stats.perennial = share(&land, &perennial);
+        stats.ice_sheet_only = share(&land, &|c| sheet(c) && !perennial(c));
+        stats.perennial_only = share(&land, &|c| perennial(c) && !sheet(c));
+        stats.radiative_effect = fields.snow_radiative_effect;
+        let cell_area = self.cell_area();
+        let to_km3 = cell_area / 1e9;
+        stats.storage = fields.snow.iter().sum::<f64>() * to_km3;
+        let ocean_area = ocean.iter().filter(|&&o| o).count() as f64 * cell_area;
+        stats.storage_sea_level = stats.storage * 1e9 / ocean_area.max(1.0);
+        let budget = &fields.snow_budget;
+        let years = budget.years.max(1) as f64;
+        stats.snowfall = budget.snowfall * to_km3 / years;
+        stats.melt = budget.melt * to_km3 / years;
+        stats.overflow = budget.overflow * to_km3 / years;
+        if fields.monthly.len() == 12 {
+            let frozen: Vec<usize> = land
+                .iter()
+                .copied()
+                .filter(|&c| fields.monthly.iter().all(|month| month[c] < 0.0))
+                .collect();
+            stats.frozen_summer_land = frozen.len() as f64 / land.len().max(1) as f64;
+            stats.frozen_summer_without_ice = share(&frozen, &|c| fields.ice[c] < 0.5);
+        }
+        stats
     }
 
     pub fn statistics(&self) -> PlanetStatistics {
@@ -1334,6 +1426,7 @@ impl Planet {
             },
             frozen_fraction: all().filter(|&c| fields.ice[c] > 0.5).count() as f64
                 / elevation.len() as f64,
+            snow: self.snow_statistics(&ocean, &latitude),
             tectonics: self.tectonics.statistics(),
             mean_land_precipitation,
             midlatitude_land_precipitation,

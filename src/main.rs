@@ -1567,6 +1567,33 @@ fn snapshot(
         planet_statistics.gyre_transport,
         planet_statistics.solar_constant,
     );
+    let snow = &planet_statistics.snow;
+    info!(
+        "    snow on land: cover north Jan/Apr/Jul/Oct {:.1}/{:.1}/{:.1}/{:.1}%, south \
+         {:.1}/{:.1}/{:.1}/{:.1}% | perennial {:.1}% of land (ice sheet without it {:.1}%, \
+         it without ice sheet {:.1}%) | reflects {:.2} W/m² | stored {:.0} km³ ({:.3} m of sea \
+         level), snowfall {:.0}, melt {:.0}, glacier flow {:.0} km³/yr | warmest month < 0 °C \
+         on {:.1}% of land, {:.0}% of it with ice < 0.5",
+        100.0 * snow.cover_north[0],
+        100.0 * snow.cover_north[1],
+        100.0 * snow.cover_north[2],
+        100.0 * snow.cover_north[3],
+        100.0 * snow.cover_south[0],
+        100.0 * snow.cover_south[1],
+        100.0 * snow.cover_south[2],
+        100.0 * snow.cover_south[3],
+        100.0 * snow.perennial,
+        100.0 * snow.ice_sheet_only,
+        100.0 * snow.perennial_only,
+        snow.radiative_effect,
+        snow.storage,
+        snow.storage_sea_level,
+        snow.snowfall,
+        snow.melt,
+        snow.overflow,
+        100.0 * snow.frozen_summer_land,
+        100.0 * snow.frozen_summer_without_ice,
+    );
     info!("    {}", planet_statistics.carbon.summary());
     if let Some(escape) = &planet_statistics.escape {
         info!("    {}", escape.summary());
