@@ -256,6 +256,9 @@ pub struct TemperatureParams {
     /// open-water albedo, but no ocean heat transport (see [`TemperatureModel::update`]).
     /// Otherwise lake cells are land (before #173).
     pub open_water_lakes: bool,
+    /// Cloud nuclei and their effect on the brightness of clouds (#204), which correct the
+    /// albedos calibrated on Earth for a planet with other sources ([`crate::aerosol`]).
+    pub aerosol: crate::aerosol::AerosolParams,
 }
 
 impl Default for TemperatureParams {
@@ -302,6 +305,7 @@ impl Default for TemperatureParams {
             years_per_update: 2,
             coarse_subdivisions: 4,
             open_water_lakes: true,
+            aerosol: crate::aerosol::AerosolParams::default(),
         }
     }
 }
@@ -321,6 +325,9 @@ impl TemperatureParams {
         if name == "open_water_lakes" {
             self.open_water_lakes = value != 0.0;
             return Ok(());
+        }
+        if let Some(name) = name.strip_prefix("aerosol.") {
+            return self.aerosol.set(name, value);
         }
         let field = match name {
             "radiation_a" => &mut self.radiation_a,
@@ -419,6 +426,11 @@ pub struct TemperatureFields {
     /// update simulates [`TemperatureParams::years_per_update`]). The carbon cycle uses it for
     /// the warming still to come (#154).
     pub toa_imbalance: f64,
+    /// Global planetary (Bond) albedo over the last simulated year of the update: reflected over
+    /// incoming sunlight.
+    pub planetary_albedo: f64,
+    /// The cloud nuclei of the update and how they changed the albedos (#204).
+    pub aerosol: crate::aerosol::AerosolDiagnostics,
     /// Depth-integrated volume transport of the wind-driven gyres (eastward, northward) in m²/s
     /// at every fine ocean cell: the value of its coarse cell, NaN where that is not ocean in the
     /// gyre model (mostly land) or the fine cell is land.
@@ -498,6 +510,8 @@ pub struct TemperatureModel {
     /// in the previous year.
     subduction_temperature: [f64; 2],
     spun_up: bool,
+    /// The volcanic and dust sources of cloud nuclei the next update uses (#204).
+    aerosol_sources: crate::aerosol::Sources,
     fields: TemperatureFields,
 }
 
@@ -610,6 +624,7 @@ impl TemperatureModel {
             gyre_model,
             subduction_temperature: [15.0; 2],
             spun_up: false,
+            aerosol_sources: crate::aerosol::Sources::default(),
             fields: TemperatureFields::default(),
         }
     }
@@ -624,6 +639,16 @@ impl TemperatureModel {
 
     pub fn params_mut(&mut self) -> &mut TemperatureParams {
         &mut self.params
+    }
+
+    /// The volcanic and dust sources of cloud nuclei of the next update (#204); Earth's until
+    /// they are set.
+    pub fn aerosol_sources(&self) -> crate::aerosol::Sources {
+        self.aerosol_sources
+    }
+
+    pub fn set_aerosol_sources(&mut self, sources: crate::aerosol::Sources) {
+        self.aerosol_sources = sources;
     }
 
     /// Simulates the seasonal cycle for the given surface elevation (in metres, sea level is 0)
@@ -790,14 +815,56 @@ impl TemperatureModel {
             }
         };
         let ice_thickness = |enthalpy: f64| (-enthalpy / params.ice_latent_heat).max(0.0);
+        // The clouds of the calibrated albedos, brightened or darkened by the cloud nuclei of the
+        // planet (#204): open ocean by latitude (sea salt), land and lakes in continental air.
+        let clouds = crate::aerosol::CloudBrightening::new(&params.aerosol, self.aerosol_sources);
+        let marine: Vec<(crate::aerosol::AirMass, f64)> = self
+            .coarse_latitude
+            .iter()
+            .map(|&latitude| clouds.ocean(latitude))
+            .collect();
+        let (continental, land_change) = clouds.land();
+        let lake_change = clouds.lake();
         let ocean_albedo: Vec<f64> = self
             .coarse_latitude
             .iter()
-            .map(|latitude| {
+            .zip(&marine)
+            .map(|(latitude, (_, change))| {
                 let x = math::sin(*latitude);
-                params.ocean_albedo + params.ocean_albedo_latitude * (3.0 * x * x - 1.0) / 2.0
+                params.ocean_albedo
+                    + params.ocean_albedo_latitude * (3.0 * x * x - 1.0) / 2.0
+                    + change
             })
             .collect();
+        // Open lake water: the calibrated open water of its latitude in continental air.
+        let lake_albedo: Vec<f64> = (0..coarse_count)
+            .map(|cell| ocean_albedo[cell] - marine[cell].1 + lake_change)
+            .collect();
+        let aerosol = {
+            let (mut weight, mut ccn, mut droplets, mut cloud, mut change) =
+                (0.0, 0.0, 0.0, 0.0, 0.0);
+            for cell in 0..coarse_count {
+                let w = ocean_fraction[cell];
+                let (air, c) = marine[cell];
+                weight += w;
+                ccn += w * air.ccn;
+                droplets += w * air.droplets;
+                cloud += w * air.cloud_albedo;
+                change += w * c;
+            }
+            let weight = weight.max(1e-12);
+            crate::aerosol::AerosolDiagnostics {
+                sources: self.aerosol_sources,
+                marine: crate::aerosol::AirMass {
+                    ccn: ccn / weight,
+                    droplets: droplets / weight,
+                    cloud_albedo: cloud / weight,
+                },
+                continental,
+                ocean_change: change / weight,
+                land_change,
+            }
+        };
 
         // Wind-driven ocean heat transport by the subtropical cells across every band interface:
         // the poleward Ekman mass transport under the trade winds, M = −τ_x f / (f² + r²) per
@@ -867,6 +934,8 @@ impl TemperatureModel {
         let mut mean = vec![0.0; coarse_count];
         // Global mean net radiation at the top of the atmosphere in the last year (W/m²).
         let mut toa_imbalance = 0.0;
+        // Sunlight reflected and received in the last year (summed W/m² over cells and steps).
+        let (mut reflected, mut incoming) = (0.0, 0.0);
         for year in 0..years {
             let last_year = year + 1 == years;
             for season in seasonal_land
@@ -898,7 +967,8 @@ impl TemperatureModel {
             let land_albedo: Vec<f64> = (0..coarse_count)
                 .map(|cell| {
                     let ice = land_ice[cell] / land_cells[cell].max(1) as f64;
-                    params.land_albedo + (params.ice_albedo - params.land_albedo) * ice
+                    let open = params.land_albedo + land_change;
+                    open + (params.ice_albedo - open) * ice
                 })
                 .collect();
             for (season, insolation) in insolation.iter().enumerate() {
@@ -1014,6 +1084,8 @@ impl TemperatureModel {
                         let (a, b) = radiation(land);
                         if last_year {
                             toa_imbalance += f * (q * (1.0 - land_albedo[cell]) - a - b * land);
+                            reflected += f * q * land_albedo[cell];
+                            incoming += q;
                         }
                         let rate = dt / params.land_heat_capacity;
                         self.land[cell] = (land
@@ -1040,6 +1112,7 @@ impl TemperatureModel {
                         if last_year {
                             toa_imbalance += ocean_fraction[cell]
                                 * (q * (1.0 - albedo) - a - b * self.ocean_surface[cell]);
+                            reflected += ocean_fraction[cell] * q * albedo;
                         }
                         // Net heating of the surface: `forcing − damping · T_surface`.
                         let forcing = q * (1.0 - albedo) - a
@@ -1061,7 +1134,7 @@ impl TemperatureModel {
                             };
                             let albedo = lake.albedo(
                                 params,
-                                ocean_albedo[cell],
+                                lake_albedo[cell],
                                 self.lake[cell],
                                 self.lake_surface[cell],
                             );
@@ -1069,6 +1142,7 @@ impl TemperatureModel {
                             if last_year {
                                 toa_imbalance += lake_fraction[cell]
                                     * (q * (1.0 - albedo) - a - b * self.lake_surface[cell]);
+                                reflected += lake_fraction[cell] * q * albedo;
                             }
                             let forcing = q * (1.0 - albedo) - a
                                 + transport
@@ -1305,6 +1379,8 @@ impl TemperatureModel {
             solar_constant: orbit.solar_constant,
             toa_imbalance: toa_imbalance
                 / ((seasons * params.substeps_per_season) as f64 * coarse_count as f64),
+            planetary_albedo: reflected / incoming.max(1e-12),
+            aerosol,
             gyre_transport: gyres
                 .streamfunction
                 .iter()

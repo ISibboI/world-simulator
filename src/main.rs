@@ -2,6 +2,7 @@
 // native build still checks for dead code.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+mod aerosol;
 mod carbon;
 mod climate;
 #[cfg(any(target_arch = "wasm32", test))]
@@ -1633,13 +1634,15 @@ fn snapshot(
     );
     info!(
         "    temperature global {:5.1} °C, equator {:5.1} °C, poles {:6.1} °C | \
-         land seasonal range {:4.1} K | permanently frozen {:4.1}% | heat transport {:+.1}/{:+.1} PW \
-         (ocean at 20°N {:+.1}, 20°S {:+.1}) | gyres {:.0} Sv | solar constant {:.1} W/m²",
+         land seasonal range {:4.1} K | permanently frozen {:4.1}% | planetary albedo {:.4} | heat \
+         transport {:+.1}/{:+.1} PW (ocean at 20°N {:+.1}, 20°S {:+.1}) | gyres {:.0} Sv | solar \
+         constant {:.1} W/m²",
         planet_statistics.global_temperature,
         planet_statistics.equatorial_temperature,
         planet_statistics.polar_temperature,
         planet_statistics.land_seasonal_range,
         100.0 * planet_statistics.frozen_fraction,
+        planet_statistics.planetary_albedo,
         planet_statistics.heat_transport[0],
         planet_statistics.heat_transport[1],
         planet_statistics.heat_transport[2],
@@ -1648,6 +1651,7 @@ fn snapshot(
         planet_statistics.solar_constant,
     );
     info!("    {}", planet_statistics.carbon.summary());
+    info!("    {}", planet_statistics.aerosol.summary());
     if let Some(escape) = &planet_statistics.escape {
         info!("    {}", escape.summary());
     }
