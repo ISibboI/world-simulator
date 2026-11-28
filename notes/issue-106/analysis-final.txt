@@ -1,0 +1,48 @@
+== volcanism: volc3
+seed-0: 741 s | LIPs 67 (≥1e6: 57, continental 19) | t=1000: cont 33.8% land 29.0% T 18.5 °C pCO2 0.3681 bar plumes 15.42 Tmol/yr | ocean p10/50/90 [-5438.8, -3803.6, -191.9] shallow<3km 0.349 plateau 0.0187 (land 0.0046, mean elev -1919.1509778357236) max mafic 43.1 km (>40 km 0.0000) cont-origin 0.333 felsic 0.9169387650337343 land p50/90/99 [223.0, 1002.2, 4690.8]
+seed-1: 747 s | LIPs 73 (≥1e6: 65, continental 21) | t=1000: cont 29.1% land 29.7% T 17.1 °C pCO2 0.3969 bar plumes 1.22 Tmol/yr | ocean p10/50/90 [-5495.0, -3543.1, -1614.7] shallow<3km 0.344 plateau 0.0354 (land 0.0010, mean elev -2314.7801379310345) max mafic 65.8 km (>40 km 0.0004) cont-origin 0.284 felsic 0.90725625161124 land p50/90/99 [534.2, 3134.6, 3379.5]
+seed-2: 750 s | LIPs 69 (≥1e6: 59, continental 35) | t=1000: cont 36.0% land 28.1% T 20.4 °C pCO2 0.4623 bar plumes 1.14 Tmol/yr | ocean p10/50/90 [-5403.3, -3761.3, -211.0] shallow<3km 0.342 plateau 0.0329 (land 0.0000, mean elev -3475.42440652819) max mafic 37.3 km (>40 km 0.0000) cont-origin 0.360 felsic 0.9399985069562267 land p50/90/99 [78.1, 422.6, 3149.6]
+seed-3: 760 s | LIPs 67 (≥1e6: 59, continental 19) | t=1000: cont 31.5% land 28.3% T 17.3 °C pCO2 0.2986 bar plumes 1.49 Tmol/yr | ocean p10/50/90 [-5822.3, -3572.0, -160.4] shallow<3km 0.376 plateau 0.0358 (land 0.0075, mean elev -957.107430129516) max mafic 46.2 km (>40 km 0.0000) cont-origin 0.305 felsic 0.8966240089693281 land p50/90/99 [349.4, 1758.4, 2742.4]
+seed-4: 977 s | LIPs 59 (≥1e6: 54, continental 6) | t=1000: cont 33.6% land 34.4% T 16.8 °C pCO2 0.3761 bar plumes 0.87 Tmol/yr | ocean p10/50/90 [-5852.5, -3953.1, -1526.3] shallow<3km 0.274 plateau 0.0168 (land 0.0024, mean elev -2575.5062409288826) max mafic 49.1 km (>40 km 0.0002) cont-origin 0.330 felsic 0.896162 land p50/90/99 [427.2, 2202.2, 2658.6]
+seed-5: 969 s | LIPs 54 (≥1e6: 45, continental 12) | t=1000: cont 33.8% land 32.3% T 16.2 °C pCO2 0.2389 bar plumes 1.42 Tmol/yr | ocean p10/50/90 [-5339.2, -3967.8, -1374.2] shallow<3km 0.268 plateau 0.0247 (land 0.0011, mean elev -2859.4461918892184) max mafic 69.8 km (>40 km 0.0007) cont-origin 0.333 felsic 0.9308721534744088 land p50/90/99 [221.2, 912.9, 1873.1]
+seed-6: 1004 s | LIPs 71 (≥1e6: 65, continental 23) | t=1000: cont 26.0% land 28.1% T 15.7 °C pCO2 0.3404 bar plumes 0.83 Tmol/yr | ocean p10/50/90 [-4601.6, -3581.6, -1946.7] shallow<3km 0.283 plateau 0.0345 (land 0.0040, mean elev -1576.541018387553) max mafic 46.6 km (>40 km 0.0007) cont-origin 0.255 felsic 0.9086017792232638 land p50/90/99 [781.4, 4636.5, 5432.8]
+seed-7: 958 s | LIPs 74 (≥1e6: 73, continental 1) | t=1000: cont 33.9% land 32.1% T 18.0 °C pCO2 0.298 bar plumes 0.75 Tmol/yr | ocean p10/50/90 [-5987.3, -3806.7, -1531.2] shallow<3km 0.302 plateau 0.0139 (land 0.0047, mean elev -1962.2341506129596) max mafic 68.3 km (>40 km 0.0017) cont-origin 0.328 felsic 0.9138145670754366 land p50/90/99 [104.8, 746.6, 1786.4]
+  oceanic: 398 LIPs, median 6.68e+06 km³, p10 1.86e+06, p90 2.28e+07, max 1.00e+08, mean lid 0.39, peak crust median 7.2 km
+  continental: 136 LIPs, median 1.48e+06 km³, p10 4.86e+05, p90 3.85e+06, max 9.63e+06, mean lid 0.08, peak crust median 1.6 km
+  all: 534 LIPs over 8 × 1000 Myr = one per 15.0 Myr; ≥1e6 km³: one per 16.8 Myr; ≥1e7: one per 62.5 Myr; total 4.52e+09 km³ (0.56 km³/yr per run)
+  volume histogram (km³ bins 1e5,3e5,1e6,3e6,1e7,3e7,1e8): [2, 55, 143, 206, 101, 27]
+  t | cont | land | temp | pco2 | plumes | sources | m_ridges | m_arcs | m_LIPs | m_plume tails
+  0 | 40 | 30.9 | 12.3 | 0.493 | 0 | 0 | - | - | - | -
+  100 | 36.9 | 28.1 | 14.5 | 0.497 | 0.894 | 11.4 | 39 | 2.83 | 0.352 | 0.318
+  200 | 36 | 29 | 15.3 | 0.541 | 0.93 | 12.9 | 39.1 | 2.76 | 0.424 | 0.315
+  300 | 35.1 | 29 | 16.6 | 0.595 | 1.07 | 14.7 | 43.1 | 3.03 | 0.658 | 0.374
+  400 | 35.1 | 28.2 | 16.4 | 0.532 | 0.856 | 13 | 41.9 | 3 | 0.516 | 0.347
+  500 | 34.6 | 27 | 16.7 | 0.475 | 0.866 | 12.3 | 38.6 | 2.76 | 0.549 | 0.285
+  600 | 34 | 24.9 | 17.1 | 0.431 | 0.84 | 12.7 | 37.2 | 2.65 | 0.459 | 0.268
+  700 | 33.3 | 26.1 | 17.2 | 0.409 | 0.901 | 12.2 | 38.9 | 2.76 | 0.389 | 0.33
+  800 | 32.7 | 26.6 | 17.2 | 0.362 | 0.907 | 12.1 | 38.2 | 2.71 | 0.422 | 0.315
+  900 | 32.2 | 28.8 | 17.7 | 0.391 | 1.05 | 12.2 | 36.9 | 2.61 | 0.831 | 0.404
+  1000 | 32.2 | 30.2 | 17.5 | 0.347 | 2.89 | 13.6 | 35.1 | 2.51 | 1.03 | 0.47
+  runtime mean 863 s
+== main: main
+seed-0: 977 s | LIPs 0 (≥1e6: 0, continental 0) | t=1000: cont 33.5% land 30.4% T 18.2 °C pCO2 0.415 bar plumes 0.88 Tmol/yr | ocean p10/50/90 [-5853.8, -3804.1, -888.9] shallow<3km 0.313 plateau 0.0007 (land 0.0000, mean elev -4188.23) max mafic 15.6 km (>40 km 0.0000) cont-origin 0.330 felsic 0.9429568825011113 land p50/90/99 [118.6, 609.8, 1725.0]
+seed-1: 986 s | LIPs 0 (≥1e6: 0, continental 0) | t=1000: cont 34.0% land 34.9% T 17.8 °C pCO2 0.3118 bar plumes 1.22 Tmol/yr | ocean p10/50/90 [-5711.3, -4028.2, -1897.4] shallow<3km 0.267 plateau 0.0020 (land 0.0000, mean elev -2937.42375) max mafic 22.9 km (>40 km 0.0000) cont-origin 0.342 felsic 0.9373326917593384 land p50/90/99 [131.2, 457.9, 1483.1]
+seed-2: 1019 s | LIPs 0 (≥1e6: 0, continental 0) | t=1000: cont 33.2% land 31.1% T 19.2 °C pCO2 0.4649 bar plumes 0.97 Tmol/yr | ocean p10/50/90 [-5828.8, -3677.9, -1316.2] shallow<3km 0.331 plateau 0.0020 (land 0.0000, mean elev -3903.0506024096385) max mafic 22.1 km (>40 km 0.0000) cont-origin 0.331 felsic 0.9349885057471264 land p50/90/99 [177.0, 1545.7, 2263.7]
+seed-3: 1013 s | LIPs 0 (≥1e6: 0, continental 0) | t=1000: cont 34.5% land 26.6% T 18.8 °C pCO2 0.3998 bar plumes 1.59 Tmol/yr | ocean p10/50/90 [-6005.0, -3618.7, -95.7] shallow<3km 0.396 plateau 0.0010 (land 0.0001, mean elev -3173.905) max mafic 17.3 km (>40 km 0.0000) cont-origin 0.346 felsic 0.9517882294827464 land p50/90/99 [79.6, 403.3, 2813.9]
+seed-4: 855 s | LIPs 0 (≥1e6: 0, continental 0) | t=1000: cont 36.7% land 27.4% T 18.0 °C pCO2 0.3087 bar plumes 1.22 Tmol/yr | ocean p10/50/90 [-5685.1, -3707.6, -325.2] shallow<3km 0.370 plateau 0.0010 (land 0.0001, mean elev -4062.082926829268) max mafic 27.9 km (>40 km 0.0000) cont-origin 0.368 felsic 0.9453159851301115 land p50/90/99 [212.6, 739.1, 3168.5]
+seed-5: 880 s | LIPs 0 (≥1e6: 0, continental 0) | t=1000: cont 29.8% land 26.8% T 17.1 °C pCO2 0.3373 bar plumes 1.3 Tmol/yr | ocean p10/50/90 [-4837.3, -3590.5, -988.6] shallow<3km 0.356 plateau 0.0016 (land 0.0002, mean elev -3349.464179104478) max mafic 21.3 km (>40 km 0.0000) cont-origin 0.298 felsic 0.9443562699909784 land p50/90/99 [351.4, 1810.4, 4269.3]
+seed-6: 917 s | LIPs 0 (≥1e6: 0, continental 0) | t=1000: cont 30.3% land 28.2% T 16.6 °C pCO2 0.3127 bar plumes 0.4 Tmol/yr | ocean p10/50/90 [-4850.2, -3722.1, -1098.4] shallow<3km 0.339 plateau 0.0031 (land 0.0002, mean elev -3081.74375) max mafic 26.6 km (>40 km 0.0000) cont-origin 0.303 felsic 0.9292918579366997 land p50/90/99 [624.7, 2509.3, 3326.2]
+seed-7: 862 s | LIPs 0 (≥1e6: 0, continental 0) | t=1000: cont 34.1% land 28.8% T 17.1 °C pCO2 0.2929 bar plumes 0.34 Tmol/yr | ocean p10/50/90 [-5647.7, -3693.2, -684.9] shallow<3km 0.334 plateau 0.0006 (land 0.0000, mean elev -4283.872) max mafic 18.3 km (>40 km 0.0000) cont-origin 0.340 felsic 0.9483531948537339 land p50/90/99 [97.0, 540.4, 1278.3]
+  t | cont | land | temp | pco2 | plumes | sources | m_ridges | m_arcs | m_LIPs | m_plume tails
+  0 | 40 | 30.9 | 12.3 | 0.493 | 0 | 0 | - | - | - | -
+  100 | 36.8 | 27.9 | 14.7 | 0.502 | 0.885 | 12.5 | - | - | - | -
+  200 | 35.7 | 27.8 | 15.6 | 0.537 | 0.839 | 13.6 | - | - | - | -
+  300 | 34.8 | 28.5 | 16.4 | 0.578 | 0.863 | 13.8 | - | - | - | -
+  400 | 34.3 | 28.3 | 16.6 | 0.533 | 0.845 | 13.3 | - | - | - | -
+  500 | 34.1 | 28.1 | 16.9 | 0.521 | 1.04 | 13.3 | - | - | - | -
+  600 | 33.9 | 27.7 | 17 | 0.5 | 1.02 | 11.7 | - | - | - | -
+  700 | 33.5 | 26.2 | 17.4 | 0.45 | 0.984 | 10.9 | - | - | - | -
+  800 | 33.4 | 26.5 | 17.8 | 0.425 | 0.968 | 11.1 | - | - | - | -
+  900 | 33.4 | 27.4 | 17.7 | 0.375 | 1.11 | 11.8 | - | - | - | -
+  1000 | 33.3 | 29.3 | 17.9 | 0.355 | 0.99 | 10.9 | - | - | - | -
+  runtime mean 939 s

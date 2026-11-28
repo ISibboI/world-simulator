@@ -80,6 +80,11 @@ pub struct CarbonParams {
     /// Plume degassing per m²/s of plume flux ([`crate::tectonics::Plume::flux`]), mol/yr per
     /// m²/s: 1 Tmol/yr for the model's typical ~9 plumes (0.036 m²/s).
     pub plume_carbon: f64,
+    /// Degassing per kg of crust emplaced by large igneous provinces (mol/kg; #106): the CO₂ of
+    /// a plume head's magma, erupted and intruded (~0.3 wt% CO₂; basaltic magmas carry
+    /// 0.1–0.5 wt%). Booked into the plume source in the step of the LIP, as a pulse. The tails'
+    /// magma is [`Self::plume_carbon`]'s, so their crust adds no carbon of its own.
+    pub lip_carbon: f64,
     /// Metamorphic decarbonation per kg of sediment metamorphosed by burial or stacked in
     /// collisions (mol/kg).
     pub metamorphic_carbon: f64,
@@ -109,6 +114,11 @@ pub struct CarbonParams {
     pub basalt_cations: f64,
     /// Weatherable part of eroded sediment relative to fresh felsic rock.
     pub sediment_weatherable: f64,
+    /// Kinetic weathering of bare rock relative to rock under regolith (#197): water runs off
+    /// bare rock with little contact time, but still dissolves some of it. The kinetic rate is
+    /// scaled by `b + (1 − b)(1 − bare)` with the bare fraction [`LandCell::bare`] (West 2012:
+    /// weathering grows with the regolith's thickness and residence time; Gabet & Mudd 2009).
+    pub bare_rock_weathering: f64,
     /// Seafloor weathering: carbon taken up per kg of new oceanic crust (mol/kg) at today's CO₂
     /// and the reference bottom water temperature (°C), its CO₂ exponent, activation energy
     /// (J/mol) and the most the crust can take up (mol/kg).
@@ -164,6 +174,7 @@ impl Default for CarbonParams {
             slab_age: 100.0,
             slab_sediment_carbon: 0.15,
             plume_carbon: 1e12 / 0.036,
+            lip_carbon: 0.07,
             metamorphic_carbon: 0.5,
             land_weathering: 0.073,
             plant_factor: 1.0,
@@ -176,6 +187,7 @@ impl Default for CarbonParams {
             felsic_cations: 1.3,
             basalt_cations: 3.7,
             sediment_weatherable: 0.3,
+            bare_rock_weathering: 0.1,
             seafloor_carbon: 0.015,
             seafloor_co2_exponent: 0.23,
             seafloor_activation_energy: 92e3,
@@ -208,6 +220,7 @@ impl CarbonParams {
             "slab_age" => &mut self.slab_age,
             "slab_sediment_carbon" => &mut self.slab_sediment_carbon,
             "plume_carbon" => &mut self.plume_carbon,
+            "lip_carbon" => &mut self.lip_carbon,
             "metamorphic_carbon" => &mut self.metamorphic_carbon,
             "land_weathering" => &mut self.land_weathering,
             "plant_factor" => &mut self.plant_factor,
@@ -220,6 +233,7 @@ impl CarbonParams {
             "felsic_cations" => &mut self.felsic_cations,
             "basalt_cations" => &mut self.basalt_cations,
             "sediment_weatherable" => &mut self.sediment_weatherable,
+            "bare_rock_weathering" => &mut self.bare_rock_weathering,
             "seafloor_carbon" => &mut self.seafloor_carbon,
             "seafloor_co2_exponent" => &mut self.seafloor_co2_exponent,
             "seafloor_activation_energy" => &mut self.seafloor_activation_energy,
@@ -264,6 +278,8 @@ pub struct TectonicDrivers {
     pub subducted_sediment: f64,
     /// Sediment metamorphosed by burial and stacked onto the upper plate in collisions.
     pub metamorphic_sediment: f64,
+    /// Crust emplaced by large igneous provinces (#106).
+    pub lip_crust: f64,
     /// Sum of the current plume fluxes in m²/s.
     pub plume_flux: f64,
 }
@@ -370,9 +386,15 @@ pub struct LandCell {
     pub runoff: f64,
     /// Permanent ice cover, 0 to 1.
     pub ice: f64,
-    /// Bedrock and sediment eroded from the cell in the step, in m/yr (≥ 0).
+    /// Bedrock and sediment eroded from the cell in the step, in m/yr (≥ 0). The bedrock
+    /// includes the rock turned into regolith (#197); the sediment excludes the regolith, which
+    /// was counted when it was made.
     pub bedrock_erosion: f64,
     pub sediment_erosion: f64,
+    /// Fraction of the step the cell's rock was bare of regolith (#197; 0 without regolith):
+    /// water on bare rock runs off with little contact, so the kinetic rate scales with the
+    /// covered fraction (see [`CarbonParams::bare_rock_weathering`]).
+    pub bare: f64,
     /// Density of the bedrock in kg/m³.
     pub bedrock_density: f64,
     /// Mafic (basaltic) share of the bedrock, 0 to 1: one minus its felsic fraction.
@@ -549,6 +571,37 @@ impl CarbonCycle {
         self.tectonic_degassing
     }
 
+    /// Adds `carbon` mol to the exogenic carbon (negative: takes it): the carbon that the
+    /// reduced gases (#202) gave back as CO₂ or took to make CH₄ in a step.
+    pub fn exchange(&mut self, carbon: f64) {
+        self.carbon += carbon;
+        self.state.carbon = self.carbon;
+    }
+
+    /// While the CO₂ is held ([`Self::holds_co2`]), sets it to the CO₂ whose forcing is
+    /// `forcing` (W/m²), with its exogenic carbon in an ocean of `ocean_mass` kg on a planet
+    /// of `planet_area` m²: the CO₂ then makes up the change of other greenhouse gases (#202),
+    /// so that the total forcing of the start is held. Does nothing otherwise.
+    pub fn hold_forcing(&mut self, forcing: f64, ocean_mass: f64, planet_area: f64) {
+        if !self.holds_co2() {
+            return;
+        }
+        self.ratio = co2_ratio_for_forcing(forcing);
+        self.forcing = forcing;
+        self.carbon = exogenic_carbon(&self.params, self.ratio, ocean_mass, planet_area);
+        let state = &mut self.state;
+        state.ratio = self.ratio;
+        state.pressure = self.ratio * REFERENCE_PRESSURE;
+        state.forcing = forcing;
+        state.carbon = self.carbon;
+        state.atmosphere = atmospheric_carbon(self.ratio, planet_area);
+    }
+
+    /// The forcing (W/m²) of the current CO₂.
+    pub fn forcing(&self) -> f64 {
+        self.forcing
+    }
+
     /// Ends the hold of the CO₂ at the end of the ramp-up phase: φ is set so that the sinks
     /// balance the sources over the recorded steps (the last [`Self::calibration_span`]) at the
     /// current CO₂, and the smoothing of the tectonic
@@ -588,6 +641,8 @@ impl CarbonCycle {
         self.years += input.years;
         let rate = |now: f64, before: f64| (now - before).max(0.0) / input.years;
         let drivers = input.drivers;
+        // LIPs degas in the step they erupt (a pulse, not smoothed).
+        let lip_crust = rate(drivers.lip_crust, previous.lip_crust);
         let raw = Rates {
             ridge: rate(drivers.new_sea_floor, previous.new_sea_floor),
             subducted: rate(drivers.subducted_crust, previous.subducted_crust),
@@ -603,7 +658,7 @@ impl CarbonCycle {
             ridges: params.ridge_carbon * rates.ridge,
             arcs: params.wedge_carbon * rates.subducted
                 + params.slab_sediment_carbon * rates.sediment,
-            plumes: params.plume_carbon * drivers.plume_flux,
+            plumes: params.plume_carbon * drivers.plume_flux + params.lip_carbon * lip_crust,
             metamorphic: params.metamorphic_carbon * rates.metamorphic,
         };
 
@@ -720,7 +775,8 @@ impl CarbonCycle {
             weathering_intensity: intensity,
             new_crust: ridge_crust,
             arc_plume_mantle_degassing: params.wedge_carbon * rates.subducted
-                + params.plume_carbon * drivers.plume_flux,
+                + params.plume_carbon * drivers.plume_flux
+                + params.lip_carbon * lip_crust,
         };
         forcing
     }
@@ -787,7 +843,8 @@ impl CarbonCycle {
                     * params.plant_factor
                     * reactivity
                     * math::powf(cell.runoff.max(0.0), params.runoff_exponent)
-                    * (1.0 - cell.ice);
+                    * (1.0 - cell.ice)
+                    * (1.0 - (1.0 - params.bare_rock_weathering) * cell.bare.clamp(0.0, 1.0));
                 WeatheringCell {
                     supply,
                     kinetic,
@@ -979,6 +1036,7 @@ mod tests {
             sediment_erosion: 0.0,
             bedrock_density: 2800.0,
             mafic: 0.2,
+            bare: 0.0,
         }
     }
 
@@ -1002,7 +1060,52 @@ mod tests {
             subducted_crust: step * 65e18 * rate,
             subducted_sediment: step * 2e18,
             metamorphic_sediment: step * 1e18,
+            lip_crust: 0.0,
             plume_flux: 0.03,
+        }
+    }
+
+    /// A LIP's crust degasses `lip_carbon` per kg into the plume source in its step only; the
+    /// other sources do not change.
+    #[test]
+    fn lip_crust_degasses_once_into_the_plume_source() {
+        let land = vec![cell(15.0); 10];
+        let params = CarbonParams {
+            degassing_smoothing: 0.0,
+            ..CarbonParams::default()
+        };
+        let lip_carbon = params.lip_carbon;
+        let mut plain = CarbonCycle::new(params.clone(), 20.0, OCEAN, AREA);
+        let mut with_lip = CarbonCycle::new(params, 20.0, OCEAN, AREA);
+        plain.start(drivers(0.0, 1.0));
+        with_lip.start(drivers(0.0, 1.0));
+        // 10⁶ km³ of basalt (~3 × 10¹⁸ kg) in the first step.
+        let lip = 2.95e18;
+        for step in 1..=2 {
+            let base = drivers(step as f64, 1.0);
+            plain.step(&input(&land, base, 0.0));
+            with_lip.step(&input(
+                &land,
+                TectonicDrivers {
+                    lip_crust: lip,
+                    ..base
+                },
+                0.0,
+            ));
+            let (a, b) = (plain.state().sources, with_lip.state().sources);
+            let expected = if step == 1 {
+                lip_carbon * lip / 1e6
+            } else {
+                0.0
+            };
+            assert!(
+                (b.plumes - a.plumes - expected).abs() <= 1e-9 * a.plumes,
+                "{step}"
+            );
+            assert_eq!(
+                (a.ridges, a.arcs, a.metamorphic),
+                (b.ridges, b.arcs, b.metamorphic)
+            );
         }
     }
 
@@ -1198,5 +1301,27 @@ mod tests {
         assert_eq!(calibrate(|phi| 2.0 * phi, 0.1, 0.3, 3.0), 0.3);
         let balancing = balancing_phi(|phi| 2.0 * phi, 16.0);
         assert!((balancing - 8.0).abs() < 1e-9);
+    }
+
+    /// Bare rock (#197) weathers at `bare_rock_weathering` of the kinetic rate of rock under
+    /// regolith; the supply stays.
+    #[test]
+    fn bare_rock_slows_the_kinetics() {
+        let params = CarbonParams::default();
+        let cycle = CarbonCycle::new(params.clone(), 0.0, OCEAN, AREA);
+        let covered = cycle.weathering_cells(&[cell(15.0)]);
+        let bare = cycle.weathering_cells(&[LandCell {
+            bare: 1.0,
+            ..cell(15.0)
+        }]);
+        let half = cycle.weathering_cells(&[LandCell {
+            bare: 0.5,
+            ..cell(15.0)
+        }]);
+        assert_eq!(covered[0].supply, bare[0].supply);
+        let ratio = bare[0].kinetic / covered[0].kinetic;
+        assert!((ratio - params.bare_rock_weathering).abs() < 1e-12);
+        let ratio = half[0].kinetic / covered[0].kinetic;
+        assert!((ratio - 0.5 * (1.0 + params.bare_rock_weathering)).abs() < 1e-12);
     }
 }

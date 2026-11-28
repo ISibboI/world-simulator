@@ -1,0 +1,72 @@
+== base-barren (8 seeds)
+  seed-0: T 16.76 ice 0.61% albedo nan CO2 0.5393 bar phi 1.168 Rv nan Rd nan
+  seed-1: T 16.81 ice 2.34% albedo nan CO2 0.4813 bar phi 1.193 Rv nan Rd nan
+  seed-2: T 18.58 ice 0.29% albedo nan CO2 0.5970 bar phi 0.915 Rv nan Rd nan
+  seed-3: T 17.61 ice 0.38% albedo nan CO2 0.5127 bar phi 1.134 Rv nan Rd nan
+  seed-4: T 17.68 ice 0.73% albedo nan CO2 0.4034 bar phi 1.133 Rv nan Rd nan
+  seed-5: T 16.38 ice 2.33% albedo nan CO2 0.3371 bar phi 1.398 Rv nan Rd nan
+  seed-6: T 16.68 ice 0.59% albedo nan CO2 0.4878 bar phi 1.221 Rv nan Rd nan
+  seed-7: T 15.73 ice 1.92% albedo nan CO2 0.4438 bar phi 1.253 Rv nan Rd nan
+  mean 200-1000: T 17.03 Teq 25.48 Tpole -2.738 ice% 1.149 albedo nan pCO2 0.4753 CO2x 1697 forcing 61.04 Rv nan degas nan Rd nan mCCN nan mNd nan mAc nan dAo nan cCCN nan cNd nan cAc nan dAl nan
+  mean 0-50    : T 13.14 Teq 21.29 Tpole -6.769 ice% 4.513 albedo nan pCO2 0.4933 CO2x 1762 forcing 61.77 Rv nan degas nan Rd nan mCCN nan mNd nan mAc nan dAo nan cCCN nan cNd nan cAc nan dAl nan
+  phi [1.168, 1.193, 0.915, 1.134, 1.133, 1.398, 1.221, 1.253] | runtime mean 883 s
+== off-barren (8 seeds)
+  seed-0: T 16.76 ice 0.61% albedo 0.3218 CO2 0.5393 bar phi 1.168 Rv 0.97 Rd 2.65
+  seed-1: T 16.81 ice 2.34% albedo 0.3159 CO2 0.4813 bar phi 1.193 Rv 0.87 Rd 1.95
+  seed-2: T 18.58 ice 0.29% albedo 0.3147 CO2 0.5970 bar phi 0.915 Rv 1.51 Rd 1.87
+  seed-3: T 17.61 ice 0.38% albedo 0.3169 CO2 0.5127 bar phi 1.134 Rv 1.08 Rd 2.25
+  seed-4: T 17.68 ice 0.73% albedo 0.3072 CO2 0.4034 bar phi 1.133 Rv 1.15 Rd 1.32
+  seed-5: T 16.38 ice 2.33% albedo 0.3096 CO2 0.3371 bar phi 1.398 Rv 0.71 Rd 1.37
+  seed-6: T 16.68 ice 0.59% albedo 0.3190 CO2 0.4878 bar phi 1.221 Rv 1.15 Rd 2.34
+  seed-7: T 15.73 ice 1.92% albedo 0.3220 CO2 0.4438 bar phi 1.253 Rv 0.81 Rd 2.43
+  mean 200-1000: T 17.03 Teq 25.48 Tpole -2.738 ice% 1.149 albedo 0.3159 pCO2 0.4753 CO2x 1697 forcing 61.04 Rv 1.029 degas 1.335 Rd 2.022 mCCN 0 mNd 0 mAc 0 dAo 0 cCCN 0 cNd 0 cAc 0 dAl 0
+  mean 0-50    : T 13.14 Teq 21.29 Tpole -6.769 ice% 4.513 albedo 0.3191 pCO2 0.4933 CO2x 1762 forcing 61.77 Rv 1.006 degas 1.304 Rd 1.306 mCCN 0 mNd 0 mAc 0 dAo 0 cCCN 0 cNd 0 cAc 0 dAl 0
+  phi [1.168, 1.193, 0.915, 1.134, 1.133, 1.398, 1.221, 1.253] | runtime mean 854 s
+== new-barren (8 seeds)
+  seed-0: T 18.04 ice 0.68% albedo 0.3066 CO2 0.4590 bar phi 0.993 Rv 0.88 Rd 1.92
+  seed-1: T 17.82 ice 0.42% albedo 0.3041 CO2 0.3934 bar phi 1.081 Rv 0.95 Rd 1.70
+  seed-2: T 19.32 ice 0.21% albedo 0.3088 CO2 0.5816 bar phi 0.832 Rv 1.33 Rd 2.00
+  seed-3: T 18.30 ice 0.20% albedo 0.3085 CO2 0.4854 bar phi 0.995 Rv 1.07 Rd 2.28
+  seed-4: T 18.72 ice 0.26% albedo 0.3011 CO2 0.4383 bar phi 0.979 Rv 1.30 Rd 1.41
+  seed-5: T 16.89 ice 1.20% albedo 0.3028 CO2 0.3454 bar phi 1.216 Rv 0.82 Rd 1.58
+  seed-6: T 17.85 ice 1.64% albedo 0.3113 CO2 0.5404 bar phi 1.022 Rv 1.02 Rd 2.17
+  seed-7: T 17.54 ice 1.45% albedo 0.3117 CO2 0.4872 bar phi 1.080 Rv 0.85 Rd 2.33
+  mean 200-1000: T 18.06 Teq 26.72 Tpole -1.997 ice% 0.7566 albedo 0.3069 pCO2 0.4663 CO2x 1665 forcing 60.72 Rv 1.029 degas 1.318 Rd 1.924 mCCN 56.74 mNd 49.39 mAc 0.4647 dAo -0.0101 cCCN 134.4 cNd 106.7 cAc 0.4575 dAl -0.004299
+  mean 0-50    : T 14.36 Teq 22.59 Tpole -5.675 ice% 3.144 albedo 0.309 pCO2 0.4928 CO2x 1760 forcing 61.76 Rv 1.008 degas 1.302 Rd 1.291 mCCN 54.25 mNd 47.31 mAc 0.4616 dAo -0.01117 cCCN 114.2 cNd 93.25 cAc 0.4466 dAl -0.005556
+  phi [0.993, 1.081, 0.832, 0.995, 0.979, 1.216, 1.022, 1.08] | runtime mean 926 s
+== new-barren-static (8 seeds)
+  seed-0: T 17.90 ice 0.84% albedo 0.3099 CO2 0.5247 bar phi 0.981 Rv 1.00 Rd 1.00
+  seed-1: T 18.22 ice 0.14% albedo 0.3033 CO2 0.4244 bar phi 1.008 Rv 1.00 Rd 1.00
+  seed-2: T 19.09 ice 0.13% albedo 0.3123 CO2 0.6142 bar phi 0.817 Rv 1.00 Rd 1.00
+  seed-3: T 19.02 ice 0.24% albedo 0.3051 CO2 0.5097 bar phi 0.966 Rv 1.00 Rd 1.00
+  seed-4: T 18.06 ice 0.98% albedo 0.3070 CO2 0.4999 bar phi 0.976 Rv 1.00 Rd 1.00
+  seed-5: T 17.64 ice 0.95% albedo 0.3037 CO2 0.3943 bar phi 1.188 Rv 1.00 Rd 1.00
+  seed-6: T 17.55 ice 0.44% albedo 0.3104 CO2 0.4719 bar phi 1.066 Rv 1.00 Rd 1.00
+  seed-7: T 17.59 ice 1.18% albedo 0.3106 CO2 0.4799 bar phi 1.069 Rv 1.00 Rd 1.00
+  mean 200-1000: T 18.13 Teq 26.6 Tpole -1.603 ice% 0.611 albedo 0.3078 pCO2 0.4899 CO2x 1750 forcing 61.33 Rv 1 degas nan Rd 1 mCCN 53.04 mNd 46.35 mAc 0.46 dAo -0.01172 cCCN 105 cNd 87 cAc 0.441 dAl -0.0062
+  mean 0-50    : T 14.44 Teq 22.66 Tpole -5.625 ice% 3.087 albedo 0.3084 pCO2 0.4922 CO2x 1758 forcing 61.74 Rv 1 degas nan Rd 1 mCCN 53.12 mNd 46.44 mAc 0.46 dAo -0.01171 cCCN 105 cNd 87 cAc 0.441 dAl -0.0062
+  phi [0.981, 1.008, 0.817, 0.966, 0.976, 1.188, 1.066, 1.069] | runtime mean 972 s
+== base-modern (4 seeds)
+  seed-0: T 22.18 ice 3.76% albedo nan CO2 0.0005 bar phi 3.000 Rv nan Rd nan
+  seed-1: T 21.16 ice 5.22% albedo nan CO2 0.0006 bar phi 3.000 Rv nan Rd nan
+  seed-2: T 22.50 ice 2.30% albedo nan CO2 0.0006 bar phi 3.000 Rv nan Rd nan
+  seed-3: T 22.84 ice 2.71% albedo nan CO2 0.0004 bar phi 3.000 Rv nan Rd nan
+  mean 200-1000: T 22.17 Teq 33.96 Tpole -5.544 ice% 3.497 albedo nan pCO2 0.0005074 CO2x 1.809 forcing 2.307 Rv nan degas nan Rd nan mCCN nan mNd nan mAc nan dAo nan cCCN nan cNd nan cAc nan dAl nan
+  mean 0-50    : T 14.52 Teq 26.15 Tpole -14.14 ice% 11.04 albedo nan pCO2 0.0004875 CO2x 1.713 forcing 2.044 Rv nan degas nan Rd nan mCCN nan mNd nan mAc nan dAo nan cCCN nan cNd nan cAc nan dAl nan
+  phi [3.0, 3.0, 3.0, 3.0] | runtime mean 905 s
+== off-modern (4 seeds)
+  seed-0: T 22.18 ice 3.76% albedo 0.3029 CO2 0.0005 bar phi 3.000 Rv 0.98 Rd 0.91
+  seed-1: T 21.16 ice 5.22% albedo 0.3078 CO2 0.0006 bar phi 3.000 Rv 0.98 Rd 1.26
+  seed-2: T 22.50 ice 2.30% albedo 0.3070 CO2 0.0006 bar phi 3.000 Rv 1.19 Rd 1.52
+  seed-3: T 22.84 ice 2.71% albedo 0.3014 CO2 0.0004 bar phi 3.000 Rv 1.16 Rd 1.07
+  mean 200-1000: T 22.17 Teq 33.96 Tpole -5.544 ice% 3.497 albedo 0.3048 pCO2 0.0005074 CO2x 1.809 forcing 2.307 Rv 1.077 degas 1.385 Rd 1.191 mCCN 0 mNd 0 mAc 0 dAo 0 cCCN 0 cNd 0 cAc 0 dAl 0
+  mean 0-50    : T 14.52 Teq 26.15 Tpole -14.14 ice% 11.04 albedo 0.3115 pCO2 0.0004875 CO2x 1.713 forcing 2.044 Rv 1.008 degas 1.325 Rd 0.91 mCCN 0 mNd 0 mAc 0 dAo 0 cCCN 0 cNd 0 cAc 0 dAl 0
+  phi [3.0, 3.0, 3.0, 3.0] | runtime mean 975 s
+== new-modern (4 seeds)
+  seed-0: T 21.96 ice 3.52% albedo 0.3068 CO2 0.0006 bar phi 3.000 Rv 0.87 Rd 1.32
+  seed-1: T 21.28 ice 4.70% albedo 0.3020 CO2 0.0003 bar phi 3.000 Rv 0.87 Rd 0.82
+  seed-2: T 23.54 ice 1.44% albedo 0.3035 CO2 0.0007 bar phi 3.000 Rv 1.26 Rd 0.87
+  seed-3: T 23.10 ice 2.95% albedo 0.3026 CO2 0.0005 bar phi 3.000 Rv 1.03 Rd 0.90
+  mean 200-1000: T 22.47 Teq 34.48 Tpole -5.075 ice% 3.153 albedo 0.3037 pCO2 0.000525 CO2x 1.891 forcing 2.172 Rv 1.005 degas 1.259 Rd 0.9759 mCCN 100.1 mNd 82.87 mAc 0.5094 dAo -2.5e-05 cCCN 299.6 cNd 197.5 cAc 0.5094 dAl -2.941e-05
+  mean 0-50    : T 14.52 Teq 26.16 Tpole -14.12 ice% 11.03 albedo 0.3115 pCO2 0.0004875 CO2x 1.713 forcing 2.029 Rv 1.009 degas 1.33 Rd 0.91 mCCN 100.5 mNd 83.12 mAc 0.5098 dAo -5e-05 cCCN 297.8 cNd 196.9 cAc 0.5092 dAl -0.0001
+  phi [3.0, 3.0, 3.0, 3.0] | runtime mean 1030 s

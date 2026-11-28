@@ -17,7 +17,11 @@ every step: tectonic degassing (ridges, arcs, plumes, metamorphism) against sili
 land and seafloor weathering, the carbonate–silicate feedback that counters the brightening sun.
 Each step logs the CO₂, the forcing and the fluxes (`carbon:` lines); `--no-carbon-cycle` keeps
 the forcing of the start for the whole run, and `--set carbon.NAME=VALUE` changes its parameters
-(`src/carbon.rs`, `notes/issue-154/`). Today's living Earth, the default before #190, is
+(`src/carbon.rs`, `notes/issue-154/`). Bare rock weathers into a thin **regolith** (#197) that
+the rivers carry away: erosion is weathering-limited where the rock weathers slowly (cold or dry
+bare highlands) and transport-limited where the regolith is thick, and the land weathering of the
+carbon cycle follows the regolith (`--set erosion.regolith=0` turns it off; `src/erosion/regolith.rs`,
+`notes/issue-197/`). Today's living Earth, the default before #190, is
 `--biosphere modern --epoch 4` (URL `?biosphere=modern&epoch=4`).
 
 `--epoch` (URL `epoch=`) sets the time of the planet's history at the start of a run, in Gyr

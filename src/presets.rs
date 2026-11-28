@@ -119,6 +119,7 @@ impl Biosphere {
         climate: &mut ClimateParams,
         temperature: &mut TemperatureParams,
         carbon: &mut CarbonParams,
+        escape: &mut EscapeParams,
     ) {
         match self {
             Biosphere::Modern => {}
@@ -129,9 +130,14 @@ impl Biosphere {
                 // ~0.1. The top of the atmosphere sees about half of a change of the surface
                 // albedo (Donohoe & Battisti, 2011): +0.05 for the planetary albedo of land.
                 temperature.land_albedo = 0.37;
-                // The snow-free surface against which seasonal snow brightens the land (#207),
-                // and no forest that sticks out of the snow and masks it.
-                temperature.land_surface_albedo = 0.3;
+                // No cloud nuclei of life (#204): no DMS sulfate or marine organics of plankton,
+                // no secondary organic aerosol of plants and no smoke of wildfires. Sea salt,
+                // volcanic sulfate and the dust of bare land remain (see [`crate::aerosol`]); the
+                // clouds above bare land see its brighter surface (~0.3).
+                temperature.aerosol.marine_biogenic = 0.0;
+                temperature.aerosol.land_biogenic = 0.0;
+                temperature.aerosol.land_surface_albedo = 0.3;
+                // No forest that sticks out of seasonal snow and masks it (#207).
                 temperature.snow_forest_cover = 0.0;
                 // Without transpiration (~60% of today's land evapotranspiration; Jasechko et
                 // al., 2013; Schlesinger & Jasechko, 2014) and without the water storage of a
@@ -174,6 +180,10 @@ impl Biosphere {
                 carbon.plant_factor = 0.25;
                 carbon.co2_exponent = 0.3;
                 carbon.soil_co2_saturation = 0.0;
+                // No photosynthetic O₂ and no methanogens: the reduced gases (#202) meet only
+                // the O₂ that the escape leaves, and the CH₄ is abiotic alone.
+                escape.gases.background_oxygen = 0.0;
+                escape.gases.background_methane = 0.0;
             }
         }
     }
@@ -317,16 +327,19 @@ impl Parameters {
             &mut parameters.climate,
             &mut parameters.temperature,
             &mut parameters.carbon,
+            &mut parameters.escape,
         );
         epoch.apply(&mut parameters.temperature);
         parameters
     }
 
-    /// Overrides one parameter: `erosion.`, `climate.`, `temperature.`, `carbon.`, `escape.`
-    /// and `ramp_up.` select those parameters, anything else is a tectonic parameter.
+    /// Overrides one parameter: `erosion.`, `climate.`, `temperature.`, `carbon.`, `escape.`,
+    /// `reduced.` (the reduced gases of the escape) and `ramp_up.` select those parameters, anything else is a tectonic parameter.
     pub fn set(&mut self, name: &str, value: f64) -> anyhow::Result<()> {
         if let Some(name) = name.strip_prefix("ramp_up.") {
             self.ramp_up.set(name, value)
+        } else if let Some(name) = name.strip_prefix("reduced.") {
+            self.escape.gases.set(name, value)
         } else if let Some(name) = name.strip_prefix("escape.") {
             self.escape.set(name, value)
         } else if let Some(name) = name.strip_prefix("carbon.") {
@@ -534,7 +547,8 @@ mod tests {
         let modern = Parameters::new(RADIUS, Biosphere::Modern, Epoch::PRESENT);
         let abiotic = Parameters::new(RADIUS, Biosphere::Abiotic, Epoch::PRESENT);
         assert_eq!(abiotic.temperature.land_albedo, 0.37);
-        assert_eq!(abiotic.temperature.land_surface_albedo, 0.3);
+        assert_eq!(abiotic.temperature.aerosol.marine_biogenic, 0.0);
+        assert_eq!(abiotic.temperature.aerosol.land_biogenic, 0.0);
         assert_eq!(abiotic.temperature.snow_forest_cover, 0.0);
         assert_eq!(abiotic.climate.budyko_omega, 1.6);
         assert_eq!(
@@ -546,7 +560,7 @@ mod tests {
         // Everything else stays: undo the preset's changes and compare.
         let mut undone = Parameters::new(RADIUS, Biosphere::Abiotic, Epoch::PRESENT);
         undone.temperature.land_albedo = modern.temperature.land_albedo;
-        undone.temperature.land_surface_albedo = modern.temperature.land_surface_albedo;
+        undone.temperature.aerosol = modern.temperature.aerosol.clone();
         undone.temperature.snow_forest_cover = modern.temperature.snow_forest_cover;
         undone.climate.budyko_omega = modern.climate.budyko_omega;
         undone.erosion.erodibility = modern.erosion.erodibility;
@@ -555,6 +569,8 @@ mod tests {
         undone.carbon.plant_factor = modern.carbon.plant_factor;
         undone.carbon.co2_exponent = modern.carbon.co2_exponent;
         undone.carbon.soil_co2_saturation = modern.carbon.soil_co2_saturation;
+        undone.escape.gases.background_oxygen = modern.escape.gases.background_oxygen;
+        undone.escape.gases.background_methane = modern.escape.gases.background_methane;
         assert_eq!(fingerprint(&undone), fingerprint(&modern));
     }
 

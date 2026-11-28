@@ -10,7 +10,7 @@ use tracing::{debug, debug_span, info};
 use crate::carbon::{CarbonCycle, CarbonParams, CarbonState, LandCell, StepInput};
 use crate::climate::{Climate, ClimateParams, WaterCycle};
 use crate::erosion::{
-    CrustClass, ErosionParams, Hydrology, Surface, SurfaceWater, WaveErosion, erode,
+    CrustClass, ErosionParams, Hydrology, RegolithStats, Surface, SurfaceWater, WaveErosion, erode,
 };
 use crate::escape::{Escape, EscapeParams, EscapeState};
 use crate::ramp_up::{RampUp, RampUpParams, RampUpStatus};
@@ -34,6 +34,10 @@ pub struct Planet {
     escape: Escape,
     /// Cells within [`EscapeParams::tropics_latitude`], whose ocean sets the cold trap.
     tropical_cells: Vec<bool>,
+    /// The greenhouse forcing of the start (W/m²; all gases), and without the carbon cycle the
+    /// CO₂'s share of it: the start's less the reduced gases' (#202) at the end of the ramp-up.
+    start_forcing: f64,
+    held_co2_forcing: f64,
     /// `None` disables erosion.
     erosion: Option<ErosionParams>,
     planet_radius: f64,
@@ -73,6 +77,10 @@ pub struct Planet {
     /// Cells that the last erosion step saw as ocean on the sample surface but not on the
     /// per-cell surface, or the other way round (#112 b; zero without it).
     ocean_mismatch: usize,
+    /// The regolith of the last step (#197): per cell, the regolith at the bottom of the
+    /// sediment (rock-equivalent m), the fraction of the step the rock was bare, the production
+    /// scale `P₀` and the bedrock lowering (m/yr), and the step's statistics.
+    regolith: RegolithFields,
 }
 
 /// A step of the planet in progress (see [`Planet::begin_step`]): which part comes next, and what
@@ -283,6 +291,32 @@ pub struct SnowStatistics {
 }
 
 /// Statistics of the planet, extending the tectonic statistics.
+/// The regolith of the last erosion step, per cell (#197).
+#[derive(Clone, Debug, Default)]
+pub struct RegolithFields {
+    /// Regolith at the bottom of the sediment (rock-equivalent m).
+    pub thickness: Vec<f64>,
+    /// Fraction of the step the rock was bare.
+    pub bare: Vec<f64>,
+    /// Production on bare rock `P₀` (m/yr of bedrock).
+    pub production: Vec<f64>,
+    /// Bedrock lowered by erosion and weathering (m/yr).
+    pub bedrock_erosion: Vec<f64>,
+    pub stats: RegolithStats,
+}
+
+impl RegolithFields {
+    fn new(cell_count: usize) -> Self {
+        Self {
+            thickness: vec![0.0; cell_count],
+            bare: vec![0.0; cell_count],
+            production: vec![0.0; cell_count],
+            bedrock_erosion: vec![0.0; cell_count],
+            stats: RegolithStats::default(),
+        }
+    }
+}
+
 pub struct PlanetStatistics {
     pub tectonics: Statistics,
     /// Mean precipitation over land in m/yr.
@@ -345,6 +379,10 @@ pub struct PlanetStatistics {
     pub frozen_fraction: f64,
     /// The seasonal snow on land (#207).
     pub snow: SnowStatistics,
+    /// Global planetary (Bond) albedo of the last climate update.
+    pub planetary_albedo: f64,
+    /// The cloud nuclei of the last climate update (#204).
+    pub aerosol: crate::aerosol::AerosolDiagnostics,
     /// Where the sediment sits and how much of the sea level it makes up.
     pub sediment_reservoirs: SedimentReservoirs,
     /// Sediment moved by waves so far, in Gt.
@@ -470,10 +508,19 @@ impl Planet {
                 math::asin(tectonics.mesh().vertex(cell).z.clamp(-1.0, 1.0)).abs() <= tropics
             })
             .collect();
-        let escape = Escape::new(escape, tectonics.water_volume());
+        let mut escape = Escape::new(escape, tectonics.water_volume());
+        escape.start(tectonics.new_crust_by_rate());
+        // The start's forcing is that of all gases: the CO₂ makes up what the reduced gases
+        // (#202) do not give.
+        let start_forcing = temperature.greenhouse_forcing;
+        let start_gas_forcing = escape.gases().map_or(0.0, |gases| gases.initial_forcing());
         let mut carbon = CarbonCycle::new(
             carbon,
-            temperature.greenhouse_forcing,
+            if escape.gases().is_some() {
+                start_forcing - start_gas_forcing
+            } else {
+                start_forcing
+            },
             crate::carbon::ocean_mass(tectonics.ocean_volume()),
             4.0 * std::f64::consts::PI * planet_radius * planet_radius,
         );
@@ -507,6 +554,8 @@ impl Planet {
             deep_water_cells,
             escape,
             tropical_cells,
+            start_forcing,
+            held_co2_forcing: start_forcing - start_gas_forcing,
             erosion,
             planet_radius,
             precipitation: vec![0.0; cell_count],
@@ -525,6 +574,7 @@ impl Planet {
             cover_cohort: None,
             inland_change: 0.0,
             ocean_mismatch: 0,
+            regolith: RegolithFields::new(cell_count),
         };
         planet.update_water_cycle(&view);
         planet
@@ -552,12 +602,37 @@ impl Planet {
         self.carbon.holds_co2()
     }
 
+    /// The carbon cycle after the last step: CO₂ and its forcing (#154).
+    pub fn carbon_state(&self) -> &CarbonState {
+        self.carbon.state()
+    }
+
+    /// Whether the carbon cycle runs (else the CO₂ of the start stays).
+    pub fn carbon_cycle_enabled(&self) -> bool {
+        self.carbon.params().enabled
+    }
+
+    /// The escape after the last step (#210); `None` when it is off.
+    pub fn escape_state(&self) -> Option<&crate::escape::EscapeState> {
+        self.escape.params().enabled.then(|| self.escape.state())
+    }
+
+    /// The radius of the planet in m.
+    pub fn radius(&self) -> f64 {
+        self.planet_radius
+    }
+
     pub fn tectonics(&self) -> &Simulation {
         &self.tectonics
     }
 
     pub fn temperature(&self) -> &TemperatureFields {
         self.temperature.fields()
+    }
+
+    /// The regolith of the last erosion step (#197).
+    pub fn regolith(&self) -> &RegolithFields {
+        &self.regolith
     }
 
     pub fn precipitation(&self) -> &[f64] {
@@ -787,11 +862,13 @@ impl Planet {
                     .then_some(&self.water);
                 let view =
                     climate_elevations(self.tectonics.mesh(), &elevation, &seeds, open, lakes);
+                let open_lakes = lakes.is_some();
+                self.update_aerosol_sources(&view, step.dt);
                 self.temperature.update(
                     &view,
                     Some(&self.precipitation),
                     &self.climate.water_cycle().monthly_precipitation,
-                    lakes.map(|water| &water.lake_depth[..]),
+                    open_lakes.then_some(&self.water.lake_depth[..]),
                     self.tectonics.time(),
                 );
                 (
@@ -859,8 +936,9 @@ impl Planet {
         view: &[f64],
     ) -> Duration {
         let open = open_sills(&self.erosion);
-        // Bedrock and sediment eroded per cell in the step (m/yr), for the weathering.
-        let mut eroded = vec![(0.0, 0.0); elevation.len()];
+        // Bedrock and sediment eroded per cell in the step (m/yr), and the fraction of the step
+        // its rock was bare, for the weathering.
+        let mut eroded = vec![(0.0, 0.0, 0.0); elevation.len()];
         if let Some(params) = &self.erosion {
             let dt_years = dt * 1e6;
             let (plate, class) = self.plates_and_classes();
@@ -900,16 +978,37 @@ impl Planet {
                     } else {
                         Vec::new()
                     },
+                    temperature: &self.temperature.fields().annual_mean,
+                    ice: &self.temperature.fields().ice,
+                    mafic: &(0..elevation.len() as u32)
+                        .map(|cell| 1.0 - self.tectonics.surface_crust(cell).felsic)
+                        .collect::<Vec<_>>(),
+                    regolith: &self.regolith.thickness,
                 },
                 params,
                 dt_years,
             );
             for (cell, eroded) in eroded.iter_mut().enumerate() {
+                // The regolith was counted as fresh rock when it was made (the bedrock lowering),
+                // so its removal is not counted again as eroded sediment.
+                let regolith_removed = result.regolith_start[cell] - result.regolith[cell];
                 *eroded = (
                     (-result.bedrock_delta[cell]).max(0.0) / dt_years,
-                    (-result.sediment_delta[cell]).max(0.0) / dt_years,
+                    (-result.sediment_delta[cell] - regolith_removed).max(0.0) / dt_years,
+                    result.bare[cell],
                 );
             }
+            self.regolith = RegolithFields {
+                bedrock_erosion: result
+                    .bedrock_delta
+                    .iter()
+                    .map(|d| (-d).max(0.0) / dt_years)
+                    .collect(),
+                thickness: result.regolith,
+                bare: result.bare,
+                production: result.production,
+                stats: result.regolith_stats,
+            };
             for (delta, class) in result.sediment_delta.iter().zip(&class) {
                 if *class == CrustClass::Continental {
                     if *delta < 0.0 {
@@ -1028,7 +1127,7 @@ impl Planet {
     fn update_carbon(
         &mut self,
         elevation: &[f64],
-        eroded: &[(f64, f64)],
+        eroded: &[(f64, f64, f64)],
         dt: f64,
     ) -> Vec<LandCell> {
         let fields = self.temperature.fields();
@@ -1045,6 +1144,7 @@ impl Planet {
                 ice: fields.ice[cell],
                 bedrock_erosion: eroded[cell].0,
                 sediment_erosion: eroded[cell].1,
+                bare: eroded[cell].2,
                 bedrock_density: bedrock_density[cell],
             })
             .collect();
@@ -1088,6 +1188,12 @@ impl Planet {
             self.carbon.tectonic_degassing(),
         ) {
             self.carbon.end_hold();
+            // The volcanic cloud nuclei of this degassing are Earth's (#204), as for φ.
+            let sources = self.temperature.aerosol_sources().calibrate(
+                &self.temperature.params().aerosol,
+                self.carbon.state().arc_plume_mantle_degassing,
+            );
+            self.temperature.set_aerosol_sources(sources);
             if holds_co2 {
                 info!(
                     phi = self.carbon.state().phi,
@@ -1096,6 +1202,45 @@ impl Planet {
             }
         }
         land
+    }
+
+    /// The volcanic and dust sources of cloud nuclei for the step's climate (#204), from the
+    /// carbon cycle's degassing and the climate of the previous step on the climate's view of
+    /// the surface `elevation`: its land without lakes.
+    fn update_aerosol_sources(&mut self, elevation: &[f64], dt: f64) {
+        let params = &self.temperature.params().aerosol;
+        let fields = self.temperature.fields();
+        let state = self.carbon.state();
+        // None before the carbon cycle's first step.
+        let degassing = (state.ratio > 0.0).then_some(state.arc_plume_mantle_degassing);
+        let lake = |cell: usize| {
+            self.water
+                .lake_depth
+                .get(cell)
+                .is_some_and(|&depth| depth >= crate::temperature::LAKE_DEPTH)
+        };
+        let dust = (fields.annual_mean.len() == elevation.len()
+            && self.precipitation.len() == elevation.len())
+        .then(|| {
+            crate::aerosol::dust_source(
+                params,
+                (0..elevation.len())
+                    .filter(|&cell| elevation[cell] >= 0.0 && !lake(cell))
+                    .map(|cell| {
+                        (
+                            fields.annual_mean[cell],
+                            self.precipitation[cell],
+                            fields.ice[cell],
+                        )
+                    }),
+                elevation.len(),
+            )
+        });
+        let sources = self
+            .temperature
+            .aerosol_sources()
+            .advance(params, degassing, dust, dt);
+        self.temperature.set_aerosol_sources(sources);
     }
 
     /// One step of the escape (#210) on the step's climate and CO₂: the water it loses is taken
@@ -1128,10 +1273,34 @@ impl Planet {
             ocean_volume: self.tectonics.ocean_volume(),
             volcanic_degassing: self.carbon.state().arc_plume_mantle_degassing,
             new_crust: self.carbon.state().new_crust,
+            new_crust_by_rate: self.tectonics.new_crust_by_rate(),
             land,
         });
-        if volume > 0.0 {
+        if volume != 0.0 {
             self.tectonics.remove_water(volume);
+        }
+        if let Some(gases) = self.escape.gases() {
+            // The carbon of the CH₄ made and destroyed, and the forcing of the gases on top of
+            // the CO₂'s (which makes up their change while the CO₂ is held).
+            self.carbon.exchange(gases.carbon_returned());
+            let gas_forcing = gases.state().forcing();
+            let co2_forcing = if self.carbon.params().enabled {
+                let area = 4.0 * std::f64::consts::PI * self.planet_radius * self.planet_radius;
+                self.carbon.hold_forcing(
+                    self.start_forcing - gas_forcing,
+                    crate::carbon::ocean_mass(self.tectonics.ocean_volume()),
+                    area,
+                );
+                self.carbon.forcing()
+            } else {
+                // As the carbon cycle's hold: the CO₂ makes up the gases until the tectonics
+                // has settled, then stays.
+                if self.ramp_up.is_running() {
+                    self.held_co2_forcing = self.start_forcing - gas_forcing;
+                }
+                self.held_co2_forcing
+            };
+            self.temperature.params_mut().greenhouse_forcing = co2_forcing + gas_forcing;
         }
         debug!(time = %format_args!("{time:.1}"), "{}", self.escape.state().summary());
     }
@@ -1148,7 +1317,8 @@ impl Planet {
             .unzip()
     }
 
-    fn cell_area(&self) -> f64 {
+    /// Area of a cell in m² (the cells of the mesh have nearly equal areas).
+    pub fn cell_area(&self) -> f64 {
         4.0 * std::f64::consts::PI * self.planet_radius.powi(2) / self.tectonics.mesh().len() as f64
     }
 
@@ -1427,6 +1597,8 @@ impl Planet {
             frozen_fraction: all().filter(|&c| fields.ice[c] > 0.5).count() as f64
                 / elevation.len() as f64,
             snow: self.snow_statistics(&ocean, &latitude),
+            planetary_albedo: fields.planetary_albedo,
+            aerosol: fields.aerosol,
             tectonics: self.tectonics.statistics(),
             mean_land_precipitation,
             midlatitude_land_precipitation,

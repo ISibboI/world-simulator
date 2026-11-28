@@ -206,7 +206,8 @@ pub struct TemperatureParams {
     /// air, in W/m²/K.
     pub land_ocean_exchange: f64,
     /// Ice sheets form below this annual mean land surface temperature; the cover changes
-    /// linearly over ±5 K around it.
+    /// linearly over ±5 K around it. Only without [`Self::seasonal_snow`]: with it, ice sheets
+    /// are the snow pack's perennial snow (#207).
     pub land_ice_temperature: f64,
     /// Ice sheets need snowfall: below this annual precipitation in m/yr, the ice cover is reduced
     /// proportionally, so cold deserts (like Siberia) stay free of ice sheets.
@@ -262,19 +263,17 @@ pub struct TemperatureParams {
     /// only under ice sheets (before #207).
     pub seasonal_snow: bool,
     /// Surface albedo of fresh, cold snow (0.8–0.9; e.g. Wiscombe & Warren, 1980), reached at
-    /// season mean temperatures of [`Self::snow_cold_temperature`] and below. 0.8 is the surface
-    /// albedo that [`Self::ice_albedo`] stands for with [`Self::surface_albedo_share`] (0.32 +
-    /// 0.5 (0.8 − 0.2) = 0.62 for today's land, 0.37 + 0.5 (0.8 − 0.3) for bare land), so snowy
-    /// land is never brighter than a snow-covered ice sheet.
+    /// season mean temperatures of [`Self::snow_cold_temperature`] and below. Snow brightens
+    /// the land by [`Self::surface_albedo_share`] times its surface albedo above that of
+    /// snow-free land (`aerosol.land_surface_albedo`: 0.17 today, 0.3 bare), at most up to
+    /// [`Self::ice_albedo`]: 0.8 on bare land gives 0.37 + 0.5 (0.8 − 0.3) = 0.62, so snowy land
+    /// is as bright as an ice sheet and never brighter.
     pub snow_fresh_albedo: f64,
     /// Surface albedo of aged, melting snow (0.5–0.7), reached at 0 °C; linear in temperature
     /// between (Robock, 1980; Roesch et al., 2001).
     pub snow_aged_albedo: f64,
     /// Season mean temperature (°C) at and below which snow keeps the fresh albedo.
     pub snow_cold_temperature: f64,
-    /// Surface albedo of snow-free land, against which snow brightens it: ~0.2 for today's
-    /// vegetated land, ~0.3 for bare land (see [`crate::presets::Biosphere`]).
-    pub land_surface_albedo: f64,
     /// Share of a change of the surface albedo that the planetary albedo sees (clouds and the
     /// atmosphere mask the rest): ~0.5 (Donohoe & Battisti, 2011; Qu & Hall, 2005: 0.3–0.6
     /// over snow-covered land). The presets use the same factor for bare land.
@@ -305,10 +304,15 @@ pub struct TemperatureParams {
     /// the following season; snow that flows off as glacier ice takes it back where it leaves.
     /// Without it, melt costs no energy and spring warms too early.
     pub snow_latent_heat: bool,
-    /// Whether snow that lasts the whole year with a non-negative balance counts as permanent
-    /// ice in [`TemperatureFields::ice`] (firn and glacier ice over a step of the simulation;
-    /// #107), which also stops weathering under it.
+    /// Whether snow that lasts the whole year with a non-negative balance is the permanent ice
+    /// of land in [`TemperatureFields::ice`] (firn and glacier ice over a step of the
+    /// simulation; #107, decided on #226), which also stops weathering under it. With the snow
+    /// pack, the ice sheets of the albedo always come from it; off, `ice` on land shows the old
+    /// annual-mean rule ([`Self::land_ice_temperature`]) as a diagnostic.
     pub perennial_snow_ice: bool,
+    /// Cloud nuclei and their effect on the brightness of clouds (#204), which correct the
+    /// albedos calibrated on Earth for a planet with other sources ([`crate::aerosol`]).
+    pub aerosol: crate::aerosol::AerosolParams,
 }
 
 impl Default for TemperatureParams {
@@ -359,7 +363,6 @@ impl Default for TemperatureParams {
             snow_fresh_albedo: 0.8,
             snow_aged_albedo: 0.6,
             snow_cold_temperature: -10.0,
-            land_surface_albedo: 0.2,
             surface_albedo_share: 0.5,
             snow_forest_albedo: 0.25,
             snow_forest_cover: 0.7,
@@ -370,6 +373,7 @@ impl Default for TemperatureParams {
             max_snow: 1.0,
             snow_latent_heat: true,
             perennial_snow_ice: true,
+            aerosol: crate::aerosol::AerosolParams::default(),
         }
     }
 }
@@ -389,6 +393,9 @@ impl TemperatureParams {
         if name == "open_water_lakes" {
             self.open_water_lakes = value != 0.0;
             return Ok(());
+        }
+        if let Some(name) = name.strip_prefix("aerosol.") {
+            return self.aerosol.set(name, value);
         }
         let switch = match name {
             "seasonal_snow" => Some(&mut self.seasonal_snow),
@@ -429,7 +436,6 @@ impl TemperatureParams {
             "snow_fresh_albedo" => &mut self.snow_fresh_albedo,
             "snow_aged_albedo" => &mut self.snow_aged_albedo,
             "snow_cold_temperature" => &mut self.snow_cold_temperature,
-            "land_surface_albedo" => &mut self.land_surface_albedo,
             "surface_albedo_share" => &mut self.surface_albedo_share,
             "snow_forest_albedo" => &mut self.snow_forest_albedo,
             "snow_forest_cover" => &mut self.snow_forest_cover,
@@ -507,8 +513,9 @@ pub struct TemperatureFields {
     /// Snow cover (0 to 1) that lasted the whole last year with a non-negative balance on the
     /// land cells, 0 elsewhere.
     pub perennial_snow: Vec<f64>,
-    /// Ice-sheet cover (0 to 1) of the land cells by the annual-mean criterion alone, 0
-    /// elsewhere.
+    /// Ice-sheet cover (0 to 1) of the land cells by the old annual-mean rule
+    /// ([`TemperatureParams::land_ice_temperature`]), 0 elsewhere; with the snow pack only a
+    /// diagnostic.
     pub ice_sheet: Vec<f64>,
     /// The snow's water budget over the update.
     pub snow_budget: SnowBudget,
@@ -529,6 +536,11 @@ pub struct TemperatureFields {
     /// update simulates [`TemperatureParams::years_per_update`]). The carbon cycle uses it for
     /// the warming still to come (#154).
     pub toa_imbalance: f64,
+    /// Global planetary (Bond) albedo over the last simulated year of the update: reflected over
+    /// incoming sunlight.
+    pub planetary_albedo: f64,
+    /// The cloud nuclei of the update and how they changed the albedos (#204).
+    pub aerosol: crate::aerosol::AerosolDiagnostics,
     /// Depth-integrated volume transport of the wind-driven gyres (eastward, northward) in m²/s
     /// at every fine ocean cell: the value of its coarse cell, NaN where that is not ocean in the
     /// gyre model (mostly land) or the fine cell is land.
@@ -635,6 +647,8 @@ pub struct TemperatureModel {
     /// decides where trees grow (see [`TemperatureParams::snow_forest_cover`]).
     warmest_season: Vec<f64>,
     spun_up: bool,
+    /// The volcanic and dust sources of cloud nuclei the next update uses (#204).
+    aerosol_sources: crate::aerosol::Sources,
     fields: TemperatureFields,
 }
 
@@ -751,6 +765,7 @@ impl TemperatureModel {
             snow_albedo: vec![params_snow_albedo; fine.len()],
             warmest_season: vec![ICE_FREE_START; fine.len()],
             spun_up: false,
+            aerosol_sources: crate::aerosol::Sources::default(),
             fields: TemperatureFields::default(),
         }
     }
@@ -765,6 +780,16 @@ impl TemperatureModel {
 
     pub fn params_mut(&mut self) -> &mut TemperatureParams {
         &mut self.params
+    }
+
+    /// The volcanic and dust sources of cloud nuclei of the next update (#204); Earth's until
+    /// they are set.
+    pub fn aerosol_sources(&self) -> crate::aerosol::Sources {
+        self.aerosol_sources
+    }
+
+    pub fn set_aerosol_sources(&mut self, sources: crate::aerosol::Sources) {
+        self.aerosol_sources = sources;
     }
 
     /// Simulates the seasonal cycle for the given surface elevation (in metres, sea level is 0)
@@ -997,14 +1022,56 @@ impl TemperatureModel {
             }
         };
         let ice_thickness = |enthalpy: f64| (-enthalpy / params.ice_latent_heat).max(0.0);
+        // The clouds of the calibrated albedos, brightened or darkened by the cloud nuclei of the
+        // planet (#204): open ocean by latitude (sea salt), land and lakes in continental air.
+        let clouds = crate::aerosol::CloudBrightening::new(&params.aerosol, self.aerosol_sources);
+        let marine: Vec<(crate::aerosol::AirMass, f64)> = self
+            .coarse_latitude
+            .iter()
+            .map(|&latitude| clouds.ocean(latitude))
+            .collect();
+        let (continental, land_change) = clouds.land();
+        let lake_change = clouds.lake();
         let ocean_albedo: Vec<f64> = self
             .coarse_latitude
             .iter()
-            .map(|latitude| {
+            .zip(&marine)
+            .map(|(latitude, (_, change))| {
                 let x = math::sin(*latitude);
-                params.ocean_albedo + params.ocean_albedo_latitude * (3.0 * x * x - 1.0) / 2.0
+                params.ocean_albedo
+                    + params.ocean_albedo_latitude * (3.0 * x * x - 1.0) / 2.0
+                    + change
             })
             .collect();
+        // Open lake water: the calibrated open water of its latitude in continental air.
+        let lake_albedo: Vec<f64> = (0..coarse_count)
+            .map(|cell| ocean_albedo[cell] - marine[cell].1 + lake_change)
+            .collect();
+        let aerosol = {
+            let (mut weight, mut ccn, mut droplets, mut cloud, mut change) =
+                (0.0, 0.0, 0.0, 0.0, 0.0);
+            for cell in 0..coarse_count {
+                let w = ocean_fraction[cell];
+                let (air, c) = marine[cell];
+                weight += w;
+                ccn += w * air.ccn;
+                droplets += w * air.droplets;
+                cloud += w * air.cloud_albedo;
+                change += w * c;
+            }
+            let weight = weight.max(1e-12);
+            crate::aerosol::AerosolDiagnostics {
+                sources: self.aerosol_sources,
+                marine: crate::aerosol::AirMass {
+                    ccn: ccn / weight,
+                    droplets: droplets / weight,
+                    cloud_albedo: cloud / weight,
+                },
+                continental,
+                ocean_change: change / weight,
+                land_change,
+            }
+        };
 
         // Wind-driven ocean heat transport by the subtropical cells across every band interface:
         // the poleward Ekman mass transport under the trade winds, M = −τ_x f / (f² + r²) per
@@ -1079,7 +1146,6 @@ impl TemperatureModel {
         // per coarse cell the brightening of the land by snow; in the last year the monthly and
         // the least snow cover per land cell, and the sunlight reflected by the snow.
         let mut snow_offset = vec![0.0; land_count];
-        let mut snow_ice = vec![0.0; land_count];
         let mut snow_forest = vec![0.0; land_count];
         let mut warmest = vec![f64::NEG_INFINITY; land_count];
         let mut snow_brightening = vec![0.0; coarse_count];
@@ -1093,6 +1159,8 @@ impl TemperatureModel {
         let mut year_start_snow = vec![0.0; if snow_on { land_count } else { 0 }];
         let seasons_per_month = seasons / 12;
         let season_days = SECONDS_PER_YEAR / seasons as f64 / 86_400.0;
+        // Sunlight reflected and received in the last year (summed W/m² over cells and steps).
+        let (mut reflected, mut incoming) = (0.0, 0.0);
         for year in 0..years {
             let last_year = year + 1 == years;
             for season in seasonal_land
@@ -1112,19 +1180,19 @@ impl TemperatureModel {
             annual_gyre_heat.fill(0.0);
             // Albedo of the land from the ice sheets, which depend on last year's temperatures:
             // the mean over the fine land cells of every coarse cell, each with its own elevation
-            // and snowfall.
+            // and snowfall. With the snow pack, ice sheets are its perennial snow instead (#207),
+            // which brightens the land through the snow.
             let mut land_ice = vec![0.0; coarse_count];
             for (i, &fine) in land_cells_list.iter().enumerate() {
                 let shift = self.free_air_shift(fine, elevation[fine]);
                 // In this order, as before #207.
                 let t = self.interpolate(&self.previous_annual_land, fine) + shift
                     - params.lapse_rate * elevation[fine];
-                let p = precipitation.map_or(f64::INFINITY, |p| p[fine]);
-                let ice = ice_sheet_cover(t, p, params);
-                land_ice[self.fine_to_coarse[fine] as usize] += ice;
-                if snow_on {
+                if !snow_on {
+                    let p = precipitation.map_or(f64::INFINITY, |p| p[fine]);
+                    land_ice[self.fine_to_coarse[fine] as usize] += ice_sheet_cover(t, p, params);
+                } else {
                     snow_offset[i] = shift - params.lapse_rate * elevation[fine];
-                    snow_ice[i] = ice;
                     // Trees grow where the warmest season reaches ~10 °C (the treeline) and it
                     // rains enough.
                     let warm = ((self.warmest_season[fine] - 8.0) / 4.0).clamp(0.0, 1.0);
@@ -1137,8 +1205,8 @@ impl TemperatureModel {
                 self.snow_brightening(
                     &land_cells_list,
                     &land_cells,
-                    &snow_ice,
                     &snow_forest,
+                    params.land_albedo + land_change,
                     &mut snow_brightening,
                 );
                 warmest.fill(f64::NEG_INFINITY);
@@ -1149,7 +1217,8 @@ impl TemperatureModel {
             let land_albedo: Vec<f64> = (0..coarse_count)
                 .map(|cell| {
                     let ice = land_ice[cell] / land_cells[cell].max(1) as f64;
-                    params.land_albedo + (params.ice_albedo - params.land_albedo) * ice
+                    let open = params.land_albedo + land_change;
+                    open + (params.ice_albedo - open) * ice
                 })
                 .collect();
             for (season, insolation) in insolation.iter().enumerate() {
@@ -1269,6 +1338,8 @@ impl TemperatureModel {
                             // the column; it is not radiation.
                             toa_imbalance += f * (q * (1.0 - albedo) - a - b * land);
                             snow_effect += f * q * snow_brightening[cell];
+                            reflected += f * q * albedo;
+                            incoming += q;
                         }
                         let rate = dt / params.land_heat_capacity;
                         self.land[cell] = (land
@@ -1296,6 +1367,7 @@ impl TemperatureModel {
                         if last_year {
                             toa_imbalance += ocean_fraction[cell]
                                 * (q * (1.0 - albedo) - a - b * self.ocean_surface[cell]);
+                            reflected += ocean_fraction[cell] * q * albedo;
                         }
                         // Net heating of the surface: `forcing − damping · T_surface`.
                         let forcing = q * (1.0 - albedo) - a
@@ -1317,7 +1389,7 @@ impl TemperatureModel {
                             };
                             let albedo = lake.albedo(
                                 params,
-                                ocean_albedo[cell],
+                                lake_albedo[cell],
                                 self.lake[cell],
                                 self.lake_surface[cell],
                             );
@@ -1325,6 +1397,7 @@ impl TemperatureModel {
                             if last_year {
                                 toa_imbalance += lake_fraction[cell]
                                     * (q * (1.0 - albedo) - a - b * self.lake_surface[cell]);
+                                reflected += lake_fraction[cell] * q * albedo;
                             }
                             let forcing = q * (1.0 - albedo) - a
                                 + transport
@@ -1389,8 +1462,8 @@ impl TemperatureModel {
                     self.snow_brightening(
                         &land_cells_list,
                         &land_cells,
-                        &snow_ice,
                         &snow_forest,
+                        params.land_albedo + land_change,
                         &mut snow_brightening,
                     );
                 }
@@ -1567,8 +1640,8 @@ impl TemperatureModel {
                 } else if elevation[fine] < 0.0 {
                     self.interpolate(&annual_sea_ice, fine)
                 } else {
-                    if perennial_ice {
-                        ice_sheet[fine].max(perennial_snow[fine])
+                    if snow_on && perennial_ice {
+                        perennial_snow[fine]
                     } else {
                         ice_sheet[fine]
                     }
@@ -1645,6 +1718,8 @@ impl TemperatureModel {
             solar_constant: orbit.solar_constant,
             toa_imbalance: toa_imbalance
                 / ((seasons * params.substeps_per_season) as f64 * coarse_count as f64),
+            planetary_albedo: reflected / incoming.max(1e-12),
+            aerosol,
             gyre_transport: gyres
                 .streamfunction
                 .iter()
@@ -1717,14 +1792,15 @@ impl TemperatureModel {
     }
 
     /// The brightening of the land of every coarse cell by snow (planetary albedo): the mean
-    /// over its fine land cells of the snow's share of their ice-free part times the planetary
-    /// share of the snow's surface albedo above that of snow-free land.
+    /// over its fine land cells of their snow cover times the planetary share of the snow's
+    /// surface albedo above that of snow-free land, at most up to
+    /// [`TemperatureParams::ice_albedo`] from the planetary albedo `open` of snow-free land.
     fn snow_brightening(
         &self,
         land: &[usize],
         land_cells: &[usize],
-        ice: &[f64],
         forest: &[f64],
+        open: f64,
         brightening: &mut [f64],
     ) {
         let params = &self.params;
@@ -1737,9 +1813,10 @@ impl TemperatureModel {
             let cover = math::tanh(snow / params.snow_cover_depth);
             let surface =
                 (1.0 - forest[i]) * self.snow_albedo[fine] + forest[i] * params.snow_forest_albedo;
-            let change =
-                (params.surface_albedo_share * (surface - params.land_surface_albedo)).max(0.0);
-            brightening[self.fine_to_coarse[fine] as usize] += (1.0 - ice[i]) * cover * change;
+            let change = (params.surface_albedo_share
+                * (surface - params.aerosol.land_surface_albedo))
+                .clamp(0.0, (params.ice_albedo - open).max(0.0));
+            brightening[self.fine_to_coarse[fine] as usize] += cover * change;
         }
         for (b, &count) in brightening.iter_mut().zip(land_cells) {
             *b /= count.max(1) as f64;
