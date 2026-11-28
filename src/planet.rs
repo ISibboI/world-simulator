@@ -15,7 +15,8 @@ use crate::erosion::{
 use crate::escape::{Escape, EscapeParams, EscapeState};
 use crate::ramp_up::{RampUp, RampUpParams, RampUpStatus};
 use crate::tectonics::{
-    CohortMasses, CoverBudget, CoverMasses, Crust, Simulation, Statistics, TectonicStep,
+    CarbonateExchange, CohortMasses, CoverBudget, CoverMasses, Crust, Simulation, Statistics,
+    TectonicStep,
 };
 use crate::temperature::{TemperatureFields, TemperatureModel, TemperatureParams};
 
@@ -77,6 +78,8 @@ pub struct Planet {
     /// sediment (rock-equivalent m), the fraction of the step the rock was bare, the production
     /// scale `P₀` and the bedrock lowering (m/yr), and the step's statistics.
     regolith: RegolithFields,
+    /// The carbonate precipitated (#200).
+    carbonate: CarbonateFields,
 }
 
 /// A step of the planet in progress (see [`Planet::begin_step`]): which part comes next, and what
@@ -271,6 +274,72 @@ pub struct RegolithFields {
     /// Bedrock lowered by erosion and weathering (m/yr).
     pub bedrock_erosion: Vec<f64>,
     pub stats: RegolithStats,
+}
+
+/// Carbonate precipitated so far (#200), in kg (cumulative, for rates between snapshots).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CarbonateStats {
+    /// Precipitated from the carbon cycle's burial (land weathering) and from dissolved
+    /// carbonate the surface processes removed (recycled).
+    pub new: f64,
+    pub recycled: f64,
+    /// Dissolved load taken back from the clastic sediment (cation oxide and recycled
+    /// carbonate), and what it could not supply (mass created; expected 0).
+    pub clastic_removed: f64,
+    pub unmatched: f64,
+    /// Carbonate that found no room up to the platform top and was put above it.
+    pub overflow: f64,
+    /// Precipitated by the depth of the sea floor (< 20, 20–200, 200–1000, 1000–3000,
+    /// ≥ 3000 m), by latitude (|φ| < 20°, 20–40°, 40–60°, ≥ 60°), and on crust of continental
+    /// origin (shelves and platforms).
+    pub by_depth: [f64; 5],
+    pub by_latitude: [f64; 4],
+    pub on_continental: f64,
+    /// Precipitation weighted with the saturation Ω of its sample (Σ mass · Ω).
+    pub omega_mass: f64,
+}
+
+/// Carbon reservoirs (mol) and cumulative flows since the start (#200): the exogenic carbon,
+/// the carbonate in the sediment (all samples), the altered sea floor, the buffers of the
+/// carbonate sources, and carbonate locked in crystalline crust (wedges, marble); what went
+/// into the mantle (unreturned subducted carbonate and altered crust, and carbonate lost with
+/// removed crust) and came out of it (ridges, mantle wedge, plumes). The residual of
+/// `reservoirs + to_mantle − mantle_degassing − initial` is the closure error (~0).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CarbonPartition {
+    pub exogenic: f64,
+    pub sediment: f64,
+    pub altered_crust: f64,
+    pub buffers: f64,
+    pub crust: f64,
+    pub to_mantle: f64,
+    pub lost: f64,
+    pub mantle_degassing: f64,
+    pub initial: f64,
+    pub residual: f64,
+    /// Mass (kg) of CO₂ that decarbonation took out of the rock.
+    pub decarbonated_co2: f64,
+}
+
+/// The carbonate of the last step and so far (#200).
+pub struct CarbonateFields {
+    /// Carbonate precipitated per cell in the last step (rock-equivalent m/Myr).
+    pub deposit: Vec<f64>,
+    /// Saturation level `S` of the last step, and the highest Ω of a sample that took carbonate.
+    pub level: f64,
+    pub max_omega: f64,
+    pub stats: CarbonateStats,
+}
+
+impl CarbonateFields {
+    fn new(cell_count: usize) -> Self {
+        Self {
+            deposit: vec![0.0; cell_count],
+            level: f64::NAN,
+            max_omega: f64::NAN,
+            stats: CarbonateStats::default(),
+        }
+    }
 }
 
 impl RegolithFields {
@@ -526,6 +595,7 @@ impl Planet {
             inland_change: 0.0,
             ocean_mismatch: 0,
             regolith: RegolithFields::new(cell_count),
+            carbonate: CarbonateFields::new(cell_count),
         };
         planet.update_water_cycle(&view);
         planet
@@ -549,6 +619,11 @@ impl Planet {
     }
 
     /// Whether the carbon cycle holds the CO₂ of the start (during the ramp-up phase).
+    /// The parameters of the carbon cycle.
+    pub fn carbon_params(&self) -> &CarbonParams {
+        self.carbon.params()
+    }
+
     pub fn holds_co2(&self) -> bool {
         self.carbon.holds_co2()
     }
@@ -564,6 +639,55 @@ impl Planet {
     /// The regolith of the last erosion step (#197).
     pub fn regolith(&self) -> &RegolithFields {
         &self.regolith
+    }
+
+    /// The carbonate precipitated in the last step and so far (#200).
+    pub fn carbonate(&self) -> &CarbonateFields {
+        &self.carbonate
+    }
+
+    /// The carbon reservoirs and their closure (#200, see `notes/issue-200/plan.md` §4).
+    pub fn carbon_partition(&self) -> CarbonPartition {
+        use crate::carbonate::{CARBONATE_MOLAR_MASS as M, CO2_MOLAR_MASS};
+        let state = self.carbon.state();
+        let budget = *self.carbon.budget();
+        let inventory = self.tectonics.carbonate_inventory();
+        let (flows, [subducted, accreted, stacked, collided]) = self.tectonics.carbonate_flows();
+        // In the crust: accreted, and metamorphosed or stacked without decarbonating.
+        let crust = (accreted + stacked - collided - flows.metamorphosed - flows.decarbonated) / M;
+        // Carbonate that left the sediment by no counted process (lost with removed crust).
+        let counted = flows.initial + flows.deposited + flows.surface + flows.metamorphosed
+            - subducted
+            - accreted
+            - stacked;
+        let lost = (counted - inventory) / M;
+        let partition = CarbonPartition {
+            exogenic: state.carbon,
+            sediment: inventory / M,
+            altered_crust: budget.altered_crust,
+            buffers: budget.buffers[0] + budget.buffers[1],
+            crust,
+            to_mantle: budget.carbonate_to_mantle
+                + budget.altered_crust_to_mantle
+                + budget.before_start
+                + lost,
+            lost,
+            mantle_degassing: budget.mantle_degassing,
+            initial: budget.initial + flows.initial / M,
+            residual: 0.0,
+            decarbonated_co2: (flows.decarbonated + collided) * CO2_MOLAR_MASS / M,
+        };
+        CarbonPartition {
+            residual: partition.exogenic
+                + partition.sediment
+                + partition.altered_crust
+                + partition.buffers
+                + partition.crust
+                + partition.to_mantle
+                - partition.mantle_degassing
+                - partition.initial,
+            ..partition
+        }
     }
 
     pub fn precipitation(&self) -> &[f64] {
@@ -703,6 +827,7 @@ impl Planet {
             }
         };
         let simulation = &self.tectonics;
+        let carbonate = self.carbon.params().carbonate_sediment;
         add(simulation.time().to_bits());
         let elevation = simulation.surface_elevations();
         let temperature = &self.temperature().annual_mean;
@@ -725,6 +850,11 @@ impl Planet {
                 add(if value.is_nan() { f64::NAN } else { value }.to_bits());
             }
             add(u64::from(owner.plate) << 32 | u64::from(owner.local));
+            // The carbonate (#200) only when it is on, so that off the hash stays that of the
+            // model without it.
+            if carbonate {
+                add(crust.cohort.carbonate.to_bits());
+            }
         }
         hash
     }
@@ -866,7 +996,11 @@ impl Planet {
         let open = open_sills(&self.erosion);
         // Bedrock and sediment eroded per cell in the step (m/yr), and the fraction of the step
         // its rock was bare, for the weathering.
-        let mut eroded = vec![(0.0, 0.0, 0.0); elevation.len()];
+        let mut eroded = vec![(0.0, 0.0, 0.0, 0.0); elevation.len()];
+        // Sediment deposited per cell (rock-equivalent m) and the carbonate the surface
+        // processes removed (kg), for the carbonate (#200).
+        let mut deposits = Vec::new();
+        let mut recycled = 0.0;
         if let Some(params) = &self.erosion {
             let dt_years = dt * 1e6;
             let (plate, class) = self.plates_and_classes();
@@ -924,6 +1058,7 @@ impl Planet {
                     (-result.bedrock_delta[cell]).max(0.0) / dt_years,
                     (-result.sediment_delta[cell] - regolith_removed).max(0.0) / dt_years,
                     result.bare[cell],
+                    self.tectonics.surface_crust(cell as u32).cohort.carbonate,
                 );
             }
             self.regolith = RegolithFields {
@@ -979,12 +1114,21 @@ impl Planet {
                 cell_area / 1e12,
             );
             let cohort_before = self.tectonics.cover_cohort_eroded();
+            let carbonate_before = self.tectonics.carbonate_flows().0.surface;
             self.tectonics.apply_surface_changes(
                 &result.bedrock_delta,
                 &result.sediment_delta,
                 result.sea_level_change,
             );
             let cohort_after = self.tectonics.cover_cohort_eroded();
+            recycled = carbonate_before - self.tectonics.carbonate_flows().0.surface;
+            if self.carbon.params().carbonate_sediment {
+                deposits = result
+                    .sediment_delta
+                    .iter()
+                    .map(|delta| delta.max(0.0))
+                    .collect();
+            }
             self.cover_export.add_cohort(
                 [
                     cohort_after[0] - cohort_before[0],
@@ -1035,6 +1179,9 @@ impl Planet {
         }
         let start_carbon = Instant::now();
         let land = self.update_carbon(view, &eroded, dt);
+        if self.carbon.params().carbonate_sediment {
+            self.precipitate_carbonate(dt, &deposits, recycled);
+        }
         self.update_escape(dt, &land);
         let carbon_time = start_carbon.elapsed();
         if self.cover_cohort.is_none() && self.tectonics.time() >= self.cover_cohort_time - 1e-9 {
@@ -1055,7 +1202,7 @@ impl Planet {
     fn update_carbon(
         &mut self,
         elevation: &[f64],
-        eroded: &[(f64, f64, f64)],
+        eroded: &[(f64, f64, f64, f64)],
         dt: f64,
     ) -> Vec<LandCell> {
         let fields = self.temperature.fields();
@@ -1073,6 +1220,7 @@ impl Planet {
                 bedrock_erosion: eroded[cell].0,
                 sediment_erosion: eroded[cell].1,
                 bare: eroded[cell].2,
+                carbonate: eroded[cell].3,
                 bedrock_density: bedrock_density[cell],
             })
             .collect();
@@ -1124,6 +1272,201 @@ impl Planet {
             }
         }
         land
+    }
+
+    /// Precipitates the carbonate of the step (#200): the carbon cycle's land burial and the
+    /// carbonate the surface processes removed (`recycled`, kg, dissolved), on the sea floor by
+    /// its saturation (see [`crate::carbonate`]); the same mass of dissolved load (the cation
+    /// oxide of the burial and the recycled carbonate, which the erosion routed as clastic
+    /// sediment) is taken back from the step's clastic `deposits` (rock-equivalent m per
+    /// cell), in the sea first. Everything per crust sample, so the masses are exact.
+    fn precipitate_carbonate(&mut self, dt: f64, deposits: &[f64], recycled: f64) {
+        use crate::carbonate::{self, CARBONATE_MOLAR_MASS, CO2_MOLAR_MASS};
+        use crate::isostasy::SEDIMENT_ROCK_DENSITY;
+        let years = dt * 1e6;
+        let new = self.carbon.state().land_burial.max(0.0) * years;
+        let recycled = recycled.max(0.0);
+        let total = new + recycled / CARBONATE_MOLAR_MASS;
+        self.carbonate.deposit.fill(0.0);
+        self.carbonate.level = f64::NAN;
+        self.carbonate.max_omega = f64::NAN;
+        if total <= 0.0 {
+            return;
+        }
+        let cell_area = self.cell_area();
+        // mol per rock-equivalent m on one sample.
+        let per_metre = SEDIMENT_ROCK_DENSITY * cell_area / CARBONATE_MOLAR_MASS;
+        let simulation = &self.tectonics;
+        let mesh = simulation.mesh();
+        let elevation = simulation.surface_elevations();
+        let ocean = &self.water.ocean;
+        let ids = simulation.sample_ids();
+        let groups = ids.iter().copied().max().map_or(0, |max| max as usize + 1);
+        let mut cells: Vec<Vec<u32>> = vec![Vec::new(); groups];
+        for (cell, &id) in ids.iter().enumerate() {
+            cells[id as usize].push(cell as u32);
+        }
+        let params = &self.carbon.params().precipitation;
+        let wave_base = self
+            .erosion
+            .as_ref()
+            .filter(|erosion| erosion.waves)
+            .map(|erosion| {
+                crate::erosion::wave_bases(mesh, &elevation, simulation.min_sea_fraction(), erosion)
+            });
+        let temperature = &self.temperature.fields().annual_mean;
+        let deep_water = self.carbon.state().deep_water_temperature;
+        let deep_water = if deep_water.is_finite() {
+            deep_water
+        } else {
+            2.0
+        };
+        // The sea-floor units: samples with cells in the ocean, their sea cells and room.
+        let mut units = Vec::new();
+        let mut unit_group = Vec::new();
+        for (group, group_cells) in cells.iter().enumerate() {
+            let sea: Vec<u32> = group_cells
+                .iter()
+                .copied()
+                .filter(|&cell| ocean[cell as usize] && elevation[cell as usize] < 0.0)
+                .collect();
+            if sea.is_empty() {
+                continue;
+            }
+            let sediment = simulation.surface_crust(sea[0]).sediment;
+            let room = sea
+                .iter()
+                .map(|&cell| {
+                    let top = wave_base.as_ref().map_or(params.platform_top, |bases| {
+                        bases[cell as usize].min(params.platform_top)
+                    });
+                    crate::isostasy::sediment_for_rise(elevation[cell as usize], top, sediment)
+                        .max(0.0)
+                })
+                .sum::<f64>()
+                / sea.len() as f64;
+            units.push(carbonate::Unit {
+                cells: sea
+                    .iter()
+                    .map(|&cell| carbonate::SeaCell {
+                        depth: -elevation[cell as usize],
+                        surface_temperature: temperature[cell as usize],
+                    })
+                    .collect(),
+                room: room * per_metre,
+            });
+            unit_group.push(group);
+        }
+        let distribution =
+            carbonate::distribute(params, &units, deep_water, cell_area, years, total);
+
+        // The dissolved load, from the step's deposits: in the sea first, then on land, then
+        // from the clastic sediment of the sea floor.
+        let clastic_mass = new * (CARBONATE_MOLAR_MASS - CO2_MOLAR_MASS) + recycled;
+        let target = clastic_mass / (SEDIMENT_ROCK_DENSITY * cell_area);
+        let mean = |group: usize, value: &dyn Fn(usize) -> f64| -> f64 {
+            let group_cells = &cells[group];
+            group_cells.iter().map(|&c| value(c as usize)).sum::<f64>()
+                / group_cells.len().max(1) as f64
+        };
+        let mut caps: Vec<f64> = (0..groups)
+            .map(|group| simulation.surface_crust(cells[group][0]).clastic())
+            .collect();
+        let mut removal = vec![0.0; groups];
+        let mut left = target;
+        for pass in 0..3 {
+            if left <= 0.0 || (deposits.is_empty() && pass < 2) {
+                continue;
+            }
+            let weight = |cell: usize| -> f64 {
+                match pass {
+                    0 if ocean[cell] => deposits[cell],
+                    1 => deposits[cell],
+                    2 if ocean[cell] => simulation.surface_crust(cell as u32).clastic(),
+                    _ => 0.0,
+                }
+            };
+            let weights: Vec<f64> = (0..groups).map(|group| mean(group, &weight)).collect();
+            let taken = carbonate::capped_fill(&weights, &caps, left);
+            for ((removal, cap), taken) in removal.iter_mut().zip(&mut caps).zip(taken) {
+                *removal += taken;
+                *cap -= taken;
+                left -= taken;
+            }
+        }
+
+        // Apply, with the diagnostics.
+        let mut deposit = vec![0.0; groups];
+        let mut max_omega = f64::NAN;
+        let stats = &mut self.carbonate.stats;
+        for (unit, (&group, &amount)) in unit_group.iter().zip(&distribution.amounts).enumerate() {
+            deposit[group] = amount / per_metre;
+            if amount <= 0.0 {
+                continue;
+            }
+            let mass = amount * CARBONATE_MOLAR_MASS;
+            let omega = distribution.omega[unit];
+            stats.omega_mass += mass * omega;
+            max_omega = if max_omega.is_nan() {
+                omega
+            } else {
+                max_omega.max(omega)
+            };
+            let cell = cells[group][0];
+            let depth = units[unit].cells.iter().map(|c| c.depth).sum::<f64>()
+                / units[unit].cells.len() as f64;
+            let bin = [20.0, 200.0, 1000.0, 3000.0]
+                .iter()
+                .filter(|&&limit| depth >= limit)
+                .count();
+            stats.by_depth[bin] += mass;
+            let latitude = math::asin(mesh.vertex(cell).z.clamp(-1.0, 1.0))
+                .to_degrees()
+                .abs();
+            let bin = [20.0, 40.0, 60.0]
+                .iter()
+                .filter(|&&limit| latitude >= limit)
+                .count();
+            stats.by_latitude[bin] += mass;
+            if simulation.surface_crust(cell).is_continental_origin() {
+                stats.on_continental += mass;
+            }
+        }
+        stats.new += new * CARBONATE_MOLAR_MASS;
+        stats.recycled += recycled;
+        stats.overflow += distribution.overflow * CARBONATE_MOLAR_MASS;
+        let changes: Vec<CarbonateExchange> = (0..groups)
+            .filter(|&group| deposit[group] > 0.0 || removal[group] > 0.0)
+            .map(|group| CarbonateExchange {
+                cell: cells[group][0],
+                clastic: removal[group],
+                carbonate: deposit[group],
+            })
+            .collect();
+        for (group, group_cells) in cells.iter().enumerate() {
+            for &cell in group_cells {
+                self.carbonate.deposit[cell as usize] = deposit[group] / dt;
+            }
+        }
+        let removed = self.tectonics.exchange_carbonate(&changes);
+        let stats = &mut self.carbonate.stats;
+        stats.clastic_removed += removed * SEDIMENT_ROCK_DENSITY * cell_area;
+        stats.unmatched += clastic_mass - removed * SEDIMENT_ROCK_DENSITY * cell_area;
+        self.carbonate.level = distribution.level;
+        self.carbonate.max_omega = max_omega;
+        let state = self.carbon.state();
+        info!(
+            time = %format_args!("{:.1}", self.tectonics.time()),
+            "carbonate: burial land {:.3} Tmol/yr, sea floor {:.3} | precipitated {:.3} Gt/yr \
+             (recycled {:.3}), saturation level {:.3}, max Ω {:.2}, overflow {:.2e} Gt/yr",
+            state.land_burial / 1e12,
+            state.seafloor_burial / 1e12,
+            total * CARBONATE_MOLAR_MASS / 1e12 / years,
+            recycled / 1e12 / years,
+            distribution.level,
+            max_omega,
+            distribution.overflow * CARBONATE_MOLAR_MASS / 1e12 / years,
+        );
     }
 
     /// One step of the escape (#210) on the step's climate and CO₂: the water it loses is taken
@@ -1585,6 +1928,76 @@ mod tests {
             }),
             RADIUS,
         )
+    }
+
+    fn carbonate_planet(carbon: CarbonParams, carbonate: bool) -> Planet {
+        let mut params = TectonicParams::default();
+        params.initial_sediment.carbonate = carbonate;
+        let simulation = Simulation::new(SphereMesh::icosphere(4), 8, params, 5);
+        Planet::new(
+            simulation,
+            ClimateParams::default(),
+            TemperatureParams::default(),
+            carbon,
+            EscapeParams::default(),
+            Some(ErosionParams {
+                planet_radius: RADIUS,
+                ..ErosionParams::default()
+            }),
+            RADIUS,
+        )
+    }
+
+    /// The carbonate sediment (#200) closes the carbon books, while the CO₂ is held and when
+    /// the cycle is active: the reservoirs and what went into the mantle equal the start and
+    /// what came out of it. The burial precipitates, and the dissolved load is fully taken from
+    /// the clastic sediment.
+    #[test]
+    fn carbonate_sediment_closes_the_carbon_books() {
+        for phi in [f64::NAN, 1.0] {
+            let carbon = CarbonParams {
+                phi,
+                ..CarbonParams::default()
+            };
+            let mut planet = carbonate_planet(carbon, true);
+            let start = planet.carbon_partition();
+            assert!(start.sediment > 0.0);
+            assert!(start.residual.abs() <= 1e-9 * start.sediment, "{start:?}");
+            for _ in 0..8 {
+                planet.step(1.0);
+            }
+            let p = planet.carbon_partition();
+            let scale = p.exogenic + p.sediment;
+            assert!(p.residual.abs() <= 1e-9 * scale, "{phi}: {p:?}");
+            assert!(p.lost.abs() <= 1e-3 * p.sediment, "{phi}: {p:?}");
+            let stats = planet.carbonate().stats;
+            assert!(stats.new > 0.0, "{phi}: {stats:?}");
+            assert!(
+                stats.unmatched.abs() <= 1e-9 * stats.clastic_removed,
+                "{phi}: {stats:?}"
+            );
+            let deposited: f64 = stats.by_depth.iter().sum();
+            assert!(
+                (deposited / (stats.new + stats.recycled) - 1.0).abs() < 1e-9,
+                "{phi}: {stats:?}"
+            );
+        }
+    }
+
+    /// Switched off, no sediment carries carbonate and nothing precipitates.
+    #[test]
+    fn carbonate_sediment_off_leaves_no_carbonate() {
+        let carbon = CarbonParams {
+            carbonate_sediment: false,
+            ..CarbonParams::default()
+        };
+        let mut planet = carbonate_planet(carbon, false);
+        for _ in 0..3 {
+            planet.step(1.0);
+        }
+        assert_eq!(planet.tectonics().carbonate_inventory(), 0.0);
+        assert_eq!(planet.carbonate().stats.new, 0.0);
+        assert!(planet.carbonate().deposit.iter().all(|&d| d == 0.0));
     }
 
     /// A step taken part by part with reads in between (as by a simulation paused inside a

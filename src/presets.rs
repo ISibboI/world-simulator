@@ -159,6 +159,11 @@ impl Biosphere {
                 // vegetated Earth delivered 2–4× today's dust to the ocean; Kohfeld & Harrison,
                 // 2001; Maher et al., 2010), which makes up for the missing ooze.
                 tectonics.initial_sediment.biogenic_pelagic = false;
+                // Inorganic carbonate only (#200): no pelagic ooze, so all of it precipitates by
+                // saturation on the sea floor; the initial cover holds the carbonate share of the
+                // burial flux (~10%) instead of the Phanerozoic platforms' ~20%.
+                carbon.precipitation.pelagic_share = 0.0;
+                tectonics.initial_sediment.platform_carbonate = 0.1;
                 // Silicate weathering without plants (#154): roots, mycorrhiza and soil
                 // organic acids speed up weathering several times; GEOCARB takes 1/4 of today's
                 // rate before vascular plants (f_E = 0.25; Berner, 1994; Moulton & Berner, 1998:
@@ -547,6 +552,9 @@ mod tests {
         undone.carbon.plant_factor = modern.carbon.plant_factor;
         undone.carbon.co2_exponent = modern.carbon.co2_exponent;
         undone.carbon.soil_co2_saturation = modern.carbon.soil_co2_saturation;
+        undone.carbon.precipitation.pelagic_share = modern.carbon.precipitation.pelagic_share;
+        undone.tectonics.initial_sediment.platform_carbonate =
+            modern.tectonics.initial_sediment.platform_carbonate;
         assert_eq!(fingerprint(&undone), fingerprint(&modern));
     }
 

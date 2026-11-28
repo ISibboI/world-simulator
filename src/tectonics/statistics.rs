@@ -769,6 +769,10 @@ impl Simulation {
                 t.stacked *= to_gt;
                 t.metasediment_accreted *= to_gt;
                 t.metasediment_subducted *= to_gt;
+                t.carbonate_subducted *= to_gt;
+                t.carbonate_accreted *= to_gt;
+                t.carbonate_stacked *= to_gt;
+                t.carbonate_decarbonated *= to_gt;
                 t
             },
             continental_thickness,

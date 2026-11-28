@@ -128,10 +128,17 @@ pub struct Crust {
 /// layered column is the cohort, faster than in proportion. Where metamorphism removes much of
 /// the cohort, the well-mixed half-life is therefore not strictly a lower bound (the cohort's
 /// fate in the log shows the metamorphosed share).
+///
+/// The struct also carries the **carbonate** fraction of the sediment (#200, not a diagnostic:
+/// the carbon cycle reads it), which travels through the same paths: it mixes by mass where
+/// sediment is added or moved sideways and keeps its fraction where sediment is removed, like
+/// [`Cohort::mixed`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Cohort {
     pub mixed: f64,
     pub lifo: f64,
+    /// Mass fraction of the sediment that is carbonate (0 to 1).
+    pub carbonate: f64,
 }
 
 impl Cohort {
@@ -139,18 +146,32 @@ impl Cohort {
     pub const NONE: Self = Self {
         mixed: 0.0,
         lifo: 0.0,
+        carbonate: 0.0,
+    };
+
+    /// New carbonate sediment: all carbonate, outside the cohort.
+    pub const CARBONATE: Self = Self {
+        mixed: 0.0,
+        lifo: 0.0,
+        carbonate: 1.0,
     };
 
     /// Sediment that all belongs to the cohort.
     pub const ALL: Self = Self {
         mixed: 1.0,
         lifo: 1.0,
+        carbonate: 0.0,
     };
 
     /// Both fractions times `sediment`: the cohort's rock-equivalent thickness in a column of
     /// `sediment` metres, as `[mixed, lifo]`.
     pub fn amounts(self, sediment: f64) -> [f64; 2] {
         [sediment * self.mixed, sediment * self.lifo]
+    }
+
+    /// The carbonate (rock-equivalent m) in a column of `sediment` metres.
+    pub fn carbonate_amount(self, sediment: f64) -> f64 {
+        sediment * self.carbonate
     }
 }
 
@@ -417,6 +438,9 @@ impl Crust {
             self.cohort = Cohort {
                 mixed: (self.sediment * self.cohort.mixed + sediment * cohort.mixed) / total,
                 lifo: (self.sediment * self.cohort.lifo + sediment * cohort.lifo) / total,
+                carbonate: ((self.sediment * self.cohort.carbonate + sediment * cohort.carbonate)
+                    / total)
+                    .clamp(0.0, 1.0),
             };
         }
         self.sediment = total;
@@ -437,6 +461,35 @@ impl Crust {
         };
         let after = self.cohort.amounts(self.sediment.max(0.0));
         [before[0] - after[0], before[1] - after[1]]
+    }
+
+    /// Carbonate in the sediment (rock-equivalent m, see [`Cohort::carbonate`]).
+    pub fn carbonate(&self) -> f64 {
+        self.cohort.carbonate_amount(self.sediment)
+    }
+
+    /// Non-carbonate (clastic) sediment (rock-equivalent m).
+    pub fn clastic(&self) -> f64 {
+        (self.sediment - self.carbonate()).max(0.0)
+    }
+
+    /// Removes `amount` (rock-equivalent m, at most [`Crust::clastic`]) of non-carbonate
+    /// sediment: the carbonate stays, the cohort tracers change as for any removal. Returns the
+    /// amount removed.
+    pub(crate) fn remove_clastic(&mut self, amount: f64) -> f64 {
+        let amount = amount.clamp(0.0, self.clastic());
+        if amount <= 0.0 {
+            return 0.0;
+        }
+        let carbonate = self.carbonate();
+        let sediment = self.sediment - amount;
+        self.remove_sediment_to(sediment);
+        self.cohort.carbonate = if sediment > 0.0 {
+            (carbonate / sediment).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        amount
     }
 
     /// Areal mass (kg/m²) of the felsic part of the crystalline crust.
@@ -557,6 +610,36 @@ pub(super) fn new_oceanic_crust(time: f64) -> Crust {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The carbonate (#200) mixes by mass where sediment is added, keeps its fraction where
+    /// sediment is removed, and stays where clastic sediment is taken: its amount is conserved.
+    #[test]
+    fn carbonate_is_conserved_by_the_sediment_operations() {
+        let mut crust = Crust {
+            sediment: 100.0,
+            cohort: Cohort {
+                carbonate: 0.2,
+                ..Cohort::NONE
+            },
+            ..new_oceanic_crust(0.0)
+        };
+        crust.add_sediment(50.0, Cohort::CARBONATE);
+        assert!((crust.carbonate() - 70.0).abs() < 1e-12);
+        crust.add_sediment(30.0, Cohort::NONE);
+        assert!((crust.carbonate() - 70.0).abs() < 1e-12);
+        assert!((crust.clastic() - 110.0).abs() < 1e-12);
+        // Removal of a well-mixed slice takes carbonate in proportion.
+        crust.remove_sediment_to(90.0);
+        assert!((crust.carbonate() - 35.0).abs() < 1e-12);
+        // Clastic removal leaves the carbonate, at most all the clastic sediment.
+        assert!((crust.remove_clastic(20.0) - 20.0).abs() < 1e-12);
+        assert!((crust.carbonate() - 35.0).abs() < 1e-12);
+        assert!((crust.sediment - 70.0).abs() < 1e-12);
+        assert!((crust.remove_clastic(1000.0) - 35.0).abs() < 1e-9);
+        assert!((crust.sediment - 35.0).abs() < 1e-9);
+        assert!((crust.cohort.carbonate - 1.0).abs() < 1e-12);
+        assert_eq!(crust.remove_clastic(1.0), 0.0);
+    }
 
     #[test]
     fn thermal_fraction_inverts() {

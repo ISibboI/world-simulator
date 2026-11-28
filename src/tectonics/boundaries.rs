@@ -383,16 +383,26 @@ impl Simulation {
                     0.0,
                     loser_crust.sediment,
                 );
+                // Its carbonate is metamorphosed; a part decarbonates and its CO₂ leaves the
+                // rock (#200; zero without carbonate).
+                let carbonate = loser_crust.carbonate() * SEDIMENT_ROCK_DENSITY;
+                let decarbonated = carbonate * params.metamorphic_decarbonation;
+                let co2 = decarbonated * crate::carbonate::CO2_FRACTION;
+                trench_sediment.carbonate_stacked += carbonate;
+                trench_sediment.carbonate_decarbonated += decarbonated;
+                ledger.record(Term::Decarbonation, -co2);
+                ledger.record(Term::CollisionConsumed, co2);
+                let mass = loser_crust.mass() - co2;
+                let sediment_mass = sediment_mass - co2;
                 let thickness = loser_crust.thickness + sediment_mass / METASEDIMENT_DENSITY;
                 additions.push(CrustAddition {
                     cell: contact.cell,
                     plate: winner.plate,
                     partner: contact.loser.plate,
                     thickness,
-                    density: loser_crust.mass() / thickness.max(1e-9),
+                    density: mass / thickness.max(1e-9),
                     // Sediment is eroded continental (felsic) material.
-                    felsic: (loser_crust.felsic_mass() + sediment_mass)
-                        / loser_crust.mass().max(1e-9),
+                    felsic: (loser_crust.felsic_mass() + sediment_mass) / mass.max(1e-9),
                     // Stacked into an orogen, it becomes part of the continental basement.
                     metasediment: 0.0,
                     kind: AdditionKind::Collision,
@@ -488,6 +498,13 @@ impl Simulation {
                     loser_crust.sediment,
                 );
                 let accreted_mass = accreted_column * SEDIMENT_ROCK_DENSITY;
+                // Carbonate (#200): scraped off into the wedge with the sediment above the
+                // décollement, the rest subducts.
+                let fraction = loser_crust.cohort.carbonate;
+                trench_sediment.carbonate_accreted +=
+                    fraction * accreted_sediment * SEDIMENT_ROCK_DENSITY;
+                trench_sediment.carbonate_subducted +=
+                    fraction * (loser_crust.sediment - accreted_sediment) * SEDIMENT_ROCK_DENSITY;
                 trench_sediment.record(
                     &loser_crust,
                     accreted_sediment * SEDIMENT_ROCK_DENSITY,
@@ -529,6 +546,9 @@ impl Simulation {
                 let mut amount = params.subduction_erosion;
                 let column = *crust;
                 let from_sediment = amount.min(crust.sediment);
+                // Its carbonate goes down with the slab (#200).
+                trench_sediment.carbonate_subducted +=
+                    crust.cohort.carbonate * from_sediment * SEDIMENT_ROCK_DENSITY;
                 crust.remove_sediment_to(crust.sediment - from_sediment);
                 amount -= from_sediment;
                 crust.thin_from_below(
@@ -1082,6 +1102,14 @@ pub struct TrenchSediment {
     /// accretionary wedge, and subducted.
     pub metasediment_accreted: f64,
     pub metasediment_subducted: f64,
+    /// Carbonate in the sediment (#200, see [`Crust::carbonate`]): subducted with the slab
+    /// (below the décollement, and removed from the forearc by subduction erosion), scraped off
+    /// into accretionary wedges, and stacked into orogens in collisions, of which
+    /// `carbonate_decarbonated` decarbonated (see [`TectonicParams::metamorphic_decarbonation`]).
+    pub carbonate_subducted: f64,
+    pub carbonate_accreted: f64,
+    pub carbonate_stacked: f64,
+    pub carbonate_decarbonated: f64,
 }
 
 impl TrenchSediment {
@@ -1315,6 +1343,7 @@ fn stretch_rift_marking(
     }
     let (mut thickness, mut mass, mut felsic, mut sediment) = (0.0, 0.0, 0.0, 0.0);
     let (mut metasediment, mut cohort) = (0.0, [0.0; 2]);
+    let mut carbonate = 0.0;
     // Mass-weighted thickness and thermal fraction of the donors after stretching (repeated
     // stretching compounds in the donors).
     let (mut donor_thickness, mut donor_heat) = (0.0, 0.0);
@@ -1346,6 +1375,7 @@ fn stretch_rift_marking(
         let given_cohort = crust.cohort.amounts(crust.sediment * share);
         cohort[0] += given_cohort[0];
         cohort[1] += given_cohort[1];
+        carbonate += crust.cohort.carbonate_amount(crust.sediment * share);
         crust.thickness -= given;
         crust.sediment -= crust.sediment * share;
         // The stretching leaves an extension fabric (#54).
@@ -1368,6 +1398,7 @@ fn stretch_rift_marking(
         cohort: Cohort {
             mixed: cohort[0] / sediment.max(1e-9),
             lifo: cohort[1] / sediment.max(1e-9),
+            carbonate: (carbonate / sediment.max(1e-9)).clamp(0.0, 1.0),
         },
     };
     crust.mix_orogeny(orogeny, orogenic / mass.max(1e-9), rifted / mass.max(1e-9));
@@ -1428,6 +1459,7 @@ fn heal_gap(
     let share = 1.0 / (neighbors.len() + 1) as f64;
     let (mut thickness, mut mass, mut sediment, mut felsic) = (0.0, 0.0, 0.0, 0.0);
     let (mut metasediment, mut cohort) = (0.0, [0.0; 2]);
+    let mut carbonate = 0.0;
     let mut birth = f64::NEG_INFINITY;
     let (mut orogeny, mut orogenic, mut rifted) = (NO_OROGENY, 0.0, 0.0);
     let mut reheated = NO_REHEATING;
@@ -1449,6 +1481,7 @@ fn heal_gap(
         let given_cohort = crust.cohort.amounts(crust.sediment * share);
         cohort[0] += given_cohort[0];
         cohort[1] += given_cohort[1];
+        carbonate += crust.cohort.carbonate_amount(crust.sediment * share);
         crust.thickness -= given;
         crust.sediment -= crust.sediment * share;
     }
@@ -1466,6 +1499,7 @@ fn heal_gap(
         cohort: Cohort {
             mixed: cohort[0] / sediment.max(1e-9),
             lifo: cohort[1] / sediment.max(1e-9),
+            carbonate: (carbonate / sediment.max(1e-9)).clamp(0.0, 1.0),
         },
     };
     crust.mix_orogeny(orogeny, orogenic / mass.max(1e-9), rifted / mass.max(1e-9));

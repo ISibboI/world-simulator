@@ -232,10 +232,14 @@ impl Simulation {
             .iter_mut()
             .flat_map(|plate| plate.crust.iter_mut().flatten())
         {
-            crust.cohort = if crust.is_continental_origin() {
-                Cohort::ALL
-            } else {
-                Cohort::NONE
+            // The carbonate stays (it is not a cohort tracer).
+            crust.cohort = Cohort {
+                carbonate: crust.cohort.carbonate,
+                ..if crust.is_continental_origin() {
+                    Cohort::ALL
+                } else {
+                    Cohort::NONE
+                }
             };
         }
         self.start_cover_budget(1..3);
@@ -269,7 +273,11 @@ mod tests {
     fn column(sediment: f64, mixed: f64, lifo: f64) -> Crust {
         Crust {
             sediment,
-            cohort: Cohort { mixed, lifo },
+            cohort: Cohort {
+                mixed,
+                lifo,
+                carbonate: 0.0,
+            },
             ..super::super::crust::new_oceanic_crust(0.0)
         }
     }

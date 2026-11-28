@@ -36,6 +36,7 @@ use std::collections::VecDeque;
 
 use tracing::warn;
 
+use crate::carbonate::{CARBONATE_MOLAR_MASS, PrecipitationParams};
 use crate::math;
 use crate::presets::{co2_forcing, co2_ratio_for_forcing};
 
@@ -135,6 +136,19 @@ pub struct CarbonParams {
     pub climate_sensitivity: f64,
     /// Relative change of the runoff per kelvin that the implicit step predicts.
     pub runoff_sensitivity: f64,
+    /// Whether the carbonate the cycle buries becomes carbonate sediment, carried by the plates
+    /// (#200, see [`crate::carbonate`]): the land sink precipitates as carbonate on the sea floor,
+    /// eroded carbonate is dissolved and precipitated again, and the arc and metamorphic sources
+    /// follow the carbonate that actually subducts and decarbonates (`slab_carbonate_return`,
+    /// [`crate::tectonics::TectonicParams::metamorphic_decarbonation`]) instead of the fixed
+    /// `slab_sediment_carbon` and `metamorphic_carbon`. Off (`carbonate_sediment=0`): the
+    /// cycle of #154 alone.
+    pub carbonate_sediment: bool,
+    /// Share of the subducted carbonate that returns at arcs; the rest goes into the mantle
+    /// (20–80%: Dasgupta & Hirschmann 2010; Kelemen & Manning 2015).
+    pub slab_carbonate_return: f64,
+    /// Where the carbonate precipitates (see [`crate::carbonate`]).
+    pub precipitation: PrecipitationParams,
     /// Scale of both kinetic weathering laws. NaN (the default): set at the end of the
     /// ramp-up phase ([`CarbonCycle::end_hold`]) so that the sinks balance the sources over its
     /// last window, at the start's CO₂ (a continuous start); until then the
@@ -163,6 +177,9 @@ impl Default for CarbonParams {
     fn default() -> Self {
         Self {
             enabled: true,
+            carbonate_sediment: true,
+            slab_carbonate_return: 0.5,
+            precipitation: PrecipitationParams::default(),
             ridge_carbon: 0.03,
             wedge_carbon: 0.015,
             slab_return: 0.5,
@@ -207,7 +224,23 @@ impl CarbonParams {
             self.enabled = value != 0.0;
             return Ok(());
         }
+        if name == "carbonate_sediment" {
+            self.carbonate_sediment = value != 0.0;
+            return Ok(());
+        }
+        let precipitation = &mut self.precipitation;
         let field = match name {
+            "slab_carbonate_return" => &mut self.slab_carbonate_return,
+            "carbonate_rate_constant" => &mut precipitation.rate_constant,
+            "carbonate_reaction_order" => &mut precipitation.reaction_order,
+            "carbonate_activation_energy" => &mut precipitation.activation_energy,
+            "carbonate_reference_temperature" => &mut precipitation.reference_temperature,
+            "carbonate_saturation_temperature" => &mut precipitation.saturation_temperature,
+            "carbonate_pressure_depth" => &mut precipitation.pressure_depth,
+            "thermocline_depth" => &mut precipitation.thermocline_depth,
+            "carbonate_platform_top" => &mut precipitation.platform_top,
+            "carbonate_pelagic_share" => &mut precipitation.pelagic_share,
+            "carbonate_ccd" => &mut precipitation.ccd,
             "ridge_carbon" => &mut self.ridge_carbon,
             "wedge_carbon" => &mut self.wedge_carbon,
             "slab_return" => &mut self.slab_return,
@@ -273,6 +306,10 @@ pub struct TectonicDrivers {
     pub metamorphic_sediment: f64,
     /// Sum of the current plume fluxes in m²/s.
     pub plume_flux: f64,
+    /// Carbonate (kg, #200) subducted (with the slab and by subduction erosion), and
+    /// decarbonated by burial metamorphism and in collisions.
+    pub subducted_carbonate: f64,
+    pub decarbonated_carbonate: f64,
 }
 
 /// Degassing in mol C/yr.
@@ -333,6 +370,40 @@ pub struct CarbonState {
     /// sediment and seafloor carbon), for the O₂ sinks of the escape (#210).
     pub new_crust: f64,
     pub arc_plume_mantle_degassing: f64,
+    /// The carbon buried in the step (mol/yr): as carbonate from the land weathering, which
+    /// [`crate::carbonate`] precipitates, and in the altered sea floor. The sinks when the
+    /// cycle is active; while the CO₂ is held (or the cycle is off) the degassing split in the
+    /// proportion of the sinks, so that the held CO₂ is consistent with a balanced budget.
+    pub land_burial: f64,
+    pub seafloor_burial: f64,
+}
+
+/// Carbon reservoirs and cumulative flows of the cycle (mol), for the partition and the
+/// closure with the sediment's carbonate (#200, see `notes/issue-200/plan.md` §4).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CarbonBudget {
+    /// Exogenic carbon at the start.
+    pub initial: f64,
+    /// Degassed from the mantle so far: ridges, the mantle wedge at arcs, plumes.
+    pub mantle_degassing: f64,
+    /// Buried so far: as carbonate from the land weathering, and in the altered sea floor.
+    pub land_burial: f64,
+    pub seafloor_burial: f64,
+    /// Carbon of the altered sea floor now (uptake less what subducted), and what subducted of
+    /// it went into the mantle (the rest degassed at arcs).
+    pub altered_crust: f64,
+    pub altered_crust_to_mantle: f64,
+    /// Carbonate that left the sediment and is not degassed yet (subducted, decarbonated):
+    /// the buffers that smooth the sources over `degassing_smoothing`.
+    pub buffers: [f64; 2],
+    /// Subducted carbonate degassed at arcs and gone into the mantle so far, and decarbonated
+    /// carbonate degassed so far.
+    pub carbonate_arcs: f64,
+    pub carbonate_to_mantle: f64,
+    pub carbonate_metamorphic: f64,
+    /// Carbonate (mol) that left the sediment before the cycle started (subducted or
+    /// decarbonated while the planet was generated), which it never degasses.
+    pub before_start: f64,
 }
 
 impl CarbonState {
@@ -386,6 +457,9 @@ pub struct LandCell {
     /// water on bare rock runs off with little contact, so the kinetic rate scales with the
     /// covered fraction (see [`CarbonParams::bare_rock_weathering`]).
     pub bare: f64,
+    /// Carbonate fraction of the eroded sediment (#200): it dissolves without taking up CO₂
+    /// over the cycle, so it is not weatherable silicate.
+    pub carbonate: f64,
     /// Density of the bedrock in kg/m³.
     pub bedrock_density: f64,
     /// Mafic (basaltic) share of the bedrock, 0 to 1: one minus its felsic fraction.
@@ -487,6 +561,8 @@ pub struct CarbonCycle {
     /// The tectonic rates smoothed over [`CarbonParams::degassing_smoothing`], once φ is set
     /// (before, the raw rates of each step are used, as in the calibration).
     smoothed: Option<Rates>,
+    /// Reservoirs and cumulative flows (#200).
+    budget: CarbonBudget,
     state: CarbonState,
 }
 
@@ -520,6 +596,10 @@ impl CarbonCycle {
             phi,
             slab_carbon: f64::NAN,
             smoothed: None,
+            budget: CarbonBudget {
+                initial: carbon,
+                ..CarbonBudget::default()
+            },
             state,
         }
     }
@@ -532,10 +612,17 @@ impl CarbonCycle {
         &self.state
     }
 
+    /// The reservoirs and cumulative flows (#200).
+    pub fn budget(&self) -> &CarbonBudget {
+        &self.budget
+    }
+
     /// Records the tectonic drivers at the start of the run, so that the first step's degassing
     /// covers only that step.
     pub fn start(&mut self, drivers: TectonicDrivers) {
         self.previous = Some(drivers);
+        self.budget.before_start =
+            (drivers.subducted_carbonate + drivers.decarbonated_carbonate) / CARBONATE_MOLAR_MASS;
     }
 
     /// Whether the CO₂ follows the carbon cycle in the next step: it is enabled and φ is known.
@@ -610,14 +697,61 @@ impl CarbonCycle {
         let cells = self.weathering_cells(input.land);
         let current_forcing = self.forcing;
         let x_now = math::ln(self.ratio);
+        // The carbonate that left the sediment in the step goes into the buffers, which degas
+        // a share per step (#200): mol/yr returning at arcs (and into the mantle) and
+        // decarbonated.
+        let carbonate = self.params.carbonate_sediment;
+        let (carbonate_arcs, carbonate_metamorphic) = if carbonate {
+            let params = &self.params;
+            let release = if params.degassing_smoothing > 0.0 {
+                -math::exp_m1(-input.years / (params.degassing_smoothing * 1e6))
+            } else {
+                1.0
+            };
+            let budget = &mut self.budget;
+            let gained = [
+                (drivers.subducted_carbonate - previous.subducted_carbonate).max(0.0),
+                (drivers.decarbonated_carbonate - previous.decarbonated_carbonate).max(0.0),
+            ];
+            let mut released = [0.0; 2];
+            for ((buffer, gained), released) in
+                budget.buffers.iter_mut().zip(gained).zip(&mut released)
+            {
+                *buffer += gained / CARBONATE_MOLAR_MASS;
+                *released = *buffer * release;
+                *buffer -= *released;
+            }
+            let returned = params.slab_carbonate_return.clamp(0.0, 1.0);
+            budget.carbonate_arcs += returned * released[0];
+            budget.carbonate_to_mantle += (1.0 - returned) * released[0];
+            budget.carbonate_metamorphic += released[1];
+            (
+                returned * released[0] / input.years,
+                released[1] / input.years,
+            )
+        } else {
+            (0.0, 0.0)
+        };
         let params = &self.params;
-        // Degassing without the slab's seafloor carbon (which depends on φ).
-        let degassing_of = |rates: &Rates| Sources {
-            ridges: params.ridge_carbon * rates.ridge,
-            arcs: params.wedge_carbon * rates.subducted
-                + params.slab_sediment_carbon * rates.sediment,
-            plumes: params.plume_carbon * drivers.plume_flux,
-            metamorphic: params.metamorphic_carbon * rates.metamorphic,
+        // Degassing without the slab's seafloor carbon (which depends on φ). With the carbonate
+        // sediment, the sediment's carbon follows its carbonate (the buffers above).
+        let degassing_of = |rates: &Rates| {
+            if carbonate {
+                Sources {
+                    ridges: params.ridge_carbon * rates.ridge,
+                    arcs: params.wedge_carbon * rates.subducted + carbonate_arcs,
+                    plumes: params.plume_carbon * drivers.plume_flux,
+                    metamorphic: carbonate_metamorphic,
+                }
+            } else {
+                Sources {
+                    ridges: params.ridge_carbon * rates.ridge,
+                    arcs: params.wedge_carbon * rates.subducted
+                        + params.slab_sediment_carbon * rates.sediment,
+                    plumes: params.plume_carbon * drivers.plume_flux,
+                    metamorphic: params.metamorphic_carbon * rates.metamorphic,
+                }
+            }
         };
 
         self.tectonic_degassing = degassing_of(&raw).total();
@@ -666,7 +800,8 @@ impl CarbonCycle {
             self.slab_carbon
         };
         let mut sources = degassing_of(&rates);
-        sources.arcs += params.slab_return * rates.subducted * slab_carbon;
+        let altered_crust_return = params.slab_return * rates.subducted * slab_carbon;
+        sources.arcs += altered_crust_return;
         let degassing = sources.total();
 
         let sinks_at = |x: f64, warming: f64| {
@@ -710,6 +845,33 @@ impl CarbonCycle {
             self.carbon += input.years * (degassing - sinks.total());
             self.ratio = math::exp(x_new);
         }
+        // What is buried: the sinks, or while the CO₂ stays the degassing in their proportion.
+        let (land_burial, seafloor_burial) = if active {
+            (sinks.land, sinks.seafloor)
+        } else if sinks.total() > 0.0 {
+            let land = degassing * sinks.land / sinks.total();
+            (land, degassing - land)
+        } else {
+            (degassing, 0.0)
+        };
+        {
+            let budget = &mut self.budget;
+            let years = input.years;
+            budget.mantle_degassing +=
+                years * (sources.ridges + params.wedge_carbon * rates.subducted + sources.plumes);
+            if !carbonate {
+                // The fixed sediment terms count as degassed from the mantle (no carbonate is
+                // tracked).
+                budget.mantle_degassing += years
+                    * (params.slab_sediment_carbon * rates.sediment
+                        + params.metamorphic_carbon * rates.metamorphic);
+            }
+            budget.land_burial += years * land_burial;
+            budget.seafloor_burial += years * seafloor_burial;
+            let subducted = years * rates.subducted * slab_carbon;
+            budget.altered_crust += years * seafloor_burial - subducted;
+            budget.altered_crust_to_mantle += subducted - years * altered_crust_return;
+        }
         if self.phi.is_some() && params.slab_age > 0.0 && ridge_crust > 0.0 {
             let uptake = sinks.seafloor / ridge_crust;
             let weight = 1.0 - math::exp(-input.years / (params.slab_age * 1e6));
@@ -734,6 +896,8 @@ impl CarbonCycle {
             new_crust: ridge_crust,
             arc_plume_mantle_degassing: params.wedge_carbon * rates.subducted
                 + params.plume_carbon * drivers.plume_flux,
+            land_burial,
+            seafloor_burial,
         };
         forcing
     }
@@ -794,6 +958,7 @@ impl CarbonCycle {
                 let supply = cell.bedrock_erosion * cell.bedrock_density * cations
                     + params.sediment_weatherable
                         * cell.sediment_erosion
+                        * (1.0 - cell.carbonate.clamp(0.0, 1.0))
                         * crate::isostasy::SEDIMENT_ROCK_DENSITY
                         * params.felsic_cations;
                 let kinetic = params.land_weathering
@@ -994,6 +1159,7 @@ mod tests {
             bedrock_density: 2800.0,
             mafic: 0.2,
             bare: 0.0,
+            carbonate: 0.0,
         }
     }
 
@@ -1018,6 +1184,8 @@ mod tests {
             subducted_sediment: step * 2e18,
             metamorphic_sediment: step * 1e18,
             plume_flux: 0.03,
+            subducted_carbonate: 0.0,
+            decarbonated_carbonate: 0.0,
         }
     }
 

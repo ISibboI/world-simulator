@@ -67,6 +67,15 @@ pub struct InitialSedimentParams {
     /// preset) the sea floor collects only red clay of wind-blown dust, volcanic ash and
     /// hydrogenous precipitates at `clay_rate`, at any depth.
     pub biogenic_pelagic: bool,
+    /// Whether the initial sediment carries carbonate (#200, see [`crate::tectonics::Cohort`]):
+    /// the continental cover a share `platform_carbonate` of its mass, biogenic pelagic sediment
+    /// the ooze it accumulated above the CCD (beyond `clay_rate`); rises and red clay none. Off
+    /// with the carbonate sediment (`carbon.carbonate_sediment=0`).
+    pub carbonate: bool,
+    /// Carbonate share of the initial continental cover (platforms and shelf prisms):
+    /// Phanerozoic platforms are ~20–25% carbonate (Ronov 1980); without calcifiers the
+    /// carbonate share of the burial flux, ~10%.
+    pub platform_carbonate: f64,
     /// Terrigenous accumulation on the sea floor at a passive margin (m/Myr; turbidites and
     /// hemipelagic mud of continental rises accumulate at tens to hundreds of m/Myr), decaying
     /// exponentially with the distance from the continental crust over `terrigenous_length` (m).
@@ -110,6 +119,8 @@ impl Default for InitialSedimentParams {
             carbonate_rate: 4.0,
             clay_rate: 1.0,
             biogenic_pelagic: true,
+            carbonate: true,
+            platform_carbonate: 0.2,
             terrigenous_rate: 40.0,
             terrigenous_length: 250e3,
             platform_thickness: 3000.0,
@@ -170,7 +181,7 @@ impl InitialSedimentParams {
 
 impl Simulation {
     /// The crust of a world cell, mutably.
-    fn surface_crust_mut(&mut self, cell: u32) -> &mut Crust {
+    pub(super) fn surface_crust_mut(&mut self, cell: u32) -> &mut Crust {
         let owner = self.owners[cell as usize];
         self.plates[owner.plate as usize].crust[owner.local as usize]
             .as_mut()
@@ -238,9 +249,15 @@ impl Simulation {
                 0.0,
             )
             .max(0.0);
-            crust.sediment = (params.pelagic(age, ccd_age) + params.terrigenous(age, distance))
-                .min(room)
-                .min(max_sediment);
+            let column = params.pelagic(age, ccd_age) + params.terrigenous(age, distance);
+            crust.sediment = column.min(room).min(max_sediment);
+            // The ooze's carbonate (beyond the clay that also falls above the CCD), as a share
+            // of the column (#200).
+            if params.carbonate && params.biogenic_pelagic && column > 0.0 {
+                let ooze =
+                    (params.carbonate_rate - params.clay_rate).max(0.0) * age.max(0.0).min(ccd_age);
+                crust.cohort.carbonate = (ooze / column).clamp(0.0, 1.0);
+            }
         }
 
         // Platform cover: a noise field over the continents; the lowest `shield_fraction` stays
@@ -364,6 +381,15 @@ impl Simulation {
             self.sea_level = sea_level;
             if change.abs() < 1e-3 {
                 break;
+            }
+        }
+        if params.carbonate {
+            let share = params.platform_carbonate.clamp(0.0, 1.0);
+            for &cell in &continental {
+                let crust = self.surface_crust_mut(cell);
+                if crust.sediment > 0.0 {
+                    crust.cohort.carbonate = share;
+                }
             }
         }
     }

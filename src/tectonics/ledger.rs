@@ -53,8 +53,12 @@ pub struct MassLedger {
     pub splits: f64,
     /// Hidden crust of plates removed because they no longer cover any cell (−).
     pub removed_plates: f64,
-    /// Net change caused by erosion and sedimentation (should be ~0: erosion conserves mass).
+    /// Net change caused by erosion and sedimentation (should be ~0: erosion conserves mass;
+    /// the carbonate of #200 adds the CO₂ it took from the exogenic carbon).
     pub surface_processes: f64,
+    /// CO₂ released by the decarbonation of carbonate sediment in burial metamorphism and
+    /// collisions (−, #200).
+    pub decarbonation: f64,
     /// Total change not accounted for by the terms above.
     pub residual: f64,
     /// Total mass at the last check.
@@ -84,6 +88,7 @@ pub(super) enum Term {
     Splits,
     RemovedPlates,
     SurfaceProcesses,
+    Decarbonation,
 }
 
 impl MassLedger {
@@ -115,6 +120,7 @@ impl MassLedger {
             Term::Splits => &mut self.splits,
             Term::RemovedPlates => &mut self.removed_plates,
             Term::SurfaceProcesses => &mut self.surface_processes,
+            Term::Decarbonation => &mut self.decarbonation,
         };
         *field += mass;
         self.recorded_since_check += mass;
@@ -136,7 +142,7 @@ impl MassLedger {
     }
 
     /// The terms with their names, for reporting.
-    pub fn terms(&self) -> [(&'static str, f64); 19] {
+    pub fn terms(&self) -> [(&'static str, f64); 20] {
         [
             ("new sea floor", self.new_sea_floor),
             ("arcs", self.arcs),
@@ -155,6 +161,7 @@ impl MassLedger {
             ("splits", self.splits),
             ("removed plates", self.removed_plates),
             ("surface processes", self.surface_processes),
+            ("decarbonation", self.decarbonation),
             ("residual", self.residual),
             ("total", self.last_total),
         ]
@@ -167,5 +174,32 @@ pub(super) fn plates_mass(plates: &[Plate]) -> f64 {
         .iter()
         .flat_map(|plate| plate.crust.iter().flatten())
         .map(Crust::mass)
+        .sum()
+}
+
+/// Carbonate in the sediment (#200, see [`Crust::carbonate`]) gained and lost so far by
+/// process, in kg/m² summed over samples (multiply by the cell area for kg). The trench terms
+/// are in [`super::TrenchSediment`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CarbonateFlows {
+    /// In the sediment of all samples (hidden ones included) at the start.
+    pub initial: f64,
+    /// Precipitated (+, see [`Simulation::exchange_carbonate`]).
+    pub deposited: f64,
+    /// Removed by the surface processes (−: erosion, waves, diffusion; dissolved and
+    /// precipitated again).
+    pub surface: f64,
+    /// Turned into crust by burial metamorphism (−), and the part of it that decarbonated.
+    pub metamorphosed: f64,
+    pub decarbonated: f64,
+}
+
+/// Carbonate (kg/m² summed over samples) in the sediment of all samples of the given plates,
+/// hidden ones included.
+pub(super) fn plates_carbonate(plates: &[Plate]) -> f64 {
+    plates
+        .iter()
+        .flat_map(|plate| plate.crust.iter().flatten())
+        .map(|crust| crust.carbonate() * SEDIMENT_ROCK_DENSITY)
         .sum()
 }

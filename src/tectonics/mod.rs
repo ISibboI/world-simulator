@@ -66,7 +66,7 @@ pub use events::{
 };
 pub use generation::InitialConfiguration;
 pub use initial_sediment::{InitialSedimentParams, PlatformEmplacement};
-pub use ledger::MassLedger;
+pub use ledger::{CarbonateFlows, MassLedger};
 pub use mantle::{MantleParams, Plume};
 pub use matching::{MatchingParams, MatchingStatistics};
 pub use sheet::{SheetParams, SheetStatistics};
@@ -146,6 +146,11 @@ pub struct TectonicParams {
     /// Sediment buried deeper than this (bulk thickness, m) metamorphoses into felsic crust (greenschist facies, ~250–300 °C at 10–12 km under
     /// sediment-blanketed margins).
     pub metamorphic_depth: f64,
+    /// Share of the carbonate in sediment turned into crust by burial metamorphism or stacked in
+    /// collisions that decarbonates (#200): calc-silicate reactions release its CO₂ (which
+    /// leaves the rock), the rest stays as marble. Pure limestones survive as marble; impure
+    /// ones with fluid infiltration decarbonate (Kerrick & Caldeira 1998).
+    pub metamorphic_decarbonation: f64,
     /// Relative amounts of new arc crust at distances of 0, 1, 2, … cells from the trench:
     /// none in the amagmatic forearc, most at the volcanic front ~100–150 km behind the trench.
     pub arc_profile: Vec<f64>,
@@ -345,6 +350,7 @@ impl Default for TectonicParams {
             subduction_erosion: 300.0,
             oceanic_arc_felsic: 0.4,
             metamorphic_depth: 11_000.0,
+            metamorphic_decarbonation: 0.5,
             arc_profile: vec![0.0, 1.0, 0.5],
             accretion_profile: vec![1.0, 0.5],
             collision_profile: vec![1.0, 0.75, 0.5, 0.25],
@@ -436,6 +442,11 @@ impl TectonicParams {
                 sediment.biogenic_pelagic = value != 0.0;
                 return Ok(());
             }
+            "initial_sediment.carbonate" => {
+                sediment.carbonate = value != 0.0;
+                return Ok(());
+            }
+            "initial_sediment.platform_carbonate" => &mut sediment.platform_carbonate,
             "initial_sediment.platform_emplacement" => {
                 sediment.platform_emplacement = match value {
                     0.0 => PlatformEmplacement::OnTop,
@@ -489,6 +500,7 @@ impl TectonicParams {
             "subduction_erosion" => &mut self.subduction_erosion,
             "oceanic_arc_felsic" => &mut self.oceanic_arc_felsic,
             "metamorphic_depth" => &mut self.metamorphic_depth,
+            "metamorphic_decarbonation" => &mut self.metamorphic_decarbonation,
             "subduction_channel_thickness" => &mut self.subduction_channel_thickness,
             "decollement_fraction" => &mut self.decollement_fraction,
             "accretionary_convergence" => &mut self.accretionary_convergence,
@@ -631,6 +643,9 @@ pub struct SeaLevelBudget {
     /// stands at a pass (see [`Simulation::sea_level_deficit`]) the removed water first reduces
     /// the deficit, and the level falls only when a later process unpins it (in that term).
     pub escape: f64,
+    /// Carbonate precipitated and the dissolved load taken from the clastic deposits (#200, see
+    /// [`Simulation::exchange_carbonate`]).
+    pub carbonate: f64,
 }
 
 impl SeaLevelBudget {
@@ -643,7 +658,19 @@ impl SeaLevelBudget {
             + self.mantle
             + self.lakes
             + self.escape
+            + self.carbonate
     }
+}
+
+/// A change of one crust sample by the carbonate exchange (see
+/// [`Simulation::exchange_carbonate`]).
+#[derive(Clone, Copy, Debug)]
+pub struct CarbonateExchange {
+    /// A cell showing the sample.
+    pub cell: u32,
+    /// Clastic sediment to remove and carbonate to add (rock-equivalent m).
+    pub clastic: f64,
+    pub carbonate: f64,
 }
 
 /// The sea-level change (m) of one step of surface processes as solved on the cells: by fluvial
@@ -773,6 +800,9 @@ pub struct Simulation {
     /// Sediment turned into crust by metamorphism so far, in Gt: on crust of continental origin
     /// and on other crust (basins, fans).
     metamorphosed: (f64, f64),
+    /// Carbonate in the sediment so far (#200; areal mass summed over cells, kg/m²): see
+    /// [`CarbonateFlows`].
+    carbonate: CarbonateFlows,
     /// Changes of the felsic crust and sediment masses so far (areal mass summed over cells, see
     /// [`Simulation::felsic_and_sediment`]) per phase of the step.
     material_budget: MaterialBudget,
@@ -984,6 +1014,7 @@ impl Simulation {
             continental_opened_area: 0.0,
             collision_inflow: 0.0,
             metamorphosed: (0.0, 0.0),
+            carbonate: CarbonateFlows::default(),
             material_budget: MaterialBudget::default(),
             cover_budget: CoverBudget::default(),
             cover_start: [0.0; 3],
@@ -1009,6 +1040,7 @@ impl Simulation {
             simulation.add_initial_sediment(seed, &is_continental, &plate_of_cell);
         }
         simulation.ledger = MassLedger::new(simulation.total_mass());
+        simulation.carbonate.initial = ledger::plates_carbonate(&simulation.plates);
         simulation.start_cover_budget(0..3);
         simulation.sea_level = simulation.solve_sea_level();
         simulation.initial_sea_level = simulation.sea_level;
@@ -1349,7 +1381,79 @@ impl Simulation {
                 + self.trench_sediment.stacked * cell_area,
             // `+ 0.0`: the empty sum is −0.
             plume_flux: self.plumes().iter().map(Plume::flux).sum::<f64>() + 0.0,
+            subducted_carbonate: self.trench_sediment.carbonate_subducted * cell_area,
+            decarbonated_carbonate: (self.carbonate.decarbonated
+                + self.trench_sediment.carbonate_decarbonated)
+                * cell_area,
         }
+    }
+
+    /// Carbonate (kg) in the sediment of all samples, hidden ones included (#200).
+    pub fn carbonate_inventory(&self) -> f64 {
+        ledger::plates_carbonate(&self.plates) * self.cell_area()
+    }
+
+    /// The carbonate gained and lost so far by process (#200), in kg: the flows of
+    /// [`CarbonateFlows`] and the trench terms of [`TrenchSediment`] (subducted, accreted,
+    /// stacked, decarbonated in collisions).
+    pub fn carbonate_flows(&self) -> (CarbonateFlows, [f64; 4]) {
+        let area = self.cell_area();
+        let flows = self.carbonate;
+        let trench = &self.trench_sediment;
+        (
+            CarbonateFlows {
+                initial: flows.initial * area,
+                deposited: flows.deposited * area,
+                surface: flows.surface * area,
+                metamorphosed: flows.metamorphosed * area,
+                decarbonated: flows.decarbonated * area,
+            },
+            [
+                trench.carbonate_subducted * area,
+                trench.carbonate_accreted * area,
+                trench.carbonate_stacked * area,
+                trench.carbonate_decarbonated * area,
+            ],
+        )
+    }
+
+    /// Precipitates carbonate and takes the dissolved load from the clastic sediment (#200),
+    /// sample by sample: each change names a cell showing the sample, the clastic sediment to
+    /// remove first (rock-equivalent m, at most what the sample has) and the carbonate to add.
+    /// Every sample counts as one cell of area, as in [`Simulation::apply_surface_changes`],
+    /// so the masses are exact. The ledger, the budgets and the sea level are updated. Returns
+    /// the clastic sediment removed (rock-equivalent m summed over samples).
+    pub fn exchange_carbonate(&mut self, changes: &[CarbonateExchange]) -> f64 {
+        if changes.is_empty() {
+            return 0.0;
+        }
+        let before = self.felsic_and_sediment();
+        let (mut change, mut removed, mut deposited) = (0.0, 0.0, 0.0);
+        for exchange in changes {
+            let owner = self.owners[exchange.cell as usize];
+            let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
+                .as_mut()
+                .expect("owners always point to existing crust");
+            let column = *crust;
+            let mass = crust.mass();
+            removed += crust.remove_clastic(exchange.clastic);
+            if exchange.carbonate > 0.0 {
+                crust.add_sediment(exchange.carbonate, Cohort::CARBONATE);
+                deposited += exchange.carbonate;
+            }
+            self.cover_budget
+                .record_change(CoverTerm::Surface, &column, crust);
+            change += crust.mass() - mass;
+        }
+        self.ledger.record(ledger::Term::SurfaceProcesses, change);
+        self.carbonate.deposited += deposited * SEDIMENT_ROCK_DENSITY;
+        let after = self.felsic_and_sediment();
+        self.material_budget.surface.0 += after.0 - before.0;
+        self.material_budget.surface.1 += after.1 - before.1;
+        let sea_level = self.solve_sea_level();
+        self.sea_level_budget.carbonate += sea_level - self.sea_level;
+        self.sea_level = sea_level;
+        removed
     }
 
     fn substep(&mut self, dt: f64) {
@@ -1629,6 +1733,9 @@ impl Simulation {
         let max_thickness = self.params.max_crust_thickness;
         // On crust of continental origin, and on other crust (basins, fans).
         let mut converted = [0.0; 2];
+        let decarbonation = self.params.metamorphic_decarbonation;
+        let (mut metamorphosed_carbonate, mut decarbonated_carbonate, mut released) =
+            (0.0, 0.0, 0.0);
         for plate in &mut self.plates {
             for crust in plate.crust.iter_mut().flatten() {
                 if crust.sediment <= keep {
@@ -1648,9 +1755,17 @@ impl Simulation {
                     continue;
                 }
                 let before = *crust;
+                // Its carbonate (#200): a part decarbonates, and its CO₂ leaves the rock (zero
+                // without carbonate).
+                let carbonate = crust.cohort.carbonate * mass;
+                let decarbonated = carbonate * decarbonation;
+                let co2 = decarbonated * crate::carbonate::CO2_FRACTION;
+                metamorphosed_carbonate += carbonate;
+                decarbonated_carbonate += decarbonated;
+                released += co2;
                 crust.remove_sediment_to(crust.sediment - mass / SEDIMENT_ROCK_DENSITY);
                 crust.add_crust(
-                    mass / METASEDIMENT_DENSITY,
+                    (mass - co2) / METASEDIMENT_DENSITY,
                     METASEDIMENT_DENSITY,
                     (1.0, tracked),
                     max_thickness,
@@ -1664,6 +1779,11 @@ impl Simulation {
             4.0 * std::f64::consts::PI * self.params.planet_radius.powi(2) / self.mesh.len() as f64;
         self.metamorphosed.0 += converted[0] * cell_area / 1e12;
         self.metamorphosed.1 += converted[1] * cell_area / 1e12;
+        self.carbonate.metamorphosed -= metamorphosed_carbonate;
+        self.carbonate.decarbonated += decarbonated_carbonate;
+        if released > 0.0 {
+            self.ledger.record(ledger::Term::Decarbonation, -released);
+        }
         let after = self.felsic_and_sediment();
         self.material_budget.metamorphism.0 += after.0 - before.0;
         self.material_budget.metamorphism.1 += after.1 - before.1;
@@ -1705,6 +1825,7 @@ impl Simulation {
         predicted: SurfaceSeaLevel,
     ) {
         let before = self.felsic_and_sediment();
+        let carbonate_before = ledger::plates_carbonate(&self.plates);
         let cell_count = self.mesh.len();
         // Per shown sample: owner, cells showing it, one of them, summed thickness and sediment
         // changes.
@@ -1928,6 +2049,9 @@ impl Simulation {
             "Surface changes shared"
         );
         self.ledger.record(ledger::Term::SurfaceProcesses, change);
+        // The carbonate the surface processes removed (#200): before the metamorphism below,
+        // which counts its own.
+        self.carbonate.surface += ledger::plates_carbonate(&self.plates) - carbonate_before;
         let after = self.felsic_and_sediment();
         self.material_budget.surface.0 += after.0 - before.0;
         self.material_budget.surface.1 += after.1 - before.1;
@@ -1965,6 +2089,64 @@ mod tests {
 
     fn simulation(seed: u64) -> Simulation {
         Simulation::new(SphereMesh::icosphere(4), 8, TectonicParams::default(), seed)
+    }
+
+    /// Burial metamorphism of carbonate sediment (#200) loses exactly the CO₂ of the part that
+    /// decarbonates, booked in the ledger; the carbonate exchange changes the mass by the
+    /// carbonate added less the clastic sediment taken, also booked.
+    #[test]
+    fn carbonate_keeps_the_mass_books() {
+        let mut simulation = simulation(3);
+        let cell = (0..simulation.mesh.len() as u32)
+            .find(|&cell| simulation.surface_crust(cell).is_oceanic())
+            .unwrap();
+        {
+            let crust = simulation.surface_crust_mut(cell);
+            crust.sediment = 20_000.0;
+            crust.cohort.carbonate = 0.3;
+        }
+        simulation.ledger.check(simulation.total_mass());
+        let before = simulation.total_mass();
+        let residual = simulation.ledger.residual;
+        simulation.metamorphose_sediment();
+        let decarbonated = simulation.carbonate.decarbonated;
+        assert!(decarbonated > 0.0);
+        assert!(
+            (simulation.carbonate.metamorphosed * simulation.params.metamorphic_decarbonation
+                + decarbonated)
+                .abs()
+                < 1e-9 * decarbonated
+        );
+        let lost = before - simulation.total_mass();
+        let co2 = decarbonated * crate::carbonate::CO2_FRACTION;
+        assert!((lost - co2).abs() < 1e-9 * co2, "{lost} {co2}");
+        simulation.ledger.check(simulation.total_mass());
+        assert!((simulation.ledger.residual - residual).abs() < 1e-9 * before);
+
+        let before = simulation.total_mass();
+        let inventory = ledger::plates_carbonate(&simulation.plates);
+        let changes: Vec<CarbonateExchange> = (0..20)
+            .map(|cell| CarbonateExchange {
+                cell,
+                clastic: 3.0,
+                carbonate: 5.0,
+            })
+            .collect();
+        let removed = simulation.exchange_carbonate(&changes);
+        assert!(removed > 0.0);
+        let change = simulation.total_mass() - before;
+        let expected = (20.0 * 5.0 - removed) * SEDIMENT_ROCK_DENSITY;
+        assert!(
+            (change - expected).abs() < 1e-9 * before,
+            "{change} {expected}"
+        );
+        let added = ledger::plates_carbonate(&simulation.plates) - inventory;
+        assert!(
+            (added - 100.0 * SEDIMENT_ROCK_DENSITY).abs() < 1e-6,
+            "{added}"
+        );
+        simulation.ledger.check(simulation.total_mass());
+        assert!((simulation.ledger.residual - residual).abs() < 1e-9 * before);
     }
 
     /// Water lost to space lowers the sea level by about its volume over the ocean's area, all
