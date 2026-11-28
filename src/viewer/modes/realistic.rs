@@ -1961,9 +1961,10 @@ mod tests {
     fn the_lake_ice_drawn_is_the_temperature_models() {
         use crate::viewer::history::codec::Planes;
         use clap::Parser;
-        // Seed 4: lakes on the model's lake ice after STEPS, frozen in July and open in January
-        // (seed 0 has no lakes yet with #213's start).
-        let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "4", "--seed", "4"]);
+        // Seed 1: lakes on the model's lake ice after STEPS, frozen in January and open in July
+        // (seed 0 has no lakes yet with #213's start; the seed changes when the climate of the
+        // first steps does, e.g. with #207's snow).
+        let cli = crate::Cli::parse_from(["world-simulator", "--subdivisions", "4", "--seed", "1"]);
         let mut planet = crate::build_planet(&cli).unwrap();
         for _ in 0..STEPS {
             planet.step(cli.dt);

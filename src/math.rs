@@ -182,6 +182,13 @@ pub fn sin_cos(x: f64) -> (f64, f64) {
     (sin(x), cos(x))
 }
 
+/// The complementary error function `erfc(x) = 1 − erf(x)`, from [`libm`] on every platform
+/// (the standard library has no stable `erfc`), so it gives the same bits everywhere.
+#[inline]
+pub fn erfc(x: f64) -> f64 {
+    libm::erfc(x)
+}
+
 /// The angle in radians between two non-zero vectors, as [`DVec3::angle_between`] computes it.
 #[inline]
 pub fn angle_between(a: DVec3, b: DVec3) -> f64 {

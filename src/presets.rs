@@ -137,6 +137,8 @@ impl Biosphere {
                 temperature.aerosol.marine_biogenic = 0.0;
                 temperature.aerosol.land_biogenic = 0.0;
                 temperature.aerosol.land_surface_albedo = 0.3;
+                // No forest that sticks out of seasonal snow and masks it (#207).
+                temperature.snow_forest_cover = 0.0;
                 // Without transpiration (~60% of today's land evapotranspiration; Jasechko et
                 // al., 2013; Schlesinger & Jasechko, 2014) and without the water storage of a
                 // root zone, less of the rain returns to the air. Fu's ω grows with plant
@@ -547,6 +549,7 @@ mod tests {
         assert_eq!(abiotic.temperature.land_albedo, 0.37);
         assert_eq!(abiotic.temperature.aerosol.marine_biogenic, 0.0);
         assert_eq!(abiotic.temperature.aerosol.land_biogenic, 0.0);
+        assert_eq!(abiotic.temperature.snow_forest_cover, 0.0);
         assert_eq!(abiotic.climate.budyko_omega, 1.6);
         assert_eq!(
             abiotic.erosion.erodibility,
@@ -558,6 +561,7 @@ mod tests {
         let mut undone = Parameters::new(RADIUS, Biosphere::Abiotic, Epoch::PRESENT);
         undone.temperature.land_albedo = modern.temperature.land_albedo;
         undone.temperature.aerosol = modern.temperature.aerosol.clone();
+        undone.temperature.snow_forest_cover = modern.temperature.snow_forest_cover;
         undone.climate.budyko_omega = modern.climate.budyko_omega;
         undone.erosion.erodibility = modern.erosion.erodibility;
         undone.erosion.sediment_diffusivity = modern.erosion.sediment_diffusivity;
@@ -627,7 +631,7 @@ mod tests {
         let mut parameters = Parameters::new(RADIUS, biosphere, epoch);
         parameters.temperature.spin_up_years = 60;
         let mut model = TemperatureModel::new(&mesh, parameters.temperature);
-        model.update(&elevation, None, None, 0.0);
+        model.update(&elevation, None, &[], None, 0.0);
         let fields = model.fields();
         let count = mesh.len() as f64;
         let global = fields.annual_mean.iter().sum::<f64>() / count;
