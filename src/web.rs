@@ -19,8 +19,8 @@
 //! parameter panel terminates the worker and starts a new one with the new query string, which
 //! also replaces the query of the page URL, so that the setting can be shared as a link. Each
 //! update after the first also carries `step_seconds`, the time of the step in the worker, and
-//! every update the global state of the run ([`viewer::GlobalStatus`]: `ramp_up_end`, NaN while
-//! the ramp-up phase runs, `ramp_up_settled` and `co2_held`).
+//! every update `global`, the global state of the planet ([`viewer::GlobalStatus`], its bytes
+//! as a `Uint8Array`, the same record the frames of the history carry).
 //!
 //! Updates also carry the extra fields of the render mode ([`viewer::Layer`]s, each as a
 //! transferred `Float32Array` buffer under its key): at first those of the mode in the
@@ -623,6 +623,14 @@ fn start_worker(
                     error!("Field from the simulation worker refused: {message}");
                 }
             }
+            let Some(global) = get(&data, "global")
+                .dyn_into::<js_sys::Uint8Array>()
+                .ok()
+                .and_then(|bytes| viewer::GlobalStatus::from_bytes(&bytes.to_vec()))
+            else {
+                error!("Surface update without its global state");
+                return;
+            };
             let frame = get(&data, "frame")
                 .dyn_into::<js_sys::ArrayBuffer>()
                 .ok()
@@ -640,11 +648,7 @@ fn start_worker(
                 mesh,
                 step_seconds,
                 fields,
-                global: viewer::GlobalStatus {
-                    ramp_up_end: get(&data, "ramp_up_end").as_f64().unwrap_or(f64::NAN),
-                    ramp_up_settled: get(&data, "ramp_up_settled").as_bool() == Some(true),
-                    co2_held: get(&data, "co2_held").as_bool() == Some(true),
-                },
+                global,
             }));
         });
     worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
@@ -698,10 +702,6 @@ impl WorkerState {
         let planet = &self.run.planet;
         let message = js_sys::Object::new();
         set(&message, "time", &planet.tectonics().time().into());
-        let global = viewer::GlobalStatus::of(planet);
-        set(&message, "ramp_up_end", &global.ramp_up_end.into());
-        set(&message, "ramp_up_settled", &global.ramp_up_settled.into());
-        set(&message, "co2_held", &global.co2_held.into());
         if let Some(step_time) = step_time {
             set(&message, "step_seconds", &step_time.as_secs_f64().into());
         }
@@ -733,10 +733,16 @@ impl WorkerState {
         put_words("cells", bytemuck::cast_slice(&cells));
         let plates = viewer::plate_infos(planet);
         put_words("plates", bytemuck::cast_slice(&plates));
+        let global = viewer::GlobalStatus::of(planet, &cells, &plates);
+        set(
+            &message,
+            "global",
+            &js_sys::Uint8Array::from(&global.to_bytes()[..]).into(),
+        );
         // The frame of the history, here rather than on the page (#174); none for a state
         // sent again.
         let time = planet.tectonics().time();
-        if let Some(frame) = self.encoder.encode(time, &cells, &plates) {
+        if let Some(frame) = self.encoder.encode(time, global, &cells, &plates) {
             let array = js_sys::Uint8Array::new_with_length(frame.len() as u32);
             array.copy_from(&frame);
             let buffer = array.buffer();

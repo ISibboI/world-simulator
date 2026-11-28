@@ -8,7 +8,7 @@
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
 
-use super::super::{CellInfo, PlateInfo};
+use super::super::{CellInfo, GlobalStatus, PlateInfo};
 
 /// The quantisation of one attribute.
 #[derive(Debug, Clone, Copy)]
@@ -396,21 +396,23 @@ pub enum Kind {
     Delta,
 }
 
-/// The state of a frame as the history keeps it: its time, the quantised cells and the
-/// angular velocity of every plate (rad/Myr, by plate id).
+/// The state of a frame as the history keeps it: its time, the global state of the planet
+/// (#209), the quantised cells and the angular velocity of every plate (rad/Myr, by plate id).
 #[derive(Debug, Clone, PartialEq)]
 pub struct State {
     pub time: f64,
+    pub global: GlobalStatus,
     pub planes: Planes,
     pub plates: Vec<PlateInfo>,
 }
 
 /// Version of the format, the first byte of every frame.
-const VERSION: u8 = 13;
+const VERSION: u8 = 14;
 /// Bytes per plate: its rotation (angular velocity), id and orientation.
 pub const PLATE_BYTES: usize = 32;
-/// Bytes before the compressed part: version, kind, time, cells, plates.
-const HEADER: usize = 2 + 8 + 4 + 4;
+/// Bytes before the compressed part: version, kind, time, cells, plates and the global state
+/// (uncompressed, so that the history reads it without decoding the frame, #209).
+const HEADER: usize = 2 + 8 + 4 + 4 + GlobalStatus::BYTES;
 
 /// Encodes a frame: as the difference to `previous` (the state of the frame before it, of the
 /// same cells), or as a keyframe if there is none.
@@ -453,6 +455,7 @@ pub fn encode(state: &State, previous: Option<&State>) -> Vec<u8> {
     frame.extend_from_slice(&state.time.to_le_bytes());
     frame.extend_from_slice(&(state.planes.cells as u32).to_le_bytes());
     frame.extend_from_slice(&(state.plates.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&state.global.to_bytes());
     frame.extend_from_slice(&compressed);
     frame
 }
@@ -466,9 +469,9 @@ pub fn kind(frame: &[u8]) -> Result<Kind, String> {
     }
 }
 
-/// What the header of a frame says: its kind, its time, and its size before compression (the
-/// plates and the quantised cells).
-pub fn header(frame: &[u8]) -> Result<(Kind, f64, usize), String> {
+/// What the header of a frame says: its kind, its time, its size before compression (the
+/// plates and the quantised cells) and the global state.
+pub fn header(frame: &[u8]) -> Result<(Kind, f64, usize, GlobalStatus), String> {
     let kind = kind(frame)?;
     let header = frame.get(..HEADER).ok_or("truncated frame")?;
     let number = |range: std::ops::Range<usize>| {
@@ -483,7 +486,12 @@ pub fn header(frame: &[u8]) -> Result<(Kind, f64, usize), String> {
         .zip(number(10..14).checked_mul(BYTES_PER_CELL))
         .and_then(|(plates, cells)| plates.checked_add(cells))
         .ok_or("a frame of an impossible size")?;
-    Ok((kind, time, raw))
+    Ok((kind, time, raw, global(header)?))
+}
+
+/// The global state in a header.
+fn global(header: &[u8]) -> Result<GlobalStatus, String> {
+    GlobalStatus::from_bytes(&header[18..HEADER]).ok_or_else(|| "truncated frame".to_owned())
 }
 
 /// Decodes a frame: a keyframe alone, a delta frame on the state of the frame before it.
@@ -528,6 +536,7 @@ pub fn decode(frame: &[u8], previous: Option<&State>) -> Result<State, String> {
     }
     Ok(State {
         time,
+        global: global(header)?,
         planes: Planes { cells, bytes },
         plates,
     })
@@ -793,6 +802,11 @@ mod tests {
         let states: Vec<State> = (0..5)
             .map(|step| State {
                 time: f64::from(step),
+                global: GlobalStatus {
+                    ramp_up_end: step as f32,
+                    temperature: 14.0 + step as f32,
+                    ..crate::viewer::global::example()
+                },
                 planes: Planes::new(&cells(300, step as f32)),
                 plates: vec![
                     PlateInfo {
@@ -817,6 +831,9 @@ mod tests {
             );
             let decoded = decode(&frame, previous.as_ref()).unwrap();
             assert_eq!(&decoded, state);
+            // The header carries the time and the global state.
+            let (_, time, _, global) = header(&frame).unwrap();
+            assert_eq!((time, global), (state.time, state.global));
             // A delta frame cannot be decoded alone.
             if previous.is_some() {
                 assert!(decode(&frame, None).is_err());
@@ -826,6 +843,7 @@ mod tests {
         // Another number of cells (a restart) starts with a keyframe.
         let other = State {
             time: 0.0,
+            global: crate::viewer::global::example(),
             planes: Planes::new(&cells(10, 0.0)),
             plates: Vec::new(),
         };
@@ -839,6 +857,7 @@ mod tests {
     fn unchanged_frames_compress_to_almost_nothing() {
         let state = State {
             time: 1.0,
+            global: crate::viewer::global::example(),
             planes: Planes::new(&cells(10_000, 0.0)),
             plates: vec![
                 PlateInfo {
@@ -880,10 +899,15 @@ mod tests {
             format!("--subdivisions={subdivisions}"),
         ]);
         let mut planet = crate::build_planet(&cli).unwrap();
-        let state = |planet: &crate::planet::Planet| State {
-            time: planet.tectonics().time(),
-            planes: Planes::new(&crate::viewer::cell_infos(planet)),
-            plates: crate::viewer::fields::plate_infos(planet),
+        let state = |planet: &crate::planet::Planet| {
+            let cells = crate::viewer::cell_infos(planet);
+            let plates = crate::viewer::fields::plate_infos(planet);
+            State {
+                time: planet.tectonics().time(),
+                global: GlobalStatus::of(planet, &cells, &plates),
+                planes: Planes::new(&cells),
+                plates,
+            }
         };
         let mut previous = state(&planet);
         let cells = previous.planes.cells;

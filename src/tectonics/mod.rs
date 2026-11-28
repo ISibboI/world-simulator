@@ -1487,6 +1487,12 @@ impl Simulation {
         self.solve_sea_level_with_deficit().deficit
     }
 
+    /// The change of the sea level since the start (m): positive where the sea stands higher
+    /// against the dry elevations than at the start (see [`Self::sea_level_budget`]).
+    pub fn sea_level_change(&self) -> f64 {
+        self.sea_level - self.initial_sea_level
+    }
+
     /// The ocean: the cells below sea level connected to the world ocean (see [`crate::sea`]).
     pub fn ocean_mask(&self) -> Vec<bool> {
         crate::sea::ocean_mask(

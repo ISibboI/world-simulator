@@ -415,8 +415,9 @@ fn run_simulation_thread(
         let fields_built = start.elapsed() - cells_built;
         let time = planet.tectonics().time();
         let plates = viewer::plate_infos(planet);
+        let global = viewer::GlobalStatus::of(planet, &cells, &plates);
         // The frame of the history, here rather than in the view (#174).
-        let frame = encoder.encode(time, &cells, &plates);
+        let frame = encoder.encode(time, global, &cells, &plates);
         debug!(
             ?cells_built,
             ?fields_built,
@@ -433,7 +434,7 @@ fn run_simulation_thread(
             mesh: std::mem::take(&mut first_update).then(|| Arc::new(MeshUpdate::of(planet))),
             step_seconds: step_time.map(|time| time.as_secs_f64()),
             fields,
-            global: viewer::GlobalStatus::of(planet),
+            global,
         };
         // Sending fails once the view started another simulation or was closed.
         if events.send(SimulationEvent::Surface(update)).is_err() {
