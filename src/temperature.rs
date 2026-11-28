@@ -302,7 +302,8 @@ pub struct TemperatureParams {
     pub max_snow: f64,
     /// Whether snow exchanges latent heat with the land: freezing releases the heat of fusion
     /// of the snowfall to the land (the air column) and melting takes it back, each spread over
-    /// the following season. Without it, melt costs no energy and spring warms too early.
+    /// the following season; snow that flows off as glacier ice takes it back where it leaves.
+    /// Without it, melt costs no energy and spring warms too early.
     pub snow_latent_heat: bool,
     /// Whether snow that lasts the whole year with a non-negative balance counts as permanent
     /// ice in [`TemperatureFields::ice`] (firn and glacier ice over a step of the simulation;
@@ -1867,7 +1868,9 @@ impl SnowSeason<'_> {
             budget.snowfall += snowfall;
             budget.melt += melt;
             budget.overflow += overflow;
-            latent[self.fine_to_coarse[fine] as usize] += snowfall - melt;
+            // The glacier ice of the overflow melts elsewhere; its latent heat is taken here, so
+            // that the snow's heat over a year balances (the column releases what it froze).
+            latent[self.fine_to_coarse[fine] as usize] += snowfall - melt - overflow;
             let fresh = (t / cold).clamp(0.0, 1.0);
             snow_albedo[fine] = params.snow_aged_albedo
                 + (params.snow_fresh_albedo - params.snow_aged_albedo) * fresh;
@@ -2443,11 +2446,16 @@ mod probe {
             let header: Vec<&str> = lines.next().unwrap().split(',').collect();
             let column = |name: &str| header.iter().position(|&h| h == name).unwrap();
             let (e, p) = (column("elev"), column("precip"));
+            let (january, july) = (column("p_jan"), column("p_jul"));
             let (mut elevation, mut precipitation) = (Vec::new(), Vec::new());
+            // January and July: evenly spaced months from January for the snow.
+            let mut monthly = vec![Vec::new(), Vec::new()];
             for line in lines {
                 let fields: Vec<&str> = line.split(',').collect();
                 elevation.push(fields[e].parse::<f64>().unwrap());
                 precipitation.push(fields[p].parse::<f64>().unwrap());
+                monthly[0].push(fields[january].parse::<f64>().unwrap());
+                monthly[1].push(fields[july].parse::<f64>().unwrap());
             }
             let mut params = TemperatureParams::default();
             if let Ok(overrides) = std::env::var("SWEEP_SET") {
@@ -2462,11 +2470,15 @@ mod probe {
                 model.params.orbit.solar_constant = 1361.0 * percent as f64 / 100.0;
                 model.spun_up = false;
                 model.params.spin_up_years = 40;
-                model.update(&elevation, Some(&precipitation), &[], None, 0.0);
+                model.update(&elevation, Some(&precipitation), &monthly, None, 0.0);
                 let f = model.fields();
                 let global = f.annual_mean.iter().sum::<f64>() / f.annual_mean.len() as f64;
                 let ice = f.ice.iter().filter(|&&i| i > 0.5).count() as f64 / f.ice.len() as f64;
-                line += &format!(" {percent}%: {global:.1}°C/{:.0}%", 100.0 * ice);
+                line += &format!(
+                    " {percent}%: {global:.1}°C/{:.0}%/{:.1}W",
+                    100.0 * ice,
+                    f.snow_radiative_effect
+                );
             }
             eprintln!("SWEEP {file}:{line}");
         }
