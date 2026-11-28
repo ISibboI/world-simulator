@@ -1434,15 +1434,14 @@ impl Simulation {
             let crust = self.plates[owner.plate as usize].crust[owner.local as usize]
                 .as_mut()
                 .expect("owners always point to existing crust");
-            let column = *crust;
+            // Not recorded in the cover budget: the erosion's export does not see it, so it
+            // falls into the budget's rest (`CoverTerm::Other`).
             let mass = crust.mass();
             removed += crust.remove_clastic(exchange.clastic);
             if exchange.carbonate > 0.0 {
                 crust.add_sediment(exchange.carbonate, Cohort::CARBONATE);
                 deposited += exchange.carbonate;
             }
-            self.cover_budget
-                .record_change(CoverTerm::Surface, &column, crust);
             change += crust.mass() - mass;
         }
         self.ledger.record(ledger::Term::SurfaceProcesses, change);
@@ -2203,6 +2202,8 @@ mod tests {
         for (p, plate) in simulation.plates.iter_mut().enumerate() {
             for (local, crust) in plate.crust.iter_mut().enumerate() {
                 let Some(crust) = crust else { continue };
+                // Without carbonate (its decarbonation is tested separately).
+                crust.cohort.carbonate = 0.0;
                 if crust.is_continental_origin() && continental.is_none() {
                     crust.sediment = deep;
                     continental = Some((p, local));

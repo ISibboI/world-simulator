@@ -1199,7 +1199,7 @@ fn snapshot(
             100.0 * cliff_bedrock / rivers.max(1e-9),
         );
         log_regolith(planet);
-        log_carbonate(planet, &previous_carbonate, years);
+        log_carbonate(planet, previous_carbonate, years);
         let trench = &statistics.trench_sediment;
         info!(
             "    sediment turned into crust (Gt/yr): burial metamorphism {:.2} on continental \

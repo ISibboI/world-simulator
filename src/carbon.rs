@@ -1198,6 +1198,8 @@ mod tests {
         let forcing = 20.0;
         let params = CarbonParams {
             degassing_smoothing: 0.0,
+            // The fixed sediment terms (no carbonate is tracked here).
+            carbonate_sediment: false,
             ..CarbonParams::default()
         };
         let span = DEFAULT_CALIBRATION_SPAN as usize;
@@ -1362,6 +1364,40 @@ mod tests {
         }
         assert!(cycle.state().sources.total() > 0.0);
         assert!(cycle.state().phi.is_finite());
+    }
+
+    /// The carbonate that leaves the sediment (#200) goes into buffers, which degas it over
+    /// `degassing_smoothing`: what was degassed (at arcs and metamorphic) and went into the
+    /// mantle plus what the buffers hold is what left the sediment, and the sources follow it.
+    #[test]
+    fn carbonate_buffers_conserve_carbon() {
+        let land = vec![cell(10.0); 20];
+        let mut cycle = CarbonCycle::new(CarbonParams::default(), 20.0, OCEAN, AREA);
+        let with_carbonate = |step: f64| TectonicDrivers {
+            subducted_carbonate: step * 1e11,
+            decarbonated_carbonate: step * 5e10,
+            ..drivers(step, 1.0)
+        };
+        cycle.start(with_carbonate(0.0));
+        for step in 1..=30 {
+            cycle.step(&input(&land, with_carbonate(step as f64), 0.0));
+            if step == 10 {
+                cycle.end_hold();
+            }
+        }
+        let budget = cycle.budget();
+        let left = 30.0 * (1e11 + 5e10) / CARBONATE_MOLAR_MASS;
+        let accounted = budget.buffers[0]
+            + budget.buffers[1]
+            + budget.carbonate_arcs
+            + budget.carbonate_to_mantle
+            + budget.carbonate_metamorphic;
+        assert!((accounted / left - 1.0).abs() < 1e-12, "{accounted} {left}");
+        assert!(budget.buffers.iter().all(|&b| b > 0.0));
+        // After ~10 smoothing times the sources reach the steady rates.
+        let state = cycle.state();
+        let metamorphic = 5e10 / CARBONATE_MOLAR_MASS / 1e6;
+        assert!((state.sources.metamorphic / metamorphic - 1.0).abs() < 1e-3);
     }
 
     #[test]

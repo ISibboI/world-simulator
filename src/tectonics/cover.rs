@@ -39,7 +39,7 @@ pub enum CoverTerm {
     SubductionErosion,
     /// The rest: transport and deformation of the plates, distributed shortening (the sediment
     /// moves onto another column), gap healing, crustal flow, plate events (merges lose hidden
-    /// crust), columns changing their class.
+    /// crust), columns changing their class, the carbonate exchange (#200).
     Other,
 }
 
