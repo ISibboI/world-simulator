@@ -58,7 +58,7 @@ mod volcanism;
 mod weak_zones;
 
 pub use activity::{SeismicSource, VolcanicSource};
-pub use boundaries::{GapStatistics, TrenchSediment};
+pub use boundaries::{GapStatistics, SPREADING_RATE_BINS, TrenchSediment};
 pub use breakup::{BreakupParams, BreakupStatistics, SectionRecord};
 pub use cover::{CohortMasses, CoverBudget, CoverMasses, CoverTerm};
 pub use crust::*;
@@ -1358,12 +1358,24 @@ impl Simulation {
     /// holds besides the lakes; the planet's water ([`TectonicParams::ocean_volume`]) shrinks
     /// and the sea level is solved again.
     pub fn remove_water(&mut self, volume: f64) {
-        let volume = volume.clamp(0.0, self.ocean_volume().max(0.0));
+        // A negative volume returns water (#202: water made by the chemistry of the air).
+        let volume = volume.min(self.ocean_volume().max(0.0));
         self.params.ocean_volume -= volume;
         self.lake_water = self.lake_water.min(self.params.ocean_volume);
         let sea_level = self.solve_sea_level();
         self.sea_level_budget.escape += sea_level - self.sea_level;
         self.sea_level = sea_level;
+    }
+
+    /// The new oceanic crust made so far (kg) by full spreading rate, in 1 cm/yr bins (the last
+    /// holds all faster rates; see [`GapStatistics::new_crust_by_rate`]), for the serpentinization
+    /// of slow ridges (#202). Cheap.
+    pub fn new_crust_by_rate(&self) -> [f64; SPREADING_RATE_BINS] {
+        let radius = self.params.planet_radius;
+        let cell_area = 4.0 * std::f64::consts::PI * radius * radius / self.mesh.len() as f64;
+        self.gap_statistics
+            .new_crust_by_rate
+            .map(|mass| mass * cell_area)
     }
 
     /// The active mantle plumes.

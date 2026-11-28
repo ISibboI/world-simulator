@@ -34,6 +34,10 @@ pub struct Planet {
     escape: Escape,
     /// Cells within [`EscapeParams::tropics_latitude`], whose ocean sets the cold trap.
     tropical_cells: Vec<bool>,
+    /// The greenhouse forcing of the start (W/m²; all gases), and without the carbon cycle the
+    /// CO₂'s share of it: the start's less the reduced gases' (#202) at the end of the ramp-up.
+    start_forcing: f64,
+    held_co2_forcing: f64,
     /// `None` disables erosion.
     erosion: Option<ErosionParams>,
     planet_radius: f64,
@@ -440,10 +444,19 @@ impl Planet {
                 math::asin(tectonics.mesh().vertex(cell).z.clamp(-1.0, 1.0)).abs() <= tropics
             })
             .collect();
-        let escape = Escape::new(escape, tectonics.water_volume());
+        let mut escape = Escape::new(escape, tectonics.water_volume());
+        escape.start(tectonics.new_crust_by_rate());
+        // The start's forcing is that of all gases: the CO₂ makes up what the reduced gases
+        // (#202) do not give.
+        let start_forcing = temperature.greenhouse_forcing;
+        let start_gas_forcing = escape.gases().map_or(0.0, |gases| gases.initial_forcing());
         let mut carbon = CarbonCycle::new(
             carbon,
-            temperature.greenhouse_forcing,
+            if escape.gases().is_some() {
+                start_forcing - start_gas_forcing
+            } else {
+                start_forcing
+            },
             crate::carbon::ocean_mass(tectonics.ocean_volume()),
             4.0 * std::f64::consts::PI * planet_radius * planet_radius,
         );
@@ -477,6 +490,8 @@ impl Planet {
             deep_water_cells,
             escape,
             tropical_cells,
+            start_forcing,
+            held_co2_forcing: start_forcing - start_gas_forcing,
             erosion,
             planet_radius,
             precipitation: vec![0.0; cell_count],
@@ -1117,10 +1132,34 @@ impl Planet {
             ocean_volume: self.tectonics.ocean_volume(),
             volcanic_degassing: self.carbon.state().arc_plume_mantle_degassing,
             new_crust: self.carbon.state().new_crust,
+            new_crust_by_rate: self.tectonics.new_crust_by_rate(),
             land,
         });
-        if volume > 0.0 {
+        if volume != 0.0 {
             self.tectonics.remove_water(volume);
+        }
+        if let Some(gases) = self.escape.gases() {
+            // The carbon of the CH₄ made and destroyed, and the forcing of the gases on top of
+            // the CO₂'s (which makes up their change while the CO₂ is held).
+            self.carbon.exchange(gases.carbon_returned());
+            let gas_forcing = gases.state().forcing();
+            let co2_forcing = if self.carbon.params().enabled {
+                let area = 4.0 * std::f64::consts::PI * self.planet_radius * self.planet_radius;
+                self.carbon.hold_forcing(
+                    self.start_forcing - gas_forcing,
+                    crate::carbon::ocean_mass(self.tectonics.ocean_volume()),
+                    area,
+                );
+                self.carbon.forcing()
+            } else {
+                // As the carbon cycle's hold: the CO₂ makes up the gases until the tectonics
+                // has settled, then stays.
+                if self.ramp_up.is_running() {
+                    self.held_co2_forcing = self.start_forcing - gas_forcing;
+                }
+                self.held_co2_forcing
+            };
+            self.temperature.params_mut().greenhouse_forcing = co2_forcing + gas_forcing;
         }
         debug!(time = %format_args!("{time:.1}"), "{}", self.escape.state().summary());
     }
