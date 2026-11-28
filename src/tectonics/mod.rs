@@ -35,6 +35,7 @@
 //! initiation at old passive margins, and disappear by subduction, suturing after continental
 //! collisions, or capture of tiny plates by a neighbour ([`events`]).
 
+mod activity;
 mod boundaries;
 mod breakup;
 mod cover;
@@ -53,14 +54,16 @@ mod polarity;
 mod sheet;
 mod statistics;
 mod topology;
+mod volcanism;
 mod weak_zones;
 
-pub use boundaries::{GapStatistics, TrenchSediment};
+pub use activity::{SeismicSource, VolcanicSource};
+pub use boundaries::{GapStatistics, SPREADING_RATE_BINS, TrenchSediment};
 pub use breakup::{BreakupParams, BreakupStatistics, SectionRecord};
 pub use cover::{CohortMasses, CoverBudget, CoverMasses, CoverTerm};
 pub use crust::*;
 pub use deformation::MIN_BAND_STRENGTH;
-pub use display::BoundaryClass;
+pub use display::{BoundaryClass, BoundaryMap};
 pub use events::{
     EventCounts, PLUME_SPLIT_DISTANCES, PlateEventParams, SplitCause, WEAK_BELT_THRESHOLD,
 };
@@ -71,6 +74,7 @@ pub use mantle::{MantleParams, Plume};
 pub use matching::{MatchingParams, MatchingStatistics};
 pub use sheet::{SheetParams, SheetStatistics};
 pub use statistics::*;
+pub use volcanism::{PLUME_CRUST_DENSITY, VolcanismParams, VolcanismRecord};
 pub use weak_zones::{
     MIN_STRENGTH, combine_strength, fabric_strength, orogenic_strength, thermal_strength,
 };
@@ -309,6 +313,8 @@ pub struct TectonicParams {
     pub min_sea_fraction: f64,
     /// Mantle flow below the plates.
     pub mantle: MantleParams,
+    /// Volcanism of the mantle plumes (see [`volcanism`]).
+    pub volcanism: VolcanismParams,
     /// How plates are matched to cells.
     pub matching: MatchingParams,
     /// Rifting, subduction initiation and suturing.
@@ -393,6 +399,7 @@ impl Default for TectonicParams {
             ocean_volume: 1.335e18,
             min_sea_fraction: crate::sea::NO_SIZE_RULE,
             mantle: MantleParams::default(),
+            volcanism: VolcanismParams::default(),
             matching: MatchingParams::default(),
             events: PlateEventParams::default(),
             polarity_memory: 20.0,
@@ -417,6 +424,9 @@ impl TectonicParams {
         }
         if let Some(name) = name.strip_prefix("breakup.") {
             return self.breakup.set(name, value);
+        }
+        if let Some(name) = name.strip_prefix("volcanism.") {
+            return self.volcanism.set(name, value);
         }
         let sediment = &mut self.initial_sediment;
         let field = match name {
@@ -617,6 +627,26 @@ pub struct SurfaceSharing {
     pub clamped: f64,
 }
 
+/// How strongly duplicated crust samples (shown at several cells) damped crustal flow and
+/// subduction erosion so far, which act once per sample instead of once per cell (#113; see
+/// [`Simulation::shared_sample_rates`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SharedSampleRates {
+    /// Crustal flow requested between cells, summed over cell pairs (kg/m², before the
+    /// available crust and the room below the cap limit it).
+    pub flow_per_cell: f64,
+    /// The same with every transfer divided by the larger number of cells showing its source
+    /// or its receiver sample, as applied.
+    pub flow_per_sample: f64,
+    /// Subduction-erosion events (one per subducted sample below an overriding sample).
+    pub erosion_events: f64,
+    /// The events as applied to the eroded samples themselves: per sample, its events divided
+    /// by the number of cells showing it.
+    pub erosion_per_sample: f64,
+    /// The rest of the events, taken from the neighbours of duplicated samples.
+    pub erosion_to_neighbours: f64,
+}
+
 /// Changes of the sea level (m, as an offset of dry elevations) so far per process. Each term is
 /// the difference between two exact solves of the sea level (see
 /// [`crate::sea::sea_level`]).
@@ -773,6 +803,8 @@ pub struct Simulation {
     polarities: polarity::Polarities,
     rng: ChaCha8Rng,
     mantle: mantle::MantleFlow,
+    /// The plumes' volcanism so far (see [`volcanism`]).
+    volcanism: volcanism::Volcanism,
     /// Dynamic topography of every world cell (m, dry): the deflection of the surface by the
     /// mantle flow below (see [`mantle::MantleFlow::dynamic_topography`]).
     dynamic_topography: Vec<f64>,
@@ -824,6 +856,8 @@ pub struct Simulation {
     sea_level_budget: SeaLevelBudget,
     /// How surface changes of samples shown at several cells were shared so far.
     surface_sharing: SurfaceSharing,
+    /// How duplicated samples damped crustal flow and subduction erosion so far.
+    shared_rates: SharedSampleRates,
     /// Simulated time in Myr.
     time: f64,
     /// The id of the next plate born (see [`Plate::id`]).
@@ -1004,6 +1038,7 @@ impl Simulation {
             owners,
             polarities,
             mantle,
+            volcanism: volcanism::Volcanism::new(seed),
             gap_statistics: GapStatistics::default(),
             trench_sediment: TrenchSediment::default(),
             event_counts: EventCounts::default(),
@@ -1026,6 +1061,7 @@ impl Simulation {
             initial_sea_level: 0.0,
             sea_level_budget: SeaLevelBudget::default(),
             surface_sharing: SurfaceSharing::default(),
+            shared_rates: SharedSampleRates::default(),
             time: 0.0,
             next_plate_id: plate_count as u32,
             force_balance: None,
@@ -1298,6 +1334,8 @@ impl Simulation {
             // The first solve's trenches fill the mantle's memory (#213).
             self.mantle.prime(dt, &subduction, &slabs, &mut self.rng);
         }
+        // The plumes' crust: LIPs of the heads that arrived, tails of the older plumes.
+        self.volcanism_step(dt);
 
         let sea_level = self.solve_sea_level();
         self.sea_level_budget.tectonics += sea_level - self.sea_level;
@@ -1355,12 +1393,24 @@ impl Simulation {
     /// holds besides the lakes; the planet's water ([`TectonicParams::ocean_volume`]) shrinks
     /// and the sea level is solved again.
     pub fn remove_water(&mut self, volume: f64) {
-        let volume = volume.clamp(0.0, self.ocean_volume().max(0.0));
+        // A negative volume returns water (#202: water made by the chemistry of the air).
+        let volume = volume.min(self.ocean_volume().max(0.0));
         self.params.ocean_volume -= volume;
         self.lake_water = self.lake_water.min(self.params.ocean_volume);
         let sea_level = self.solve_sea_level();
         self.sea_level_budget.escape += sea_level - self.sea_level;
         self.sea_level = sea_level;
+    }
+
+    /// The new oceanic crust made so far (kg) by full spreading rate, in 1 cm/yr bins (the last
+    /// holds all faster rates; see [`GapStatistics::new_crust_by_rate`]), for the serpentinization
+    /// of slow ridges (#202). Cheap.
+    pub fn new_crust_by_rate(&self) -> [f64; SPREADING_RATE_BINS] {
+        let radius = self.params.planet_radius;
+        let cell_area = 4.0 * std::f64::consts::PI * radius * radius / self.mesh.len() as f64;
+        self.gap_statistics
+            .new_crust_by_rate
+            .map(|mass| mass * cell_area)
     }
 
     /// The active mantle plumes.
@@ -1382,6 +1432,7 @@ impl Simulation {
             subducted_sediment: -ledger.subducted_sediment * cell_area,
             metamorphic_sediment: (self.metamorphosed.0 + self.metamorphosed.1) * 1e12
                 + self.trench_sediment.stacked * cell_area,
+            lip_crust: ledger.lips * cell_area,
             // `+ 0.0`: the empty sum is −0.
             plume_flux: self.plumes().iter().map(Plume::flux).sum::<f64>() + 0.0,
             subducted_carbonate: self.trench_sediment.carbonate_subducted * cell_area,
@@ -1593,6 +1644,12 @@ impl Simulation {
         self.solve_sea_level_with_deficit().deficit
     }
 
+    /// The change of the sea level since the start (m): positive where the sea stands higher
+    /// against the dry elevations than at the start (see [`Self::sea_level_budget`]).
+    pub fn sea_level_change(&self) -> f64 {
+        self.sea_level - self.initial_sea_level
+    }
+
     /// The ocean: the cells below sea level connected to the world ocean (see [`crate::sea`]).
     pub fn ocean_mask(&self) -> Vec<bool> {
         crate::sea::ocean_mask(
@@ -1799,6 +1856,11 @@ impl Simulation {
     /// How surface changes of samples shown at several cells were shared so far.
     pub fn surface_sharing(&self) -> SurfaceSharing {
         self.surface_sharing
+    }
+
+    /// How duplicated samples damped crustal flow and subduction erosion so far (#113).
+    pub fn shared_sample_rates(&self) -> SharedSampleRates {
+        self.shared_rates
     }
 
     /// Applies per-cell changes of crust thickness and sediment thickness to the crust at the

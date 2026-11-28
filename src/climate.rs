@@ -1268,7 +1268,7 @@ impl ColumnSaturation {
 /// circulation, i.e. measured from the ITCZ. Representative of Earth's moisture-carrying lower
 /// troposphere: trade winds converging on the ITCZ (Hadley cell), westerlies with a weak
 /// poleward drift (Ferrel cell) and polar easterlies.
-fn zonal_mean_wind(latitude: f64) -> (f64, f64) {
+pub(crate) fn zonal_mean_wind(latitude: f64) -> (f64, f64) {
     const TABLE: [(f64, f64, f64); 10] = [
         (0.0, -4.0, 0.0),
         (10.0, -6.0, -0.6),

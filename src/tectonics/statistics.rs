@@ -33,6 +33,8 @@ pub struct Statistics {
     pub plate_areas: Vec<usize>,
     /// Number of active mantle plumes.
     pub plumes: usize,
+    /// The plumes' volcanism so far: LIPs and tail volumes (see [`VolcanismRecord`]).
+    pub volcanism: VolcanismRecord,
     /// How uncovered cells were filled so far.
     pub gaps: GapStatistics,
     /// Plate births and deaths so far, by mechanism.
@@ -687,6 +689,7 @@ impl Simulation {
             mean_speed: speed_sum / cell_count as f64,
             plate_areas,
             plumes: self.plumes().len(),
+            volcanism: self.volcanism().clone(),
             gaps: self.gap_statistics.clone(),
             events: self.event_counts.clone(),
             ledger: self.ledger.checked(total_mass),

@@ -36,7 +36,10 @@
 //!   to the air.
 //! - **Not modelled**: ion pickup and sputtering by the solar wind, impact erosion and Jeans
 //!   escape of heavy gases (all minor for an Earth-sized planet with a magnetic field after the
-//!   heavy bombardment), hydrogen from other gases (H₂, CH₄; #202), and the runaway greenhouse.
+//!   heavy bombardment) and the runaway greenhouse.
+//! - **Reduced gases** (#202, [`crate::reduced`]): volcanic H₂ and CO and the H₂ and CH₄ of
+//!   serpentinization meet the O₂ together with the other sinks; what the O₂ leaves stays in
+//!   the air, and its hydrogen escapes with the water's (`f_T = f_H₂O + f_H₂ + 2 f_CH₄`).
 //!
 //! See `notes/issue-210/plan.md` for the values and their sources.
 
@@ -44,6 +47,7 @@ use tracing::warn;
 
 use crate::carbon::{LandCell, SEA_WATER_DENSITY};
 use crate::math;
+use crate::reduced::{GasInput, GasState, Gases, ReducedParams, SPREADING_RATE_BINS};
 use crate::sun::SOLAR_AGE;
 
 /// Surface gravity in m/s² (as [`crate::carbon`]).
@@ -151,10 +155,15 @@ pub struct EscapeParams {
     pub tropics_latitude: f64,
     /// O₂ taken up by the reduced gases (H₂, CO, H₂S, SO₂) of arc and plume volcanoes, in mol
     /// O₂ per mol of their mantle CO₂ (Holland, 2002: somewhat below 0.2; Catling & Kasting,
-    /// 2017). The ridges' reductants are part of [`Self::seafloor_oxidation`].
+    /// 2017). The ridges' reductants are part of [`Self::seafloor_oxidation`]. With the reduced
+    /// gases (#202) only their sulfur part
+    /// ([`crate::reduced::ReducedParams::volcanic_sulfur`]) stays here; the H₂ and CO become
+    /// gases.
     pub volcanic_reductants: f64,
     /// O₂ taken up by the hydrothermal oxidation of new oceanic crust (Fe²⁺ → Fe³⁺ and sulfide
-    /// of its upper ~0.6 km), mol O₂ per kg of new crust (Lécuyer & Ricard, 1999).
+    /// of its upper ~0.6 km of basalt), mol O₂ per kg of new crust (Lécuyer & Ricard, 1999).
+    /// The serpentinization of peridotite at slow ridges (#202) is a separate source of H₂;
+    /// basalt-hosted alteration releases little H₂, so this stays a fixed capacity.
     pub seafloor_oxidation: f64,
     /// O₂ that the oxidative weathering of eroded felsic and basaltic bedrock takes up, mol O₂
     /// per kg: half its Fe²⁺ to Fe³⁺, all its sulfide to sulfate. Eroded sediment counts as
@@ -168,6 +177,8 @@ pub struct EscapeParams {
     /// The escape stops when the ocean is down to this share of the planet's water at the start
     /// (the climate model needs an ocean).
     pub min_ocean_fraction: f64,
+    /// The reduced gases (#202; `reduced.NAME`), which need the escape.
+    pub gases: ReducedParams,
 }
 
 impl Default for EscapeParams {
@@ -188,6 +199,7 @@ impl Default for EscapeParams {
             basalt_oxygen_demand: 0.23,
             oxidation_pressure: 2e-5,
             min_ocean_fraction: 0.01,
+            gases: ReducedParams::default(),
         }
     }
 }
@@ -369,6 +381,8 @@ pub struct StepInput<'a> {
     /// carbon cycle.
     pub volcanic_degassing: f64,
     pub new_crust: f64,
+    /// The new oceanic crust so far by spreading rate (kg; for the reduced gases).
+    pub new_crust_by_rate: [f64; SPREADING_RATE_BINS],
     /// The land cells with their erosion in the step.
     pub land: &'a [LandCell],
 }
@@ -382,11 +396,14 @@ pub struct OxygenSinks {
     pub seafloor: f64,
     /// Oxidative weathering on land.
     pub weathering: f64,
+    /// The reduced gases in the air (#202: H₂ and CH₄, ½ and 2 O₂ each); 0 without them, when
+    /// [`Self::volcanic`] holds all the volcanic reductants.
+    pub gases: f64,
 }
 
 impl OxygenSinks {
     pub fn total(&self) -> f64 {
-        self.volcanic + self.seafloor + self.weathering
+        self.volcanic + self.seafloor + self.weathering + self.gases
     }
 
     fn add(&self, other: &OxygenSinks) -> OxygenSinks {
@@ -394,6 +411,7 @@ impl OxygenSinks {
             volcanic: self.volcanic + other.volcanic,
             seafloor: self.seafloor + other.seafloor,
             weathering: self.weathering + other.weathering,
+            gases: self.gases + other.gases,
         }
     }
 }
@@ -433,15 +451,17 @@ fn oxygen_step(
     capacity: OxygenSinks,
     pressure_per_mol: f64,
 ) -> (OxygenSinks, f64) {
-    let fixed = years * (capacity.volcanic + capacity.seafloor);
+    let fixed = years * (capacity.volcanic + capacity.seafloor + capacity.gases);
     if available <= fixed {
         // All goes to the fixed sinks, in proportion to their capacity (W(0) = 0).
         let share = if fixed > 0.0 { available / fixed } else { 0.0 };
         let volcanic = years * capacity.volcanic * share;
+        let gases = years * capacity.gases * share;
         let taken = OxygenSinks {
             volcanic,
-            seafloor: available - volcanic,
+            seafloor: available - volcanic - gases,
             weathering: 0.0,
+            gases,
         };
         return (taken, 0.0);
     }
@@ -465,6 +485,7 @@ fn oxygen_step(
         volcanic: years * capacity.volcanic,
         seafloor: years * capacity.seafloor,
         weathering: weathering(high).min(available - fixed),
+        gases: years * capacity.gases,
     };
     let left = (available - taken.total()).max(0.0);
     (taken, left)
@@ -500,6 +521,8 @@ pub struct EscapeState {
     pub oxygen_pressure: f64,
     /// Whether the ocean has reached [`EscapeParams::min_ocean_fraction`].
     pub at_floor: bool,
+    /// The reduced gases (#202), when they are simulated.
+    pub gases: Option<GasState>,
 }
 
 impl EscapeState {
@@ -550,7 +573,14 @@ impl EscapeState {
             } else {
                 ""
             },
-        )
+        ) + &self.gases.map_or(String::new(), |gases| {
+            format!(
+                " | O₂ to the gases {:.4} of {:.4} Tmol/yr | {}",
+                self.sink_rates.gases / 1e12,
+                self.sink_capacity.gases / 1e12,
+                gases.summary()
+            )
+        })
     }
 }
 
@@ -558,6 +588,8 @@ impl EscapeState {
 #[derive(Clone, Debug)]
 pub struct Escape {
     params: EscapeParams,
+    /// The reduced gases (#202), when they are simulated.
+    gases: Option<Gases>,
     /// The ocean's volume (m³) below which nothing more is lost.
     floor: f64,
     state: EscapeState,
@@ -567,8 +599,11 @@ impl Escape {
     /// The escape of a planet whose water is `water_volume` m³ at the start.
     pub fn new(params: EscapeParams, water_volume: f64) -> Self {
         let floor = params.min_ocean_fraction.max(0.0) * water_volume;
+        let gases =
+            (params.enabled && params.gases.enabled).then(|| Gases::new(params.gases.clone()));
         Self {
             params,
+            gases,
             floor,
             state: EscapeState::default(),
         }
@@ -580,6 +615,18 @@ impl Escape {
 
     pub fn state(&self) -> &EscapeState {
         &self.state
+    }
+
+    /// The reduced gases (#202), when they are simulated.
+    pub fn gases(&self) -> Option<&Gases> {
+        self.gases.as_ref()
+    }
+
+    /// Records the new crust per spreading rate at the start (see [`Gases::start`]).
+    pub fn start(&mut self, new_crust_by_rate: [f64; SPREADING_RATE_BINS]) {
+        if let Some(gases) = &mut self.gases {
+            gases.start(new_crust_by_rate);
+        }
     }
 
     /// Takes one step and returns the volume of water (m³) to take from the ocean.
@@ -605,9 +652,23 @@ impl Escape {
             }
         }
         let xuv = xuv_flux(params, input.sun_age);
-        let diffusion_limit = diffusion_limited_flux(params, water);
+        let mut diffusion_limit = diffusion_limited_flux(params, water);
         let energy_limit = energy_limited_flux(params, xuv, input.planet_radius);
         let mut hydrogen_flux = diffusion_limit.min(energy_limit);
+        if let Some(gases) = &self.gases {
+            // The gases of the last step share the diffusion limit (`f_T`) and the XUV energy
+            // (in proportion to their H) with the water.
+            let f_gases = gases.hydrogen_equivalent();
+            let f_total = water + f_gases;
+            diffusion_limit = 2.0 * params.diffusion_limit * f_total / (1.0 + f_total);
+            let water_limit = 2.0 * params.diffusion_limit * water / (1.0 + f_total);
+            let water_energy = if f_total > 0.0 {
+                energy_limit * water / f_total
+            } else {
+                energy_limit
+            };
+            hydrogen_flux = water_limit.min(water_energy);
+        }
         // Water lost (kg): two H per H₂O.
         let seconds = input.years * 365.25 * 86400.0;
         let mut water_mass = hydrogen_flux * area * seconds / AVOGADRO / 2.0 * WATER_MOLAR_MASS;
@@ -630,11 +691,26 @@ impl Escape {
         }
         // One O₂ per two H₂O.
         let produced = water_mass / WATER_MOLAR_MASS / 2.0;
-        let capacity = OxygenSinks {
+        let mut capacity = OxygenSinks {
             volcanic: params.volcanic_reductants.max(0.0) * input.volcanic_degassing.max(0.0),
             seafloor: params.seafloor_oxidation.max(0.0) * input.new_crust.max(0.0),
             weathering: weathering_oxygen_demand(params, input.land),
+            gases: 0.0,
         };
+        // The reduced gases (#202): the volcanic H₂ and CO and the serpentinization's H₂ and
+        // CH₄ meet the O₂ with the gases already in the air; the sulfur gases stay a capacity.
+        let gas_sources = self.gases.as_mut().map(|gases| {
+            let (sources, serpentinite) = gases.sources(
+                input.volcanic_degassing,
+                input.new_crust,
+                input.new_crust_by_rate,
+            );
+            let (hydrogen, methane) = gases.pools(&sources, input.years);
+            capacity.volcanic =
+                gases.params().volcanic_sulfur.max(0.0) * input.volcanic_degassing.max(0.0);
+            capacity.gases = (0.5 * hydrogen + 2.0 * methane) / input.years;
+            (sources, serpentinite)
+        });
         let pressure_per_mol = OXYGEN_MOLAR_MASS * GRAVITY / area / 1e5;
         let (taken, oxygen) = oxygen_step(
             params,
@@ -647,7 +723,45 @@ impl Escape {
             volcanic: taken.volcanic / input.years,
             seafloor: taken.seafloor / input.years,
             weathering: taken.weathering / input.years,
+            gases: taken.gases / input.years,
         };
+        let mut gas_state = None;
+        let mut water_used = 0.0;
+        if let (Some(gases), Some((sources, serpentinite))) = (&mut self.gases, gas_sources) {
+            let demand = input.years * capacity.gases;
+            let titrated = if demand > 0.0 {
+                taken.gases / demand
+            } else {
+                1.0
+            };
+            let per_year = area * 365.25 * 86400.0 / AVOGADRO;
+            let water_hydrogen = hydrogen_flux * per_year / 2.0;
+            let molar_mass = GAS_CONSTANT / air.gas_constant;
+            gases.step(
+                &GasInput {
+                    years: input.years,
+                    area,
+                    column: air.pressure / (GRAVITY * molar_mass),
+                    diffusion_limit: params.diffusion_limit * per_year,
+                    water,
+                    energy_room: (energy_limit * per_year / 2.0 - water_hydrogen).max(0.0),
+                    background_oxygen: gases.params().background_oxygen,
+                    nitrogen: (params.background_pressure / 1e5 - gases.params().background_oxygen)
+                        .max(0.0),
+                    pressure: air.pressure / 1e5,
+                },
+                sources,
+                serpentinite,
+                titrated,
+                input.co2_pressure,
+            );
+            water_used = gases.water_used();
+            hydrogen_flux += gases.state().hydrogen_flux;
+            // The diffusion limit of the step's gases (the water's share used the last step's).
+            let f_total = water + gases.hydrogen_equivalent();
+            diffusion_limit = 2.0 * params.diffusion_limit * f_total / (1.0 + f_total);
+            gas_state = Some(*gases.state());
+        }
         self.state = EscapeState {
             tropical_temperature,
             stratospheric_water: water,
@@ -665,8 +779,13 @@ impl Escape {
             sink_capacity: capacity,
             sink_rates: rates,
             at_floor,
+            gases: gas_state,
         };
-        water_mass / SEA_WATER_DENSITY
+        if self.gases.is_some() {
+            (water_mass + water_used * WATER_MOLAR_MASS) / SEA_WATER_DENSITY
+        } else {
+            water_mass / SEA_WATER_DENSITY
+        }
     }
 }
 
@@ -676,6 +795,188 @@ mod tests {
 
     const RADIUS: f64 = 6.371e6;
     const OCEAN: f64 = 1.335e18;
+
+    /// The escape without the reduced gases (#202), as #210 and #212 tested it.
+    fn old_params() -> EscapeParams {
+        let mut params = EscapeParams::default();
+        params.gases.enabled = false;
+        params
+    }
+
+    /// The escape of a barren planet with the reduced gases.
+    fn barren_params() -> EscapeParams {
+        let mut params = EscapeParams::default();
+        params.gases.background_oxygen = 0.0;
+        params.gases.background_methane = 0.0;
+        params
+    }
+
+    /// New crust of an Earth-like spread of rates (kg so far after `step` steps of 1 Myr):
+    /// 65 Gt/yr, ~5% ultraslow, ~25% slow, ~30% intermediate, ~40% fast.
+    fn crust_by_rate(step: f64, scale: f64) -> [f64; SPREADING_RATE_BINS] {
+        let mut bins = [0.0; SPREADING_RATE_BINS];
+        let shares = [(1, 0.05), (3, 0.25), (6, 0.30), (10, 0.40)];
+        for (bin, share) in shares {
+            bins[bin] = step * 1e6 * 65e12 * scale * share;
+        }
+        bins
+    }
+
+    /// The budgets of the gases close over many steps with changing sources, climates and O₂:
+    /// redox (H₂-equivalents), carbon, hydrogen, and the escape's O₂.
+    #[test]
+    fn gas_budgets_close() {
+        for (redox, background) in [(0.0, 0.0), (-4.0, 0.0), (0.0, 0.21), (-2.0, 1e-3)] {
+            let mut params = barren_params();
+            params.gases.mantle_redox = redox;
+            params.gases.background_oxygen = background;
+            let mut escape = Escape::new(params, OCEAN);
+            let mut ocean = OCEAN;
+            for step in 0..300 {
+                let celsius = [match step {
+                    0..100 => 20.0,
+                    100..200 => 95.0 + (step % 7) as f64,
+                    _ => 25.0,
+                }];
+                let mut step_input = input(&celsius, ocean);
+                step_input.years = 1e6;
+                step_input.volcanic_degassing = 1e12 * (1.0 + (step % 5) as f64);
+                step_input.new_crust = 1e14 * (1.0 + (step % 3) as f64);
+                step_input.new_crust_by_rate =
+                    crust_by_rate(step as f64 + 1.0, 1.0 + (step % 4) as f64);
+                ocean -= escape.step(&step_input);
+                let state = *escape.state();
+                let gases = state.gases.expect("gases are on");
+                let t = gases.totals;
+                let tolerance = |x: f64| 1e-9 * x.abs().max(1.0);
+                let redox_in = t.volcanic_hydrogen + t.volcanic_monoxide + t.serpentinization;
+                let redox_out = t.hydrogen_titrated
+                    + 4.0 * t.methane_titrated
+                    + t.hydrogen_oxidised
+                    + 4.0 * t.methane_oxidised
+                    + t.hydrogen_escaped
+                    + 2.0 * t.methane_escaped
+                    + gases.hydrogen
+                    + 4.0 * gases.methane;
+                assert!(
+                    (redox_in - redox_out).abs() <= tolerance(redox_in),
+                    "{redox}: {step} redox {redox_in} {redox_out}"
+                );
+                let carbon = t.methane_destroyed() + gases.methane;
+                assert!(
+                    (t.methane_made - carbon).abs() <= tolerance(t.methane_made),
+                    "{redox}: {step} carbon"
+                );
+                let hydrogen_in = 2.0 * t.volcanic_hydrogen + 2.0 * t.water_used;
+                let hydrogen_out =
+                    2.0 * gases.hydrogen + 4.0 * gases.methane + t.escaped_hydrogen_atoms();
+                assert!(
+                    (hydrogen_in - hydrogen_out).abs() <= tolerance(redox_in),
+                    "{redox}: {step} hydrogen {hydrogen_in} {hydrogen_out}"
+                );
+                assert!(
+                    (state.oxygen + state.oxygen_consumed.total() - state.oxygen_produced).abs()
+                        <= 1e-9 * state.oxygen_produced.max(1.0)
+                );
+                assert!(gases.hydrogen >= 0.0 && gases.methane >= 0.0);
+                assert!(gases.hydrogen_ratio < 1.0 && gases.methane_ratio < 1.0);
+                // Never more escape than the XUV allows (to the lag of the water's share).
+                assert!(
+                    state.hydrogen_flux <= state.energy_limit * (1.0 + 1e-9),
+                    "{redox}: {step}"
+                );
+            }
+        }
+    }
+
+    /// A temperate barren planet: the H₂ is set by its sources and the diffusion limit
+    /// (~150 ppm per Tmol/yr), CH₄ by its anoxic lifetime; a living planet's O₂ oxidises both.
+    #[test]
+    fn gas_steady_state() {
+        let mut escape = Escape::new(barren_params(), OCEAN);
+        let mut step_input = input(&[27.0], OCEAN);
+        step_input.years = 1e6;
+        step_input.volcanic_degassing = 3.5e12;
+        step_input.new_crust = 65e12;
+        for step in 1..=5 {
+            step_input.new_crust_by_rate = crust_by_rate(step as f64, 1.0);
+            escape.step(&step_input);
+        }
+        let gases = escape.state().gases.unwrap();
+        // ~0.45 Tmol/yr volcanic, ~0.4 Tmol/yr serpentinization.
+        let sources = gases.sources;
+        assert!(
+            (0.3e12..0.6e12).contains(&(sources.volcanic_hydrogen + sources.volcanic_monoxide)),
+            "{sources:?}"
+        );
+        assert!(
+            (0.25e12..0.55e12).contains(&sources.serpentinization),
+            "{sources:?}"
+        );
+        assert!((1e9..1e10).contains(&sources.methane), "{sources:?}");
+        let hydrogen = sources.hydrogen() / 1e12 * 150e-6;
+        assert!(
+            (gases.hydrogen_ratio / hydrogen - 1.0).abs() < 0.15,
+            "{} {hydrogen}",
+            gases.hydrogen_ratio
+        );
+        // CH₄: ~7 kyr with the escape, ppb to ppm.
+        let lifetime = gases.methane / sources.methane;
+        assert!((5e3..1e4).contains(&lifetime), "{lifetime}");
+        assert!(
+            (1e-8..1e-6).contains(&gases.methane_ratio),
+            "{}",
+            gases.methane_ratio
+        );
+        assert!(gases.methane_forcing < 0.0 && gases.methane_forcing > -0.95);
+        // Essentially all of it escapes; the escape's O₂ takes a tiny share.
+        assert!(gases.rates.hydrogen_titrated < 0.05 * sources.hydrogen());
+
+        let mut escape = Escape::new(EscapeParams::default(), OCEAN);
+        for step in 1..=5 {
+            step_input.new_crust_by_rate = crust_by_rate(step as f64, 1.0);
+            escape.step(&step_input);
+        }
+        let modern = escape.state().gases.unwrap();
+        assert!(
+            modern.hydrogen_ratio < 1e-8 && modern.methane_ratio < 1e-9,
+            "{modern:?}"
+        );
+        assert!(modern.methane_forcing.abs() < 1e-3);
+    }
+
+    /// A reduced mantle outgasses more H₂ than the XUV of a late sun can remove: it builds up,
+    /// the escape stays at the energy limit, the mixing ratio below 1.
+    #[test]
+    fn energy_limited_hydrogen() {
+        let mut params = barren_params();
+        params.gases.mantle_redox = -4.0;
+        let mut escape = Escape::new(params, OCEAN);
+        let mut step_input = input(&[20.0], OCEAN);
+        step_input.years = 1e6;
+        step_input.volcanic_degassing = 4e12;
+        step_input.sun_age = 9.0;
+        let mut previous = 0.0;
+        for step in 1..=200 {
+            step_input.new_crust_by_rate = crust_by_rate(step as f64, 1.0);
+            escape.step(&step_input);
+            let state = escape.state();
+            let gases = state.gases.unwrap();
+            assert!(gases.hydrogen >= previous);
+            previous = gases.hydrogen;
+            assert!(state.hydrogen_flux <= state.energy_limit * (1.0 + 1e-9));
+        }
+        let state = escape.state();
+        let gases = state.gases.unwrap();
+        assert!(state.energy_limited());
+        assert!((state.hydrogen_flux / state.energy_limit - 1.0).abs() < 0.01);
+        assert!(
+            gases.hydrogen_ratio > 0.01 && gases.hydrogen_ratio < 1.0,
+            "{}",
+            gases.hydrogen_ratio
+        );
+        assert!(gases.hydrogen_forcing > 0.0);
+    }
 
     #[test]
     fn saturation_pressure_values() {
@@ -720,7 +1021,7 @@ mod tests {
     /// energy limit of today's XUV (~1.6e11), the young sun's XUV 13 times today's at epoch 0.
     #[test]
     fn todays_limits() {
-        let params = EscapeParams::default();
+        let params = old_params();
         let diffusion = diffusion_limited_flux(&params, 7e-6) * 1e-4;
         assert!((2e8..5e8).contains(&diffusion), "{diffusion}");
         let energy = energy_limited_flux(&params, xuv_flux(&params, SOLAR_AGE), RADIUS) * 1e-4;
@@ -740,6 +1041,7 @@ mod tests {
             // ~0.5 and ~1.3 Tmol O₂/yr.
             volcanic_degassing: 3e12,
             new_crust: 1.6e14,
+            new_crust_by_rate: [0.0; SPREADING_RATE_BINS],
             land: &[],
         }
     }
@@ -748,7 +1050,7 @@ mod tests {
     /// loses an ocean in Gyr. Water, hydrogen and oxygen balance.
     #[test]
     fn water_loss_and_oxygen_balance() {
-        let mut escape = Escape::new(EscapeParams::default(), OCEAN);
+        let mut escape = Escape::new(old_params(), OCEAN);
         let volume = escape.step(&input(&[27.0], OCEAN));
         let ocean_area = 3.6e14;
         let per_gyr = volume * 1e2 / ocean_area;
@@ -765,7 +1067,7 @@ mod tests {
         // Sinks that take all the O₂ (it would otherwise dry the stratosphere, see below).
         let params = EscapeParams {
             volcanic_reductants: 1e20,
-            ..EscapeParams::default()
+            ..old_params()
         };
         let mut escape = Escape::new(params, OCEAN);
         let mut ocean = OCEAN;
@@ -793,7 +1095,7 @@ mod tests {
 
         // With sinks of a few Tmol/yr the O₂ builds up (bars), dilutes the vapour and ends the
         // fast loss: the escape becomes diffusion-limited.
-        let mut escape = Escape::new(EscapeParams::default(), OCEAN);
+        let mut escape = Escape::new(old_params(), OCEAN);
         let mut ocean = OCEAN;
         let first = escape.step(&input(&[100.0], ocean));
         assert!(escape.state().energy_limited());
@@ -817,7 +1119,7 @@ mod tests {
             min_ocean_fraction: 0.5,
             heating_efficiency: 1e3,
             volcanic_reductants: 1e20,
-            ..EscapeParams::default()
+            ..old_params()
         };
         let mut escape = Escape::new(params, OCEAN);
         let mut ocean = OCEAN;
@@ -833,7 +1135,7 @@ mod tests {
     /// cells, no water.
     #[test]
     fn average_over_cells() {
-        let mut escape = Escape::new(EscapeParams::default(), OCEAN);
+        let mut escape = Escape::new(old_params(), OCEAN);
         escape.step(&input(&[63.0, 77.0], OCEAN));
         let spread = escape.state().stratospheric_water;
         escape.step(&input(&[70.0], OCEAN));
@@ -861,7 +1163,7 @@ mod tests {
     /// The weathering's demand follows the eroded bedrock and its rock; its oxidation the O₂.
     #[test]
     fn weathering_demand_and_oxidation() {
-        let params = EscapeParams::default();
+        let params = old_params();
         let land = eroding_land();
         // 9 ice-free cells of 1.4e11 kg/yr each, half-way between felsic and basalt on average.
         let demand = weathering_oxygen_demand(&params, &land);
@@ -886,7 +1188,7 @@ mod tests {
     /// left while the fixed sinks exceed the source.
     #[test]
     fn oxygen_budget_closes() {
-        let params = EscapeParams::default();
+        let params = old_params();
         let land = eroding_land();
         let mut escape = Escape::new(params.clone(), OCEAN);
         let mut ocean = OCEAN;
@@ -952,11 +1254,12 @@ mod tests {
     /// stays and the weathering at its pressure add up to the O₂ there was.
     #[test]
     fn implicit_weathering_step() {
-        let params = EscapeParams::default();
+        let params = old_params();
         let capacity = OxygenSinks {
             volcanic: 0.0,
             seafloor: 0.0,
             weathering: 2e12,
+            gases: 0.0,
         };
         let per_mol =
             OXYGEN_MOLAR_MASS * GRAVITY / (4.0 * std::f64::consts::PI * RADIUS * RADIUS) / 1e5;

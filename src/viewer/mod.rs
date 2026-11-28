@@ -28,6 +28,7 @@ mod atmosphere;
 mod banner;
 mod cell_info;
 mod fields;
+mod global;
 mod history;
 mod hydrology;
 mod lighting;
@@ -58,6 +59,8 @@ use cell_info::{CellInfoPanel, ShownCell};
 #[cfg(target_arch = "wasm32")]
 pub use fields::Layer;
 pub use fields::{Fields, Layers, PlateInfo, plate_infos};
+pub use global::GlobalStatus;
+use global::SimulationStatus;
 #[cfg(target_arch = "wasm32")]
 pub use history::store::MemoryStore;
 pub use history::{FrameEncoder, FrameStore, History};
@@ -72,9 +75,8 @@ pub use modes::{
 };
 use overlay::OverlayBuilder;
 use pace::{HintAction, Pace};
-pub use parameters::GlobalStatus;
+use parameters::ParameterPanel;
 pub use parameters::with_random_seed;
-use parameters::{ParameterPanel, SimulationStatus};
 #[cfg(target_arch = "wasm32")]
 pub use parameters::{has_option, with_default};
 use plate_colors::PlateColors;
@@ -549,6 +551,8 @@ struct Viewer {
     /// The colour of every plate of the run, for the plate mode.
     plate_colors: PlateColors,
     cell_panel: CellInfoPanel,
+    /// The panel of the planet's global state, in the bottom right corner (#209).
+    planet_panel: global::PlanetPanel,
     /// The time bar along the bottom edge, collapsed or expanded.
     time_bar: timeline::TimeBar,
     /// Where choices of the user are remembered across restarts.
@@ -574,6 +578,8 @@ struct Viewer {
     time: Option<f64>,
     /// The global state of the newest state of the running simulation (see [`GlobalStatus`]).
     global: Option<GlobalStatus>,
+    /// The global state of the displayed state (live or a past frame), for the panel (#209).
+    shown_global: Option<GlobalStatus>,
     /// Simulated duration of the running simulation in Myr.
     duration: f64,
     /// Why the running simulation failed, if it did.
@@ -638,6 +644,7 @@ impl FrameTimes {
 /// The newest state of the running simulation.
 struct Latest {
     time: f64,
+    global: GlobalStatus,
     cells: Arc<Vec<CellInfo>>,
     plates: Arc<Vec<PlateInfo>>,
     fields: Fields,
@@ -720,6 +727,7 @@ impl Viewer {
             parameters,
             plate_colors: PlateColors::default(),
             cell_panel: CellInfoPanel::default(),
+            planet_panel: global::PlanetPanel::default(),
             time_bar: timeline::TimeBar::new(settings::get_bool(
                 settings.as_ref(),
                 timeline::STORAGE_KEY,
@@ -736,6 +744,7 @@ impl Viewer {
             adapted_at: None,
             time: None,
             global: None,
+            shown_global: None,
             duration: initial.cli.run_duration(),
             failure: None,
             runs: 0,
@@ -765,6 +774,7 @@ impl Viewer {
         self.events = receiver;
         self.time = None;
         self.global = None;
+        self.shown_global = None;
         self.duration = launch.cli.run_duration();
         self.exaggeration = launch.cli.exaggeration;
         self.abiotic = launch.cli.biosphere == crate::presets::Biosphere::Abiotic;
@@ -962,6 +972,7 @@ impl Viewer {
         }
         self.latest = Some(Latest {
             time: update.time,
+            global: update.global,
             cells: update.cells.clone(),
             plates: update.plates.clone(),
             fields: update.fields.clone(),
@@ -980,6 +991,7 @@ impl Viewer {
                     self.walk.shown(now);
                 }
                 self.live_pending = false;
+                self.shown_global = Some(update.global);
                 self.show(update.time, update.cells, update.plates, update.fields);
             } else if let Some(index) = self.recorded_index(self.shown_time) {
                 self.viewing = Some(index);
@@ -1101,6 +1113,13 @@ impl Viewer {
                     .and_then(|history| history.time(frame.index))
                     .unwrap_or(self.shown_time);
                 self.frame_error = None;
+                if let Some(global) = self
+                    .history
+                    .as_ref()
+                    .and_then(|history| history.global(frame.index))
+                {
+                    self.shown_global = Some(global);
+                }
                 self.show(time, Arc::new(frame.cells), Arc::new(frame.plates), fields);
                 self.shown_frame = Some(frame.index);
                 // The walk holds every frame for its interval from when it is shown.
@@ -1226,6 +1245,7 @@ impl Viewer {
         self.live_pending = false;
         self.walk.shown(web_time::Instant::now());
         if let Some(latest) = &self.latest {
+            self.shown_global = Some(latest.global);
             let (time, cells, plates, fields) = (
                 latest.time,
                 latest.cells.clone(),
@@ -1771,13 +1791,60 @@ impl eframe::App for Viewer {
         });
         let above_bar = time_bar.map_or(0.0, |rect| ui.ctx().content_rect().bottom() - rect.top());
         let cell_panel = self.cell_panel.show(ui.ctx(), shown, self.touch, above_bar);
+        // The global state of the displayed state, with sparklines over the recorded frames
+        // (#209).
+        let latest = self
+            .latest
+            .as_ref()
+            .map(|latest| (latest.time, latest.global));
+        let series = match &self.history {
+            Some(history) => global::thin(history.globals(), latest),
+            None => global::thin(std::iter::empty(), latest),
+        };
+        let planet_view = self.shown_global.as_ref().map(|global| global::PlanetView {
+            global,
+            time: self.shown_time,
+            epoch: self.epoch,
+            series: &series,
+        });
+        let status = SimulationStatus {
+            time: self.time,
+            duration: self.duration,
+            failure: self.failure.as_deref(),
+            starting: banner::starting_text(restarted, self.generating),
+            step_seconds: self.pace.median(),
+        };
+        let pace = &mut self.pace;
+        let mut hint_action = None;
+        let hint = pace
+            .has_hint(self.time, self.duration)
+            .then_some(|ui: &mut egui::Ui| {
+                hint_action = pace.ui(ui, self.time, self.duration);
+            });
+        let planet_panel = self.planet_panel.show(
+            ui.ctx(),
+            &status,
+            planet_view.as_ref(),
+            above_bar,
+            cell_panel,
+            hint,
+        );
 
         let mut mode = self.mode;
         let view = SwitcherView {
             legend: &self.legend,
             points_per_radius: self.points_per_radius,
             waiting: self.waiting_for_fields(),
-            bottom: cell_panel.map_or(f32::INFINITY, |rect| rect.top()),
+            // Below the switcher: the cell widget, and the planet panel where it reaches
+            // that far left (phones).
+            bottom: cell_panel
+                .into_iter()
+                .chain(
+                    (planet_panel.left() < ui.ctx().content_rect().center().x)
+                        .then_some(planet_panel),
+                )
+                .map(|rect| rect.top())
+                .fold(f32::INFINITY, f32::min),
             sun: (self.mode == RenderModeId::Realistic).then(|| self.sun().describe()),
         };
         let (changed, switcher) = self.switcher.show(ui.ctx(), &mut mode, &view);
@@ -1792,24 +1859,8 @@ impl eframe::App for Viewer {
             ui.ctx().request_repaint();
         }
 
-        let status = SimulationStatus {
-            time: self.time,
-            duration: self.duration,
-            failure: self.failure.as_deref(),
-            starting: banner::starting_text(restarted, self.generating),
-            step_seconds: self.pace.median(),
-            global: self.global,
-        };
-        let pace = &mut self.pace;
-        let mut hint_action = None;
-        let hint = pace
-            .has_hint(self.time, self.duration)
-            .then_some(|ui: &mut egui::Ui| {
-                hint_action = pace.ui(ui, self.time, self.duration);
-            });
-        let mut launch =
-            self.parameters
-                .show(ui.ctx(), &status, cell_panel, time_bar, switcher, hint);
+        let avoid: Vec<egui::Rect> = cell_panel.into_iter().chain([planet_panel]).collect();
+        let mut launch = self.parameters.show(ui.ctx(), &avoid, time_bar, switcher);
         if let Some(HintAction::Restart(subdivisions)) = hint_action {
             match self.parameters.launch_with_subdivisions(subdivisions) {
                 Ok(new) => {

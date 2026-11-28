@@ -35,6 +35,10 @@ pub struct Planet {
     escape: Escape,
     /// Cells within [`EscapeParams::tropics_latitude`], whose ocean sets the cold trap.
     tropical_cells: Vec<bool>,
+    /// The greenhouse forcing of the start (W/m²; all gases), and without the carbon cycle the
+    /// CO₂'s share of it: the start's less the reduced gases' (#202) at the end of the ramp-up.
+    start_forcing: f64,
+    held_co2_forcing: f64,
     /// `None` disables erosion.
     erosion: Option<ErosionParams>,
     planet_radius: f64,
@@ -261,6 +265,34 @@ pub struct CoverTurnover {
     pub deposited: f64,
 }
 
+/// The snow on land (not lakes) in the last update of the temperature model (#207).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SnowStatistics {
+    /// Mean snow cover of the land of the northern and the southern hemisphere in January,
+    /// April, July and October.
+    pub cover_north: [f64; 4],
+    pub cover_south: [f64; 4],
+    /// Share of land with perennial snow cover above 0.5.
+    pub perennial: f64,
+    /// Global mean sunlight reflected by the snow (W/m²).
+    pub radiative_effect: f64,
+    /// Snow stored at the end of the update in km³ of water, and in metres of sea level.
+    pub storage: f64,
+    pub storage_sea_level: f64,
+    /// Snowfall, melt and overflow (glacier flow) in km³ of water per year.
+    pub snowfall: f64,
+    pub melt: f64,
+    pub overflow: f64,
+    /// Share of land whose warmest month is below 0 °C, and the share of that land with ice
+    /// cover below 0.5 (#107).
+    pub frozen_summer_land: f64,
+    pub frozen_summer_without_ice: f64,
+    /// Share of land under an ice sheet (> 0.5) by the annual-mean criterion without perennial
+    /// snow (< 0.5), and with perennial snow (> 0.5) but no ice sheet (< 0.5).
+    pub ice_sheet_only: f64,
+    pub perennial_only: f64,
+}
+
 /// Statistics of the planet, extending the tectonic statistics.
 /// The regolith of the last erosion step, per cell (#197).
 #[derive(Clone, Debug, Default)]
@@ -304,7 +336,8 @@ pub struct CarbonateStats {
 /// carbonate sources, and carbonate locked in crystalline crust (wedges, marble); what went
 /// into the mantle (unreturned subducted carbonate and altered crust, and carbonate lost with
 /// removed crust) and came out of it (ridges, mantle wedge, plumes). The residual of
-/// `reservoirs + to_mantle − mantle_degassing − initial` is the closure error (~0).
+/// `reservoirs + to_mantle − mantle_degassing − initial − reduced_gases − held` is the closure
+/// error (~0).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CarbonPartition {
     pub exogenic: f64,
@@ -316,6 +349,10 @@ pub struct CarbonPartition {
     pub lost: f64,
     pub mantle_degassing: f64,
     pub initial: f64,
+    /// Exogenic carbon from the reduced gases (#202) and from holding the CO₂ (see
+    /// [`crate::carbon::CarbonBudget`]).
+    pub reduced_gases: f64,
+    pub held: f64,
     pub residual: f64,
     /// Mass (kg) of CO₂ that decarbonation took out of the rock.
     pub decarbonated_co2: f64,
@@ -412,8 +449,14 @@ pub struct PlanetStatistics {
     pub carbon: CarbonState,
     /// The escape after the last step (#210); `None` when it is off.
     pub escape: Option<EscapeState>,
-    /// Fraction of the surface covered by permanent ice (sea ice, ice sheets).
+    /// Fraction of the surface covered by permanent ice (sea ice, ice sheets, perennial snow).
     pub frozen_fraction: f64,
+    /// The seasonal snow on land (#207).
+    pub snow: SnowStatistics,
+    /// Global planetary (Bond) albedo of the last climate update.
+    pub planetary_albedo: f64,
+    /// The cloud nuclei of the last climate update (#204).
+    pub aerosol: crate::aerosol::AerosolDiagnostics,
     /// Where the sediment sits and how much of the sea level it makes up.
     pub sediment_reservoirs: SedimentReservoirs,
     /// Sediment moved by waves so far, in Gt.
@@ -539,10 +582,19 @@ impl Planet {
                 math::asin(tectonics.mesh().vertex(cell).z.clamp(-1.0, 1.0)).abs() <= tropics
             })
             .collect();
-        let escape = Escape::new(escape, tectonics.water_volume());
+        let mut escape = Escape::new(escape, tectonics.water_volume());
+        escape.start(tectonics.new_crust_by_rate());
+        // The start's forcing is that of all gases: the CO₂ makes up what the reduced gases
+        // (#202) do not give.
+        let start_forcing = temperature.greenhouse_forcing;
+        let start_gas_forcing = escape.gases().map_or(0.0, |gases| gases.initial_forcing());
         let mut carbon = CarbonCycle::new(
             carbon,
-            temperature.greenhouse_forcing,
+            if escape.gases().is_some() {
+                start_forcing - start_gas_forcing
+            } else {
+                start_forcing
+            },
             crate::carbon::ocean_mass(tectonics.ocean_volume()),
             4.0 * std::f64::consts::PI * planet_radius * planet_radius,
         );
@@ -559,7 +611,7 @@ impl Planet {
         );
         let open = open_sills(&erosion);
         let view = climate_elevations(tectonics.mesh(), &elevation, &seeds, open, None);
-        temperature.update(&view, None, None, tectonics.time());
+        temperature.update(&view, None, &[], None, tectonics.time());
         let cell_count = tectonics.mesh().len();
         let water = SurfaceWater::ocean_only(crate::sea::ocean_from(
             tectonics.mesh(),
@@ -576,6 +628,8 @@ impl Planet {
             deep_water_cells,
             escape,
             tropical_cells,
+            start_forcing,
+            held_co2_forcing: start_forcing - start_gas_forcing,
             erosion,
             planet_radius,
             precipitation: vec![0.0; cell_count],
@@ -628,6 +682,26 @@ impl Planet {
         self.carbon.holds_co2()
     }
 
+    /// The carbon cycle after the last step: CO₂ and its forcing (#154).
+    pub fn carbon_state(&self) -> &CarbonState {
+        self.carbon.state()
+    }
+
+    /// Whether the carbon cycle runs (else the CO₂ of the start stays).
+    pub fn carbon_cycle_enabled(&self) -> bool {
+        self.carbon.params().enabled
+    }
+
+    /// The escape after the last step (#210); `None` when it is off.
+    pub fn escape_state(&self) -> Option<&crate::escape::EscapeState> {
+        self.escape.params().enabled.then(|| self.escape.state())
+    }
+
+    /// The radius of the planet in m.
+    pub fn radius(&self) -> f64 {
+        self.planet_radius
+    }
+
     pub fn tectonics(&self) -> &Simulation {
         &self.tectonics
     }
@@ -674,6 +748,8 @@ impl Planet {
             lost,
             mantle_degassing: budget.mantle_degassing,
             initial: budget.initial + flows.initial / M,
+            reduced_gases: budget.reduced_gases,
+            held: budget.held,
             residual: 0.0,
             decarbonated_co2: (flows.decarbonated + collided) * CO2_MOLAR_MASS / M,
         };
@@ -685,7 +761,9 @@ impl Planet {
                 + partition.crust
                 + partition.to_mantle
                 - partition.mantle_degassing
-                - partition.initial,
+                - partition.initial
+                - partition.reduced_gases
+                - partition.held,
             ..partition
         }
     }
@@ -906,7 +984,7 @@ impl Planet {
             }
             StepPart::Temperature => {
                 let elevation = self.tectonics.surface_elevations();
-                // Ice sheets depend on last step's snowfall.
+                // Ice sheets and snow depend on last step's snowfall.
                 // The seas of this topography, for the climate and the erosion.
                 let seeds = crate::sea::ocean_seeds(
                     self.tectonics.mesh(),
@@ -923,10 +1001,13 @@ impl Planet {
                     .then_some(&self.water);
                 let view =
                     climate_elevations(self.tectonics.mesh(), &elevation, &seeds, open, lakes);
+                let open_lakes = lakes.is_some();
+                self.update_aerosol_sources(&view, step.dt);
                 self.temperature.update(
                     &view,
                     Some(&self.precipitation),
-                    lakes.map(|water| &water.lake_depth[..]),
+                    &self.climate.water_cycle().monthly_precipitation,
+                    open_lakes.then_some(&self.water.lake_depth[..]),
                     self.tectonics.time(),
                 );
                 (
@@ -1264,6 +1345,12 @@ impl Planet {
             self.carbon.tectonic_degassing(),
         ) {
             self.carbon.end_hold();
+            // The volcanic cloud nuclei of this degassing are Earth's (#204), as for φ.
+            let sources = self.temperature.aerosol_sources().calibrate(
+                &self.temperature.params().aerosol,
+                self.carbon.state().arc_plume_mantle_degassing,
+            );
+            self.temperature.set_aerosol_sources(sources);
             if holds_co2 {
                 info!(
                     phi = self.carbon.state().phi,
@@ -1470,6 +1557,45 @@ impl Planet {
         );
     }
 
+    /// The volcanic and dust sources of cloud nuclei for the step's climate (#204), from the
+    /// carbon cycle's degassing and the climate of the previous step on the climate's view of
+    /// the surface `elevation`: its land without lakes.
+    fn update_aerosol_sources(&mut self, elevation: &[f64], dt: f64) {
+        let params = &self.temperature.params().aerosol;
+        let fields = self.temperature.fields();
+        let state = self.carbon.state();
+        // None before the carbon cycle's first step.
+        let degassing = (state.ratio > 0.0).then_some(state.arc_plume_mantle_degassing);
+        let lake = |cell: usize| {
+            self.water
+                .lake_depth
+                .get(cell)
+                .is_some_and(|&depth| depth >= crate::temperature::LAKE_DEPTH)
+        };
+        let dust = (fields.annual_mean.len() == elevation.len()
+            && self.precipitation.len() == elevation.len())
+        .then(|| {
+            crate::aerosol::dust_source(
+                params,
+                (0..elevation.len())
+                    .filter(|&cell| elevation[cell] >= 0.0 && !lake(cell))
+                    .map(|cell| {
+                        (
+                            fields.annual_mean[cell],
+                            self.precipitation[cell],
+                            fields.ice[cell],
+                        )
+                    }),
+                elevation.len(),
+            )
+        });
+        let sources = self
+            .temperature
+            .aerosol_sources()
+            .advance(params, degassing, dust, dt);
+        self.temperature.set_aerosol_sources(sources);
+    }
+
     /// One step of the escape (#210) on the step's climate and CO₂: the water it loses is taken
     /// from the ocean, its O₂ meets the sinks of the step's tectonics and erosion (`land`).
     /// Nothing happens when it is off.
@@ -1500,10 +1626,34 @@ impl Planet {
             ocean_volume: self.tectonics.ocean_volume(),
             volcanic_degassing: self.carbon.state().arc_plume_mantle_degassing,
             new_crust: self.carbon.state().new_crust,
+            new_crust_by_rate: self.tectonics.new_crust_by_rate(),
             land,
         });
-        if volume > 0.0 {
+        if volume != 0.0 {
             self.tectonics.remove_water(volume);
+        }
+        if let Some(gases) = self.escape.gases() {
+            // The carbon of the CH₄ made and destroyed, and the forcing of the gases on top of
+            // the CO₂'s (which makes up their change while the CO₂ is held).
+            self.carbon.exchange(gases.carbon_returned());
+            let gas_forcing = gases.state().forcing();
+            let co2_forcing = if self.carbon.params().enabled {
+                let area = 4.0 * std::f64::consts::PI * self.planet_radius * self.planet_radius;
+                self.carbon.hold_forcing(
+                    self.start_forcing - gas_forcing,
+                    crate::carbon::ocean_mass(self.tectonics.ocean_volume()),
+                    area,
+                );
+                self.carbon.forcing()
+            } else {
+                // As the carbon cycle's hold: the CO₂ makes up the gases until the tectonics
+                // has settled, then stays.
+                if self.ramp_up.is_running() {
+                    self.held_co2_forcing = self.start_forcing - gas_forcing;
+                }
+                self.held_co2_forcing
+            };
+            self.temperature.params_mut().greenhouse_forcing = co2_forcing + gas_forcing;
         }
         debug!(time = %format_args!("{time:.1}"), "{}", self.escape.state().summary());
     }
@@ -1520,7 +1670,8 @@ impl Planet {
             .unzip()
     }
 
-    fn cell_area(&self) -> f64 {
+    /// Area of a cell in m² (the cells of the mesh have nearly equal areas).
+    pub fn cell_area(&self) -> f64 {
         4.0 * std::f64::consts::PI * self.planet_radius.powi(2) / self.tectonics.mesh().len() as f64
     }
 
@@ -1567,6 +1718,7 @@ impl Planet {
                 model.update(
                     &view,
                     Some(&self.precipitation),
+                    &self.climate.water_cycle().monthly_precipitation,
                     lakes.map(|water| &water.lake_depth[..]),
                     self.tectonics.time(),
                 );
@@ -1650,6 +1802,66 @@ impl Planet {
     /// [`crate::sea::ocean_from`]).
     pub fn open_sills(&self) -> bool {
         open_sills(&self.erosion)
+    }
+
+    fn snow_statistics(&self, ocean: &[bool], latitude: &dyn Fn(usize) -> f64) -> SnowStatistics {
+        let fields = self.temperature.fields();
+        let land: Vec<usize> = (0..ocean.len())
+            .filter(|&c| !ocean[c] && self.water.lake_depth[c] < crate::temperature::LAKE_DEPTH)
+            .collect();
+        let share = |cells: &[usize], test: &dyn Fn(usize) -> bool| {
+            cells.iter().filter(|&&c| test(c)).count() as f64 / cells.len().max(1) as f64
+        };
+        let mut stats = SnowStatistics::default();
+        let north: Vec<usize> = land
+            .iter()
+            .copied()
+            .filter(|&c| latitude(c) >= 0.0)
+            .collect();
+        let south: Vec<usize> = land
+            .iter()
+            .copied()
+            .filter(|&c| latitude(c) < 0.0)
+            .collect();
+        if fields.monthly_snow.len() == 12 {
+            let mean = |cells: &[usize], month: usize| {
+                cells
+                    .iter()
+                    .map(|&c| fields.monthly_snow[month][c])
+                    .sum::<f64>()
+                    / cells.len().max(1) as f64
+            };
+            for (slot, month) in [0, 3, 6, 9].into_iter().enumerate() {
+                stats.cover_north[slot] = mean(&north, month);
+                stats.cover_south[slot] = mean(&south, month);
+            }
+        }
+        let perennial = |c: usize| fields.perennial_snow.get(c).is_some_and(|&p| p > 0.5);
+        let sheet = |c: usize| fields.ice_sheet.get(c).is_some_and(|&i| i > 0.5);
+        stats.perennial = share(&land, &perennial);
+        stats.ice_sheet_only = share(&land, &|c| sheet(c) && !perennial(c));
+        stats.perennial_only = share(&land, &|c| perennial(c) && !sheet(c));
+        stats.radiative_effect = fields.snow_radiative_effect;
+        let cell_area = self.cell_area();
+        let to_km3 = cell_area / 1e9;
+        stats.storage = fields.snow.iter().sum::<f64>() * to_km3;
+        let ocean_area = ocean.iter().filter(|&&o| o).count() as f64 * cell_area;
+        stats.storage_sea_level = stats.storage * 1e9 / ocean_area.max(1.0);
+        let budget = &fields.snow_budget;
+        let years = budget.years.max(1) as f64;
+        stats.snowfall = budget.snowfall * to_km3 / years;
+        stats.melt = budget.melt * to_km3 / years;
+        stats.overflow = budget.overflow * to_km3 / years;
+        if fields.monthly.len() == 12 {
+            let frozen: Vec<usize> = land
+                .iter()
+                .copied()
+                .filter(|&c| fields.monthly.iter().all(|month| month[c] < 0.0))
+                .collect();
+            stats.frozen_summer_land = frozen.len() as f64 / land.len().max(1) as f64;
+            stats.frozen_summer_without_ice = share(&frozen, &|c| fields.ice[c] < 0.5);
+        }
+        stats
     }
 
     pub fn statistics(&self) -> PlanetStatistics {
@@ -1737,6 +1949,9 @@ impl Planet {
             },
             frozen_fraction: all().filter(|&c| fields.ice[c] > 0.5).count() as f64
                 / elevation.len() as f64,
+            snow: self.snow_statistics(&ocean, &latitude),
+            planetary_albedo: fields.planetary_albedo,
+            aerosol: fields.aerosol,
             tectonics: self.tectonics.statistics(),
             mean_land_precipitation,
             midlatitude_land_precipitation,

@@ -2,6 +2,7 @@
 // native build still checks for dead code.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+mod aerosol;
 mod carbon;
 mod carbonate;
 mod climate;
@@ -20,6 +21,7 @@ mod presets;
 #[cfg(any(test, target_arch = "wasm32"))]
 mod query;
 mod ramp_up;
+mod reduced;
 mod render;
 mod sea;
 mod sparse;
@@ -51,14 +53,15 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::erosion::WaveErosion;
+use crate::isostasy::{ARC_DENSITY, OCEANIC_DENSITY};
 use crate::planet::{
     CoverCohort, CoverExport, CoverTurnover, EXPORT_DESTINATIONS, Planet, PlanetStatistics,
 };
 use crate::presets::{Biosphere, Epoch, Parameters};
 use crate::sphere::SphereMesh;
 use crate::tectonics::{
-    CoverBudget, CoverTerm, InitialConfiguration, MassLedger, MaterialBudget, SeaLevelBudget,
-    Simulation, TrenchSediment,
+    CoverBudget, CoverTerm, InitialConfiguration, MassLedger, MaterialBudget, PLUME_CRUST_DENSITY,
+    SeaLevelBudget, Simulation, TrenchSediment,
 };
 
 /// The planet radius in metres; used for erosion, climate and to report linear speeds.
@@ -137,6 +140,13 @@ struct Cli {
     /// fast in a moist greenhouse; the ocean and the sea level fall, the oxygen stays behind.
     #[arg(long)]
     no_escape: bool,
+
+    /// Leave out the reduced gases (#202): by default volcanoes (with the mantle's redox state)
+    /// and the serpentinization of slowly spreading sea floor release H₂ and a little CH₄,
+    /// which meet the O₂, escape to space and add their greenhouse forcing. They need the
+    /// escape, so `--no-escape` also leaves them out.
+    #[arg(long)]
+    no_reduced_gases: bool,
 
     /// Start with a bare planet instead of an initial sediment cover.
     #[arg(long)]
@@ -416,8 +426,9 @@ fn run_simulation_thread(
         let fields_built = start.elapsed() - cells_built;
         let time = planet.tectonics().time();
         let plates = viewer::plate_infos(planet);
+        let global = viewer::GlobalStatus::of(planet, &cells, &plates);
         // The frame of the history, here rather than in the view (#174).
-        let frame = encoder.encode(time, &cells, &plates);
+        let frame = encoder.encode(time, global, &cells, &plates);
         debug!(
             ?cells_built,
             ?fields_built,
@@ -434,7 +445,7 @@ fn run_simulation_thread(
             mesh: std::mem::take(&mut first_update).then(|| Arc::new(MeshUpdate::of(planet))),
             step_seconds: step_time.map(|time| time.as_secs_f64()),
             fields,
-            global: viewer::GlobalStatus::of(planet),
+            global,
         };
         // Sending fails once the view started another simulation or was closed.
         if events.send(SimulationEvent::Surface(update)).is_err() {
@@ -589,6 +600,7 @@ impl Cli {
         params.breakup.diagnose = self.plate_log.is_some();
         parameters.carbon.enabled = !self.no_carbon_cycle;
         parameters.escape.enabled = !self.no_escape;
+        parameters.escape.gases.enabled = !self.no_reduced_gases;
         let mut overrides = Vec::with_capacity(self.overrides.len());
         for assignment in &self.overrides {
             let (name, value) = assignment
@@ -870,6 +882,62 @@ impl Run {
     fn log_finished(&self) {
         info!("Finished in {:.1?}", self.start.elapsed());
     }
+}
+
+/// Logs the magmatic volume rates by source since the last snapshot (#106): new sea floor at
+/// ridges, arc crust, LIPs and plume tails (km³/yr of crust, gross), and the LIPs emplaced.
+fn log_magmatism(
+    statistics: &tectonics::Statistics,
+    previous: &MassLedger,
+    previous_time: f64,
+    cell_area: f64,
+    years: f64,
+) {
+    let ledger = &statistics.ledger;
+    let rate =
+        |now: f64, before: f64, density: f64| (now - before) * cell_area / density / 1e9 / years;
+    let lips: Vec<_> = statistics
+        .volcanism
+        .lips
+        .iter()
+        .filter(|lip| lip.time > previous_time)
+        .collect();
+    let volumes: Vec<String> = lips
+        .iter()
+        .map(|lip| {
+            format!(
+                "{:.1e}{}",
+                lip.volume,
+                if lip.continental {
+                    " (continental)"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect();
+    info!(
+        "    magmatism (km³/yr): ridges {:.2}, arcs {:.2}, LIPs {:.3}, plume tails {:.3} | {} LIPs \
+         since the last snapshot{}{} | {} LIPs so far, {:.2e} km³ LIP and {:.2e} km³ tail crust",
+        rate(
+            ledger.new_sea_floor,
+            previous.new_sea_floor,
+            OCEANIC_DENSITY
+        ),
+        rate(ledger.arcs, previous.arcs, ARC_DENSITY),
+        rate(ledger.lips, previous.lips, PLUME_CRUST_DENSITY),
+        rate(
+            ledger.plume_tails,
+            previous.plume_tails,
+            PLUME_CRUST_DENSITY
+        ),
+        lips.len(),
+        if lips.is_empty() { "" } else { " (km³): " },
+        volumes.join(", "),
+        statistics.volcanism.lips.len(),
+        statistics.volcanism.lip_volume,
+        statistics.volcanism.tail_volume,
+    );
 }
 
 fn snapshot(
@@ -1265,6 +1333,7 @@ fn snapshot(
             .map(|(name, rate)| format!("{name} {rate:+.2}"))
             .collect();
         info!("    crust mass budget (Gt/yr): {}", rates.join(", "));
+        log_magmatism(statistics, previous, *previous_time, cell_area, years);
         let trench = &statistics.trench_sediment;
         let arrived: f64 = trench.by_thickness.iter().sum::<f64>()
             - previous_trench.by_thickness.iter().sum::<f64>();
@@ -1454,6 +1523,17 @@ fn snapshot(
         100.0 * sharing.kept / sharing.gross.max(1e-30),
         sharing.clamped,
     );
+    let rates = simulation.shared_sample_rates();
+    info!(
+        "    duplicated samples act once so far: crustal flow {:.2}% of the per-cell request \
+         ({:.3e} kg/m² per cell) | subduction erosion {:.0} events, {:.2}% on the eroded samples, \
+         {:.2}% on their neighbours",
+        100.0 * rates.flow_per_sample / rates.flow_per_cell.max(1e-30),
+        rates.flow_per_cell,
+        rates.erosion_events,
+        100.0 * rates.erosion_per_sample / rates.erosion_events.max(1e-30),
+        100.0 * rates.erosion_to_neighbours / rates.erosion_events.max(1e-30),
+    );
     info!(
         "    land masses {} ({} specks, largest {:.0}%) | continental crust masses {} ({} specks, \
          largest {:.0}%)",
@@ -1561,13 +1641,15 @@ fn snapshot(
     );
     info!(
         "    temperature global {:5.1} °C, equator {:5.1} °C, poles {:6.1} °C | \
-         land seasonal range {:4.1} K | permanently frozen {:4.1}% | heat transport {:+.1}/{:+.1} PW \
-         (ocean at 20°N {:+.1}, 20°S {:+.1}) | gyres {:.0} Sv | solar constant {:.1} W/m²",
+         land seasonal range {:4.1} K | permanently frozen {:4.1}% | planetary albedo {:.4} | heat \
+         transport {:+.1}/{:+.1} PW (ocean at 20°N {:+.1}, 20°S {:+.1}) | gyres {:.0} Sv | solar \
+         constant {:.1} W/m²",
         planet_statistics.global_temperature,
         planet_statistics.equatorial_temperature,
         planet_statistics.polar_temperature,
         planet_statistics.land_seasonal_range,
         100.0 * planet_statistics.frozen_fraction,
+        planet_statistics.planetary_albedo,
         planet_statistics.heat_transport[0],
         planet_statistics.heat_transport[1],
         planet_statistics.heat_transport[2],
@@ -1575,7 +1657,35 @@ fn snapshot(
         planet_statistics.gyre_transport,
         planet_statistics.solar_constant,
     );
+    let snow = &planet_statistics.snow;
+    info!(
+        "    snow on land: cover north Jan/Apr/Jul/Oct {:.1}/{:.1}/{:.1}/{:.1}%, south \
+         {:.1}/{:.1}/{:.1}/{:.1}% | perennial {:.1}% of land (ice sheet without it {:.1}%, \
+         it without ice sheet {:.1}%) | reflects {:.2} W/m² | stored {:.0} km³ ({:.3} m of sea \
+         level), snowfall {:.0}, melt {:.0}, glacier flow {:.0} km³/yr | warmest month < 0 °C \
+         on {:.1}% of land, {:.0}% of it with ice < 0.5",
+        100.0 * snow.cover_north[0],
+        100.0 * snow.cover_north[1],
+        100.0 * snow.cover_north[2],
+        100.0 * snow.cover_north[3],
+        100.0 * snow.cover_south[0],
+        100.0 * snow.cover_south[1],
+        100.0 * snow.cover_south[2],
+        100.0 * snow.cover_south[3],
+        100.0 * snow.perennial,
+        100.0 * snow.ice_sheet_only,
+        100.0 * snow.perennial_only,
+        snow.radiative_effect,
+        snow.storage,
+        snow.storage_sea_level,
+        snow.snowfall,
+        snow.melt,
+        snow.overflow,
+        100.0 * snow.frozen_summer_land,
+        100.0 * snow.frozen_summer_without_ice,
+    );
     info!("    {}", planet_statistics.carbon.summary());
+    info!("    {}", planet_statistics.aerosol.summary());
     if let Some(escape) = &planet_statistics.escape {
         info!("    {}", escape.summary());
     }
@@ -2005,8 +2115,9 @@ fn log_carbonate(planet: &Planet, previous: &CarbonateSnapshot, years: f64) {
     info!(
         "    carbon reservoirs (10¹⁸ mol): exogenic {:.3}, sediment carbonate {:.3}, altered sea \
          floor {:.3}, in crust (marble, wedges) {:.3}, source buffers {:.4} | since the start: \
-         from the mantle {:.3}, into the mantle {:.3} (lost with crust {:.4}), decarbonation CO₂ \
-         {:.3e} kg | closure residual {:.2e} mol ({:.1e} of the reservoirs)",
+         from the mantle {:.3}, into the mantle {:.3} (lost with crust {:.4}), reduced gases \
+         {:.4}, CO₂ hold {:.4}, decarbonation CO₂ {:.3e} kg | closure residual {:.2e} mol ({:.1e} \
+         of the reservoirs)",
         e18(p.exogenic),
         e18(p.sediment),
         e18(p.altered_crust),
@@ -2015,6 +2126,8 @@ fn log_carbonate(planet: &Planet, previous: &CarbonateSnapshot, years: f64) {
         e18(p.mantle_degassing),
         e18(p.to_mantle),
         e18(p.lost),
+        e18(p.reduced_gases),
+        e18(p.held),
         p.decarbonated_co2,
         p.residual,
         p.residual / (p.exogenic + p.sediment + p.altered_crust.abs() + p.crust).max(1e-30),

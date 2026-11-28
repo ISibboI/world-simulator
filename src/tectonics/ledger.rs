@@ -20,6 +20,11 @@ pub struct MassLedger {
     pub new_sea_floor: f64,
     /// New arc crust above subducting slabs (+).
     pub arcs: f64,
+    /// Crust of large igneous provinces emplaced by arriving plume heads (+; see
+    /// `volcanism`).
+    pub lips: f64,
+    /// Crust added by plume tails (hotspot tracks, +).
+    pub plume_tails: f64,
     /// Subducted oceanic crust (−).
     pub subducted_oceanic: f64,
     /// Subducted transitional crust: thickened arc crust or thinned continental crust (−).
@@ -72,6 +77,8 @@ pub struct MassLedger {
 pub(super) enum Term {
     NewSeaFloor,
     Arcs,
+    Lips,
+    PlumeTails,
     SubductedOceanic,
     SubductedTransitional,
     SubductedSediment,
@@ -104,6 +111,8 @@ impl MassLedger {
         let field = match term {
             Term::NewSeaFloor => &mut self.new_sea_floor,
             Term::Arcs => &mut self.arcs,
+            Term::Lips => &mut self.lips,
+            Term::PlumeTails => &mut self.plume_tails,
             Term::SubductedOceanic => &mut self.subducted_oceanic,
             Term::SubductedTransitional => &mut self.subducted_transitional,
             Term::SubductedSediment => &mut self.subducted_sediment,
@@ -142,10 +151,12 @@ impl MassLedger {
     }
 
     /// The terms with their names, for reporting.
-    pub fn terms(&self) -> [(&'static str, f64); 20] {
+    pub fn terms(&self) -> [(&'static str, f64); 22] {
         [
             ("new sea floor", self.new_sea_floor),
             ("arcs", self.arcs),
+            ("LIPs", self.lips),
+            ("plume tails", self.plume_tails),
             ("subducted oceanic", self.subducted_oceanic),
             ("subducted transitional", self.subducted_transitional),
             ("subducted sediment", self.subducted_sediment),

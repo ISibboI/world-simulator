@@ -409,6 +409,19 @@ fn swatch_symbol(ui: &mut egui::Ui, swatch: &Swatch, size: f32) {
             painter.line_segment(ends, egui::Stroke::new(line_width + 2.0, dark));
             painter.line_segment(ends, egui::Stroke::new(line_width, color));
         }
+        SwatchShape::Triangle => {
+            let center = rect.center();
+            let half = 0.45 * size;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(center.x - half, center.y + 0.8 * half),
+                    egui::pos2(center.x + half, center.y + 0.8 * half),
+                    egui::pos2(center.x, center.y - half),
+                ],
+                color,
+                egui::Stroke::new(1.5, egui::Color32::from_gray(235)),
+            ));
+        }
         SwatchShape::Dots => {
             painter.rect_filled(rect, 2.0, color);
             let step = size / 3.0;
