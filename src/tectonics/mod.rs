@@ -723,6 +723,7 @@ fn apply_surface_change(
     thickness: f64,
     sediment: f64,
     cover: &mut CoverBudget,
+    carbonate: &mut f64,
 ) -> (f64, f64) {
     let column = *crust;
     let before = crust.mass();
@@ -741,6 +742,8 @@ fn apply_surface_change(
     // Erosion removes crust from the top; deposition never adds crystalline crust.
     crust.thin_from_top(new_thickness.max(0.0));
     cover.record_change(CoverTerm::Surface, &column, crust);
+    // The carbonate removed with the sediment (#200; deposits carry none).
+    *carbonate += (crust.carbonate() - column.carbonate()) * SEDIMENT_ROCK_DENSITY;
     (crust.mass() - before, expected)
 }
 
@@ -1824,7 +1827,7 @@ impl Simulation {
         predicted: SurfaceSeaLevel,
     ) {
         let before = self.felsic_and_sediment();
-        let carbonate_before = ledger::plates_carbonate(&self.plates);
+        let mut carbonate_change = 0.0;
         let cell_count = self.mesh.len();
         // Per shown sample: owner, cells showing it, one of them, summed thickness and sediment
         // changes.
@@ -1882,8 +1885,13 @@ impl Simulation {
                 residual[if sediment_mass > 0.0 { 1 } else { 2 }] += sediment_mass;
                 extra_cells[plate][class] += sample.cells - 1;
             }
-            let (applied, expected) =
-                apply_surface_change(crust, thickness, sediment, &mut self.cover_budget);
+            let (applied, expected) = apply_surface_change(
+                crust,
+                thickness,
+                sediment,
+                &mut self.cover_budget,
+                &mut carbonate_change,
+            );
             change += applied;
             clamped += (expected - applied).abs();
         }
@@ -2000,6 +2008,7 @@ impl Simulation {
                         parts[0] * share[0] / crust.density,
                         (parts[1] * share[1] + parts[2] * share[2]) / SEDIMENT_ROCK_DENSITY,
                         &mut self.cover_budget,
+                        &mut carbonate_change,
                     );
                     change += applied;
                     clamped += (expected - applied).abs();
@@ -2028,6 +2037,7 @@ impl Simulation {
                         sample.bedrock_mass * keep[0] / crust.density,
                         sediment_mass * sediment_keep / SEDIMENT_ROCK_DENSITY,
                         &mut self.cover_budget,
+                        &mut carbonate_change,
                     );
                     change += applied;
                     clamped += (expected - applied).abs();
@@ -2050,7 +2060,7 @@ impl Simulation {
         self.ledger.record(ledger::Term::SurfaceProcesses, change);
         // The carbonate the surface processes removed (#200): before the metamorphism below,
         // which counts its own.
-        self.carbonate.surface += ledger::plates_carbonate(&self.plates) - carbonate_before;
+        self.carbonate.surface += carbonate_change;
         let after = self.felsic_and_sediment();
         self.material_budget.surface.0 += after.0 - before.0;
         self.material_budget.surface.1 += after.1 - before.1;

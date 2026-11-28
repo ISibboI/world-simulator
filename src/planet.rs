@@ -1369,24 +1369,25 @@ impl Planet {
             group_cells.iter().map(|&c| value(c as usize)).sum::<f64>()
                 / group_cells.len().max(1) as f64
         };
-        let mut caps: Vec<f64> = (0..groups)
+        let clastic: Vec<f64> = (0..groups)
             .map(|group| simulation.surface_crust(cells[group][0]).clastic())
             .collect();
+        let mut caps = clastic.clone();
         let mut removal = vec![0.0; groups];
         let mut left = target;
         for pass in 0..3 {
             if left <= 0.0 || (deposits.is_empty() && pass < 2) {
                 continue;
             }
-            let weight = |cell: usize| -> f64 {
-                match pass {
-                    0 if ocean[cell] => deposits[cell],
-                    1 => deposits[cell],
-                    2 if ocean[cell] => simulation.surface_crust(cell as u32).clastic(),
-                    _ => 0.0,
-                }
-            };
-            let weights: Vec<f64> = (0..groups).map(|group| mean(group, &weight)).collect();
+            let weights: Vec<f64> = (0..groups)
+                .map(|group| match pass {
+                    0 => mean(group, &|cell| {
+                        if ocean[cell] { deposits[cell] } else { 0.0 }
+                    }),
+                    1 => mean(group, &|cell| deposits[cell]),
+                    _ => mean(group, &|cell| f64::from(u8::from(ocean[cell]))) * clastic[group],
+                })
+                .collect();
             let taken = carbonate::capped_fill(&weights, &caps, left);
             for ((removal, cap), taken) in removal.iter_mut().zip(&mut caps).zip(taken) {
                 *removal += taken;

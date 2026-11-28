@@ -28,7 +28,7 @@ const ZERO_CELSIUS: f64 = 273.15;
 /// Freezing point of sea water in °C.
 const SEA_WATER_FREEZING: f64 = -1.8;
 /// Bisection steps of the level solves (fixed, for determinism).
-const ITERATIONS: usize = 100;
+const ITERATIONS: usize = 64;
 
 /// Parameters of the precipitation (part of [`crate::carbon::CarbonParams`]).
 #[derive(Clone, Debug)]
