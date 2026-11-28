@@ -432,6 +432,10 @@ mod tests {
                 Kind::Continental => CellInfo::CONTINENTAL,
             },
             drainage: CellInfo::NO_RECEIVER,
+            seismicity: 0.0,
+            magma_supply: 0.0,
+            eruptions: 0.0,
+            activity: 0,
         }
     }
 
