@@ -18,7 +18,7 @@ use super::{CellInfo, PlateInfo};
 use crate::planet::Planet;
 
 /// The `f32` values of [`GlobalStatus::to_bytes`].
-const FLOATS: usize = 19;
+const FLOATS: usize = 20;
 
 /// The global state of a state of the planet (see the module documentation). Means over cells
 /// are area-weighted, since the cells of the mesh have nearly equal areas.
@@ -74,6 +74,8 @@ pub struct GlobalStatus {
     /// (km³/yr, intrusions included), the sums of the cells' (#110).
     pub seismic_moment: f32,
     pub magma_supply: f32,
+    /// Its erupted share (km³/yr).
+    pub eruptions: f32,
 }
 
 impl GlobalStatus {
@@ -108,6 +110,7 @@ impl GlobalStatus {
             sums.continental += usize::from(cell.is_continental());
             sums.seismic += f64::from(cell.seismicity);
             sums.magma += f64::from(cell.magma_supply);
+            sums.eruptions += f64::from(cell.eruptions);
             if let Some(plate) = plates.get(cell.plate as usize) {
                 plate_cells[cell.plate as usize] += 1;
                 let rotation = glam::Vec3::from(plate.rotation).as_dvec3();
@@ -153,6 +156,7 @@ impl GlobalStatus {
             // N·m yr⁻¹ km⁻² × km²; mm/yr × km² = 10⁻⁶ km³/yr.
             seismic_moment: (sums.seismic * cell_area / 1e6) as f32,
             magma_supply: (sums.magma * cell_area / 1e6 * 1e-6) as f32,
+            eruptions: (sums.eruptions * cell_area / 1e6 * 1e-6) as f32,
         }
     }
 
@@ -210,6 +214,7 @@ impl GlobalStatus {
             oxygen: float(16),
             seismic_moment: float(17),
             magma_supply: float(18),
+            eruptions: float(19),
             plates: count(0),
             large_plates: count(1),
         })
@@ -237,6 +242,7 @@ impl GlobalStatus {
             self.oxygen,
             self.seismic_moment,
             self.magma_supply,
+            self.eruptions,
         ]
     }
 
@@ -652,6 +658,17 @@ fn planet_rows(ui: &mut egui::Ui, view: &PlanetView, narrow: bool) {
             );
             spark(ui, |g| g.magma_supply);
             ui.end_row();
+            row(
+                ui,
+                "Eruptions",
+                value(global.eruptions, |rate| format!("{rate:.1} km³/yr")),
+                "Estimated long-term eruption rate: the share of the magma supply that reaches \
+                 the surface (about a seventh at ridges, a sixth at arcs, a third at oceanic \
+                 hotspots, half in large igneous provinces). Earth: about 3–4 km³/yr, most of \
+                 it unseen on the sea floor at the ridges.",
+            );
+            spark(ui, |g| g.eruptions);
+            ui.end_row();
         });
 }
 
@@ -767,6 +784,7 @@ struct Sums {
     /// Seismic moment rate (N·m yr⁻¹ km⁻²) and magma supply (mm/yr) summed over the cells.
     seismic: f64,
     magma: f64,
+    eruptions: f64,
 }
 
 /// A sum and a count.
@@ -818,6 +836,7 @@ pub(super) fn example() -> GlobalStatus {
         oxygen: 2e-9,
         seismic_moment: 8.5e21,
         magma_supply: 21.3,
+        eruptions: 3.6,
     }
 }
 

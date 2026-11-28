@@ -112,19 +112,25 @@ fn deformation_coupling(continental: bool, strain_rate: f64, dilatation: f64) ->
 /// lithosphere melts far less until it has thinned by a factor of 2–3 (McKenzie & Bickle 1988).
 const RIFT_MELT_SHARE: f64 = 0.1;
 
-/// Magma supply of a plume (m³/yr per m²/s of plume flux) under no lid; the constants of the
-/// plume tails of #106's plan, so that the estimate matches what #106 emplaces.
-const PLUME_MAGMA_PER_FLUX: f64 = 1e11;
-/// Depth (m) at which the hot plume head starts to melt, and the thermal lid of oceanic
-/// lithosphere: z = min(2.32 √(κ t), 95 km), κ = 10⁻⁶ m²/s; lithosphere of continental
-/// origin: 130 km.
-const PLUME_MELT_DEPTH: f64 = 180e3;
-const MAX_OCEANIC_LID: f64 = 95e3;
-const CONTINENTAL_LID: f64 = 130e3;
-const DIFFUSIVITY: f64 = 1e-6;
-/// Standard deviation and cut-off (m) of the footprint of a hotspot's magma.
-const PLUME_FOOTPRINT: f64 = 150e3;
-const PLUME_CUTOFF: f64 = 400e3;
+/// Duration (Myr) of the main pulse of a large igneous province, over which its volume is shown
+/// as a rate: LIPs emplace most (≥ 75 %) of their volume within 1–5 Myr (Bryan & Ernst 2008);
+/// the model emplaces each in one step.
+const LIP_PULSE: f64 = 3.0;
+
+/// Erupted (extrusive) share of the magma supply per setting, 1 / (1 + I/E) with the
+/// intrusive-to-extrusive ratio I/E (Crisp 1984; White, Crisp & Spera 2006):
+/// - ridges: I/E ≈ 6 (oceanic crust is ~1 km of lavas over ~6 km of dikes and gabbro);
+/// - arcs: I/E ≈ 5;
+/// - oceanic hotspots (islands, seamounts): I/E ≈ 2; hotspots under continents: I/E ≈ 10, as
+///   continental magmatism generally (most magma stalls in the thick crust);
+/// - continental rifts: I/E ≈ 10;
+/// - large igneous provinces: mostly extrusive (flood basalts, plateau lavas), I/E ≈ 1 assumed
+///   for the province with its sills and underplate.
+const RIDGE_ERUPTED: f64 = 1.0 / 7.0;
+const ARC_ERUPTED: f64 = 1.0 / 6.0;
+const OCEANIC_HOTSPOT_ERUPTED: f64 = 1.0 / 3.0;
+const CONTINENTAL_ERUPTED: f64 = 1.0 / 11.0;
+const LIP_ERUPTED: f64 = 0.5;
 
 /// What causes most of the earthquakes of a cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -192,17 +198,20 @@ pub enum VolcanicSource {
     Hotspot = 3,
     /// A continental rift.
     Rift = 4,
+    /// A large igneous province (a plume head), during its main pulse.
+    Lip = 5,
 }
 
 impl VolcanicSource {
-    pub const ALL: [VolcanicSource; 4] = [
+    pub const ALL: [VolcanicSource; 5] = [
         VolcanicSource::Arc,
         VolcanicSource::Ridge,
         VolcanicSource::Hotspot,
         VolcanicSource::Rift,
+        VolcanicSource::Lip,
     ];
 
-    /// The source of a code (1 to 4), `None` for 0 and unknown codes.
+    /// The source of a code (1 to 5), `None` for 0 and unknown codes.
     pub fn from_code(code: u8) -> Option<Self> {
         Self::ALL.get(usize::from(code).checked_sub(1)?).copied()
     }
@@ -218,6 +227,7 @@ impl VolcanicSource {
             VolcanicSource::Ridge => "ridge",
             VolcanicSource::Hotspot => "hotspot",
             VolcanicSource::Rift => "rift",
+            VolcanicSource::Lip => "large igneous province",
         }
     }
 }
@@ -233,6 +243,10 @@ pub struct Activity {
     pub magma: Vec<f64>,
     /// Its largest contribution, if there is any.
     pub volcanic_source: Vec<Option<VolcanicSource>>,
+    /// Eruption rate per area in mm/yr: the erupted (extrusive) share of the magma supply.
+    pub eruptions: Vec<f64>,
+    /// Its largest contribution, if there is any.
+    pub eruption_source: Vec<Option<VolcanicSource>>,
 }
 
 /// Contributions of the sources of one cell.
@@ -309,20 +323,6 @@ fn strike_slip_coupling(class: BoundaryClass, continental: bool, speed: f64) -> 
     }
 }
 
-/// The lid factor of plume melting under lithosphere `crust` at the simulated time `time`:
-/// ((Z − z_L) / Z)², 0 to 1 (White & McKenzie 1989; Ellam 1992).
-fn lid_factor(crust: &Crust, time: f64) -> f64 {
-    let lid = if crust.is_continental_origin() {
-        CONTINENTAL_LID
-    } else {
-        let age = crust.age(time).max(0.0) * 1e6 * SECONDS_PER_YEAR;
-        (2.32 * (DIFFUSIVITY * age).sqrt()).min(MAX_OCEANIC_LID)
-    };
-    ((PLUME_MELT_DEPTH - lid) / PLUME_MELT_DEPTH)
-        .max(0.0)
-        .powi(2)
-}
-
 impl Simulation {
     /// The seismic and volcanic activity of every cell (see the module documentation), with
     /// the boundaries as [`Simulation::boundary_map`] classifies them.
@@ -336,7 +336,13 @@ impl Simulation {
         let area = 4.0 * std::f64::consts::PI * radius * radius / count.max(1) as f64;
         let area_km2 = area / 1e6;
         let mut seismic = vec![Contributions::<7>::ZERO; count];
-        let mut magma = vec![Contributions::<4>::ZERO; count];
+        let mut magma = vec![Contributions::<5>::ZERO; count];
+        let mut eruptions = vec![Contributions::<5>::ZERO; count];
+        // Adds `supply` mm/yr of magma of `source` to a cell, `erupted` of it erupting.
+        let mut add_magma = |cell: usize, source: VolcanicSource, supply: f64, erupted: f64| {
+            magma[cell].0[source as usize - 1] += supply;
+            eruptions[cell].0[source as usize - 1] += supply * erupted;
+        };
         let crusts: Vec<Crust> = (0..count as u32)
             .map(|cell| self.surface_crust(cell))
             .collect();
@@ -373,16 +379,20 @@ impl Simulation {
             // (Trenches and collisions that open slightly, see `normal_coupling`, get none.)
             if opening > 0.0 {
                 let volume = opening * OCEANIC_THICKNESS * share;
-                let (volume, source) = match class {
-                    BoundaryClass::Ridge => (volume, VolcanicSource::Ridge),
-                    BoundaryClass::Rift => (volume * RIFT_MELT_SHARE, VolcanicSource::Rift),
-                    BoundaryClass::OtherDivergent if continental => {
-                        (volume * RIFT_MELT_SHARE, VolcanicSource::Rift)
-                    }
-                    BoundaryClass::OtherDivergent => (volume, VolcanicSource::Ridge),
-                    _ => (0.0, VolcanicSource::Ridge),
+                let ridge = (volume, VolcanicSource::Ridge, RIDGE_ERUPTED);
+                let rift = (
+                    volume * RIFT_MELT_SHARE,
+                    VolcanicSource::Rift,
+                    CONTINENTAL_ERUPTED,
+                );
+                let (volume, source, erupted) = match class {
+                    BoundaryClass::Ridge => ridge,
+                    BoundaryClass::Rift => rift,
+                    BoundaryClass::OtherDivergent if continental => rift,
+                    BoundaryClass::OtherDivergent => ridge,
+                    _ => (0.0, VolcanicSource::Ridge, 0.0),
                 };
-                magma[cell].0[source as usize - 1] += volume / area * 1e3;
+                add_magma(cell, source, volume / area * 1e3, erupted);
             }
         }
 
@@ -426,48 +436,90 @@ impl Simulation {
             }
             let volume = convergence * self.params.arc_crust_per_subduction * spacing;
             for &(cell, ring) in &reached {
-                magma[cell as usize].0[VolcanicSource::Arc as usize - 1] +=
-                    volume * profile[ring] / total / area * 1e3;
+                add_magma(
+                    cell as usize,
+                    VolcanicSource::Arc,
+                    volume * profile[ring] / total / area * 1e3,
+                    ARC_ERUPTED,
+                );
             }
         }
 
-        // Hotspots: each plume's magma as a Gaussian around it, scaled by the lid of the
-        // lithosphere above it.
-        let cutoff = PLUME_CUTOFF / radius;
-        let mut weights: Vec<(usize, f64)> = Vec::new();
-        for plume in self.plumes() {
-            let flux = plume.flux();
-            if flux <= 0.0 {
-                continue;
-            }
-            let above = (0..count)
-                .max_by(|&a, &b| {
-                    let position = |cell: usize| mesh.vertex(cell as u32).dot(plume.position);
-                    position(a).total_cmp(&position(b))
-                })
-                .unwrap_or(0);
-            let volume = PLUME_MAGMA_PER_FLUX * flux * lid_factor(&crusts[above], time);
-            if volume <= 0.0 {
-                continue;
-            }
-            weights.clear();
-            for cell in 0..count {
-                let chord = mesh.vertex(cell as u32).distance(plume.position);
-                if chord <= cutoff {
-                    let distance = chord * radius;
-                    let weight = crate::math::exp(
-                        -0.5 * (distance / PLUME_FOOTPRINT) * (distance / PLUME_FOOTPRINT),
+        // Plumes, as the volcanism emplaces them (see `Simulation::volcanism_step`): the tail
+        // of every plume whose head has arrived, scaled by the lid of the lithosphere above it,
+        // and the large igneous provinces of the last `LIP_PULSE` Myr, each as a Gaussian
+        // around the plume.
+        let volcanism = &self.params.volcanism;
+        let mut footprint =
+            |centre: glam::DVec3, width: f64, volume: f64, source: VolcanicSource, erupted: f64| {
+                // Chord distances on the unit sphere, cut at 2.5 σ, normalised over the cells.
+                let sigma = width / radius;
+                let cutoff = (2.5 * sigma).min(2.0);
+                let weights: Vec<(usize, f64)> = (0..count)
+                    .filter_map(|cell| {
+                        let chord = mesh.vertex(cell as u32).distance(centre);
+                        (chord <= cutoff)
+                            .then(|| (cell, crate::math::exp(-0.5 * (chord / sigma).powi(2))))
+                    })
+                    .collect();
+                let total: f64 = weights.iter().map(|&(_, weight)| weight).sum();
+                if total <= 0.0 {
+                    let cell = mesh.nearest(centre) as usize;
+                    add_magma(cell, source, volume / area * 1e3, erupted);
+                    return;
+                }
+                for &(cell, weight) in &weights {
+                    add_magma(cell, source, volume * weight / total / area * 1e3, erupted);
+                }
+            };
+        if volcanism.enabled {
+            for plume in self.plumes() {
+                if plume.age < volcanism.lip_age {
+                    continue;
+                }
+                let crust = &crusts[mesh.nearest(plume.position) as usize];
+                // km³/Myr → m³/yr.
+                let volume = volcanism.tail_volume_flux
+                    * plume.flux()
+                    * super::volcanism::lid_factor(volcanism, crust, time)
+                    * 1e3;
+                if volume > 0.0 {
+                    let erupted = if crust.is_continental_origin() {
+                        CONTINENTAL_ERUPTED
+                    } else {
+                        OCEANIC_HOTSPOT_ERUPTED
+                    };
+                    footprint(
+                        plume.position,
+                        volcanism.tail_width,
+                        volume,
+                        VolcanicSource::Hotspot,
+                        erupted,
                     );
-                    weights.push((cell, weight));
                 }
             }
-            let total: f64 = weights.iter().map(|&(_, weight)| weight).sum();
-            if total <= 0.0 {
-                continue;
-            }
-            for &(cell, weight) in &weights {
-                magma[cell].0[VolcanicSource::Hotspot as usize - 1] +=
-                    volume * weight / total / area * 1e3;
+            for lip in self.volcanism().lips.iter().rev() {
+                let since = time - lip.time;
+                if since >= LIP_PULSE {
+                    break;
+                }
+                if since < 0.0 || lip.volume <= 0.0 {
+                    continue;
+                }
+                // As emplaced: large provinces spread wider (see `Simulation::volcanism_step`).
+                let width = volcanism.lip_width.max(
+                    (lip.volume * 1e9 / (std::f64::consts::TAU * volcanism.lip_plateau_thickness))
+                        .sqrt(),
+                );
+                // km³ over the pulse → m³/yr.
+                let volume = lip.volume * 1e9 / (LIP_PULSE * 1e6);
+                footprint(
+                    lip.position,
+                    width,
+                    volume,
+                    VolcanicSource::Lip,
+                    LIP_ERUPTED,
+                );
             }
         }
 
@@ -497,6 +549,11 @@ impl Simulation {
                 .iter()
                 .map(|cell| cell.largest().map(|index| VolcanicSource::ALL[index]))
                 .collect(),
+            eruptions: eruptions.iter().map(Contributions::total).collect(),
+            eruption_source: eruptions
+                .iter()
+                .map(|cell| cell.largest().map(|index| VolcanicSource::ALL[index]))
+                .collect(),
         }
     }
 }
@@ -517,18 +574,6 @@ mod tests {
         // Strike-slip faults are vertical: no geometry factor.
         let rate = CONTINENTAL_TRANSFORM.moment_rate(-0.03);
         assert!((rate / (27.7e9 * 8.6e3 * 0.03) - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn plume_melting_shrinks_under_thick_lids() {
-        let ocean = |age: f64| Crust {
-            birth: -age,
-            ..crate::tectonics::crust::new_oceanic_crust(0.0)
-        };
-        let young = lid_factor(&ocean(2.0), 0.0);
-        let old = lid_factor(&ocean(100.0), 0.0);
-        assert!(young > old && old > 0.0 && young <= 1.0, "{young} {old}");
-        assert!((old - (85.0f64 / 180.0).powi(2)).abs() < 1e-9);
     }
 
     /// Two plates, split at the equator, plate 1 (north) moving with `omega` (rad/Myr).
@@ -587,5 +632,78 @@ mod tests {
                 .any(|&source| source == VolcanicSource::Ridge || source == VolcanicSource::Rift),
             "opening boundaries supply magma"
         );
+    }
+
+    #[test]
+    fn a_large_igneous_province_erupts_over_its_pulse() {
+        let mut simulation = split(DVec3::ZERO);
+        let time = simulation.time;
+        let centre = simulation.mesh.vertex(500);
+        simulation
+            .volcanism
+            .record
+            .lips
+            .push(crate::tectonics::volcanism::LipEvent {
+                time,
+                position: centre,
+                volume: 1e6,
+                lid_factor: 0.2,
+                continental: false,
+                samples: 0,
+                peak_thickness: 0.0,
+            });
+        let activity = simulation.activity(&simulation.boundary_map());
+        let radius = simulation.params.planet_radius;
+        let area_km2 =
+            4.0 * std::f64::consts::PI * radius * radius / 1e6 / simulation.mesh.len() as f64;
+        // mm/yr × km² = 10⁻⁶ km³/yr: the province's volume over its pulse, half of it erupted.
+        let lip = |values: &[f64]| {
+            values
+                .iter()
+                .zip(&activity.volcanic_source)
+                .filter(|(_, source)| **source == Some(VolcanicSource::Lip))
+                .map(|(value, _)| value * area_km2 * 1e-6)
+                .sum::<f64>()
+        };
+        let rate = 1e6 / (LIP_PULSE * 1e6);
+        assert!(
+            (lip(&activity.magma) / rate - 1.0).abs() < 1e-6,
+            "{}",
+            lip(&activity.magma)
+        );
+        assert!((lip(&activity.eruptions) / (rate * LIP_ERUPTED) - 1.0).abs() < 1e-6);
+        assert_eq!(activity.eruption_source[500], Some(VolcanicSource::Lip));
+        // Nowhere erupts more than it is supplied.
+        for (erupted, supplied) in activity.eruptions.iter().zip(&activity.magma) {
+            assert!(erupted <= supplied);
+        }
+        // After its pulse, the province is quiet.
+        simulation.volcanism.record.lips[0].time = time - LIP_PULSE;
+        let activity = simulation.activity(&simulation.boundary_map());
+        assert!(
+            activity
+                .volcanic_source
+                .iter()
+                .all(|source| *source != Some(VolcanicSource::Lip))
+        );
+    }
+
+    #[test]
+    fn eruptions_are_a_share_of_the_supply_by_setting() {
+        // Opening oceanic boundaries: ridges, a seventh erupting.
+        let rotating = split(DVec3::X * 0.01);
+        let activity = rotating.activity(&rotating.boundary_map());
+        for cell in 0..activity.magma.len() {
+            if activity.volcanic_source[cell] == Some(VolcanicSource::Ridge)
+                && activity.magma[cell] > 0.0
+            {
+                let share = activity.eruptions[cell] / activity.magma[cell];
+                assert!(share <= RIDGE_ERUPTED + 1e-9 && share > 0.0, "{share}");
+            }
+        }
+        // Earth's settings: ~20 km³/yr at ridges and ~5 at arcs erupt ~3.7 km³/yr, within
+        // Earth's 3–4 km³/yr (Crisp 1984; White et al. 2006).
+        let earth = 20.0 * RIDGE_ERUPTED + 5.0 * ARC_ERUPTED + 0.4 * OCEANIC_HOTSPOT_ERUPTED;
+        assert!((3.0..4.5).contains(&earth), "{earth}");
     }
 }

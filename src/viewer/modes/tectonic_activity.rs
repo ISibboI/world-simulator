@@ -3,8 +3,10 @@
 //! [`crate::tectonics::Simulation::activity`] and `notes/issue-110/plan.md`).
 //!
 //! Earthquakes are shown as the seismic moment rate per area on a logarithmic scale, volcanism
-//! as the magma supply per area (intrusions included) on its own; "Both" shows the earthquakes
-//! with volcano markers at the arcs, hotspots and rifts (ridges are left out of the markers:
+//! as the magma supply per area (intrusions included) on its own, eruptions as its erupted
+//! share (one decade lower on the same colours); "Both" shows the earthquakes with volcano
+//! markers at the arcs, hotspots, rifts and large igneous provinces (ridges are left out of the
+//! markers:
 //! they would line every ridge, and the earthquake colours show them already). Everything comes
 //! from the cells every frame keeps, so past frames show alike.
 
@@ -26,6 +28,7 @@ pub struct TectonicActivity;
 enum Shown {
     Earthquakes,
     Volcanism,
+    Eruptions,
     Both,
 }
 
@@ -33,7 +36,8 @@ impl Shown {
     fn of(options: &OptionValues) -> Self {
         match options.get(SHOW) {
             1 => Shown::Volcanism,
-            2 => Shown::Both,
+            2 => Shown::Eruptions,
+            3 => Shown::Both,
             _ => Shown::Earthquakes,
         }
     }
@@ -46,9 +50,10 @@ const BOUNDARIES: usize = 1;
 const OPTIONS: [ModeOption; 2] = [
     ModeOption {
         label: "Show",
-        hover: "Earthquakes (the seismic moment rate), volcanism (the magma supply), or both \
+        hover: "Earthquakes (the seismic moment rate), volcanism (the magma supply, \
+                intrusions included), eruptions (the share of it that erupts), or both \
                 (earthquakes with volcano markers)",
-        kind: OptionKind::Choice(&["Earthquakes", "Volcanism", "Both"]),
+        kind: OptionKind::Choice(&["Earthquakes", "Volcanism", "Eruptions", "Both"]),
     },
     ModeOption {
         label: "Plate boundaries",
@@ -72,8 +77,10 @@ const SEISMIC_STOPS: [(f64, [u8; 3]); 7] = [
     (16.0, [80, 0, 30]),
 ];
 
-/// The bottom of the volcanic scale: log₁₀ of the magma supply in mm/yr.
+/// The bottom of the volcanic scale: log₁₀ of the magma supply in mm/yr; the eruption scale is
+/// a decade lower (a tenth to a half of the magma erupts).
 const MAGMA_LOW: f64 = -3.0;
+const ERUPTION_OFFSET: f64 = -1.0;
 /// Pale lilac to dark magenta (ColorBrewer PuRd), apart from the earthquake colours.
 const MAGMA_STOPS: [(f64, [u8; 3]); 5] = [
     (-3.0, [236, 226, 240]),
@@ -103,6 +110,7 @@ fn volcanic_color(source: VolcanicSource) -> [u8; 3] {
         VolcanicSource::Ridge => [86, 180, 233],
         VolcanicSource::Hotspot => [0, 114, 178],
         VolcanicSource::Rift => [0, 158, 115],
+        VolcanicSource::Lip => [230, 159, 0],
     }
 }
 
@@ -150,6 +158,23 @@ fn magma_scale() -> ColorScale {
     }
 }
 
+fn eruption_scale() -> ColorScale {
+    ColorScale {
+        stops: MAGMA_STOPS
+            .iter()
+            .map(|&(value, color)| (value + ERUPTION_OFFSET, color))
+            .collect(),
+        title: "Eruption rate (mm per year, as a layer)".into(),
+        ticks: vec![
+            (-4.0, "0.0001".into()),
+            (-3.0, "0.001".into()),
+            (-2.0, "0.01".into()),
+            (-1.0, "0.1".into()),
+            (0.0, "1".into()),
+        ],
+    }
+}
+
 /// The colour of a cell for a rate on a logarithmic scale from `10^low`: the quiet colour
 /// below it.
 fn color(scale: &ColorScale, value: f32, low: f64, cell: &CellInfo) -> [u8; 3] {
@@ -189,19 +214,20 @@ impl RenderMode for TectonicActivity {
     }
 
     fn colors(&self, data: &ModeData) -> Option<Vec<[f32; 4]>> {
-        let (scale, low) = match Shown::of(data.options) {
+        let shown = Shown::of(data.options);
+        let (scale, low) = match shown {
             Shown::Volcanism => (magma_scale(), MAGMA_LOW),
-            _ => (seismic_scale(), SEISMIC_LOW),
+            Shown::Eruptions => (eruption_scale(), MAGMA_LOW + ERUPTION_OFFSET),
+            Shown::Earthquakes | Shown::Both => (seismic_scale(), SEISMIC_LOW),
         };
-        let volcanism = Shown::of(data.options) == Shown::Volcanism;
         Some(
             data.cells
                 .iter()
                 .map(|cell| {
-                    let value = if volcanism {
-                        cell.magma_supply
-                    } else {
-                        cell.seismicity
+                    let value = match shown {
+                        Shown::Volcanism => cell.magma_supply,
+                        Shown::Eruptions => cell.eruptions,
+                        Shown::Earthquakes | Shown::Both => cell.seismicity,
                     };
                     rgba(color(&scale, value, low, cell))
                 })
@@ -280,12 +306,17 @@ impl RenderMode for TectonicActivity {
                 swatches.push(Swatch::fill(QUIET_OCEAN, "No magma, ocean"));
                 swatches.push(Swatch::fill(QUIET_LAND, "No magma, land"));
             }
+            Shown::Eruptions => {
+                swatches.push(Swatch::fill(QUIET_OCEAN, "No eruptions, ocean"));
+                swatches.push(Swatch::fill(QUIET_LAND, "No eruptions, land"));
+            }
         }
         if shown == Shown::Both {
             for (source, label) in [
                 (VolcanicSource::Arc, "Arc volcanoes"),
                 (VolcanicSource::Hotspot, "Hotspot"),
                 (VolcanicSource::Rift, "Rift volcanism"),
+                (VolcanicSource::Lip, "Large igneous province"),
             ] {
                 swatches.push(Swatch::new(
                     volcanic_color(source),
@@ -307,21 +338,29 @@ impl RenderMode for TectonicActivity {
                                    millennia, not single earthquakes."
                 .into(),
             Shown::Volcanism => "Where magma rises: the long-term supply of magma (intrusions \
-                                 included; 10–20 % of it erupts), from spreading ridges, arcs \
-                                 above the slabs, hotspots above mantle plumes and continental \
-                                 rifts. A layer of 1 mm per year is 1000 m³ per year and km²."
+                                 included), from spreading ridges, arcs above the slabs, \
+                                 hotspots above mantle plumes, continental rifts and large \
+                                 igneous provinces during their pulse of a few Myr. A layer of \
+                                 1 mm per year is 1000 m³ per year and km²."
+                .into(),
+            Shown::Eruptions => "Where lava erupts: the share of the magma supply that reaches \
+                                 the surface — about a seventh at ridges (most of it unseen on \
+                                 the sea floor), a sixth at arcs, a third at oceanic hotspots, a \
+                                 tenth in continents and half in large igneous provinces; the \
+                                 rest freezes at depth."
                 .into(),
             Shown::Both => "Earthquakes as colours (the long-term seismic moment rate) and \
-                            volcanoes as markers: arcs, hotspots and rifts with at least \
-                            0.01 mm/yr of magma; spreading ridges, also volcanic, show in the \
-                            colours."
+                            volcanoes as markers: arcs, hotspots, rifts and large igneous \
+                            provinces with at least 0.01 mm/yr of magma; spreading ridges, \
+                            also volcanic, show in the colours."
                 .into(),
         };
         Legend {
             description,
             scale: Some(match shown {
                 Shown::Volcanism => magma_scale(),
-                _ => seismic_scale(),
+                Shown::Eruptions => eruption_scale(),
+                Shown::Earthquakes | Shown::Both => seismic_scale(),
             }),
             swatches,
             arrows: Vec::new(),

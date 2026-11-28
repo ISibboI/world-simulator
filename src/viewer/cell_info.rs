@@ -11,7 +11,7 @@ use crate::tectonics::{self, BoundaryClass, SeismicSource, VolcanicSource};
 /// Per-cell attributes of a surface state, sent with every update next to the vertices.
 ///
 /// Everything is stored as 32-bit values, so that an array of them can be sent as one byte
-/// buffer (to the page on the web) and read back without parsing: 164 bytes per cell, 6.7 MB
+/// buffer (to the page on the web) and read back without parsing: 168 bytes per cell, 6.9 MB
 /// per update at the default 6 subdivisions (41k cells).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -112,9 +112,11 @@ pub struct CellInfo {
     /// Estimated long-term magma supply in mm/yr (as a layer over the cell; intrusions
     /// included).
     pub magma_supply: f32,
+    /// Estimated long-term eruption rate in mm/yr: the erupted share of the magma supply.
+    pub eruptions: f32,
     /// The dominant sources of [`CellInfo::seismicity`] (bits 0 to 3, the code of a
-    /// [`SeismicSource`], 0 for none) and of [`CellInfo::magma_supply`] (bits 4 to 7, a
-    /// [`VolcanicSource`]).
+    /// [`SeismicSource`], 0 for none), of [`CellInfo::magma_supply`] (bits 4 to 7, a
+    /// [`VolcanicSource`]) and of [`CellInfo::eruptions`] (bits 8 to 11).
     pub activity: u32,
 }
 
@@ -256,9 +258,14 @@ impl CellInfo {
     }
 
     /// The bits of [`CellInfo::activity`].
-    pub fn activity_bits(seismic: Option<SeismicSource>, volcanic: Option<VolcanicSource>) -> u32 {
+    pub fn activity_bits(
+        seismic: Option<SeismicSource>,
+        volcanic: Option<VolcanicSource>,
+        eruption: Option<VolcanicSource>,
+    ) -> u32 {
         u32::from(seismic.map_or(0, SeismicSource::code))
             | u32::from(volcanic.map_or(0, VolcanicSource::code)) << 4
+            | u32::from(eruption.map_or(0, VolcanicSource::code)) << 8
     }
 
     /// What causes most of the cell's earthquakes, if it has any.
@@ -269,6 +276,11 @@ impl CellInfo {
     /// What supplies most of the cell's magma, if it has any.
     pub fn volcanic_source(&self) -> Option<VolcanicSource> {
         VolcanicSource::from_code((self.activity >> 4 & 0xF) as u8)
+    }
+
+    /// What erupts most of the cell's lava, if anything does.
+    pub fn eruption_source(&self) -> Option<VolcanicSource> {
+        VolcanicSource::from_code((self.activity >> 8 & 0xF) as u8)
     }
 
     /// What the plate boundary at the cell does, if the cell is at one.
@@ -667,9 +679,11 @@ pub fn cell_infos(planet: &Planet) -> Vec<CellInfo> {
                 drainage: water_bits(index),
                 seismicity: activity.seismicity[index] as f32,
                 magma_supply: activity.magma[index] as f32,
+                eruptions: activity.eruptions[index] as f32,
                 activity: CellInfo::activity_bits(
                     activity.seismic_source[index],
                     activity.volcanic_source[index],
+                    activity.eruption_source[index],
                 ),
             }
         })
@@ -724,7 +738,7 @@ pub struct Row {
 
 /// The labels of the rows, always all of them in this order, so that the widget does not
 /// change its layout from cell to cell.
-pub const ROW_LABELS: [&str; 24] = [
+pub const ROW_LABELS: [&str; 25] = [
     "Position",
     "Elevation",
     "Surface",
@@ -738,6 +752,7 @@ pub const ROW_LABELS: [&str; 24] = [
     "Earthquakes",
     "Century quake",
     "Volcanism",
+    "Eruptions",
     "Temperature",
     "Jan / Jul",
     "Precipitation",
@@ -795,7 +810,7 @@ pub fn format_rows(
     longitude: f64,
 ) -> Vec<Row> {
     let land = !info.is_sea();
-    let values: [Option<String>; 24] = [
+    let values: [Option<String>; 25] = [
         Some(format_position(latitude, longitude)),
         Some(format!("{:.0} m", info.elevation)),
         Some(format_surface(info)),
@@ -839,6 +854,7 @@ pub fn format_rows(
         format_seismicity(info),
         century_quake(info),
         format_magma(info),
+        format_eruptions(info),
         format_temperature(info.temperature),
         (info.temperature_january.is_finite() || info.temperature_july.is_finite()).then(|| {
             let month = |t| format_temperature(t).unwrap_or_else(|| NOT_APPLICABLE.to_owned());
@@ -1009,6 +1025,18 @@ fn format_magma(info: &CellInfo) -> Option<String> {
         .volcanic_source()
         .map_or(String::new(), |source| format!("{}, ", source.label()));
     Some(format!("{source}{} mm/yr", significant(f64::from(supply))))
+}
+
+/// The estimated eruption rate of a cell and what erupts most: "arc, 0.025 mm/yr".
+fn format_eruptions(info: &CellInfo) -> Option<String> {
+    let rate = info.eruptions;
+    if !(rate.is_finite() && rate >= NO_MAGMA) {
+        return None;
+    }
+    let source = info
+        .eruption_source()
+        .map_or(String::new(), |source| format!("{}, ", source.label()));
+    Some(format!("{source}{} mm/yr", significant(f64::from(rate))))
 }
 
 /// Annual precipitation minus evaporation, with the evaporation: "+312 mm/yr (evap. 500)".
@@ -1310,8 +1338,10 @@ mod tests {
             drainage: CellInfo::NO_RECEIVER,
             seismicity: 2.0e14,
             magma_supply: 0.15,
+            eruptions: 0.025,
             activity: CellInfo::activity_bits(
                 Some(SeismicSource::Subduction),
+                Some(VolcanicSource::Arc),
                 Some(VolcanicSource::Arc),
             ),
         }
@@ -1386,6 +1416,7 @@ mod tests {
             "Mw 7.5 per 100 × 100 km"
         );
         assert_eq!(row(&rows, "Volcanism").unwrap(), "arc, 0.150 mm/yr");
+        assert_eq!(row(&rows, "Eruptions").unwrap(), "arc, 0.0250 mm/yr");
         assert_eq!(format_thickness(12_345.0), "12.3 km");
         assert_eq!(format_thickness(999.0), "999 m");
         assert_eq!(row(&rows, "Orogeny").unwrap(), "25%, last 88 Myr ago");
@@ -1679,7 +1710,7 @@ mod tests {
     #[test]
     fn cell_info_is_whole_words() {
         // The web version sends it as u32 words.
-        assert_eq!(std::mem::size_of::<CellInfo>(), 164);
+        assert_eq!(std::mem::size_of::<CellInfo>(), 168);
         assert_eq!(std::mem::align_of::<CellInfo>(), 4);
     }
 

@@ -2,8 +2,8 @@
 //! encoding of a frame as a keyframe or as the difference to the previous one, compressed with
 //! lz4 ([`encode`], [`decode`]).
 //!
-//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (61 bytes per cell
-//! instead of 164, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
+//! Each attribute of [`CellInfo`] becomes a channel of 1 or 2 bytes per cell (63 bytes per cell
+//! instead of 168, see [`CHANNELS`]). A 2-byte channel is stored as two planes, the low bytes of
 //! all cells and then the high bytes, so that the high bytes, which rarely change, form long runs.
 //! A delta frame is the byte-wise difference (wrapping) of its planes to those of the previous
 //! frame: zero where nothing changed. lz4 then compresses the runs.
@@ -52,7 +52,7 @@ impl Code {
 }
 
 /// The channels in the order of the planes: the attributes of [`CellInfo`] in its order.
-const CHANNELS: [Code; 41] = [
+const CHANNELS: [Code; 42] = [
     // Elevation: 1 m, ±32 km.
     Code::Signed(1.0),
     // Crust thickness: 10 m, up to 655 km.
@@ -133,8 +133,13 @@ const CHANNELS: [Code; 41] = [
         low: -6.0,
         decades: 8.0,
     },
-    // The dominant sources of both.
-    Code::Integer8,
+    // Eruption rate: as the magma supply.
+    Code::Decades {
+        low: -6.0,
+        decades: 8.0,
+    },
+    // The dominant sources of the three (12 bits).
+    Code::Integer16,
 ];
 
 /// The channels of the integer attributes: plate, flags, drainage and climate class.
@@ -142,7 +147,7 @@ const PLATE: usize = 34;
 const FLAGS: usize = 35;
 const DRAINAGE: usize = 36;
 const CLIMATE_CLASS: usize = 37;
-const ACTIVITY: usize = 40;
+const ACTIVITY: usize = 41;
 
 /// The value of an integer channel of a cell.
 fn integer(channel: usize, cell: &CellInfo) -> u16 {
@@ -151,7 +156,7 @@ fn integer(channel: usize, cell: &CellInfo) -> u16 {
         FLAGS => (cell.flags & 0xFFFF) as u16,
         DRAINAGE => (cell.drainage & 0xFF) as u16,
         CLIMATE_CLASS => cell.climate_class.min(0xFF) as u16,
-        ACTIVITY => (cell.activity & 0xFF) as u16,
+        ACTIVITY => (cell.activity & 0xFFFF) as u16,
         _ => unreachable!("not an integer channel"),
     }
 }
@@ -210,6 +215,7 @@ fn attributes(cell: &CellInfo) -> [f32; CHANNELS.len()] {
         0.0,
         cell.seismicity,
         cell.magma_supply,
+        cell.eruptions,
         0.0,
     ]
 }
@@ -430,6 +436,7 @@ impl Planes {
                     drainage: u32::from(values[DRAINAGE]),
                     seismicity: value(38),
                     magma_supply: value(39),
+                    eruptions: value(40),
                     activity: u32::from(values[ACTIVITY]),
                 }
             })
@@ -685,7 +692,12 @@ mod tests {
             } else {
                 10f32.powf(-4.0 + (x * 0.09).cos().abs() * 5.0)
             },
-            activity: (index * 11 % 256) as u32,
+            eruptions: if index.is_multiple_of(3) {
+                0.0
+            } else {
+                10f32.powf(-5.0 + (x * 0.05).sin().abs() * 5.0)
+            },
+            activity: (index * 11 % 4096) as u32,
         }
     }
 
@@ -821,6 +833,7 @@ mod tests {
         for (a, b, step) in [
             (original.seismicity, decoded.seismicity, 12.0 / 253.0),
             (original.magma_supply, decoded.magma_supply, 8.0 / 253.0),
+            (original.eruptions, decoded.eruptions, 8.0 / 253.0),
         ] {
             if a == 0.0 {
                 assert_eq!(b, 0.0);
@@ -845,7 +858,7 @@ mod tests {
         for (original, decoded) in original.iter().zip(&decoded) {
             assert_close(original, decoded);
         }
-        assert_eq!(BYTES_PER_CELL, 61);
+        assert_eq!(BYTES_PER_CELL, 63);
     }
 
     #[test]
