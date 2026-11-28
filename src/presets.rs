@@ -129,6 +129,10 @@ impl Biosphere {
                 // ~0.1. The top of the atmosphere sees about half of a change of the surface
                 // albedo (Donohoe & Battisti, 2011): +0.05 for the planetary albedo of land.
                 temperature.land_albedo = 0.37;
+                // The snow-free surface against which seasonal snow brightens the land (#207),
+                // and no forest that sticks out of the snow and masks it.
+                temperature.land_surface_albedo = 0.3;
+                temperature.snow_forest_cover = 0.0;
                 // Without transpiration (~60% of today's land evapotranspiration; Jasechko et
                 // al., 2013; Schlesinger & Jasechko, 2014) and without the water storage of a
                 // root zone, less of the rain returns to the air. Fu's ω grows with plant
