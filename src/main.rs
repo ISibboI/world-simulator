@@ -4,6 +4,7 @@
 
 mod aerosol;
 mod carbon;
+mod carbonate;
 mod climate;
 #[cfg(any(target_arch = "wasm32", test))]
 mod device;
@@ -704,6 +705,9 @@ fn build_planet(cli: &Cli) -> anyhow::Result<Planet> {
         ramp_up,
         escape,
     } = parameters;
+    let mut params = params;
+    // Without the carbonate sediment (#200) the initial sediment carries no carbonate either.
+    params.initial_sediment.carbonate &= carbon.carbonate_sediment;
     let simulation = Simulation::new(mesh, cli.plates(), params, cli.seed);
     let erosion = (!cli.no_erosion).then_some(erosion);
     let mut planet = Planet::new(
@@ -1199,6 +1203,7 @@ fn snapshot(
         cover_masses: previous_cover_masses,
         sea_level_budget: previous_sea_level,
         metamorphosed: previous_metamorphosed,
+        carbonate: previous_carbonate,
     }) = previous_ledger.as_ref()
     {
         let years = (statistics.time - previous_time) * 1e6;
@@ -1262,6 +1267,7 @@ fn snapshot(
             100.0 * cliff_bedrock / rivers.max(1e-9),
         );
         log_regolith(planet);
+        log_carbonate(planet, previous_carbonate, years);
         let trench = &statistics.trench_sediment;
         info!(
             "    sediment turned into crust (Gt/yr): burial metamorphism {:.2} on continental \
@@ -1370,6 +1376,7 @@ fn snapshot(
         cover_export: planet_statistics.cover_export,
         cover_budget: planet_statistics.cover_budget,
         cover_masses: planet_statistics.cover_masses,
+        carbonate: carbonate_snapshot(planet),
     });
     let segments = &statistics.segment_events;
     info!(
@@ -2016,6 +2023,115 @@ struct PreviousSnapshot {
     cover_export: CoverExport,
     cover_budget: CoverBudget,
     cover_masses: [f64; 3],
+    carbonate: CarbonateSnapshot,
+}
+
+/// What the carbonate log line (#200) compares with the last snapshot: the precipitation so
+/// far, the carbonate subducted so far and the sediment subducted (kg).
+#[derive(Clone, Copy)]
+struct CarbonateSnapshot {
+    stats: crate::planet::CarbonateStats,
+    subducted_carbonate: f64,
+    subducted_sediment: f64,
+}
+
+fn carbonate_snapshot(planet: &Planet) -> CarbonateSnapshot {
+    let drivers = planet.tectonics().carbon_drivers();
+    CarbonateSnapshot {
+        stats: planet.carbonate().stats,
+        subducted_carbonate: drivers.subducted_carbonate,
+        subducted_sediment: drivers.subducted_sediment,
+    }
+}
+
+/// Logs the carbonate sediment (#200): its precipitation since the last snapshot by depth,
+/// latitude and crust, the saturation, the dissolved load, the carbonate share of the sediment
+/// and of what subducted, and the carbon reservoirs with their closure.
+fn log_carbonate(planet: &Planet, previous: &CarbonateSnapshot, years: f64) {
+    if !planet.carbon_params().carbonate_sediment {
+        return;
+    }
+    let now = carbonate_snapshot(planet);
+    let (a, b) = (&now.stats, &previous.stats);
+    let to_gt = |kg: f64| kg / 1e12 / years;
+    let total = a.new - b.new + a.recycled - b.recycled;
+    let share = |x: f64, y: f64| 100.0 * (x - y) / total.max(1e-30);
+    let depth: Vec<String> = (0..5)
+        .map(|i| format!("{:.0}", share(a.by_depth[i], b.by_depth[i])))
+        .collect();
+    let latitude: Vec<String> = (0..4)
+        .map(|i| format!("{:.0}", share(a.by_latitude[i], b.by_latitude[i])))
+        .collect();
+    let simulation = planet.tectonics();
+    // Carbonate share of the visible sediment by crust.
+    let mut fractions = [[0.0; 2]; 3];
+    for cell in 0..simulation.mesh().len() as u32 {
+        let crust = simulation.surface_crust(cell);
+        let class = if crust.is_continental_origin() {
+            0
+        } else if crust.is_oceanic() {
+            2
+        } else {
+            1
+        };
+        fractions[class][0] += crust.carbonate();
+        fractions[class][1] += crust.sediment;
+    }
+    let percent = |f: [f64; 2]| 100.0 * f[0] / f[1].max(1e-30);
+    let all = [
+        fractions.iter().map(|f| f[0]).sum::<f64>(),
+        fractions.iter().map(|f| f[1]).sum::<f64>(),
+    ];
+    let p = planet.carbon_partition();
+    let fields = planet.carbonate();
+    info!(
+        "    carbonate (#200): precipitated {:.3} Gt/yr (new {:.3}, recycled {:.3}) | depth < 20 / \
+         20–200 / 200–1000 / 1000–3000 / ≥ 3000 m: {}% | |lat| < 20 / 20–40 / 40–60 / ≥ 60°: {}% \
+         | on continental crust {:.0}% | Ω mean {:.2}, max {:.2} (last step), overflow {:.3} | \
+         dissolved load {:.3} Gt/yr, unmatched {:.2e} | carbonate in sediment: all {:.1}%, \
+         continental {:.1}%, transitional {:.1}%, oceanic {:.1}% | subducted {:.3} Gt/yr of {:.2} \
+         Gt/yr sediment ({:.1}%)",
+        to_gt(total),
+        to_gt(a.new - b.new),
+        to_gt(a.recycled - b.recycled),
+        depth.join(" / "),
+        latitude.join(" / "),
+        share(a.on_continental, b.on_continental),
+        (a.omega_mass - b.omega_mass) / total.max(1e-30),
+        fields.max_omega,
+        to_gt(a.overflow - b.overflow),
+        to_gt(a.clastic_removed - b.clastic_removed),
+        to_gt(a.unmatched - b.unmatched),
+        percent(all),
+        percent(fractions[0]),
+        percent(fractions[1]),
+        percent(fractions[2]),
+        to_gt(now.subducted_carbonate - previous.subducted_carbonate),
+        to_gt(now.subducted_sediment - previous.subducted_sediment),
+        100.0 * (now.subducted_carbonate - previous.subducted_carbonate)
+            / (now.subducted_sediment - previous.subducted_sediment).max(1e-30),
+    );
+    let e18 = |mol: f64| mol / 1e18;
+    info!(
+        "    carbon reservoirs (10¹⁸ mol): exogenic {:.3}, sediment carbonate {:.3}, altered sea \
+         floor {:.3}, in crust (marble, wedges) {:.3}, source buffers {:.4} | since the start: \
+         from the mantle {:.3}, into the mantle {:.3} (lost with crust {:.4}), reduced gases \
+         {:.4}, CO₂ hold {:.4}, decarbonation CO₂ {:.3e} kg | closure residual {:.2e} mol ({:.1e} \
+         of the reservoirs)",
+        e18(p.exogenic),
+        e18(p.sediment),
+        e18(p.altered_crust),
+        e18(p.crust),
+        e18(p.buffers),
+        e18(p.mantle_degassing),
+        e18(p.to_mantle),
+        e18(p.lost),
+        e18(p.reduced_gases),
+        e18(p.held),
+        p.decarbonated_co2,
+        p.residual,
+        p.residual / (p.exogenic + p.sediment + p.altered_crust.abs() + p.crust).max(1e-30),
+    );
 }
 
 /// Writes one CSV row per cell: latitude (°), surface elevation (m), rock-equivalent and bulk
@@ -2066,7 +2182,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
         file,
         "cell,lat,elev,sed,bulk,thick,dens,felsic,meta,cls,plate,age,dup,coast,precip,discharge,\
              lon,t_annual,t_jan,t_jul,evap,p_jan,p_jul,orogeny,dyn,orogenic,rifted,strength_age,strength,ocean,strain,dil,u_east,u_north,lake,lake_evap,lake_air,sample,drain,ice,\
-             regolith,bare,production,bed_erosion"
+             regolith,bare,production,bed_erosion,carbonate,carb_dep"
     )?;
     for cell in 0..cell_count {
         let crust = simulation.surface_crust(cell);
@@ -2093,7 +2209,7 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             file,
             "{cell},{:.3},{e:.1},{:.1},{:.1},{:.1},{:.1},{:.3},{:.1},{class},{},{:.1},{},{},{:.4},{:.4e},\
              {:.3},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{},{:.1},{:.3},{:.3},{:.1},{:.3},{},{:.3e},{:.3e},\
-             {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1},{:.3},{:.3},{:.3},{:.3e},{:.3e}",
+             {:.3},{:.3},{:.1},{:.4},{:.4},{},{:.1},{:.3},{:.3},{:.3},{:.3e},{:.3e},{:.4},{:.3}",
             math::asin(mesh.vertex(cell).z).to_degrees(),
             crust.sediment,
             isostasy::sediment_bulk_thickness(crust.sediment),
@@ -2154,6 +2270,8 @@ fn write_cell_dump(planet: &Planet, path: &std::path::Path) -> anyhow::Result<()
             regolith.bare[cell as usize],
             regolith.production[cell as usize],
             regolith.bedrock_erosion[cell as usize],
+            crust.cohort.carbonate,
+            planet.carbonate().deposit[cell as usize],
         )?;
     }
     file.flush()?;

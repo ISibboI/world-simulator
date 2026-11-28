@@ -402,6 +402,8 @@ struct Mixture {
     sediment: f64,
     /// Cohort amounts (rock-equivalent m, `[mixed, lifo]`, see [`Cohort`]).
     cohort: [f64; 2],
+    /// Carbonate (rock-equivalent m, see [`Cohort::carbonate`]).
+    carbonate: f64,
     orogenic: f64,
     rifted: f64,
     orogeny: f64,
@@ -436,6 +438,7 @@ impl Mixture {
         let cohort = crust.cohort.amounts(sediment);
         self.cohort[0] += cohort[0];
         self.cohort[1] += cohort[1];
+        self.carbonate += crust.cohort.carbonate_amount(sediment);
         self.orogenic += mass * crust.orogenic;
         self.rifted += mass * crust.rifted;
         self.orogeny = self.orogeny.max(crust.orogeny);
@@ -471,6 +474,7 @@ impl Mixture {
                 Cohort {
                     mixed: self.cohort[0] / self.sediment,
                     lifo: self.cohort[1] / self.sediment,
+                    carbonate: (self.carbonate / self.sediment).clamp(0.0, 1.0),
                 }
             } else {
                 Cohort::NONE
