@@ -9,6 +9,36 @@ per seed, then mean ± SD over seeds. Numbers from [`analyse.py`](analyse.py). A
 
 Project goal: an Earth-like planet, not Earth; Earth values are orientation only.
 
+## 0. After merging main (`8bb6d73`; #220–#226)
+
+Main gained once-per-sample subduction erosion (#220), LIP CO₂ (#221), reduced gases (#223),
+cloud nuclei (#225) and seasonal snow (#226), so both sides were re-run: barren 8 seeds × 1000
+Myr and modern 4 seeds, against main's head. With `carbon.carbonate_sediment=0` the state hashes
+match main (30 Myr held, 20 Myr with `carbon.phi=1`). The H₂ of #223 and the volcanic sulfate of
+#225 scale with the mantle's arc + plume degassing (`arc_plume_mantle_degassing`: wedge, plumes,
+LIPs), which excludes the recycled carbonate and altered crust, so the carbonate arc return does
+not feed them (no double counting; their budgets are unchanged). The carbon closure now also
+books the reduced gases' carbon and the CO₂ hold of #223 (≤ 1.1e-14).
+
+| barren, 200–1000 Myr | main | #200 merged |
+|---|---|---|
+| pCO₂ (bar) | 0.423 ± 0.060 | **0.373 ± 0.044** |
+| temperature (°C) | 16.1 ± 0.7 | **15.1 ± 0.7** |
+| φ | 1.40 ± 0.20 | 1.50 ± 0.21 (1.15–1.87) |
+| arcs / metamorphic (Tmol/yr) | 7.77 / 1.00 | **6.80 / 0.47** |
+| land / sea-floor sink | 3.15 / 10.07 | 2.82 / 8.94 |
+| subducted sediment, carbonate in it | 5.7 Gt/yr, (3 wt% assumed) | 5.7 Gt/yr, **1.7 wt%** (0.099 Gt/yr) |
+| precipitated (new / recycled, Gt/yr) | — | 1.00 (0.28 / 0.72) |
+| depth < 20 / 20–200 / 200–1000 / 1000–3000 / ≥ 3000 m | — | 5 / 68 / 15 / 10 / 2% |
+| on continental crust; Ω mean / max | — | 72%; 3.0 / 4.5 |
+| carbonate share: all / continental cover (200–1000 Myr) | — | 10.9% / 18.8% |
+| altered sea floor at 1000 Myr (10¹⁸ mol) | — | −157 ± 206 (−474 to +104) |
+| runtime (GitHub) | 1113 ± 28 s | 1288 ± 93 s (+16%) |
+
+Modern (4 seeds): arcs 4.67 → 7.00 Tmol/yr, subducting sediment 8.3 wt% CaCO₃ (0.39 of 4.8
+Gt/yr), CO₂ ~790 → ~1060 ppm, 22.8 → 24.1 °C (φ clamped at 3), runtime 911 → 992 s (+9%).
+The sections below are the evaluation before the merge (against #224); the conclusions hold.
+
 ## 1. Barren planet (default)
 
 ### Climate and carbon cycle
