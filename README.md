@@ -21,7 +21,11 @@ the forcing of the start for the whole run, and `--set carbon.NAME=VALUE` change
 the rivers carry away: erosion is weathering-limited where the rock weathers slowly (cold or dry
 bare highlands) and transport-limited where the regolith is thick, and the land weathering of the
 carbon cycle follows the regolith (`--set erosion.regolith=0` turns it off; `src/erosion/regolith.rs`,
-`notes/issue-197/`). Today's living Earth, the default before #190, is
+`notes/issue-197/`). The carbonate the cycle buries becomes **carbonate sediment** (#200): it
+precipitates where the sea floor is most supersaturated (warm, shallow shelves), the plates carry
+it, eroded carbonate dissolves and precipitates again, and the arc and metamorphic CO₂ follow the
+carbonate that subducts or decarbonates (`--set carbon.carbonate_sediment=0` turns it off;
+`src/carbonate.rs`, `notes/issue-200/`). Today's living Earth, the default before #190, is
 `--biosphere modern --epoch 4` (URL `?biosphere=modern&epoch=4`).
 
 `--epoch` (URL `epoch=`) sets the time of the planet's history at the start of a run, in Gyr
