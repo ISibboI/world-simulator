@@ -605,6 +605,26 @@ pub struct SurfaceSharing {
     pub clamped: f64,
 }
 
+/// How strongly duplicated crust samples (shown at several cells) damped crustal flow and
+/// subduction erosion so far, which act once per sample instead of once per cell (#113; see
+/// [`Simulation::shared_sample_rates`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SharedSampleRates {
+    /// Crustal flow requested between cells, summed over cell pairs (kg/m², before the
+    /// available crust and the room below the cap limit it).
+    pub flow_per_cell: f64,
+    /// The same with every transfer divided by the larger number of cells showing its source
+    /// or its receiver sample, as applied.
+    pub flow_per_sample: f64,
+    /// Subduction-erosion events (one per subducted sample below an overriding sample).
+    pub erosion_events: f64,
+    /// The events as applied to the eroded samples themselves: per sample, its events divided
+    /// by the number of cells showing it.
+    pub erosion_per_sample: f64,
+    /// The rest of the events, taken from the neighbours of duplicated samples.
+    pub erosion_to_neighbours: f64,
+}
+
 /// Changes of the sea level (m, as an offset of dry elevations) so far per process. Each term is
 /// the difference between two exact solves of the sea level (see
 /// [`crate::sea::sea_level`]).
@@ -791,6 +811,8 @@ pub struct Simulation {
     sea_level_budget: SeaLevelBudget,
     /// How surface changes of samples shown at several cells were shared so far.
     surface_sharing: SurfaceSharing,
+    /// How duplicated samples damped crustal flow and subduction erosion so far.
+    shared_rates: SharedSampleRates,
     /// Simulated time in Myr.
     time: f64,
     /// The id of the next plate born (see [`Plate::id`]).
@@ -992,6 +1014,7 @@ impl Simulation {
             initial_sea_level: 0.0,
             sea_level_budget: SeaLevelBudget::default(),
             surface_sharing: SurfaceSharing::default(),
+            shared_rates: SharedSampleRates::default(),
             time: 0.0,
             next_plate_id: plate_count as u32,
             force_balance: None,
@@ -1683,6 +1706,11 @@ impl Simulation {
     /// How surface changes of samples shown at several cells were shared so far.
     pub fn surface_sharing(&self) -> SurfaceSharing {
         self.surface_sharing
+    }
+
+    /// How duplicated samples damped crustal flow and subduction erosion so far (#113).
+    pub fn shared_sample_rates(&self) -> SharedSampleRates {
+        self.shared_rates
     }
 
     /// Applies per-cell changes of crust thickness and sediment thickness to the crust at the
