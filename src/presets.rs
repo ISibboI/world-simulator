@@ -534,6 +534,8 @@ mod tests {
         let modern = Parameters::new(RADIUS, Biosphere::Modern, Epoch::PRESENT);
         let abiotic = Parameters::new(RADIUS, Biosphere::Abiotic, Epoch::PRESENT);
         assert_eq!(abiotic.temperature.land_albedo, 0.37);
+        assert_eq!(abiotic.temperature.land_surface_albedo, 0.3);
+        assert_eq!(abiotic.temperature.snow_forest_cover, 0.0);
         assert_eq!(abiotic.climate.budyko_omega, 1.6);
         assert_eq!(
             abiotic.erosion.erodibility,
@@ -544,6 +546,8 @@ mod tests {
         // Everything else stays: undo the preset's changes and compare.
         let mut undone = Parameters::new(RADIUS, Biosphere::Abiotic, Epoch::PRESENT);
         undone.temperature.land_albedo = modern.temperature.land_albedo;
+        undone.temperature.land_surface_albedo = modern.temperature.land_surface_albedo;
+        undone.temperature.snow_forest_cover = modern.temperature.snow_forest_cover;
         undone.climate.budyko_omega = modern.climate.budyko_omega;
         undone.erosion.erodibility = modern.erosion.erodibility;
         undone.erosion.sediment_diffusivity = modern.erosion.sediment_diffusivity;
