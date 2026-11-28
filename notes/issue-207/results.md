@@ -46,7 +46,15 @@ with a non-negative balance counts as permanent ice.
 | φ | 1.18 | 1.40 | 3.00 (clamp) | 3.00 (clamp) | 3.00 (clamp) | 3.00 (clamp) | – | – |
 
 - **Barren default:** 1.5 K colder late, 4.2 K colder at the start; permanent ice 3.0% instead
-  of 1.1% of the surface late, 22.7% instead of 5.9% at the start.
+  of 1.1% of the surface late, 22.7% instead of 5.9% at the start. "Permanently frozen" includes
+  perennial snow when snow is on (1–2.5 points of the surface late), so the frozen shares are
+  not quite like for like.
+- **Only about half of the late barren cooling is the snow's albedo.** The snow reflects 1.45
+  W/m², and the greenhouse forcing is 1.4 W/m² lower (59.6 vs 61.0 W/m²). That lower forcing
+  comes from φ being calibrated at the colder start (next bullet). A weathering thermostat
+  should offset the snow's cooling over time; here the calibration at a glacial start adds to
+  it. A follow-up question for the carbon cycle, not for the snow: should φ be calibrated on a
+  start that is out of equilibrium?
 - **Modern, epoch 4:** 0.6 K colder late, within the seed spread. Forest masking and the carbon
   cycle (φ at its clamp, CO₂ +20%) absorb most of the snow. At the start it is 3.8 K colder.
 - **Barren today, epoch 4:** the coldest start with a carbon cycle, 0.5 °C global with 42%
@@ -101,8 +109,12 @@ with a non-negative balance counts as permanent ice.
   sublimation that is the only way snow is lost; such land is a polar desert (like the Dry
   Valleys). A second contribution is the half-month mean of the snow model being slightly
   warmer than the monthly mean of the statistic.
-- **Without the perennial→ice coupling,** the share stays near main (43% late, 16% at the start):
-  the fix comes from the coupling, not from the albedo.
+- **Without the perennial→ice coupling** (seeds 0–3), the share stays near main: 43% late, 16% at
+  the start. On the same seeds the coupled run has 29%. So the fix comes from the coupling, not
+  from the albedo. The shares are means of per-snapshot ratios; weighted by the frozen-summer
+  land, they are 21% (on, 8 seeds; 15% on seeds 0–3), 34% (no coupling, seeds 0–3) and 31%
+  (off, 8 seeds). φ per seed is the same with and
+  without the coupling; the mean of 1.28 in that run is only the seed subset.
 - **The two rules disagree.** The annual-mean ice-sheet rule and the snow rule cover different
   land: late in the barren run, 1.9% of land is under an ice sheet without perennial snow (an
   annual mean below about −10 °C with summers that melt snow), and 0.6% has perennial snow but no
@@ -119,9 +131,12 @@ with a non-negative balance counts as permanent ice.
 - **Sensitivity on the cold case** (start / late; the base case is −6.8 °C, 53% / 11.5 °C, 19%):
   - `surface_albedo_share` 0.35: −5.9 °C, 51% / 13.5 °C, 15%.
   - Latent heat off: −6.8 °C, 53% / 10.4 °C, 21%. The latent heat changes nothing in the
-    glacial start, where the snow hardly melts, and warms the later partly glaciated climate by
-    1.1 K: it releases the snowfall's heat in winter and takes it back with the melt in spring
-    and summer.
+    glacial start, where the snow hardly melts. Later it is 1.1 K warmer with latent heat, but
+    over a year the exchange nets to zero, so it does not explain a warming by itself. Two
+    candidates, neither checked: the one-season lag (melt energy is taken after the snow has
+    gone, and melt is never limited by energy), and seed spread (the late means differ by about
+    as much as the seed ranges). Treat the 1.1 K as unexplained, and possibly an artefact of the
+    lag.
   - Even the most snowball-prone variant stays partial.
   - A first version gave the glacier overflow's latent heat to the land and never took it back,
     ~0.8 W/m² globally at the glacial starts. It was fixed (`7cc54f1`) and the snow-on runs were
@@ -147,14 +162,22 @@ with a non-negative balance counts as permanent ice.
     with open tropical ocean. Without snow the planet stops at 50%. Voigt & Marotzke (2010)
     freeze an Earth with modern continents completely at ~91% S₀. So the model is, if anything,
     *less* snowball-prone than that GCM, both with and without snow.
-  - **A second stable state.** Back at 100% S₀ the snow-on runs do not return to their warm
-    state within 40 years: 3.6 instead of 11.0 °C, 35% instead of 17% frozen. Perennial snow
-    keeps the high-latitude land bright, which keeps its summers cold. This is the bistability
-    of a land snow/ice cover that glacial-inception studies find for the Northern Hemisphere
-    (Calov & Ganopolski, 2005). It is physical in kind: perennial snow fields are incipient ice
-    sheets. Its strength depends on the snow albedo and on the share of it that reaches the top
-    of the atmosphere (0.5, perhaps high for cloudy polar regions). With 0.35, the barren sweep
-    returns to within 1 K of its start.
+  - **Hysteresis within 40 years.** Back at 100% S₀ the snow-on runs are far from their
+    starting state: 3.6 instead of 11.0 °C, 35% instead of 17% frozen. Perennial snow keeps the
+    high-latitude land bright, which keeps its summers cold. The sweep does not show whether this
+    is a second stable state:
+    - each step lasts only 40 years, and the way back is still warming steeply (barren 98 → 100%:
+      −3.0 → 2.0 °C);
+    - the precipitation is fixed from a warm dump, so a cold state gets more snow than it would;
+    - there is no sublimation.
+
+    Land-snow bistability is known from glacial-inception studies (Calov & Ganopolski, 2005).
+    Their window comes from real ice sheets over millennia and is much narrower than this 7–8 K
+    gap, so the gap here is an upper bound. It depends on the share of the snow albedo that
+    reaches the top of the atmosphere (0.5, perhaps high for cloudy polar regions): with 0.35,
+    the barren sweep returns to within 1 K of its start. In the full runs, part of the cooling
+    persists from the glacial start (the cold case is still 2.5 K colder at 1000 Myr), while
+    the runs with a carbon cycle converge.
   - **In the full runs** the carbon cycle (weathering slows under ice and cold) and the
     brightening Sun pull every cold start out within ~200 Myr. In the cold case without a carbon
     cycle, only the brightening Sun and the wearing-down of the highlands do it.
@@ -177,6 +200,15 @@ with a non-negative balance counts as permanent ice.
   calibration already absorbed, but nothing was retuned.
 - The latent heat of the glacier overflow is taken back on the cell it leaves, not where the ice
   would melt (at the coast or in the sea).
+- Gaps in the latent-heat bookkeeping:
+  - the last season of every update never gets its heat (a slight cooling);
+  - snow on cells that are flooded returns no heat;
+  - the unit test closes the water budget, not the energy budget.
+- The first temperature update of a run has no precipitation yet and assumes 1 m/yr for the snow
+  (as for the ice sheets). The forest mask starts at its maximum in the first year of a modern
+  run.
+- The independent evaluation is in [review-results.md](review-results.md); its must-fix points
+  are reworded above (the cooling split, the hysteresis claim, the latent-heat warming).
 - The coarse temperature cells (~440 km) give one land temperature per cell. Snow lines follow
   elevation through the lapse rate on the fine cells, but not sub-grid slopes or aspect (#64).
 - Overlap with #204 (cloud albedo): this change adds a surface term on top of `land_albedo`. If

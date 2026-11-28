@@ -795,8 +795,9 @@ impl TemperatureModel {
     /// `tanh(S / depth)` of the cell, with an albedo between fresh and aged snow by temperature,
     /// under forest that of snowy forest. It brightens the ice-free part of the land in the
     /// next season by the planetary share of the change of its surface albedo. Snow that stays
-    /// all year counts as permanent ice in [`TemperatureFields::ice`]. The melt takes no latent
-    /// heat from the land (a degree-day model).
+    /// all year counts as permanent ice in [`TemperatureFields::ice`]. The melt follows the
+    /// degree days, not the energy available; with [`TemperatureParams::snow_latent_heat`], the
+    /// latent heat of a season's snowfall minus its melt goes to the land in the next season.
     pub fn update(
         &mut self,
         elevation: &[f64],
