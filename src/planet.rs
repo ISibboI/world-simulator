@@ -845,7 +845,7 @@ impl Planet {
             }
             StepPart::Temperature => {
                 let elevation = self.tectonics.surface_elevations();
-                // Ice sheets depend on last step's snowfall.
+                // Ice sheets and snow depend on last step's snowfall.
                 // The seas of this topography, for the climate and the erosion.
                 let seeds = crate::sea::ocean_seeds(
                     self.tectonics.mesh(),

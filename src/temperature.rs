@@ -794,8 +794,9 @@ impl TemperatureModel {
 
     /// Simulates the seasonal cycle for the given surface elevation (in metres, sea level is 0)
     /// of the fine mesh, `time` Myr into the run (for the sun's brightening), and updates the
-    /// temperature fields. `precipitation` (m/yr) limits where ice sheets can grow; without it,
-    /// 1 m/yr is assumed everywhere.
+    /// temperature fields. `precipitation` (m/yr) feeds the snow pack (or, without
+    /// [`TemperatureParams::seasonal_snow`], limits where ice sheets can grow); without it, 1 m/yr
+    /// is assumed everywhere.
     ///
     /// `lake_depth` (m, per fine cell) marks the lakes: cells with water on them that are not
     /// ocean (elevation ≥ 0, which for a lake is its water surface). With
@@ -818,9 +819,11 @@ impl TemperatureModel {
     /// is the annual one, distributed over the year like `monthly_precipitation` (the climate's
     /// solved months, evenly spaced from January; uniform if empty). The snow covers
     /// `tanh(S / depth)` of the cell, with an albedo between fresh and aged snow by temperature,
-    /// under forest that of snowy forest. It brightens the ice-free part of the land in the
-    /// next season by the planetary share of the change of its surface albedo. Snow that stays
-    /// all year counts as permanent ice in [`TemperatureFields::ice`]. The melt follows the
+    /// under forest that of snowy forest. It brightens the land in the next season by the
+    /// planetary share of the change of its surface albedo, up to the albedo of an ice sheet; the
+    /// cloud correction of snow-free land ([`crate::aerosol`]) stays in full under the snow. Snow
+    /// that stays all year is the ice sheets: permanent ice in [`TemperatureFields::ice`], and
+    /// the annual-mean rule of [`TemperatureParams::land_ice_temperature`] is not used. The melt follows the
     /// degree days, not the energy available; with [`TemperatureParams::snow_latent_heat`], the
     /// latent heat of a season's snowfall minus its melt goes to the land in the next season.
     pub fn update(
@@ -1630,8 +1633,8 @@ impl TemperatureModel {
                 }
             })
             .collect();
-        // Ice cover of the fine cells: sea ice and lake ice (annual mean cover), ice sheets by
-        // temperature and snowfall, and snow that lasts all year.
+        // Ice cover of the fine cells: sea ice and lake ice (annual mean cover), on land the snow
+        // that lasts all year (with the snow pack) or the annual-mean rule (without).
         let perennial_ice = params.perennial_snow_ice;
         let ice = (0..elevation.len())
             .map(|fine| {
